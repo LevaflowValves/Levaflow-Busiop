@@ -51,7 +51,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-09-24T03:10:00Z";
+  var APP_BUILD_VERSION = "2026-09-25T04:20:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -1032,7 +1032,12 @@ async function computeSlNoPricing(referenceNumber, itemSlNo, orderQty){
       globalFoldShare += combined*share;
     });
   }
-  return { total: baseGrandTotal + slExtraTotal + (testingMode==="prorata" ? slTestingTotal + globalFoldShare : 0), exact:false, paid:null };
+  // 25 Sep 2026 — a Direct-Price-only Sl No is priced exactly as typed, so
+  // it reports exact:true the same way a PO price does. Without this the
+  // round-to-5 was applied to a price the user had typed to the rupee.
+  // allLines is already fetched above with is_direct_price on it.
+  const dpOnly = slNoIsDirectPriceOnly(itemSlNo, allLines);
+  return { total: baseGrandTotal + slExtraTotal + (testingMode==="prorata" ? slTestingTotal + globalFoldShare : 0), exact:dpOnly, paid:null };
 }
 // Value snapshot (30 Aug) — captured on leaving a Quote or Sale Order
 // screen (React unmount), upserted per reference_number. Header total
@@ -1294,6 +1299,37 @@ function roundedUnitTotal(rawTotal, qty){
   const unit = q>0 ? roundTo5(Number(rawTotal||0)/q) : roundTo5(Number(rawTotal||0));
   const total = unit*q;
   return { unit, total };
+}
+
+/* ---- DIRECT PRICE LINES — PER-ITEM PRICING (25 Sep 2026) ----
+   A Direct Price line is hand-priced: it has no rate/sf, it carries its
+   cost and sales_price as typed. Before this date some summaries read
+   rate × sf regardless, so a Direct Price line came out as 0. These four
+   helpers answer "the price of one of this line" and "is this Sl No made
+   only of Direct Price lines" in one place, so no call site has to
+   re-type the test. Use them; don't inline the logic again.
+
+   The companion rule: a Direct Price line is stored with qty_required = 1
+   (one per item). The number of items is the Sl No's order_qty. Typing
+   the ordered quantity into BOTH used to multiply it twice. */
+function lineUnitCost(line){
+  if(!line) return 0;
+  return line.is_direct_price===true ? (Number(line.cost)||0) : (Number(line.rate)||0);
+}
+function lineUnitSale(line){
+  if(!line) return 0;
+  return line.is_direct_price===true
+    ? (Number(line.sales_price)||0)
+    : (Number(line.rate)||0) * (Number(line.sf)||3.1);
+}
+// True only when there is at least one line and every one of them is a
+// Direct Price line. A BOM item that happens to carry a Direct Price
+// gasket line is NOT direct-price-only — it keeps normal BOM behaviour.
+function isDirectPriceOnly(lines){
+  return Array.isArray(lines) && lines.length>0 && lines.every(l=>l && l.is_direct_price===true);
+}
+function slNoIsDirectPriceOnly(itemSlNo, allLines){
+  return isDirectPriceOnly((allLines||[]).filter(l=>l && l.item_sl_no===itemSlNo));
 }
 function colLabel(c) { return c.replace(/_/g," ").replace(/\b\w/g,m=>m.toUpperCase()); }
 
@@ -5675,7 +5711,11 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     const newItem = {
       model:recordedModel, item:dp.item, size:"", sub_assembly:"", component:dp.description.trim(),
       material_shape:"", material_spec:"", grade:"",
-      qty_required:Number(dp.qty)||1, uom:dp.uom||"Nos",
+      // 25 Sep 2026 — one per item. The number ordered rides along as
+      // dp_order_qty, which is NOT a database column: saveReference reads
+      // it to pre-fill / set the Sl No's order_qty and maps columns
+      // explicitly, so it never reaches estimate_lines.
+      qty_required:1, dp_order_qty:Math.max(1,Number(dp.qty)||1), uom:dp.uom||"Nos",
       rate:0, cost:Number(dp.cost_price)||0, sf:0, sales_price:Number(dp.sales_price)||0,
       cutting_plan_layout_size:"", cutting_plan_qty:0, cutting_plan_uom:"",
       is_direct_price:true, validation_status:"Pending",
@@ -6651,6 +6691,15 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
 
   const saveReference = async(cartOverride, orderQty, skipDatasheet)=>{
     const effectiveCart = cartOverride || cart;
+    // 25 Sep 2026 — Direct Price per-item pricing. When every line in the
+    // cart is a Direct Price line, the lines are stored one per item and
+    // the quantity the user typed belongs on the Sl No's order_qty. It
+    // travels on the cart item as dp_order_qty (never a database column —
+    // the estimate_lines mapping below lists its columns explicitly).
+    const dpOnlyCart = isDirectPriceOnly(effectiveCart);
+    const dpTypedQty = dpOnlyCart
+      ? Math.max(1, ...effectiveCart.map(l=>Number(l.dp_order_qty)||1))
+      : 0;
     setSaveMsg("");
     const fail = (m)=>{ setSaveMsg(m); if(!showSave) alert(m); };
     if(!refNumber.trim()){fail("Enter a Quote#.");return;}
@@ -6713,14 +6762,22 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
       if(isNewSlNo && !(Number(orderQty)>=1)){
         setSavingRef(false);
         setOrderQtyGate({cartOverride: effectiveCart});
-        setOrderQtyGateInput("");
+        // Pre-filled with the quantity already typed on the Direct Price
+        // line, so the user confirms it instead of typing it twice.
+        setOrderQtyGateInput(dpOnlyCart && dpTypedQty>=1 ? String(dpTypedQty) : "");
         setDatasheetChoice(null);
         setOrderQtyGateTag(""); setOrderQtyGateLocation(""); setOrderQtyGateEnq("");
         return false;
       }
       if(existing&&existing.length>0){
         estimateId=existing[0].id;
-        await sb.from("estimates").update(headerPayload).eq("id",estimateId);
+        // A re-save of a Direct-Price-only Sl No carries the typed quantity
+        // onto order_qty — otherwise the count would be lost when the lines
+        // drop to one per item below.
+        const existingPayload = (dpOnlyCart && dpTypedQty>=1)
+          ? {...headerPayload, order_qty: dpTypedQty}
+          : headerPayload;
+        await sb.from("estimates").update(existingPayload).eq("id",estimateId);
         await sb.from("estimate_lines").delete().eq("reference_number",ref).eq("item_sl_no",slNo);
       } else {
         const{data:created,error:err}=await sb.from("estimates").insert({reference_number:ref,item_sl_no:slNo,...headerPayload,order_qty:Number(orderQty),quote_status:resolvedQuoteStatus,company_id:resolvedCompanyId,created_by:user.username,datasheet_not_required:skipDatasheet===true,linked_allocation_id:(holdingNewSlNo&&holdingNewSlNo.linked_allocation_id)||null,linked_project_id:linkedProjectId||null,linked_enquiry_id:(holdingNewSlNo&&holdingNewSlNo.linked_enquiry_id)||null}).select().single();
@@ -6740,7 +6797,11 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
           await sb.from("enquiry_tbl").update({status:"Converted",linked_reference_number:ref}).eq("id",holdingNewSlNo.linked_enquiry_id);
         }
       }
-      const rows=effectiveCart.map((l,idx)=>({reference_number:ref,item_sl_no:slNo,sl_no:idx+1,estimate_id:estimateId,model:l.model,item:l.item,size:l.size,sub_assembly:l.sub_assembly,component:l.component,material_shape:l.material_shape||"",material_spec:l.material_spec,grade:l.grade,qty_required:l.qty_required,uom:l.uom,rate:l.rate,cost:l.cost,sf:l.sf,sales_price:l.sales_price,cutting_plan_layout_size:l.cutting_plan_layout_size||"",cutting_plan_qty:Number(l.cutting_plan_qty)||0,cutting_plan_uom:l.cutting_plan_uom||"",is_direct_price:l.is_direct_price===true,validation_status:l.validation_status||null,excel_file_name:l.excel_file_name||null,excel_file_path:l.excel_file_path||null,no_excel_code_used:l.no_excel_code_used||null,added_by:l.added_by||null,custom_item:l.custom_item||null,custom_model_recorded:l.custom_model_recorded||null}));
+      // qty_required is forced to 1 on a Direct-Price-only Sl No: one per
+      // item, with the count held on order_qty. Every other cart keeps the
+      // quantity exactly as it was. dp_order_qty is deliberately not in
+      // this list — it is a carrier, not a column.
+      const rows=effectiveCart.map((l,idx)=>({reference_number:ref,item_sl_no:slNo,sl_no:idx+1,estimate_id:estimateId,model:l.model,item:l.item,size:l.size,sub_assembly:l.sub_assembly,component:l.component,material_shape:l.material_shape||"",material_spec:l.material_spec,grade:l.grade,qty_required:(dpOnlyCart?1:l.qty_required),uom:l.uom,rate:l.rate,cost:l.cost,sf:l.sf,sales_price:l.sales_price,cutting_plan_layout_size:l.cutting_plan_layout_size||"",cutting_plan_qty:Number(l.cutting_plan_qty)||0,cutting_plan_uom:l.cutting_plan_uom||"",is_direct_price:l.is_direct_price===true,validation_status:l.validation_status||null,excel_file_name:l.excel_file_name||null,excel_file_path:l.excel_file_path||null,no_excel_code_used:l.no_excel_code_used||null,added_by:l.added_by||null,custom_item:l.custom_item||null,custom_model_recorded:l.custom_model_recorded||null}));
       const{error:insErr}=await sb.from("estimate_lines").insert(rows); if(insErr)throw insErr;
       if(mocDeletedExceptions.length>0){
         try{
@@ -7097,11 +7158,17 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
         h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Description"),
         h("input",{value:directPriceLine.description,onChange:e=>setDirectPriceLine(d=>({...d,description:e.target.value})),placeholder:"As per attached workup…",style:{...inputStyle,padding:"8px 10px",fontSize:13,marginBottom:10,width:"100%"}}),
         h("div",{style:{display:"flex",gap:8,marginBottom:10}},
-          h("div",{style:{flex:1}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Qty"),h("input",{type:"number",value:directPriceLine.qty,onChange:e=>setDirectPriceLine(d=>({...d,qty:e.target.value})),style:{...inputStyle,padding:"8px 10px",fontSize:13}})),
+          // 25 Sep 2026 — this box is the ORDER qty, not a per-item count.
+          // The line itself is stored as one per item; the prices beside it
+          // are the price of one. Typing the order qty here and again in the
+          // Order Quantity popup used to multiply the two.
+          h("div",{style:{flex:1}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Qty (order qty)"),h("input",{type:"number",min:1,value:directPriceLine.qty,onChange:e=>setDirectPriceLine(d=>({...d,qty:e.target.value})),style:{...inputStyle,padding:"8px 10px",fontSize:13}})),
           h("div",{style:{flex:1}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"UOM"),h(MasterSelect,{value:directPriceLine.uom,onChange:v=>setDirectPriceLine(d=>({...d,uom:v})),options:(uoms||[]).slice(),table:"uom_tbl",valueCol:"uom",fieldLabel:"UOM",placeholder:"Select…",style:{padding:"8px 10px",fontSize:13},refreshOptions:onRefresh})),
           h("div",{style:{flex:1}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Cost price (enter in INR) *"),h("input",{type:"number",value:directPriceLine.cost_price||"",onChange:e=>setDirectPriceLine(d=>({...d,cost_price:e.target.value})),placeholder:"0.00",style:{...inputStyle,padding:"8px 10px",fontSize:13}})),
           h("div",{style:{flex:1}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Sales price (enter in INR — converted for display on non-INR quotes)"),h("input",{type:"number",value:directPriceLine.sales_price,onChange:e=>setDirectPriceLine(d=>({...d,sales_price:e.target.value})),placeholder:"0.00",style:{...inputStyle,padding:"8px 10px",fontSize:13}}))
         ),
+        h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:-4,marginBottom:10,lineHeight:1.45}},
+          "Qty is the number of items ordered. Cost and sales prices are per item."),
         h("div",{style:{border:"1px solid "+colors.border,borderRadius:6,padding:"10px 12px",marginBottom:10}},
           h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:6}},"Record model as"),
           h("div",{style:{display:"flex",gap:6,marginBottom:8}},
@@ -8089,11 +8156,12 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
   // (used while loading) is computed the SAME live way — qty_required ×
   // order_qty × rate × sf — as the real fetch and as the BOM footer itself,
   // never from the possibly-stale stored sales_price field.
+  // 25 Sep 2026 — lineUnitSale, so a Direct Price line contributes its
+  // typed sales_price instead of rate × sf, which it does not have. It
+  // used to show 0 for the moment the pricing fetch was in flight.
   const baseUnitPriceInrLive = useMemo(()=>(openLines||[]).reduce((s,l)=>{
     const q=(Number(l.qty_required)||0)*(Number(openRef.order_qty)||1);
-    const rate=Number(l.rate)||0;
-    const sf=Number(l.sf)||3.1;
-    return s+q*rate*sf;
+    return s+q*lineUnitSale(l);
   },0),[openLines, openRef.order_qty]);
   const [foldedPricing,setFoldedPricing] = useState(null);   // {total, exact}
   useEffect(()=>{
@@ -13325,7 +13393,12 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       const sf=Number(edits.sf!==undefined?edits.sf:line.sf)||3.1;
       const cost=computeCost(qty, 1, rate);   // PER UNIT
       const sales_price=computeSalesPrice(cost, sf);
-      const payload={...edits,cost,sales_price};
+      // 25 Sep 2026 — a Direct Price line is hand-priced and has no rate or
+      // sf, so recomputing from rate × sf would wipe the typed figures to 0.
+      // Keep its stored cost and sales_price; only BOM lines recompute.
+      const payload = line.is_direct_price===true
+        ? {...edits}
+        : {...edits,cost,sales_price};
       // A Validated Direct Price line whose price actually changes on a
       // revision needs re-validation — the whole point of Validated is
       // "an Admin/Super Admin signed off on this exact number." Only
@@ -13749,6 +13822,15 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     if(!dpSalesPrice || Number(dpSalesPrice)<=0){ alert("Enter a sales price."); return; }
     const isAdminOrAbove = user.role==="admin"||user.role==="super_admin";
     if(!dpFilePath && !dpAuthorizedCode && !isAdminOrAbove){ alert("Attach an Excel reference, or enter a no-Excel authorization code from an Admin or Super Admin first."); return; }
+    // 25 Sep 2026 — this Qty is the count PER ITEM (e.g. 2 gaskets in each
+    // strainer), not the order quantity. When it happens to equal the Sl No's
+    // order qty that is almost always the old double-counting habit, so ask
+    // once rather than quietly multiplying N × N.
+    const dpQtyNum = Math.max(1, Number(dpQty)||1);
+    const slOrderQty = Number(openRef.order_qty)||1;
+    if(dpQtyNum>1 && dpQtyNum===slOrderQty){
+      if(!confirm("Qty per item is "+dpQtyNum+", the same as this Sl No's order qty.\n\nThe price would be counted "+dpQtyNum+" × "+dpQtyNum+" = "+(dpQtyNum*dpQtyNum)+" times.\n\nOK = keep it as "+dpQtyNum+" per item.\nCancel = go back and change it.")) { return; }
+    }
     setSavingDpLine(true); setAddMsg("");
     try{
       const nextSl=(openLines.length>0?Math.max(...openLines.map(l=>l.sl_no)):0)+1;
@@ -13756,7 +13838,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         reference_number:openRef.reference_number, item_sl_no:openRef.item_sl_no, sl_no:nextSl, estimate_id:openRef.id,
         model:addModel, item:dpItem.trim(), sub_assembly:"", component:dpDescription.trim(), material_shape:"",
         cutting_plan_layout_size:"", cutting_plan_qty:0, cutting_plan_uom:"",
-        material_spec:"", grade:"", qty_required:Number(dpQty)||1, uom:dpUom||"Nos",
+        material_spec:"", grade:"", qty_required:dpQtyNum, uom:dpUom||"Nos",
         rate:0, cost:Number(dpCostPrice)||0, sf:0, sales_price:Number(dpSalesPrice)||0,
         is_direct_price:true, validation_status:"Pending",
         excel_file_name:dpFileName||null, excel_file_path:dpFilePath||null,
@@ -14043,6 +14125,12 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       // entry covers the whole batch instead.
       let changed = 0;
       for(const line of openLines){
+        // 25 Sep 2026 — THE ZEROING BUG. A Direct Price line has no rate and
+        // no sf: it is hand-priced. Running it through rate × sf wrote 0 over
+        // the typed cost and sales price every time the order qty was nudged.
+        // Its prices are per item and never depend on the order qty, so there
+        // is nothing to recompute — leave it exactly as typed.
+        if(line.is_direct_price===true) continue;
         const qty = Number(getLineVal(line,"qty_required"))||0;
         const rate = Number(getLineVal(line,"rate"))||0;
         const sf = Number(getLineVal(line,"sf"))||3.1;
@@ -14101,15 +14189,24 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const savedSummaryRows=useMemo(()=>{
     const map=new Map();
     openLines.forEach(l=>{
-      const shape=(l.material_shape||"").toUpperCase()||"OTHER";
-      const key=shape+"|||"+(l.material_spec||"(no spec)")+"|||"+(l.grade||"(no grade)");
-      if(!map.has(key)) map.set(key,{shape,spec:l.material_spec||"(no spec)",grade:l.grade||"",uom:l.uom||"",rate:Number(l.rate)||0,totalQty:0,totalCost:0,totalSales:0,lineCount:0});
+      // 25 Sep 2026 — a Direct Price line has no shape, spec, grade or rate,
+      // so it used to land in an "OTHER / (no spec)" bucket priced at rate 0
+      // and vanish from the money columns. Give it a row of its own, priced
+      // at what was typed. It is never cut, so the cutting basis does not
+      // apply to it — it keeps its own qty per item.
+      const direct = l.is_direct_price===true;
+      const shape = direct ? "DIRECT PRICE" : ((l.material_shape||"").toUpperCase()||"OTHER");
+      const label = direct
+        ? "Direct price: "+(l.item||l.component||"(unnamed)")
+        : (l.material_spec||"(no spec)");
+      const key=shape+"|||"+label+"|||"+(direct?"":(l.grade||"(no grade)"));
+      if(!map.has(key)) map.set(key,{shape,spec:label,grade:direct?"":(l.grade||""),uom:l.uom||"",rate:direct?lineUnitCost(l):(Number(l.rate)||0),totalQty:0,totalCost:0,totalSales:0,lineCount:0});
       const g=map.get(key);
-      const baseQty=summaryBasis==="cutting"?(Number(l.cutting_plan_qty)||0):(Number(l.qty_required)||0);
+      const baseQty=(summaryBasis==="cutting" && !direct)?(Number(l.cutting_plan_qty)||0):(Number(l.qty_required)||0);
       const qtyByOrder=baseQty*(orderQty||1);
       g.totalQty+=qtyByOrder;
-      g.totalCost+=qtyByOrder*(Number(l.rate)||0);
-      g.totalSales+=qtyByOrder*(Number(l.rate)||0)*(Number(l.sf)||3.1);
+      g.totalCost+=qtyByOrder*lineUnitCost(l);
+      g.totalSales+=qtyByOrder*lineUnitSale(l);
       g.lineCount+=1;
     });
     return Array.from(map.values()).sort((a,b)=>a.shape.localeCompare(b.shape)||a.spec.localeCompare(b.spec));
@@ -14122,6 +14219,10 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const cuttingPlanRows=useMemo(()=>{
     const map=new Map();
     openLines.forEach(l=>{
+      // 25 Sep 2026 — nothing is cut for a bought-in, hand-priced item, so a
+      // Direct Price line has no place on a cutting plan. It used to appear
+      // as an empty "(no spec) / (none)" row.
+      if(l.is_direct_price===true) return;
       const cuttingPlan=l.cutting_plan_layout_size||"(none)";
       const key=(l.material_spec||"(no spec)")+"|||"+(l.grade||"(no grade)")+"|||"+cuttingPlan;
       if(!map.has(key)) map.set(key,{spec:l.material_spec||"(no spec)",grade:l.grade||"",cuttingPlan,uom:l.cutting_plan_uom||"",rate:Number(l.rate)||0,totalQty:0,totalCost:0,lineCount:0});
@@ -14334,20 +14435,42 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     let cost=0, sale=0;
     (lines||[]).forEach(l=>{
       const qtyByOrder = r2(r2(l.qty_required)*q);
+      // 25 Sep 2026 — a Direct Price line contributes its typed cost and
+      // sales price per item; it has no rate or sf to multiply.
+      if(l.is_direct_price===true){
+        cost += r2(qtyByOrder*r2(l.cost));
+        sale += r2(qtyByOrder*r2(l.sales_price));
+        return;
+      }
       const c = r2(qtyByOrder*r2(l.rate));
       cost += c; sale += r2(c*r2(l.sf||3.1));
     });
     const ccy = currency||"INR";
     const fx = Number(conversionRate)||1;
-    const costR = roundedUnitTotal(cost,q);
-    const saleR = roundedUnitTotal(sale,q);
-    const saleConvR = (ccy!=="INR" && fx>0) ? roundedUnitTotal(sale/fx,q) : null;
+    // A Sl No priced entirely by hand is shown to the rupee, not rounded to
+    // the nearest 5 — the same rule the screen card uses.
+    const exact = isDirectPriceOnly(lines);
+    const costR = priceUnitTotal(cost,q,exact);
+    const saleR = priceUnitTotal(sale,q,exact);
+    const saleConvR = (ccy!=="INR" && fx>0) ? priceUnitTotal(sale/fx,q,exact) : null;
     return { q, ccy, costR, saleR, saleConvR };
   };
 
   const bomDataRow = (l, orderQtyForSl, withSales)=>{
     const qtyReqd = r2(l.qty_required);
     const qtyByOrder = r2(qtyReqd*(orderQtyForSl||1));
+    // 25 Sep 2026 — a Direct Price line has no shape, spec, grade, rate or
+    // sf. It used to print as a blank row at rate 0. Show it as what it is:
+    // the item name under Sub Assembly, its cost price in the Rate column,
+    // "—" where Sf would be, and cost/sales worked out per item.
+    if(l.is_direct_price===true){
+      const unitCost = r2(l.cost);
+      const dpRow = ["", "Direct price", l.item||l.component||"", l.component||"", "", qtyReqd, l.uom||"Nos", qtyByOrder, unitCost];
+      if(withSales) dpRow.push("—");
+      dpRow.push(r2(qtyByOrder*unitCost));
+      if(withSales) dpRow.push(r2(qtyByOrder*r2(l.sales_price)));
+      return dpRow;
+    }
     const rate = r2(l.rate);
     const sf = r2(l.sf||3.1);
     const cost = r2(qtyByOrder*rate);
@@ -14628,7 +14751,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           // immediately follow make a pointer line redundant.
           if(hasAttachment) dsRows.push({key:"custom-pdf",label:"Reference",value:"Attached — see following page(s)"});
           const customSections = [ { title:"Datasheet", rows: dsRows } ];
-          customSections.push(buildPriceDataSection(est.currency, est.order_qty, totalSalesValue, est.conversion_rate, poUnitPriceIn(est, est.currency)!==null, poUnitPriceIn(est, est.currency)));
+          customSections.push(buildPriceDataSection(est.currency, est.order_qty, totalSalesValue, est.conversion_rate, poUnitPriceIn(est, est.currency)!==null || slNoIsDirectPriceOnly(est.item_sl_no, linesRows), poUnitPriceIn(est, est.currency)));
           // itemNameForTemplate is now already the real typed Item (see fix
           // above) — no separate display-name fallback needed here anymore.
           list.push({ slNo: est.item_sl_no, model: est.model||"", itemName: itemNameForTemplate, sectionsRows: customSections,
@@ -14653,7 +14776,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         .map(sec=>({ ...sec, rows: sec.rows.filter(r=> r.value!==undefined && r.value!==null && String(r.value).trim()!=="") }))
         .filter(sec=>sec.rows.length>0);
       const totalSalesValue = await computeSlNoFoldedSalesTotal(est.reference_number, est.item_sl_no, est.order_qty);
-      sectionsRows.push(buildPriceDataSection(est.currency, est.order_qty, totalSalesValue, est.conversion_rate, poUnitPriceIn(est, est.currency)!==null, poUnitPriceIn(est, est.currency)));
+      sectionsRows.push(buildPriceDataSection(est.currency, est.order_qty, totalSalesValue, est.conversion_rate, poUnitPriceIn(est, est.currency)!==null || slNoIsDirectPriceOnly(est.item_sl_no, linesRows), poUnitPriceIn(est, est.currency)));
       list.push({ slNo: est.item_sl_no, model: est.model||"", itemName: itemNameForTemplate, sectionsRows, renderOwnPdfPage:true });
     }
     list.sort((a,b)=>a.slNo-b.slNo);
@@ -14924,7 +15047,11 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       const pfBasicPriceTotal = estimatesRows.reduce((s,est)=>s+slNoBaseSalesDisplay(est, linesRows, quoteCurrency, quoteFx),0);
       // A Sale Order priced from the PO prints its money exactly. An offer
       // keeps the round-to-5 on every figure, unchanged.
-      const exactPricing = estimatesRows.some(est=>poUnitPriceIn(est, quoteCurrency)!==null);
+      // 25 Sep 2026 — a Sl No priced entirely by hand (Direct Price lines)
+      // is exact for the same reason a PO price is: the figure was typed,
+      // and round-to-5 would move it. Keeps Annexure II, the grand total
+      // and the cover letter's Total Basic Price in agreement.
+      const exactPricing = estimatesRows.some(est=>poUnitPriceIn(est, quoteCurrency)!==null || slNoIsDirectPriceOnly(est.item_sl_no, linesRows));
       const money = (v)=> exactPricing ? fmt(r2(v)) : fmtR(v);
       // pfQuoteIsInr / pfQuoteFx were removed here on 7 Sep. They were a local
       // duplicate of quoteIsInr/quoteFx for the old lumpsum conversion, and that
@@ -15021,7 +15148,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       const grandTotalPrinted = (()=>{
         const slNoSum = estimatesRows.reduce((acc,est)=>{
           const q = est.order_qty||1;
-          return acc + priceUnitTotal(slNoFoldedTotalDisp(est), q, poUnitPriceIn(est, quoteCurrency)!==null).total;
+          return acc + priceUnitTotal(slNoFoldedTotalDisp(est), q, poUnitPriceIn(est, quoteCurrency)!==null || slNoIsDirectPriceOnly(est.item_sl_no, linesRows)).total;
         },0);
         const extrasInr = extraPriceTotal + testingSeparateTotal;
         const extrasDisp = quoteIsInr ? extrasInr : (quoteFx>0 ? extrasInr/quoteFx : 0);
@@ -15515,7 +15642,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       const annexureIITitle = "ANNEXURE II - PRICE SUMMARY";
       const summaryRows = estimatesRows.map(est=>{
         const qty = est.order_qty||1;
-        const { unit, total } = priceUnitTotal(slNoFoldedTotalDisp(est), qty, poUnitPriceIn(est, quoteCurrency)!==null);
+        const { unit, total } = priceUnitTotal(slNoFoldedTotalDisp(est), qty, poUnitPriceIn(est, quoteCurrency)!==null || slNoIsDirectPriceOnly(est.item_sl_no, linesRows));
         // A Direct Price line's real Item lives on the line itself, typed
         // by the user — est.model is "Custom" (or a typed model label),
         // never the Item. Real BOM Sl Nos are unaffected (no dpLine found).
@@ -15964,13 +16091,20 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     const orderQtyBySl = new Map(estimatesRows.map(e=>[e.item_sl_no, e.order_qty||1]));
     const map = new Map();
     linesRows.forEach(l=>{
-      const key = (l.material_spec||"(no spec)")+"|||"+(l.grade||"(no grade)");
+      // 25 Sep 2026 — same treatment as the per-Sl-No summary: a Direct
+      // Price line gets its own row at its typed prices instead of being
+      // grouped under "(no spec)" at rate 0.
+      const direct = l.is_direct_price===true;
+      const key = direct
+        ? "DIRECT|||"+(l.item||l.component||"(unnamed)")
+        : (l.material_spec||"(no spec)")+"|||"+(l.grade||"(no grade)");
       const qtyByOrder = (Number(l.qty_required)||0)*(orderQtyBySl.get(l.item_sl_no)||1);
-      const rate = Number(l.rate)||0;
-      const sf = Number(l.sf)||3.1;
-      if(!map.has(key)) map.set(key,{spec:l.material_spec||"(no spec)",grade:l.grade||"",uom:l.uom||"",rate,totalQty:0,totalCost:0,totalSales:0,slNos:new Set()});
+      const rate = direct ? lineUnitCost(l) : (Number(l.rate)||0);
+      if(!map.has(key)) map.set(key,{spec:direct?("Direct price: "+(l.item||l.component||"(unnamed)")):(l.material_spec||"(no spec)"),grade:direct?"":(l.grade||""),uom:l.uom||"",rate,totalQty:0,totalCost:0,totalSales:0,slNos:new Set()});
       const g = map.get(key);
-      g.totalQty += qtyByOrder; g.totalCost += qtyByOrder*rate; g.totalSales += qtyByOrder*rate*sf;
+      g.totalQty += qtyByOrder;
+      g.totalCost += qtyByOrder*lineUnitCost(l);
+      g.totalSales += qtyByOrder*lineUnitSale(l);
       g.slNos.add(l.item_sl_no);
     });
     return Array.from(map.values()).map(g=>({...g, slNoList: Array.from(g.slNos).sort((a,b)=>a-b).join(", ")}))
@@ -15983,6 +16117,9 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     const orderQtyBySl = new Map(estimatesRows.map(e=>[e.item_sl_no, e.order_qty||1]));
     const map = new Map();
     linesRows.forEach(l=>{
+      // 25 Sep 2026 — nothing is cut for a Direct Price line (see the
+      // per-Sl-No cutting plan).
+      if(l.is_direct_price===true) return;
       const cuttingPlan = l.cutting_plan_layout_size||"(none)";
       const key = (l.material_spec||"(no spec)")+"|||"+(l.grade||"(no grade)")+"|||"+cuttingPlan;
       const qtyByOrder = (Number(l.cutting_plan_qty)||0)*(orderQtyBySl.get(l.item_sl_no)||1);
@@ -16914,7 +17051,12 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
                 )
             )
             ),
-            showPricingPanel && h(PricingDescriptionPanel,{ openRef, openLines, user, sessionCompany, itemOptions:dpItemOptions, onSaved:()=>{ openEstimate(openRef); refreshReadiness(openRef.reference_number); }, onViewBom:()=>setShowBomOverride(true), hasRealBom:openLinesHaveRealBom }),
+            // 25 Sep 2026 — the panel can now change the Sl No's order qty
+            // (a Direct-Price-only Sl No is priced per item, so that is where
+            // the count lives). onSaved takes the new qty and reopens with
+            // it: openEstimate re-reads order_qty from the object it is
+            // handed, so passing the stale openRef would undo the change.
+            showPricingPanel && h(PricingDescriptionPanel,{ openRef, openLines, user, sessionCompany, itemOptions:dpItemOptions, orderQty, onOrderQtyChange:updateOrderQty, onSaved:(newOrderQty)=>{ openEstimate(newOrderQty!=null ? {...openRef, order_qty:Number(newOrderQty)||1} : openRef); refreshReadiness(openRef.reference_number); }, onViewBom:()=>setShowBomOverride(true), hasRealBom:openLinesHaveRealBom }),
             showDetailPanel&&h("div",{style:fullScreenBOM?{position:"fixed",inset:0,zIndex:1000,background:"#f4f2ea",padding:20,overflowY:"auto"}:{}},
               h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}},
                 h("div",{style:{fontSize:13,fontWeight:700}}, fullScreenBOM?("BOM — "+(openRef?openRef.reference_number+" · Sl No "+openRef.item_sl_no:"")):""),
@@ -17167,14 +17309,20 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               // 67,355 instead of 67,360). Same fix as the Annexure II
               // Price Summary and the Datasheet's own Price Data section —
               // all three had this independently.
-              const costR = roundedUnitTotal(totalOrderCost, orderQty);
+              // 25 Sep 2026 — a Sl No made only of Direct Price lines is
+              // priced by hand to the rupee. Round-to-5 would move a number
+              // the user typed, so it is shown exactly, the same way a PO
+              // price is. A BOM Sl No is unaffected.
+              const dpOnlyOpen = isDirectPriceOnly(openLines);
+              const costR = priceUnitTotal(totalOrderCost, orderQty, dpOnlyOpen);
               // 17 Sep -- on a Sale Order with a PO price, the sale shown is
               // the PO price (exact, not rounded to 5), and the BOM-computed
               // sale drops to a note underneath so the two can be compared.
               const poSales = openSlNoPoUnitInr!==null ? openSlNoPoUnitInr*(Number(orderQty)||1) : null;
               const saleBasis = poSales!==null ? poSales : totalOrderSales;
-              const salesR = priceUnitTotal(saleBasis, orderQty, poSales!==null);
-              const salesConvR = isNonInr ? priceUnitTotal(fx>0?saleBasis/fx:0, orderQty, poSales!==null) : null;
+              const saleExact = poSales!==null || dpOnlyOpen;
+              const salesR = priceUnitTotal(saleBasis, orderQty, saleExact);
+              const salesConvR = isNonInr ? priceUnitTotal(fx>0?saleBasis/fx:0, orderQty, saleExact) : null;
               const cell = (label,value,extra)=>h("div",null,
                 h("div",{style:{fontSize:10,color:colors.mutedLight,textTransform:"uppercase",letterSpacing:"0.04em"}},label),
                 h("div",{style:{fontWeight:700,fontSize:16,color:colors.text,marginTop:3}},value),
@@ -17244,7 +17392,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               h("input",{value:dpDescription,onChange:e=>setDpDescription(e.target.value),placeholder:"As per attached workup…",style:{...inputStyle,padding:"7px 9px",fontSize:12,width:"100%"}})
             ),
             h("div",{style:{display:"flex",gap:10,marginBottom:10}},
-              h("div",{style:{flex:1}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Qty"),h("input",{type:"number",value:dpQty,onChange:e=>setDpQty(e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12}})),
+              // 25 Sep 2026 — per item, not the order qty (see saveDirectPriceAddLine).
+              h("div",{style:{flex:1}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Qty per item"),h("input",{type:"number",min:1,value:dpQty,onChange:e=>setDpQty(e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12}})),
               h("div",{style:{flex:1}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"UOM"),h(MasterSelect,{value:dpUom,onChange:v=>setDpUom(v),options:[...uoms],table:"uom_tbl",valueCol:"uom",fieldLabel:"UOM",placeholder:"Select…",style:{padding:"7px 9px",fontSize:12}})),
               h("div",{style:{flex:1}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Cost price (INR) *"),h("input",{type:"number",value:dpCostPrice,onChange:e=>setDpCostPrice(e.target.value),placeholder:"0.00",style:{...inputStyle,padding:"7px 9px",fontSize:12}})),
               h("div",{style:{flex:1}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Sales price (enter in INR)"),h("input",{type:"number",value:dpSalesPrice,onChange:e=>setDpSalesPrice(e.target.value),placeholder:"0.00",style:{...inputStyle,padding:"7px 9px",fontSize:12}}))
@@ -23792,6 +23941,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"25 Sep 2026 (88)", summary:"Direct Price lines are priced PER ITEM. A Direct Price line (a hand-priced, bought-in item with no BOM costing) is now stored as one per item \u2014 qty_required = 1 \u2014 and the number of items lives only on the Sl No's order qty. Before this, users typed the ordered quantity into the line's Qty box AND into the Order Quantity popup, and the app multiplied the two: a 15NB globe valve at 1,800 with Qty 70 and order qty 70 showed a unit cost of 1,26,000 and a total of 88,20,000 instead of 1,800 and 1,26,000. SECOND BUG FIXED, found while tracing the first: changing an Sl No's order qty ran every line through rate \u00d7 sf to recompute cost and sales_price. A Direct Price line has no rate and no sf, so its typed cost and sales price were overwritten with 0 every time the order qty was nudged \u2014 the same wipe happened when such a line was edited through the BOM table's line editor. Both now skip Direct Price lines entirely: nothing recomputes a hand-typed price, not an order-qty change, not a line edit, not a price refresh. FOUR SHARED HELPERS added beside roundedUnitTotal \u2014 lineUnitCost, lineUnitSale, isDirectPriceOnly, slNoIsDirectPriceOnly \u2014 so every summary asks \"the price of one of this line\" in one place instead of reading rate/sf and silently getting 0. EXACT PRICING: an Sl No made only of Direct Price lines is now printed to the rupee rather than rounded to the nearest 5, the same rule a PO price already had, because the figure was typed by a person. Applied to the cost card, the internal BOM totals, Annexure II, the grand total, the cover letter's Total Basic Price and the Datasheet Price Data, so no two of them can disagree. WHERE DIRECT PRICE LINES NOW APPEAR PROPERLY: both material summaries give each one its own row (\"Direct price: <item>\") at its typed cost and sales price instead of burying it under \"(no spec)\" at rate 0; both cutting plans drop them, since nothing is cut for a bought-in item, instead of printing an empty \"(no spec)\" row; the internal BOM PDF/Excel shows the item name, its cost price in the Rate column and \"\u2014\" for Sf. LABELS AND GUARDS: the Custom (no BOM) form's Qty is labelled \"Qty (order qty)\" with a line saying the prices are per item, and it pre-fills the Order Quantity popup so the figure is confirmed rather than typed twice; the Add Line popup and the Pending validation card label theirs \"Qty per item\" and warn before saving when that equals the Sl No's order qty, which is almost always the old double-counting habit; on a Sl No made only of Direct Price lines the validation card's Qty box IS the order qty and saving it changes the order qty. The Pending Validation list reads \"INR x each\". A ONE-TIME DATA CORRECTION (preview + fix SQL, quantities only, never prices) repairs quotes saved the old way; anything ambiguous is listed for the MD rather than guessed. BOM Sl Nos, and BOM Sl Nos that merely carry a Direct Price line (2 gaskets per strainer), are unchanged in every respect." },
   { date:"24 Sep 2026 (87)", summary:"One Index.html, safe for both companies. The file now reads an optional settings.js beside it (loaded before the app's own script): supabaseUrl / supabaseKey decide which database, appTitle the browser tab, instanceLabel the line under BOM Estimator on the sign-in screen, companyName/Address/Website/Email the PDF letterhead fallbacks, quoteNumberSuggestion the Quote# suggestion. Falls back to Flometriq's own values when no settings.js is present, and a key present but empty wins over the fallback, so a company with no website shows none. Written to match the settings.js already deployed on Levaflow, so that file needs no change. This closes the hole that sent Levaflow's site at Flometriq's database this morning: without settings support, every Index.html handed over was a Flometriq file. No SQL." },
   { date:"23 Sep 2026 (86)", summary:"Three things on the new-offer flow, plus a naming rule. UNFINISHED QUOTES: nothing exists in the database until the first Sl No is saved, and the unsaved-work guard only watched the cart \u2014 a captured header and a part-built BOM were lost silently. The work in hand (header, selected model, BOM lines, overrides, cart) is now written to the browser as it goes, under that quote number; the guard covers it; and the Estimator offers \\\"Unfinished quote X, started HH:MM \u2014 Resume / Discard\\\" on return. Cleared when the quote saves, when discarded, or when that number turns out to exist already; per computer and per username. ADD ITEM MID-QUOTE: new \\\"+ Add item / size / model\\\" under the Estimator's pickers \u2014 anyone may, with the authorization code (admins pass through), audited, the catalog reloads immediately and the new item/size/model is selected, so the page never has to be reloaded (which is what lost the header). The new row is marked needs_template. FLAG: new Pending Actions source item_template owed to the Technical Head \u2014 models marked needs_template with no BOM rows, ageing from when they were added; it clears itself once a template exists. NAMING: messages name the PERSON, not the post \u2014 postPersonText/postPersonShort over a post cache; when a post is vacant they read \\\"the Technical Head post is empty \u2014 contact Bala Boopathy\\\". Used in the add-item messages, the work-order flag list and Pending Actions' Waiting on column. NEEDS SQL: item_needs_template_20260923_v1.sql. Headless test 54 of 54." },
   { date:"23 Sep 2026 (85)", summary:"Stage moves from every screen, each with a note. QUOTE SCREEN: the three-stage dropdown is replaced by QuoteStageTrack under the header \u2014 the funnel's open and won stages in master order (passed ones green, current dark), Lost and Deferred as exits, a move box asking for the date it changed, a note and (for open stages) the next follow-up; Won/Lost/Deferred hand on to the outcome box with the note held until it completes. Every move writes a follow-up via logStageMoveFollowup (discussed_what \\\"Stage moved on Quote screen\\\"), so it becomes Last interaction; a stage trail shows the last four moves with who, where and the note. The track re-checks the stage on returning to the screen, on window focus/visibility and every 60 s, and shows who moved it elsewhere. Readiness gate, the plain-user authorization code and the un-Won guard are kept. QUOTES REPORT: the stage box asks for a note and next follow-up and writes the same follow-up (\\\"Stage moved on Quotes Report\\\"). LAST INTERACTION: ordered by the date the interaction happened, then time entered; shows the notes only. QUOTE STAGES: On Quote screen column removed \u2014 every stage is settable. SOP FMQ-SOP-CRM-001 Rev 1. Headless test 50 of 50. No SQL." },
@@ -31614,9 +31764,16 @@ function SalesOverdueCallsScreen({ user, onGoLog }){
 // same direct-price-excels bucket/policy as everywhere else. Editing a
 // Validated line's sales price reverts it to Pending, matching the same
 // guard already used elsewhere in this app when a validated price changes.
-function PricingDescriptionPanel({ openRef, openLines, user, sessionCompany, itemOptions, onSaved, onViewBom, hasRealBom }){
+function PricingDescriptionPanel({ openRef, openLines, user, sessionCompany, itemOptions, orderQty, onOrderQtyChange, onSaved, onViewBom, hasRealBom }){
   const dpLines = openLines.filter(l=>l.is_direct_price===true);
-  const draftFor = (l)=>({ item:l.item||"", description:l.component||"", qty:String(l.qty_required||1), uom:l.uom||"Nos", cost_price:l.cost?String(l.cost):"", sales_price:l.sales_price?String(l.sales_price):"" });
+  // 25 Sep 2026 — Direct Price per-item pricing. When this Sl No is nothing
+  // but Direct Price lines there is no BOM, so the Qty box here IS the
+  // order qty and the prices beside it are the price of one item. When the
+  // Sl No also has BOM lines, the box keeps its old meaning: how many of
+  // this bought-in part go into each item.
+  const dpOnly = !hasRealBom && isDirectPriceOnly(openLines);
+  const slOrderQty = Math.max(1, Number(orderQty!=null ? orderQty : openRef.order_qty)||1);
+  const draftFor = (l)=>({ item:l.item||"", description:l.component||"", qty:String(dpOnly ? slOrderQty : (l.qty_required||1)), uom:l.uom||"Nos", cost_price:l.cost?String(l.cost):"", sales_price:l.sales_price?String(l.sales_price):"" });
   const [drafts,setDrafts] = useState(()=>{ const d={}; dpLines.forEach(l=>{ d[l.id]=draftFor(l); }); return d; });
   const [fileState,setFileState] = useState(()=>{ const f={}; dpLines.forEach(l=>{ f[l.id]={name:l.excel_file_name||"",path:l.excel_file_path||""}; }); return f; });
   useEffect(()=>{
@@ -31624,7 +31781,7 @@ function PricingDescriptionPanel({ openRef, openLines, user, sessionCompany, ite
     dpLines.forEach(l=>{ d[l.id]=draftFor(l); f[l.id]={name:l.excel_file_name||"",path:l.excel_file_path||""}; });
     setDrafts(d); setFileState(f);
     // eslint-disable-next-line
-  },[openLines]);
+  },[openLines, slOrderQty]);
   const [saving,setSaving] = useState({});
   const [uploading,setUploading] = useState({});
   // Datasheet — one per Sl No (not per Direct Price line), same table every
@@ -31668,13 +31825,21 @@ function PricingDescriptionPanel({ openRef, openLines, user, sessionCompany, ite
     if(!draft.description.trim()){ alert("Enter a description."); return; }
     if(!draft.cost_price || Number(draft.cost_price)<=0){ alert("Enter a cost price greater than 0."); return; }
     if(!draft.sales_price || Number(draft.sales_price)<=0){ alert("Enter a sales price greater than 0."); return; }
+    // 25 Sep 2026 — Qty must be at least 1 either way.
+    const typedQty = Math.max(1, Number(draft.qty)||1);
+    // On a mixed Sl No the box is "how many per item", so the same
+    // double-counting check the Add Line popup applies belongs here too.
+    if(!dpOnly && typedQty>1 && typedQty===slOrderQty){
+      if(!confirm("Qty per item is "+typedQty+", the same as this Sl No's order qty.\n\nThe price would be counted "+typedQty+" × "+typedQty+" = "+(typedQty*typedQty)+" times.\n\nOK = keep it as "+typedQty+" per item.\nCancel = go back and change it.")) return;
+    }
     setSaving(s=>({...s,[line.id]:true}));
     try{
       const newSalesPrice = Number(draft.sales_price)||0;
       const newCostPrice = Number(draft.cost_price)||0;
       const payload = {
         item: draft.item.trim(), component: draft.description.trim(),
-        qty_required: Number(draft.qty)||1, uom: draft.uom||"Nos",
+        // Direct-Price-only: one per item, the count lives on order_qty.
+        qty_required: dpOnly ? 1 : typedQty, uom: draft.uom||"Nos",
         cost: newCostPrice, sales_price: newSalesPrice
       };
       if(line.validation_status==="Validated" && Number(line.sales_price)!==newSalesPrice){
@@ -31683,7 +31848,15 @@ function PricingDescriptionPanel({ openRef, openLines, user, sessionCompany, ite
       const { error } = await byLine(sb.from("estimate_lines").update(payload), line);
       if(error) throw error;
       await logAudit("UPDATE","estimate_lines",openRef.reference_number+"-"+openRef.item_sl_no,"Updated Direct Price line \""+draft.description.trim()+"\"",user?.username||"unknown",null,payload);
-      onSaved();
+      // A changed Qty on a Direct-Price-only Sl No is a changed ORDER qty:
+      // push it through the same path the order-qty pill uses, then reopen
+      // with the new figure so the card and totals follow immediately.
+      if(dpOnly && typedQty!==slOrderQty && onOrderQtyChange){
+        await onOrderQtyChange(typedQty);
+        onSaved(typedQty);
+      } else {
+        onSaved();
+      }
       alert("Saved — "+draft.item.trim()+" (\""+draft.description.trim()+"\"): Cost ₹"+newCostPrice.toFixed(2)+" · Sales ₹"+newSalesPrice.toFixed(2)+".");
     } catch(e){ alert("Save failed: "+e.message); }
     finally { setSaving(s=>({...s,[line.id]:false})); }
@@ -31736,7 +31909,9 @@ function PricingDescriptionPanel({ openRef, openLines, user, sessionCompany, ite
           h("input",{value:draft.description,onChange:e=>setDraft(line.id,"description",e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12,width:"100%"}})
         ),
         h("div",{style:{display:"flex",gap:10,marginBottom:8,flexWrap:"wrap"}},
-          h("div",{style:{flex:1,minWidth:80}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:2}},"Qty"),h("input",{type:"number",value:draft.qty,onChange:e=>setDraft(line.id,"qty",e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12}})),
+          // 25 Sep 2026 — label follows the meaning: the order qty on a
+          // Direct-Price-only Sl No, per-item count on a mixed one.
+          h("div",{style:{flex:1,minWidth:80}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:2}},dpOnly?"Qty (order qty)":"Qty per item"),h("input",{type:"number",min:1,value:draft.qty,onChange:e=>setDraft(line.id,"qty",e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12}})),
           h("div",{style:{flex:1,minWidth:80}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:2}},"UOM"),h("input",{value:draft.uom,onChange:e=>setDraft(line.id,"uom",e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12}}))
         ),
         h("div",{style:{display:"flex",gap:10,marginBottom:10,flexWrap:"wrap"}},
@@ -31820,8 +31995,13 @@ function PendingValidationScreen({ user, onOpenQuote }){
       rows.map(row=>h("div",{key:row.id,style:{border:"1px solid "+colors.border,borderRadius:6,padding:"10px 12px"}},
         h("div",{style:{fontSize:13,fontWeight:600,marginBottom:2}},row.reference_number+" / Sl No "+row.item_sl_no+(row.customer_name?" — "+row.customer_name:"")),
         h("div",{style:{fontSize:12.5,marginBottom:4}},row.component),
+        // 25 Sep 2026 — the price is per item, so it reads "INR x each", and
+        // the "N UOM per item ×" prefix only appears when there really is
+        // more than one per item. Exact formatting, never round-to-5: this
+        // is the figure the validator is being asked to sign off on.
         h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:8}},
-          (row.qty_required||0)+" "+(row.uom||"")+" × INR "+fmtR(row.sales_price||0)+" — added by "+(row.added_by||"unknown")+
+          ((Number(row.qty_required)||1)>1 ? (row.qty_required+" "+(row.uom||"")+" per item × ") : "")+
+          "INR "+fmt(r2(Number(row.sales_price)||0))+" each — added by "+(row.added_by||"unknown")+
           (row.no_excel_code_used?", no-Excel authorization: "+row.no_excel_code_used:"")
         ),
         row.excel_file_name
