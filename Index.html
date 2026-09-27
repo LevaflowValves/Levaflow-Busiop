@@ -11,10 +11,11 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
-<!-- settings.js — OPTIONAL, and per site. Levaflow's copy sits beside this
-     file and points the app at Levaflow's database and branding. Flometriq's
-     site has no settings.js at all and falls back to its own values below,
-     so the SAME Index.html is safe to deploy to either. -->
+<!-- settings.js — REQUIRED, and per site (since build 90, 27 Sep 2026).
+     Each company's copy sits beside this file and points the app at that
+     company's database and branding. There is no built-in database: without
+     a readable settings.js the app shows an error screen and stops. The SAME
+     Index.html is deployed to both sites; settings.js is never copied across. -->
 <script src="settings.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/3.44.0/tabler-icons.min.css" />
 <style>
@@ -51,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-09-25T05:05:00Z";
+  var APP_BUILD_VERSION = "2026-09-27T03:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -420,8 +421,13 @@ function formatReadinessGaps(missing){
 //   companyName / companyAddress / companyWebsite / companyEmail
 //   quoteNumberSuggestion      — suggest the next Quote#; OFF unless set
 const APP_SETTINGS = (typeof window!=="undefined" && window.APP_SETTINGS && typeof window.APP_SETTINGS==="object") ? window.APP_SETTINGS : {};
-const SUPABASE_URL = APP_SETTINGS.supabaseUrl || "https://afqioawxgcgssktdzyql.supabase.co";
-const SUPABASE_KEY = APP_SETTINGS.supabaseKey || "sb_publishable_3vYQANajyTU0wBhGjmfmgQ_eMReC9pl";
+// 27 Sep (90): settings.js is REQUIRED on every site. There is no built-in
+// database any more — a site whose settings.js is missing, renamed or broken
+// shows SettingsMissingScreen and stops, instead of silently opening
+// Flometriq's database under another company's name.
+const SETTINGS_OK = !!(APP_SETTINGS.supabaseUrl && APP_SETTINGS.supabaseKey);
+const SUPABASE_URL = SETTINGS_OK ? String(APP_SETTINGS.supabaseUrl) : "https://settings-missing.invalid";
+const SUPABASE_KEY = SETTINGS_OK ? String(APP_SETTINGS.supabaseKey) : "settings-missing";
 const QUOTE_NUMBER_SUGGESTION = APP_SETTINGS.quoteNumberSuggestion === true;
 const APP_INSTANCE_LABEL = APP_SETTINGS.instanceLabel || "";
 if(APP_SETTINGS.appTitle){ try{ document.title = String(APP_SETTINGS.appTitle); }catch(e){} }
@@ -10635,6 +10641,126 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
   );
 }
 
+/* ---- FIXED ACTION RIBBON (27 Sep, build 91) ----
+   One strip under the main menu, sticky, that holds every action for the
+   screen. Rules it enforces, because buttons used to jump about as warnings
+   and banners came and went:
+   - every button has a fixed slot; a button that does not apply is GREYED,
+     never removed, so nothing beside it ever moves;
+   - clicking a greyed button says why, in the ribbon's own message line;
+   - below 1720px wide it splits into two rows, and the split is fixed per
+     screen (a group's `row`), never decided by content;
+   - Close and Delete sit apart at the far right.
+   groups: [{key, cap, row:1|2, push, items:[item]}]
+   item:   {id,label,icon,color,onClick,why,active}   a button
+           {id,node}                                  any custom control
+           {id,label,icon,color,why,menu:[{label,onClick}]}  a dropdown */
+(function(){
+  if(typeof document==="undefined" || document.getElementById("fr-ribbon-style")) return;
+  const st=document.createElement("style"); st.id="fr-ribbon-style";
+  st.textContent=[
+    ".fr-rib{background:#fbfaf6;border-bottom:1px solid #e2ded3;box-shadow:0 2px 6px rgba(0,0,0,.05);overflow-x:auto}",
+    ".fr-tabs{display:flex;align-items:center;gap:12px;padding:5px 16px 0;background:#fff;border-bottom:1px solid #e2ded3;min-height:30px}",
+    ".fr-tab{padding:4px 14px;font-size:12.5px;font-weight:700;border:1px solid #e2ded3;border-bottom:none;border-radius:6px 6px 0 0;background:#fbfaf6}",
+    ".fr-msg{font-size:12px;color:#8a5a10;background:#fff6dc;border:1px solid #f0d58a;border-radius:5px;padding:2px 9px}",
+    ".fr-body{display:flex;align-items:stretch;padding:7px 8px 0;min-width:max-content}",
+    ".fr-body+.fr-body{border-top:1px solid #eceae0}",
+    ".fr-g{display:flex;flex-direction:column;padding:0 7px;border-right:1px solid #e2ded3;position:relative}",
+    ".fr-g:last-child{border-right:none}",
+    ".fr-g.fr-push{margin-left:auto;border-left:1px solid #e2ded3;border-right:none}",
+    ".fr-row{display:flex;gap:4px;align-items:flex-start;flex:1}",
+    ".fr-cap{font-size:10px;color:#8a887e;text-align:center;letter-spacing:.07em;text-transform:uppercase;padding:4px 0 5px}",
+    ".fr-b{display:flex;flex-direction:column;align-items:center;gap:3px;width:64px;min-height:54px;padding:4px 2px;border:1px solid transparent;border-radius:6px;background:transparent;color:#1f2320;font-size:11px;line-height:1.15;text-align:center;cursor:pointer;font-family:inherit}",
+    ".fr-b:hover{background:#fff;border-color:#e2ded3}",
+    ".fr-b .fr-ic{width:28px;height:26px;border-radius:6px;display:grid;place-items:center;color:#fff;font-size:15px}",
+    ".fr-b.fr-off{opacity:.38;cursor:help}",
+    ".fr-b.fr-off:hover{background:transparent;border-color:transparent}",
+    ".fr-b.fr-on{background:#eef4fb;border-color:#b9d3ef}",
+    ".fr-two .fr-body{padding:4px 8px 0}",
+    ".fr-two .fr-g{padding:0 4px}",
+    ".fr-two .fr-row{gap:2px;align-items:center}",
+    ".fr-two .fr-b{flex-direction:row;width:auto;min-height:28px;padding:3px 5px 3px 2px;gap:4px;white-space:nowrap;font-size:11.5px;text-align:left}",
+    ".fr-two .fr-b .fr-ic{width:20px;height:20px;font-size:12px;border-radius:5px}",
+    ".fr-two .fr-cap{padding:1px 0 3px}",
+    ".fr-menu{position:absolute;right:4px;top:100%;background:#fff;border:1px solid #e2ded3;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.14);padding:6px;display:flex;flex-direction:column;gap:4px;z-index:80;min-width:210px}",
+    ".fr-menu button{border:1px solid #f0c6c3;background:#fff;color:#a3312a;border-radius:5px;padding:6px 9px;text-align:left;font-size:12.5px;cursor:pointer;font-family:inherit}",
+    ".fr-menu button:hover{background:#fdeee9}",
+    ".fr-find{display:flex;flex-direction:column;gap:4px;width:220px;padding-top:2px}",
+    ".fr-find input{width:100%;box-sizing:border-box}",
+    ".fr-find .fr-cur{font-size:11px;color:#6b6a62;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+    ".fr-two .fr-find{flex-direction:row;align-items:center;width:auto;padding-top:0}",
+    ".fr-two .fr-find input{width:165px}",
+    ".fr-two .fr-find .fr-cur{display:none}",
+    ".fr-sf{display:flex;flex-direction:column;gap:4px;width:138px;padding-top:2px}",
+    ".fr-sf input{width:100%;box-sizing:border-box}",
+    ".fr-sf .fr-sfb{display:flex;gap:3px}",
+    ".fr-sf .fr-sfb button{flex:1;border:1px solid #e2ded3;background:#fff;border-radius:5px;padding:4px 0;font-size:11.5px;cursor:pointer;font-family:inherit}",
+    ".fr-sf .fr-sfb button:disabled{opacity:.4;cursor:help}",
+    ".fr-two .fr-sf{flex-direction:row;align-items:center;width:auto;padding-top:0}",
+    ".fr-two .fr-sf input{width:78px}",
+    ".fr-two .fr-sf .fr-sfb button{padding:4px 6px}"
+  ].join("\n");
+  document.head.appendChild(st);
+})();
+function ActionRibbon({ tab, groups, top, onHeight }){
+  const rootRef=useRef(null);
+  useEffect(()=>{
+    const el=rootRef.current; if(!el||!onHeight||typeof ResizeObserver==="undefined") return;
+    const ro=new ResizeObserver(()=>onHeight(el.offsetHeight)); ro.observe(el); onHeight(el.offsetHeight);
+    return ()=>ro.disconnect();
+  },[onHeight]);
+  const [w,setW]=useState(typeof window!=="undefined"?window.innerWidth:1920);
+  const [msg,setMsg]=useState("");
+  const [openMenu,setOpenMenu]=useState(null);
+  const [menuPos,setMenuPos]=useState(null); // fixed, so the ribbon's own scroll box cannot clip it
+  const msgTimer=useRef(null);
+  useEffect(()=>{ const f=()=>setW(window.innerWidth); window.addEventListener("resize",f); return ()=>window.removeEventListener("resize",f); },[]);
+  useEffect(()=>{
+    if(!openMenu) return;
+    const close=e=>{ if(!(e.target.closest && e.target.closest(".fr-menu-wrap"))) setOpenMenu(null); };
+    const shut=()=>setOpenMenu(null);
+    document.addEventListener("mousedown",close); window.addEventListener("scroll",shut,true); window.addEventListener("resize",shut);
+    return ()=>{ document.removeEventListener("mousedown",close); window.removeEventListener("scroll",shut,true); window.removeEventListener("resize",shut); };
+  },[openMenu]);
+  useEffect(()=>()=>clearTimeout(msgTimer.current),[]);
+  const say=t=>{ setMsg(t); clearTimeout(msgTimer.current); msgTimer.current=setTimeout(()=>setMsg(""),5000); };
+  const two = w<1720; // one row needs about 1690px; below that the fixed two-row split
+  const renderItem=(it)=>{
+    if(it.node) return h(React.Fragment,{key:it.id},it.node);
+    const off=!!it.why;
+    const cls="fr-b"+(off?" fr-off":"")+(it.active?" fr-on":"");
+    const click=(ev)=>{
+      if(off){ say(it.why); return; }
+      if(it.menu){
+        if(openMenu===it.id){ setOpenMenu(null); return; }
+        const r=ev.currentTarget.getBoundingClientRect();
+        setMenuPos({top:r.bottom+4,right:Math.max(8,window.innerWidth-r.right)}); setOpenMenu(it.id); return;
+      }
+      setMsg(""); it.onClick && it.onClick();
+    };
+    const btn=h("button",{key:it.id,type:"button",className:cls,onClick:click,title:off?it.why:(it.title||""),"aria-disabled":off?"true":undefined},
+      h("span",{className:"fr-ic",style:{background:it.color||"#6b6a62"}},h("i",{className:"ti ti-"+(it.icon||"point"),"aria-hidden":"true"})),
+      it.label);
+    if(!it.menu) return btn;
+    return h("span",{key:it.id,className:"fr-menu-wrap",style:{position:"relative"}},btn,
+      openMenu===it.id && menuPos && h("div",{className:"fr-menu",style:{position:"fixed",top:menuPos.top,right:menuPos.right,left:"auto"}},
+        it.menu.map((m,i)=>h("button",{key:i,type:"button",onClick:()=>{ setOpenMenu(null); m.onClick(); }},m.label))));
+  };
+  const renderGroup=g=>h("div",{key:g.key,className:"fr-g"+(g.push?" fr-push":"")},
+    h("div",{className:"fr-row"},(g.items||[]).map(renderItem)),
+    h("div",{className:"fr-cap"},g.cap||" "));
+  const bodies = two
+    ? [groups.filter(g=>g.row!==2),groups.filter(g=>g.row===2)]
+    : [groups];
+  return h("div",{ref:rootRef,className:"fr-rib"+(two?" fr-two":""),style:{position:"sticky",top:top||0,zIndex:50}},
+    h("div",{className:"fr-tabs"},
+      h("span",{className:"fr-tab"},tab),
+      msg && h("span",{className:"fr-msg",role:"status"},msg)
+    ),
+    bodies.map((gs,i)=>h("div",{key:i,className:"fr-body"},gs.map(renderGroup)))
+  );
+}
+
 function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, onGoToTab, onNewSlNo, mode, contractInfo, onContractInfoChanged, onOpenContract, cameFromQuotesReport, onBackToQuotesReport }) {
   // mode: "quote" (default) | "contract". When "contract", this exact
   // same screen is a Sale Order — the underlying data lives in the same
@@ -13194,6 +13320,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   // pixel offset — that header's height changes (Draft/abandoned banners
   // toggling), so a fixed number would drift out of sync.
   const [appHeaderHeight,setAppHeaderHeight]=useState(0);
+  const [ribbonHeight,setRibbonHeight]=useState(0); // the action ribbon (27 Sep, 91) sits under it
   useEffect(()=>{
     const el = document.getElementById("app-sticky-header");
     if(!el) return;
@@ -16428,7 +16555,77 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const showDetailPanel = !showSummarySaved && !showCuttingPlan && (!openLinesHaveDirectPrice || showBomOverride);
   const showPricingPanel = !showSummarySaved && !showCuttingPlan && openLinesHaveDirectPrice && !showBomOverride;
 
+  // 27 Sep (91) — the fixed action ribbon for this screen. Every action that
+  // used to sit in a row beside a warning, in the header card or at the
+  // right of the Sl No filter now has one fixed slot here. See ActionRibbon.
+  const isSO = mode==="contract";
+  const docWord = isSO ? "Sale Order" : "quote";
+  const noOpen = refFilter ? null : "Open a "+docWord+" first: type its number or the client in the search box on the left.";
+  const ribbonGroups = [
+    {key:"find",cap:"Find",row:1,items:[
+      {id:"search",node:h("div",{className:"fr-find"},
+        h("input",{list:"quote-search-datalist",value:refSearchDisplay,onFocus:comboRefocusRS,onChange:e=>handleRefSearchChange(e.target.value),onBlur:handleRefSearchBlur,placeholder:isSO?"Sale Order number or client…":"Quote number or client name…",style:{...inputStyle,background:"#fff"}}),
+        h("datalist",{id:"quote-search-datalist"},refOptionsList.map(o=>h("option",{key:o.rn,value:o.label}))),
+        h("div",{className:"fr-cur"},refFilter?("Open: "+refFilter+(quoteHeaderRow&&quoteHeaderRow.customer_name?" · "+quoteHeaderRow.customer_name:"")):"Nothing open")
+      )},
+      {id:"new",label:"New quote",icon:"plus",color:"#1f2320",onClick:handleMakeNewQuoteClick,
+        why:isSO?"New quotes start from Sales › Quotes, not from a Sale Order.":null},
+      {id:"all",label:isSO?"All Sale Orders":"All quotes",icon:"list",color:"#1f2320",
+        onClick:()=>{setRefFilter("");setRefSearchDisplay("");setSlNoFilter("");},
+        why:refFilter?null:"You're already looking at all of them."}
+    ]},
+    {key:"this",cap:isSO?"This Sale Order":"This quote",row:1,items:[
+      {id:"hdr",label:"Edit header",icon:"pencil",color:"#1d5fa8",onClick:openHeaderEdit,
+        why:noOpen||(!quoteHeaderRow?"The header is still loading.":null)||(headerEditOpen?"The header is already open for editing, below.":null)},
+      {id:"terms",label:"Commercial Terms",icon:"file-text",color:"#5c2d91",onClick:openCommercialTerms,why:noOpen},
+      {id:"dev",label:"Deviations / Suggestions",icon:"message-report",color:"#8a5a00",onClick:openInternalNotes,why:noOpen||(!quoteExportRef?"The "+docWord+" is still loading.":null)},
+      {id:"extra",label:"Extra Price Addition",icon:"currency-rupee",color:"#0f766e",onClick:openExtraPrice,why:noOpen},
+      {id:"nde",label:ndeRollupSummary?("NDE Testing ("+ndeRollupSummary.count+")"):"NDE Testing",icon:"flask",color:"#8a4b1f",onClick:openGlobalTestPicker,
+        why:noOpen||(readiness.ready?null:"Not Ready yet. "+formatReadinessGaps(readiness.missing).replace(/^[^\n]*\n\n/,"").replace(/\n?\u2022 ?/g," · ").replace(/^ · /,""))}
+    ]},
+    {key:"price",cap:"Pricing",row:1,items:[
+      {id:"sf",node:h("div",{className:"fr-sf"},
+        h("input",{type:"number",step:"0.1",value:globalSfInput,disabled:!refFilter,onChange:e=>setGlobalSfInput(e.target.value),placeholder:"New Sf, all Sl Nos",title:refFilter?"Sets this Sf on every Sl No of the "+docWord:(noOpen||""),style:{...inputStyle}}),
+        h("div",{className:"fr-sfb"},
+          h("button",{type:"button",onClick:applyGlobalSf,disabled:!refFilter||applyingGlobalSf,title:"Apply Sf for all Sl Nos"},applyingGlobalSf?"…":"Apply"),
+          h("button",{type:"button",onClick:restorePreviousGlobalSf,disabled:!(lastGlobalSfSnapshot&&lastGlobalSfSnapshot.refFilter===refFilter)||restoringGlobalSf,
+            title:(lastGlobalSfSnapshot&&lastGlobalSfSnapshot.refFilter===refFilter)?"Put back each line's Sf and sales price from before it was set to "+lastGlobalSfSnapshot.appliedValue:"Nothing to undo yet"},restoringGlobalSf?"…":"Undo"),
+          h("button",{type:"button",onClick:()=>refreshQuoteTotals(refFilter),disabled:!refFilter||quoteTotalsLoading,title:"Refresh totals"},"⟳")
+        )
+      )}
+    ]},
+    {key:"goto",cap:"Go to",row:2,items:[
+      {id:"cart",label:"Cart",icon:"shopping-cart",color:"#1c8c75",onClick:openCartScreen,why:noOpen||(cartUnavailable?"The "+docWord+" is still loading.":null)},
+      {id:"docs",label:"Documents",icon:"folder",color:"#6b6a62",onClick:openDocumentsPanel,why:noOpen||(!quoteExportRef?"The "+docWord+" is still loading.":null)},
+      {id:"fu",label:"Follow-up log",icon:"phone",color:"#6b6a62",onClick:()=>setShowQuoteActivityPanel(true),why:noOpen||(!quoteExportRef?"The "+docWord+" is still loading.":null)},
+      {id:"hist",label:"History",icon:"history",color:"#6b6a62",onClick:()=>setHistoryOpen(true),why:noOpen},
+      {id:"qr",label:"Quotes Report",icon:"arrow-left",color:"#6b6a62",onClick:onBackToQuotesReport,
+        why:(cameFromQuotesReport&&!isSO&&onBackToQuotesReport)?null:"Only lights up when you opened this "+docWord+" from the Quotes Report."}
+    ]},
+    {key:"out",cap:"Output",row:2,items:[
+      {id:"gen",label:generatingQuotePdf?"Generating…":(isSO?"Generate Sale Order":"Generate Quote PDF"),icon:"file-type-pdf",color:"#1f2320",
+        onClick:attemptGenerateQuotePdf,why:noOpen||(!quoteExportRef?"The "+docWord+" is still loading.":null)||(generatingQuotePdf?"Already generating.":null)},
+      {id:"sds",label:"Summarised datasheets",icon:summaryMode?"square-check":"square",color:summaryMode?"#1d5fa8":"#9a978c",active:summaryMode,
+        title:"When ticked, the PDF uses summarised datasheets",onClick:()=>setSummaryMode(v=>!v),why:noOpen}
+    ]},
+    {key:"next",cap:"Next step",row:2,items:[
+      {id:"so",label:"Create Sale Order",icon:"file-invoice",color:"#185fa5",onClick:createSaleOrderFromQuote,
+        why:noOpen||(isSO?"You're already on the Sale Order.":null)||(!quoteHeaderRow?"The header is still loading.":null)},
+      {id:"amend",label:isSO?"Amend Sale Order":"Amend quote",icon:"git-branch",color:"#0c447c",
+        onClick:()=>{ if(isAdmin) setShowAmendPicker(true); else setShowAmendGate(true); },
+        why:noOpen||(isSO?"Amending a Sale Order isn't built yet.":null)||(!quoteHeaderRow?"The header is still loading.":null)||(quoteHeaderRow&&quoteHeaderRow.quote_status==="Draft"?"A Draft is edited directly. Amend is for a quote that has left Draft.":null)}
+    ]},
+    {key:"end",cap:"",row:2,push:true,items:[
+      {id:"close",label:"Close",icon:"x",color:colors.danger,onClick:()=>attemptCloseOrNewQuotes("close"),why:noOpen},
+      {id:"del",label:"Delete ▾",icon:"trash",color:colors.danger,
+        why:noOpen||(isAdmin?null:"Only Admins can delete."),
+        menu:[{label:"Delete this Revision",onClick:openDeleteQuote},{label:isSO?"Delete Entire Sale Order":"Delete Entire Quote",onClick:openDeleteEntireQuote}]}
+    ]}
+  ];
+
+
   return h(React.Fragment,null,
+    h(ActionRibbon,{tab:isSO?"Sale Order":"Quote",groups:ribbonGroups,top:appHeaderHeight,onHeight:setRibbonHeight}),
     h("div",{style:{background:colors.bg,padding:"20px 24px 14px",borderBottom:"1px solid "+colors.border}},
       // 16 Sep -- this whole region used to be sticky, and it holds the
       // title row, the search, and (on a Contract) the entire
@@ -16441,13 +16638,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       // longer needed for an offset here and is kept only because the
       // measurement is cheap and other callers may want it.
       h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}},
-        h("h2",{style:{margin:0,fontSize:18,fontWeight:700}}, mode==="contract" ? "Sale Order" : "Quotes"),
-        h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}},
-          h("input",{list:"quote-search-datalist",value:refSearchDisplay,onFocus:comboRefocusRS,onChange:e=>handleRefSearchChange(e.target.value),onBlur:handleRefSearchBlur,placeholder:"Quote number or client name…",style:{...inputStyle,width:260,background:"#185fa5",color:"#fff",border:"1px solid #185fa5",fontWeight:600}}),
-          h("datalist",{id:"quote-search-datalist"},refOptionsList.map(o=>h("option",{key:o.rn,value:o.label}))),
-          mode!=="contract" && h("button",{onClick:handleMakeNewQuoteClick,style:{...btnSmall,fontWeight:600}},"Make New Quote"),
-          refFilter && h("button",{onClick:()=>{setRefFilter("");setRefSearchDisplay("");setSlNoFilter("");},style:btnSmall},mode==="contract"?"All Sale Orders":"All quotes")
-        )
+        h("h2",{style:{margin:0,fontSize:18,fontWeight:700}}, mode==="contract" ? "Sale Order" : "Quotes")
+        // 27 Sep (91): search, Make New Quote and All quotes live in the ribbon now.
       ),
       mode==="contract" && contractInfo && h(ContractStatusBanner,{contractInfo, quoteHeaderRow, user, onChanged:onContractInfoChanged, onEditDetails:()=>setShowEditContractDetails(true),
         onPoFieldsSaved:(po_number,po_date)=>{
@@ -16484,7 +16676,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       )
     ),
     h("div",{style:{padding:"14px 24px 20px"}},
-      cameFromQuotesReport && mode!=="contract" && h("button",{onClick:onBackToQuotesReport,style:{...btnSmall,marginBottom:10,display:"flex",alignItems:"center",gap:5}},"← Back to Quotes Report"),
+      // 27 Sep (91): "Back to Quotes Report" is the ribbon's Go to › Quotes Report.
       refFilter && quoteHeaderRow && h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,background:"#fff",padding:"14px 16px",marginBottom:14}},
         h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12,marginBottom:12}},
           h("div",{style:{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}},
@@ -16542,27 +16734,15 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
             onClose: ()=>setShowBomExemptions(false),
             onSaved: async()=>{ setShowBomExemptions(false); await refreshReadiness(refFilter); }
           }),
-          h("div",{style:{display:"flex",gap:8}},
-            h("button",{onClick:openCartScreen,disabled:cartUnavailable,style:{...btnSmall,border:"1px solid "+colors.border,display:"flex",alignItems:"center",gap:5}},h("i",{className:"ti ti-shopping-cart","aria-hidden":"true",style:{fontSize:13}}),"Go to Cart"),
-            isAdmin && h("button",{onClick:openDeleteQuote,style:{...btnSmall,border:"1px solid "+colors.danger,color:colors.danger}},"Delete this Revision"),
-            isAdmin && h("button",{onClick:openDeleteEntireQuote,style:{...btnSmall,background:colors.danger,color:"#fff",border:"none",fontWeight:600}},mode==="contract"?"Delete Entire Sale Order":"Delete Entire Quote"),
-            h("button",{onClick:()=>attemptCloseOrNewQuotes("close"),style:{padding:"6px 14px",fontSize:12,fontWeight:600,borderRadius:5,border:"none",background:colors.danger,color:"#fff",cursor:"pointer"}},"Close")
-          )
+          // 27 Sep (91): Cart, Delete and Close moved to the ribbon. They used to
+          // share this row with the Incomplete BOM warning and jump when it came and went.
+          null
         ),
         h("div",{style:{marginTop:14,paddingTop:14,borderTop:"1px solid "+colors.border}},
         h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}},
           h("div",{style:{fontSize:12.5,fontWeight:700}},(mode==="contract"?"Sale Order Header — ":"Quote Header — ")+refFilter),
-          h("div",{style:{display:"flex",gap:8}},
-            mode!=="contract" && h("button",{onClick:createSaleOrderFromQuote,style:{...btnSmall,background:"#185FA5",color:"#fff",border:"none"}},"Create Sale Order"),
-            // Contract amendment isn't fully built yet (24 Aug) — the
-            // generic clone-into-new-revision logic below would work
-            // mechanically, but wouldn't reset the three approvals or
-            // create a fresh sale_order_tbl row for the new revision, so
-            // this stays hidden in Contract mode rather than offering a
-            // half-working "Amend Sale Order" button.
-            mode!=="contract" && quoteHeaderRow.quote_status!=="Draft" && h("button",{onClick:()=>{ if(isAdmin) setShowAmendPicker(true); else setShowAmendGate(true); },style:{...btnSmall,background:"#0c447c",color:"#fff",border:"none"}},"Amend quote"),
-            !headerEditOpen && h("button",{onClick:openHeaderEdit,style:btnSmall},"Edit")
-          )
+          // 27 Sep (91): Create Sale Order, Amend and Edit header are in the ribbon.
+          null
         ),
         quoteHeaderRow.customer_name && !headerCustomerCountry.trim() && h("div",{style:{background:"#fdeee9",border:"1px solid #f0b8b8",borderRadius:6,padding:"8px 12px",marginBottom:10,display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}},
           h("span",{style:{fontSize:11.5,color:colors.danger}},"This customer has no country on file. Add one before continuing — currency and conversion rate depend on it."),
@@ -16786,8 +16966,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
             mode!=="contract" && h("input",{value:descSearch,onChange:e=>setDescSearch(e.target.value),placeholder:"Search description…",style:{...inputStyle,width:200}})
           ),
           h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}},
-            h("button",{onClick:openCommercialTerms,style:{...btnSmall,background:"#5c2d91",color:"#fff",border:"none",fontWeight:600}},"Commercial Terms"),
-            h("button",{onClick:openInternalNotes,disabled:!quoteExportRef,style:{...btnSmall,background:"#8a5a00",color:"#fff",border:"none",fontWeight:600}},"Deviations / Suggestions"),
+            // Compliance chips only now — the buttons that sat here are in the ribbon (27 Sep, 91).
             (function(){
               // Compliance rollup, computed live from the per-Sl-No rows.
               // Never stored — this app has been bitten by stale stored
@@ -16798,15 +16977,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               return h("span",{style:{display:"inline-flex",gap:5,flexWrap:"wrap",alignItems:"center"}},
                 Object.keys(counts).sort().map(k=>h("span",{key:k,style:{fontSize:10.5,color:"#0f766e",background:"#e6f4f1",border:"1px solid #9fe1cb",padding:"2px 7px",borderRadius:9}},k+" \u00b7 "+counts[k].size+" Sl No"+(counts[k].size===1?"":"s")))
               );
-            })(),
-            h("button",{onClick:openExtraPrice,style:{...btnSmall,background:"#0f766e",color:"#fff",border:"none",fontWeight:600}},"Extra Price Addition"),
-            h("button",{onClick:readiness.ready?openGlobalTestPicker:()=>alert(formatReadinessGaps(readiness.missing)),title:readiness.ready?"":"Click to see what's still needed",style:{...btnSmall,background:readiness.ready?"#8a4b1f":"#fff",color:readiness.ready?"#fff":colors.muted,border:readiness.ready?"none":"1px solid "+colors.border,fontWeight:600,cursor:"pointer"}},(ndeRollupSummary?("NDE Testing ("+ndeRollupSummary.count+" item"+(ndeRollupSummary.count!==1?"s":"")+", ₹"+ndeRollupSummary.total.toFixed(0)+")"):"NDE Testing")+(readiness.ready?"":" — quote not ready yet")),
-            h("div",{style:{display:"flex",gap:4,alignItems:"center"}},
-              h("input",{type:"number",step:"0.1",value:globalSfInput,onChange:e=>setGlobalSfInput(e.target.value),placeholder:"New Sf — all Sl Nos",style:{...inputStyle,width:160}}),
-              h("button",{onClick:applyGlobalSf,disabled:applyingGlobalSf,style:{...btnSmall,opacity:applyingGlobalSf?0.6:1}},applyingGlobalSf?"Applying…":"Apply Sf for all Sl Nos"),
-              lastGlobalSfSnapshot && lastGlobalSfSnapshot.refFilter===refFilter && h("button",{onClick:restorePreviousGlobalSf,disabled:restoringGlobalSf,title:"Undo the last global Sf change — restores each line's Sf and sales price to what they were before it was set to "+lastGlobalSfSnapshot.appliedValue,style:{...btnSmall,fontSize:10.5,color:colors.danger,border:"1px solid #f0997b",opacity:restoringGlobalSf?0.6:1}},restoringGlobalSf?"Restoring…":"↺ Restore previous Sf")
-            ),
-            h("button",{onClick:()=>setHistoryOpen(true),style:btnSmall},"History")
+            })()
+            // 27 Sep (91): Commercial Terms, Deviations, Extra Price, NDE, the Sf box and History moved to the ribbon.
           )
         )
       ),
@@ -16919,7 +17091,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         )
       ),
       h("div",{style:{display:"flex",gap:20,flexWrap:"wrap",alignItems:"flex-start"}},
-        h("div",{style:{width:300,flexShrink:0,position:"sticky",top:12}},
+        h("div",{style:{width:300,flexShrink:0,position:"sticky",top:appHeaderHeight+ribbonHeight+12}},
           loading?h("div",{style:{color:colors.mutedLight,fontSize:13}},"Loading…"):
           h("div",{style:{border:"1px solid "+colors.border,borderRadius:6,maxHeight:520,overflowY:"auto"}},
             filtered.map((r,rowIdx)=>{ const active=openRef&&openRef.id===r.id; return h("div",{key:r.id,onClick:()=>openEstimate(r),style:{padding:"10px 12px",cursor:"pointer",borderBottom:"1px solid #eceae0",background:active?colors.dark:(rowIdx%2===0?"#eaf3de":"#e6f1fb"),color:active?"#fff":colors.text,display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:6}},
@@ -17687,15 +17859,17 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     // (careful delete-everywhere, with its own confirmation) — no new
     // removal logic invented here.
     showCartScreen && h("div",{style:{position:"fixed",inset:0,background:"rgba(20,20,20,0.55)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:20}},
-      h("div",{style:{background:"#fff",borderRadius:8,width:1180,maxWidth:"95vw",maxHeight:"85vh",overflow:"auto",padding:"20px 22px"}},
-        h("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,paddingBottom:12,borderBottom:"1px solid "+colors.border}},
-          h("span",{style:{fontSize:14,fontWeight:700}},"Cart — "+refFilter),
-          h("button",{onClick:()=>setShowCartScreen(false),style:{border:"1px solid #1c8c75",background:"#eef6f3",color:"#0f6e56",padding:"7px 13px",borderRadius:6,fontSize:12.5,fontWeight:600,cursor:"pointer",display:"flex",alignItems:"center",gap:5}},h("i",{className:"ti ti-arrow-left","aria-hidden":"true",style:{fontSize:13}}),(mode==="contract"?"Back to Sale Order ":"Back to quote ")+refFilter)
+      h("div",{style:{background:"#fff",borderRadius:8,width:1180,maxWidth:"95vw",maxHeight:"85vh",overflow:"auto",padding:"0 22px 20px"}},
+        // 27 Sep (91): a fixed bar that stays at the top of the Cart while it
+        // scrolls. Back and Add sit in the same place every time.
+        h("div",{style:{position:"sticky",top:0,zIndex:3,background:"#fff",display:"flex",alignItems:"center",gap:10,padding:"16px 0 12px",marginBottom:14,borderBottom:"1px solid "+colors.border}},
+          h("button",{onClick:()=>setShowCartScreen(false),style:{border:"1px solid #1c8c75",background:"#eef6f3",color:"#0f6e56",padding:"7px 13px",borderRadius:6,fontSize:12.5,fontWeight:600,cursor:"pointer",display:"flex",alignItems:"center",gap:5}},h("i",{className:"ti ti-arrow-left","aria-hidden":"true",style:{fontSize:13}}),(mode==="contract"?"Back to Sale Order ":"Back to quote ")+refFilter),
+          h("button",{
+            onClick:()=>{ setShowCartScreen(false); setNewSlNoInput(""); setNewSlNoError(""); setNewSlNoStep("input"); setShowNewSlNoModal(true); },
+            style:{...btnPrimary}
+          },"+ Add New Sl No. To Cart"),
+          h("span",{style:{fontSize:14,fontWeight:700,marginLeft:8}},"Cart — "+refFilter)
         ),
-        h("button",{
-          onClick:()=>{ setShowCartScreen(false); setNewSlNoInput(""); setNewSlNoError(""); setNewSlNoStep("input"); setShowNewSlNoModal(true); },
-          style:{...btnPrimary,marginBottom:18}
-        },"+ Add New Sl No. To Cart"),
         h("div",{style:{fontSize:11,color:colors.mutedLight,textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:8}},"Cart — existing Sl Nos on this quote"),
         h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,overflowX:"auto"}},
           h("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:13,minWidth:1100}},
@@ -17789,30 +17963,42 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
                         );
                       })()
                     ),
+                    // 27 Sep (91): the same seven buttons, in the same order and at the
+                    // same width, on every row. One that does not apply to this row is
+                    // greyed and says why when clicked; nothing is ever left out, so no
+                    // button sits in a different place from one row to the next.
+                    // Remove is set apart at the end so it is not hit by mistake.
                     h("td",{style:{padding:"8px 10px",whiteSpace:"nowrap"}},
-                      isEditing
-                        ? h(React.Fragment,null,
-                            h("button",{onClick:()=>saveCartRowEdits(r),disabled:savingCartRowEdits,style:{...btnSecondary,padding:"4px 9px",fontSize:11.5,marginRight:6,borderColor:"#1c8c75",color:"#0f6e56",opacity:savingCartRowEdits?0.6:1}},savingCartRowEdits?"Saving…":"Save"),
-                            h("button",{onClick:cancelEditCartRow,disabled:savingCartRowEdits,style:{...btnSecondary,padding:"4px 9px",fontSize:11.5}},"Cancel")
-                          )
-                        : h(React.Fragment,null,
-                            h("button",{onClick:()=>startEditCartRow(r),style:{...btnSecondary,padding:"4px 9px",fontSize:11.5,marginRight:6}},"Edit"),
-                            h("button",{onClick:async()=>{ setShowCartScreen(false); await openEstimate(r); },style:{...btnSecondary,padding:"4px 9px",fontSize:11.5,marginRight:6}},"Goto BOM"),
-                            h("button",{onClick:()=>{ setShowCartScreen(false); openEstimate(r); setShowDatasheet(true); },style:{...btnSecondary,padding:"4px 9px",fontSize:11.5,marginRight:6}},"Datasheet"),
-                            h("button",{onClick:()=>openCloneSlNo(r),style:{...btnSecondary,padding:"4px 9px",fontSize:11.5,marginRight:6,borderColor:"#1c8c75",color:"#0f6e56"}},"Clone Sl No"),
-                            // Fresh BOM at Sale Order level -- snapshots first,
-                            // then hands over to the normal estimator. Restore
-                            // only appears once a snapshot exists to go back to.
-                            mode==="contract" && h("button",{onClick:()=>startFreshBom(r),disabled:busyBom===r.item_sl_no,
-                              title:"Rebuild this Sl No's BOM from scratch. The current BOM is saved first.",
-                              style:{...btnSecondary,padding:"4px 9px",fontSize:11.5,marginRight:6,borderColor:"#7a5000",color:"#7a5000",opacity:busyBom===r.item_sl_no?0.5:1}},
-                              busyBom===r.item_sl_no?"…":"Fresh BOM"),
-                            mode==="contract" && baselineBySl[r.item_sl_no] && h("button",{onClick:()=>restoreBom(r),disabled:busyBom===r.item_sl_no,
-                              title:"Put back the BOM that was here before the fresh BOM was started",
-                              style:{...btnSecondary,padding:"4px 9px",fontSize:11.5,marginRight:6,opacity:busyBom===r.item_sl_no?0.5:1}},
-                              "Restore BOM"),
-                            isAdmin && h("button",{onClick:()=>deleteSlNo(r),disabled:deletingSlNo===r.id,style:{border:"none",background:"transparent",color:colors.danger,cursor:"pointer",fontSize:12}},deletingSlNo===r.id?"…":"Remove")
-                          )
+                      (()=>{
+                        const editFirst = isEditing ? "Save or cancel the edit on this row first." : null;
+                        const busy = busyBom===r.item_sl_no;
+                        const slot = (key,label,onClick,why,w,extra)=>h("button",{key,type:"button",
+                          onClick: why ? ()=>alert(why) : onClick,
+                          title: why || (extra&&extra.title) || "",
+                          disabled: !!(extra&&extra.disabled),
+                          style:{...btnSecondary,padding:"4px 6px",fontSize:11.5,width:w,textAlign:"center",
+                            opacity: why ? 0.4 : ((extra&&extra.disabled)?0.6:1), cursor: why?"help":"pointer", ...((extra&&extra.style)||{})}},label);
+                        return h("div",{style:{display:"flex",gap:6,alignItems:"center"}},
+                          isEditing
+                            ? slot("a",savingCartRowEdits?"Saving…":"Save",()=>saveCartRowEdits(r),null,70,{disabled:savingCartRowEdits,style:{borderColor:"#1c8c75",color:"#0f6e56"}})
+                            : slot("a","Edit",()=>startEditCartRow(r),null,70),
+                          isEditing
+                            ? slot("b","Cancel",cancelEditCartRow,null,78,{disabled:savingCartRowEdits})
+                            : slot("b","Goto BOM",async()=>{ setShowCartScreen(false); await openEstimate(r); },null,78),
+                          slot("c","Datasheet",()=>{ setShowCartScreen(false); openEstimate(r); setShowDatasheet(true); },editFirst,78),
+                          slot("d","Clone Sl No",()=>openCloneSlNo(r),editFirst,90,{style:{borderColor:"#1c8c75",color:"#0f6e56"}}),
+                          slot("e",busy?"…":"Fresh BOM",()=>startFreshBom(r),
+                            editFirst||(mode!=="contract"?"Fresh BOM is for Sale Orders only.":null),84,
+                            {disabled:busy,title:"Rebuild this Sl No's BOM from scratch. The current BOM is saved first.",style:{borderColor:"#7a5000",color:"#7a5000"}}),
+                          slot("f","Restore BOM",()=>restoreBom(r),
+                            editFirst||(mode!=="contract"?"Restore BOM is for Sale Orders only.":null)||(!baselineBySl[r.item_sl_no]?"There is no earlier BOM to go back to. One is saved when Fresh BOM is used.":null),92,
+                            {disabled:busy,title:"Put back the BOM that was here before the fresh BOM was started"}),
+                          h("span",{style:{width:10}}),
+                          slot("g",deletingSlNo===r.id?"…":"Remove",()=>deleteSlNo(r),
+                            editFirst||(isAdmin?null:"Only Admins can remove a Sl No."),72,
+                            {disabled:deletingSlNo===r.id,style:{borderColor:"#f0b8b8",color:colors.danger}})
+                        );
+                      })()
                     )
                   );})
             )
@@ -23941,6 +24127,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"27 Sep 2026 (91)", summary:"A fixed action ribbon on the Quote and Sale Order screens, and fixed buttons on every Cart row. WHY: buttons moved depending on what was on the page \u2014 Go to Cart, Delete this Revision, Delete Entire Quote and Close shared a row with the Incomplete BOM warning and jumped when it came and went (so Delete could land where Cart had been); Create Sale Order and Amend moved with the no-country warning; the coloured buttons wrapped to a new line on narrower screens. RIBBON (ActionRibbon, sticky under the main menu at appHeaderHeight): groups in a fixed order \u2014 Find (quote search, New quote, All quotes) \u00b7 This quote (Edit header, Commercial Terms, Deviations / Suggestions, Extra Price Addition, NDE Testing) \u00b7 Pricing (Sf for all Sl Nos, Apply, Undo, refresh totals) \u00b7 Go to (Cart, Documents, Follow-up log, History, Quotes Report) \u00b7 Output (Generate Quote PDF / Generate Sale Order, Summarised datasheets toggle) \u00b7 Next step (Create Sale Order, Amend) \u00b7 and, set apart at the far right, Close and a Delete menu (Delete this Revision / Delete Entire Quote, each still asking for the typed number). A button that does not apply is greyed, never removed, so nothing beside it moves; clicking it puts the reason in the ribbon's message line (e.g. NDE lists what is still missing). Below 1720px wide the ribbon splits into two rows, and the split is fixed per group (Find, This quote, Pricing on top), never decided by content; one row needs about 1690px. The same handlers as before are called \u2014 nothing about what each action does has changed. Removed from the page body: the search/New/All row at the top, the Cart/Delete/Close row beside the Incomplete BOM warning, Create Sale Order/Amend/Edit on the header card, the coloured button row beside the Sl No filter (its compliance chips stay), and the in-page Back to Quotes Report. The Export box, the three side boxes and the admin code buttons are unchanged. The saved-quotes list panel now sticks below the ribbon (ribbonHeight). CART: the top bar (Back to quote, + Add New Sl No, title) stays at the top of the Cart while it scrolls. Every row now has the same seven buttons, same order, fixed widths: Edit/Save \u00b7 Goto BOM/Cancel \u00b7 Datasheet \u00b7 Clone Sl No \u00b7 Fresh BOM \u00b7 Restore BOM \u00b7 (gap) Remove. Fresh BOM and Restore BOM show greyed on a quote (Sale Orders only) and Restore is greyed until a Fresh BOM has saved an earlier one; Remove is greyed for non-admins; while a row is being edited the others are greyed with 'Save or cancel the edit on this row first.' Later stages: the same ribbon on the Quotes Report, CRM, Inventory and the other screens." },
+  { date:"27 Sep 2026 (90)", summary:"settings.js is now REQUIRED on every site. Until now a missing settings.js made the app fall back to a database address built into Index.html (Flometriq\u2019s), so a Levaflow site that lost its settings.js would open Flometriq\u2019s database under Levaflow\u2019s name \u2014 and anyone with a login on both (the MD) could save Levaflow work into Flometriq without noticing. The built-in address and key are removed. If settings.js is missing, renamed, unreadable, or lacks supabaseUrl/supabaseKey, the app does not mount at all: SettingsMissingScreen says what is wrong, that nothing was read or saved, and how to fix it (put settings.js back beside Index.html, wait for the site to update, click Try again). The Supabase client is created against a dummy .invalid address in that case so nothing can reach a real database. Flometriq\u2019s site therefore MUST also have its own settings.js with its own supabaseUrl/supabaseKey. Deploy is unchanged: upload Index.html and version.txt only; settings.js stays in each repo untouched." },
   { date:"25 Sep 2026 (89)", summary:"The 8 Sep no-id fix, finished. estimate_lines has no id column \u2014 build 58 corrected the ten database writes that filtered on it, but two screens were still keying their own React state on line.id, which is undefined on every row. Every line therefore shared the single key \"undefined\". CONSEQUENCES, both real: on the Pending validation card (Pricing & Description), a Sl No with two or more Direct Price lines showed the LAST line's item, description, qty, cost and sales price in every line's boxes, and saving one line wrote those values over the other; on the Pending Validation screen, marking one line Validated ran rs.filter(r=>r.id!==row.id), and since undefined !== undefined is false for every row, the whole list disappeared from the screen instead of that one line (the other lines were not actually validated \u2014 they came back on reload, which is how it stayed hidden). A Sl No with a single Direct Price line, which is the common case, was never affected. FIX: one shared lineKey(line) beside byLine, returning reference_number|item_sl_no|sl_no \u2014 the same key byLine already filters the database on, so screen state and database writes now agree on what \"this line\" means. Applied to all 38 places across the two components; no other line list in the file was keyed this way. Nothing else changed: no pricing, no layout, no wording." },
   { date:"25 Sep 2026 (88)", summary:"Direct Price lines are priced PER ITEM. A Direct Price line (a hand-priced, bought-in item with no BOM costing) is now stored as one per item \u2014 qty_required = 1 \u2014 and the number of items lives only on the Sl No's order qty. Before this, users typed the ordered quantity into the line's Qty box AND into the Order Quantity popup, and the app multiplied the two: a 15NB globe valve at 1,800 with Qty 70 and order qty 70 showed a unit cost of 1,26,000 and a total of 88,20,000 instead of 1,800 and 1,26,000. SECOND BUG FIXED, found while tracing the first: changing an Sl No's order qty ran every line through rate \u00d7 sf to recompute cost and sales_price. A Direct Price line has no rate and no sf, so its typed cost and sales price were overwritten with 0 every time the order qty was nudged \u2014 the same wipe happened when such a line was edited through the BOM table's line editor. Both now skip Direct Price lines entirely: nothing recomputes a hand-typed price, not an order-qty change, not a line edit, not a price refresh. FOUR SHARED HELPERS added beside roundedUnitTotal \u2014 lineUnitCost, lineUnitSale, isDirectPriceOnly, slNoIsDirectPriceOnly \u2014 so every summary asks \"the price of one of this line\" in one place instead of reading rate/sf and silently getting 0. EXACT PRICING: an Sl No made only of Direct Price lines is now printed to the rupee rather than rounded to the nearest 5, the same rule a PO price already had, because the figure was typed by a person. Applied to the cost card, the internal BOM totals, Annexure II, the grand total, the cover letter's Total Basic Price and the Datasheet Price Data, so no two of them can disagree. WHERE DIRECT PRICE LINES NOW APPEAR PROPERLY: both material summaries give each one its own row (\"Direct price: <item>\") at its typed cost and sales price instead of burying it under \"(no spec)\" at rate 0; both cutting plans drop them, since nothing is cut for a bought-in item, instead of printing an empty \"(no spec)\" row; the internal BOM PDF/Excel shows the item name, its cost price in the Rate column and \"\u2014\" for Sf. LABELS AND GUARDS: the Custom (no BOM) form's Qty is labelled \"Qty (order qty)\" with a line saying the prices are per item, and it pre-fills the Order Quantity popup so the figure is confirmed rather than typed twice; the Add Line popup and the Pending validation card label theirs \"Qty per item\" and warn before saving when that equals the Sl No's order qty, which is almost always the old double-counting habit; on a Sl No made only of Direct Price lines the validation card's Qty box IS the order qty and saving it changes the order qty. The Pending Validation list reads \"INR x each\". A ONE-TIME DATA CORRECTION (preview + fix SQL, quantities only, never prices) repairs quotes saved the old way; anything ambiguous is listed for the MD rather than guessed. BOM Sl Nos, and BOM Sl Nos that merely carry a Direct Price line (2 gaskets per strainer), are unchanged in every respect." },
   { date:"24 Sep 2026 (87)", summary:"One Index.html, safe for both companies. The file now reads an optional settings.js beside it (loaded before the app's own script): supabaseUrl / supabaseKey decide which database, appTitle the browser tab, instanceLabel the line under BOM Estimator on the sign-in screen, companyName/Address/Website/Email the PDF letterhead fallbacks, quoteNumberSuggestion the Quote# suggestion. Falls back to Flometriq's own values when no settings.js is present, and a key present but empty wins over the fallback, so a company with no website shows none. Written to match the settings.js already deployed on Levaflow, so that file needs no change. This closes the hole that sent Levaflow's site at Flometriq's database this morning: without settings support, every Index.html handed over was a Flometriq file. No SQL." },
@@ -38900,7 +39088,29 @@ function TestTypesScreen(){
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(h(App));
+function SettingsMissingScreen(){
+  const loaded = (typeof window!=="undefined" && window.APP_SETTINGS && typeof window.APP_SETTINGS==="object");
+  const why = loaded
+    ? "settings.js was found, but it does not give a database address (supabaseUrl) and key (supabaseKey)."
+    : "settings.js did not load. It is missing, renamed (for example \"settings (1).js\"), or has a typo that stops the browser reading it.";
+  const box={maxWidth:560,margin:"80px auto",padding:"28px 32px",border:"2px solid #c0392b",borderRadius:8,background:"#fff",fontFamily:"system-ui, sans-serif",color:"#222",lineHeight:1.5};
+  return h("div",{style:{minHeight:"100vh",background:"#f6f5f0",padding:"0 16px"}},
+    h("div",{style:box},
+      h("div",{style:{fontSize:20,fontWeight:700,color:"#c0392b",marginBottom:8}},"Settings file missing — the app has stopped"),
+      h("p",{style:{margin:"0 0 12px"}},why),
+      h("p",{style:{margin:"0 0 12px"}},"Nothing has been read or saved. The app will not open without it, so that no one works in the wrong company's database."),
+      h("div",{style:{fontWeight:600,margin:"16px 0 6px"}},"To fix"),
+      h("ol",{style:{margin:"0 0 16px",paddingLeft:20}},
+        h("li",null,"Put this company's settings.js back in the root of its GitHub repo, beside Index.html (exact name: settings.js)."),
+        h("li",null,"Wait a minute for the site to update."),
+        h("li",null,"Click Try again.")
+      ),
+      h("p",{style:{margin:"0 0 16px",fontSize:13,color:"#666"}},"Site: "+(location.host||"(local file)")+" · Build "+(window.APP_BUILD_VERSION||"")+" · Contact Bala Boopathy if unsure."),
+      h("button",{onClick:()=>location.reload(),style:{padding:"8px 18px",background:"#c0392b",color:"#fff",border:"none",borderRadius:4,fontSize:14,cursor:"pointer"}},"Try again")
+    )
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(SETTINGS_OK ? h(App) : h(SettingsMissingScreen));
 </script>
 </body>
 </html>
