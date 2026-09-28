@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-09-27T03:00:00Z";
+  var APP_BUILD_VERSION = "2026-09-28T07:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -2011,6 +2011,7 @@ function MenuTabs({ user, active, onChange }) {
       { label:"Item Master", tabs: (()=>{ const t = byKeys(itemMasterKeys); const idx = t.findIndex(x=>x.key==="item_tbl"); t.splice(idx+1,0,{key:"bom_form",label:"BOM Entry Form"}); return t; })() },
       { label:"Raw Material Master", tabs: byKeys(rawMaterialKeys) },
       { label:"Test Types", tabs:[{key:"test_types",label:"Test Types Master"}] },
+      { label:"Price List", tabs:[{key:"price_list",label:"Price List"}] },
     ]});
   }
   // HR (24 Aug) — pulled out from under Admin into its own top-level tab;
@@ -5387,9 +5388,361 @@ async function loadMasterData(setMasterData) {
 }
 
 /* ---- ESTIMATOR ---- */
+/* ---- PRICELIST (28 Sep 2026, build 92) ----
+   A third way to price a line, beside BOM and Custom: the cost comes from a
+   vendor price list held in pricelist_models (one row per priced model),
+   the user picks a Sales Factor (default 1.3) and sales = cost × Sf, as in
+   BOM. A Pricelist line is stored like a Direct Price line (one per item,
+   is_direct_price=true, so every per-item pricing rule already in place
+   applies) but with price_source="pricelist", Validated from the start,
+   and the source recorded in pricelist_ref. Its datasheet Material Data
+   comes from material_values (filled from the price list, the gaps typed
+   by the user) instead of BOM lines — see buildMocMaterialDataRows.
+   The price list is loaded from Excel on Admin › Price List (BOM menu):
+   PRICELIST_COLUMNS is the one definition both the template download and
+   the upload reader use, so they can't drift apart. */
+const PRICELIST_DEFAULT_SF = 1.3;
+const PRICELIST_COLUMNS = [
+  { head:"Model code", key:"model_code" },
+  { head:"Item", key:"item", req:true },
+  { head:"Size", key:"size", req:true },
+  { head:"Type", key:"valve_type", req:true, seg:true },
+  { head:"Construction", key:"construction", req:true, seg:true },
+  { head:"End", key:"end_conn", req:true, seg:true },
+  { head:"Rating", key:"rating", req:true, seg:true },
+  { head:"Body", key:"body", req:true, seg:true },
+  { head:"Trim / Ball", key:"trim", req:true, seg:true },
+  { head:"Seat / Gasket", key:"seat", req:true, seg:true },
+  { head:"Operator", key:"operator", req:true, seg:true },
+  { head:"Description", key:"description" },
+  { head:"Vendor", key:"vendor", req:true },
+  { head:"Vendor ref", key:"vendor_ref" },
+  { head:"Price list no", key:"pricelist_no" },
+  { head:"W.e.f.", key:"wef" },
+  { head:"List price (INR)", key:"list_price", req:true, num:true },
+  { head:"Uplift %", key:"uplift_pct", num:true },
+  { head:"Cost price (INR)", key:"cost_price", readOnly:true },
+  { head:"Page", key:"source_page" },
+  { head:"Notes", key:"note" },
+];
+const PRICELIST_MAT_PREFIX = "Mat: ";
+// The abbreviations the model code uses — printed on the template's Codes
+// sheet so a new price list is written the same way as the first one.
+const PRICELIST_CODES = [
+  ["Type",[["BV","Ball valve"],["GV","Gate valve"],["GLV","Globe valve"],["CV","Check / non-return valve"],["BFV","Butterfly valve"],["SV","Sluice valve"],["KGV","Knife gate valve"],["PV","Plug valve"],["PUV","Pulp valve"],["AV","Air valve"],["FV","Foot valve"],["RV","Reflux valve"]]],
+  ["Construction",[["1P / 2P / 3P","1-, 2-, 3-piece (ball)"],["3PRB","3-piece reduced bore"],["3W","3-way"],["RS / NRS","Rising / non-rising spindle"],["SB / BB","Screwed / bolted bonnet"],["SW","Swing (check)"],["PL","Piston lift"],["SP","Single plate"],["DP","Dual plate"],["NS","Non-slam"],["WF / LG / DF","Wafer / lug / double flanged"],["HP","High performance"],["UD / BD","Uni- / bi-directional (knife gate)"],["RSNRS / RSRS","Resilient seated non-rising / rising"],["SO / DO","Single / double orifice (air)"],["SD / DD","Single / double door (foot)"],["NA","Not applicable"]]],
+  ["End",[["FL","Flanged"],["SW","Socket weld"],["SCRD","Screwed"],["SWSC","Screwed & socket weld, same price"],["BW","Butt weld"],["WF","Wafer"],["LUG","Lugged"]]],
+  ["Rating",[["CL125 / CL150 / CL300 / CL600 / CL800","ASME class"],["PN10 / PN16 / PN40","PN 1.0 / 1.6 / 4.0"],["NA","Not stated"]]],
+  ["Body",[["CI","Cast iron"],["DI","Ductile / SG iron"],["WCB","ASTM A216 WCB"],["CF8 / CF8M / CF3 / CF3M","ASTM A351"],["A105","ASTM A105"],["F304 / F316","ASTM A182"],["MS","Mild steel"],["SS304 / SS316 / SS316L","Stainless (wrought)"],["GM","Gunmetal"]]],
+  ["Trim / Ball",[["SS304 / SS316 / SS316L","Stainless"],["CF8 / CF8M","Cast stainless"],["13CR","13% Cr"],["SS410","SS 410"],["CI / DI / MS / GM / BRZ","As named"],["NA","Not applicable"]]],
+  ["Seat / Gasket",[["PTFE / RPTFE","PTFE / reinforced PTFE"],["EPDM","EPDM"],["NBR","Nitrile / rubber"],["MTM","Metal to metal"],["GM","Gunmetal"],["NA","Not applicable"]]],
+  ["Operator",[["LO","Lever"],["HW","Handwheel"],["GO","Gear"],["CAP","Cap"],["PNA-DA / PNA-SA","Pneumatic double / single acting"],["ELA","Electric actuator"],["NA","Self-acting"]]],
+];
+// Labels treated as materials when an item has no Datasheet MOC rule to say
+// which ones its datasheet wants. Anything else in attrs (standards, ends,
+// hydro test) still travels with the line and can prefill template fields.
+const PRICELIST_MATERIAL_LABELS = ["Body","Bonnet","Cover","Ball","Disc","Wedge","Plate","Stem","Shaft","Trim","Seat","Seat & seal","Liner","Working parts","Hinge pin","Spring","Float","Gasket","Packing"];
+const plNorm = s => String(s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+// A template/MOC label a vendor prints under a different name.
+const PRICELIST_LABEL_ALIASES = { wedge:["trim","disc"], disc:["trim","wedge"], seatring:["trim","seat"], seat:["seatseal"], seatseal:["seat"], shaft:["stem"], stem:["shaft"], gasket:["bonnetgasket","bodygasket"], bonnetgasket:["gasket"], bodygasket:["gasket"], liner:["seat","seatseal"] };
+function pricelistLookup(attrs, label){
+  const a = attrs||{};
+  const byNorm = {}; Object.keys(a).forEach(k=>{ if(String(a[k]||"").trim()) byNorm[plNorm(k)] = a[k]; });
+  const n = plNorm(label);
+  if(byNorm[n]) return String(byNorm[n]);
+  for(const alt of (PRICELIST_LABEL_ALIASES[n]||[])) if(byNorm[alt]) return String(byNorm[alt]);
+  return "";
+}
+function pricelistBuiltCode(r){
+  return ["valve_type","construction","size","end_conn","rating","body","trim","seat","operator"].map(k=>String(r[k]||"").replace(/\s+/g,"").toUpperCase()).join("-");
+}
+function pricelistCost(r){ return Math.round((Number(r.list_price)||0)*(1+(Number(r.uplift_pct)||0)/100)*100)/100; }
+function pricelistRefText(r){
+  return [r.vendor, r.vendor_ref, r.pricelist_no, r.wef?("w.e.f. "+r.wef):"", r.source_page?("page "+r.source_page):""].filter(Boolean).join(" · ");
+}
+// Every active model, paged (the API returns at most 1000 rows a call).
+async function fetchAllPricelistModels(includeInactive){
+  const out=[]; const step=1000;
+  for(let from=0; from<200000; from+=step){
+    let q = sb.from("pricelist_models").select("*").order("model_code").range(from, from+step-1);
+    if(!includeInactive) q = q.eq("active",true);
+    const { data, error } = await q;
+    if(error) throw error;
+    out.push(...(data||[]));
+    if(!data || data.length<step) break;
+  }
+  return out;
+}
+// Rows the upload reader returns: {row, rec, errors[]} — rec is ready to upsert.
+function readPricelistSheet(ws){
+  const aoa = XLSX.utils.sheet_to_json(ws,{header:1,defval:"",raw:true});
+  if(!aoa.length) return { rows:[], headerError:"The PriceList sheet is empty." };
+  const head = aoa[0].map(x=>String(x||"").trim());
+  const idx = {}; PRICELIST_COLUMNS.forEach(c=>{ idx[c.key]=head.findIndex(x=>plNorm(x)===plNorm(c.head)); });
+  const missing = PRICELIST_COLUMNS.filter(c=>c.req && idx[c.key]<0).map(c=>c.head);
+  if(missing.length) return { rows:[], headerError:"These columns are missing from the first row: "+missing.join(", ")+". Start from the downloaded template." };
+  const matCols = head.map((x,i)=>({x,i})).filter(o=>o.x.toLowerCase().startsWith(PRICELIST_MAT_PREFIX.toLowerCase()));
+  const rows=[]; const seen=new Map();
+  for(let r=1;r<aoa.length;r++){
+    const line = aoa[r];
+    if(!line || line.every(v=>String(v).trim()==="")) continue;
+    const get = k => idx[k]>=0 ? line[idx[k]] : "";
+    const errors=[];
+    const rec = {};
+    PRICELIST_COLUMNS.forEach(c=>{ if(c.readOnly) return; const v=get(c.key); rec[c.key] = (typeof v==="string") ? v.trim() : v; });
+    PRICELIST_COLUMNS.filter(c=>c.seg).forEach(c=>{ rec[c.key]=String(rec[c.key]||"").trim().toUpperCase().replace(/\s+/g,""); });
+    rec.item = String(rec.item||"").trim().replace(/\s+/g," ");
+    rec.vendor = String(rec.vendor||"").trim();
+    const sz = String(rec.size||"").trim().toUpperCase().replace(/\s+/g,"");
+    if(/^\d+(\.\d+)?$/.test(sz)) rec.size = sz+"NB";
+    else rec.size = sz;
+    if(!/^\d+NB$/.test(rec.size)) errors.push("Size \""+get("size")+"\": write it in NB, e.g. 50NB.");
+    PRICELIST_COLUMNS.filter(c=>c.req && !c.num).forEach(c=>{ if(!String(rec[c.key]||"").trim()) errors.push(c.head+" is empty."); });
+    const lp = Number(String(rec.list_price).replace(/[,₹\s]/g,""));
+    if(!(lp>0)) errors.push("List price \""+get("list_price")+"\" isn't a number above 0.");
+    rec.list_price = lp>0 ? Math.round(lp*100)/100 : 0;
+    let up = String(rec.uplift_pct==null?"":rec.uplift_pct).replace(/[%\s]/g,"");
+    up = up==="" ? 0 : Number(up);
+    if(isNaN(up) || up<0){ errors.push("Uplift % \""+get("uplift_pct")+"\" isn't a number."); up=0; }
+    else if(up>0 && up<1 && !String(get("uplift_pct")).includes("%")) up = Math.round(up*10000)/100; // a cell formatted as % arrives as 0.1
+    rec.uplift_pct = up;
+    const built = pricelistBuiltCode(rec);
+    const given = String(rec.model_code||"").trim().toUpperCase().replace(/\s+/g,"");
+    if(!given) rec.model_code = built;
+    else if(given===built || given.startsWith(built+"-")) rec.model_code = given;
+    else errors.push("Model code "+given+" doesn't match its columns (it should start "+built+").");
+    const attrs={};
+    matCols.forEach(o=>{ const v=String(line[o.i]==null?"":line[o.i]).trim(); if(v) attrs[o.x.slice(PRICELIST_MAT_PREFIX.length).trim()] = v; });
+    rec.attrs = attrs;
+    ["description","vendor_ref","pricelist_no","wef","source_page","note"].forEach(k=>{ rec[k] = String(rec[k]==null?"":rec[k]).trim() || null; });
+    if(rec.model_code && seen.has(rec.model_code)) errors.push("Same model code as row "+seen.get(rec.model_code)+".");
+    else if(rec.model_code) seen.set(rec.model_code, r+1);
+    rows.push({ row:r+1, rec, errors });
+  }
+  return { rows };
+}
+function PriceListMaster({ user }){
+  const [existing,setExisting]=useState(null); // null = loading
+  const [loadErr,setLoadErr]=useState("");
+  const [preview,setPreview]=useState(null); // {fileName, rows:[{row,rec,errors,status,old}]}
+  const [filter,setFilter]=useState("all");
+  const [busy,setBusy]=useState("");
+  const [doneMsg,setDoneMsg]=useState("");
+  const fileRef=useRef(null);
+  const load = useCallback(async()=>{
+    try{ setExisting(await fetchAllPricelistModels(true)); setLoadErr(""); }
+    catch(e){ setExisting([]); setLoadErr(/pricelist_models/.test(e.message||"")||e.code==="42P01" ? "The price list tables aren't in this database yet. Run pricelist_2026-09-28.sql in Supabase first." : ("Couldn't read the price list: "+e.message)); }
+  },[]);
+  useEffect(()=>{ load(); },[load]);
+
+  const summary = useMemo(()=>{
+    const m=new Map();
+    (existing||[]).filter(r=>r.active!==false).forEach(r=>{
+      const k=(r.vendor||"")+"|"+(r.pricelist_no||"");
+      const s=m.get(k)||{vendor:r.vendor,pricelist_no:r.pricelist_no,wef:r.wef,uplift:new Set(),count:0,last:null,by:null};
+      s.count++; s.uplift.add(Number(r.uplift_pct)||0);
+      if(!s.last || String(r.updated_at)>String(s.last)){ s.last=r.updated_at; s.by=r.updated_by; }
+      m.set(k,s);
+    });
+    return Array.from(m.values()).sort((a,b)=>String(a.vendor).localeCompare(String(b.vendor)));
+  },[existing]);
+
+  const downloadTemplate = (withData)=>{
+    const wb = XLSX.utils.book_new();
+    const readMe = [
+      ["Price List master — upload template"],[""],
+      ["One row = one priced model. The app reads the PriceList sheet only; keep the first row (the headings) as it is."],
+      ["Model code can be left blank: the app builds it as Type-Construction-Size-End-Rating-Body-Trim-Seat-Operator (e.g. BV-3P-50NB-FL-CL150-WCB-SS304-PTFE-LO)."],
+      ["If two models share those nine parts, give the model code an extra ending of your own, e.g. ...-LO-K701."],
+      ["Size is always in NB, e.g. 50NB."],
+      ["Cost price = List price × (1 + Uplift %/100). Cost price is worked out by the app; anything typed in that column is ignored."],
+      ["Columns headed \"Mat: <label>\" carry material and spec data for the datasheet, e.g. \"Mat: Body\", \"Mat: Stem\". Add as many as you like."],
+      ["Uploading the same model code again updates it; the old price is kept in the price history."],
+      ["Items, sizes and models that aren't in the Item, Size and Model masters yet are added when you apply. The same model code then serves BOM and Pricelist."],
+      ["Abbreviations for the code are on the Codes sheet."],
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(readMe), "Read me");
+    const rows = withData ? (existing||[]).filter(r=>r.active!==false) : [];
+    const matLabels = Array.from(new Set(rows.flatMap(r=>Object.keys(r.attrs||{})))).sort();
+    const mats = matLabels.length ? matLabels : ["Body","Trim","Stem","Seat"];
+    const head = PRICELIST_COLUMNS.map(c=>c.head).concat(mats.map(m=>PRICELIST_MAT_PREFIX+m));
+    const body = rows.map(r=>PRICELIST_COLUMNS.map(c=>c.key==="cost_price"?pricelistCost(r):(r[c.key]==null?"":r[c.key])).concat(mats.map(m=>(r.attrs||{})[m]||"")));
+    if(!withData) body.push(["","Ball Valve","50NB","BV","3P","FL","CL150","WCB","SS304","PTFE","LO","Ball valve 3-pc, 50NB, flanged ASME 150#, WCB body, SS304 ball & stem, PTFE seats, lever operated","Jeet Industries","Item 67","JEET-2023-24","01-04-2023",3550,10,"","19","Example row — delete it","ASTM A216 Gr WCB","SS 304","SS 304","PTFE"]);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head,...body]), "PriceList");
+    const codeRows = [["Part of the code","Write","Meaning"]];
+    PRICELIST_CODES.forEach(([grp,list])=>{ list.forEach(([c,m],i)=>codeRows.push([i===0?grp:"",c,m])); codeRows.push(["","",""]); });
+    codeRows.push(["","","Something not on this list? Use a short capital code of your own and keep using it the same way."]);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(codeRows), "Codes");
+    XLSX.writeFile(wb, withData ? "PriceList_current.xlsx" : "PriceList_template.xlsx");
+  };
+
+  const onFile = async(file)=>{
+    if(!file) return;
+    setDoneMsg(""); setBusy("Reading "+file.name+"…");
+    try{
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf,{type:"array"});
+      const ws = wb.Sheets["PriceList"] || wb.Sheets[wb.SheetNames.find(n=>plNorm(n)==="pricelist")||""];
+      if(!ws){ alert("There's no sheet called PriceList in "+file.name+". Start from the downloaded template."); return; }
+      const { rows, headerError } = readPricelistSheet(ws);
+      if(headerError){ alert(headerError); return; }
+      // Use the masters' own spelling ("Ball valve", "50 NB") so the price
+      // list and the Model master agree and nothing is added twice.
+      const [itemRows,sizeRows] = await Promise.all([fetchAll("item_tbl","item"), fetchAll("size_tbl","size")]);
+      const itemBy = new Map(); itemRows.forEach(r=>{ if(r.item && !itemBy.has(normalizeItemName(r.item))) itemBy.set(normalizeItemName(r.item), r.item); });
+      const sizeKey = v=>String(v||"").replace(/\s+/g,"").toUpperCase();
+      const sizeBy = new Map(); sizeRows.forEach(r=>{ if(r.size && !sizeBy.has(sizeKey(r.size))) sizeBy.set(sizeKey(r.size), r.size); });
+      rows.forEach(o=>{ const it=itemBy.get(normalizeItemName(o.rec.item)); if(it) o.rec.item=it; const sz=sizeBy.get(sizeKey(o.rec.size)); if(sz) o.rec.size=sz; });
+      const byCode = new Map((existing||[]).map(r=>[r.model_code,r]));
+      rows.forEach(o=>{
+        if(o.errors.length){ o.status="err"; return; }
+        const old = byCode.get(o.rec.model_code);
+        if(!old){ o.status="new"; return; }
+        o.old = old;
+        const priceChanged = Number(old.list_price)!==Number(o.rec.list_price) || Number(old.uplift_pct)!==Number(o.rec.uplift_pct);
+        const otherChanged = ["item","size","description","vendor","vendor_ref","pricelist_no","wef","source_page","note"].some(k=>String(old[k]||"")!==String(o.rec[k]||""))
+          || JSON.stringify(old.attrs||{})!==JSON.stringify(o.rec.attrs||{}) || old.active===false;
+        o.status = priceChanged ? "chg" : (otherChanged ? "upd" : "same");
+      });
+      setPreview({ fileName:file.name, rows }); setFilter(rows.some(o=>o.status==="err")?"err":"all");
+    } catch(e){ alert("Couldn't read that file: "+e.message); }
+    finally{ setBusy(""); if(fileRef.current) fileRef.current.value=""; }
+  };
+
+  const apply = async()=>{
+    if(!preview) return;
+    const todo = preview.rows.filter(o=>o.status==="new"||o.status==="chg"||o.status==="upd");
+    if(!todo.length){ alert("Nothing to change — every row is either unchanged or has a mistake."); return; }
+    if(!confirm("Apply "+todo.length+" row(s) to the price list?")) return;
+    setBusy("Saving…");
+    try{
+      const now = new Date().toISOString(); const who = user?.username||"unknown";
+      for(let i=0;i<todo.length;i+=400){
+        const chunk = todo.slice(i,i+400).map(o=>({...o.rec, active:true, updated_at:now, updated_by:who}));
+        setBusy("Saving "+Math.min(i+400,todo.length)+" of "+todo.length+"…");
+        const { error } = await sb.from("pricelist_models").upsert(chunk,{onConflict:"model_code"});
+        if(error) throw error;
+      }
+      const hist = todo.filter(o=>o.status==="chg").map(o=>({model_code:o.rec.model_code, old_list:o.old.list_price, new_list:o.rec.list_price, old_uplift:o.old.uplift_pct, new_uplift:o.rec.uplift_pct, pricelist_no:o.rec.pricelist_no, changed_by:who}));
+      for(let i=0;i<hist.length;i+=500){
+        const { error } = await sb.from("pricelist_price_history").insert(hist.slice(i,i+500));
+        if(error) throw error;
+      }
+      // Item, Size and Model masters: whatever the price list uses must be
+      // there, so the same model serves BOM and Pricelist and a datasheet
+      // template / MOC rule can be set up for each item.
+      setBusy("Updating the Item, Size and Model masters…");
+      const [itemRows,sizeRows,modelRows] = await Promise.all([fetchAll("item_tbl","item"), fetchAll("size_tbl","size"), fetchAll("model_tbl","model")]);
+      const haveItem = new Set(itemRows.map(r=>normalizeItemName(r.item)));
+      const newItems = []; todo.forEach(o=>{ const k=normalizeItemName(o.rec.item); if(!haveItem.has(k)){ haveItem.add(k); newItems.push(o.rec.item); } });
+      if(newItems.length){ const { error } = await sb.from("item_tbl").insert(newItems.map(item=>({ item }))); if(error) throw error; }
+      const sk = v=>String(v||"").replace(/\s+/g,"").toUpperCase();
+      const haveSize = new Set(sizeRows.map(r=>sk(r.size)));
+      const newSizes = []; todo.forEach(o=>{ const k=sk(o.rec.size); if(!haveSize.has(k)){ haveSize.add(k); newSizes.push(o.rec.size); } });
+      if(newSizes.length){ const { error } = await sb.from("size_tbl").insert(newSizes.map(size=>({ size }))); if(error) throw error; }
+      const haveModel = new Set(modelRows.map(r=>r.model));
+      const newModels = todo.filter(o=>!haveModel.has(o.rec.model_code)).map(o=>({ item:o.rec.item, size:o.rec.size, model:o.rec.model_code, is_custom:false }));
+      for(let i=0;i<newModels.length;i+=500){ const { error } = await sb.from("model_tbl").insert(newModels.slice(i,i+500)); if(error) throw error; }
+      await logAudit("UPDATE","pricelist_models","upload",
+        "Price list upload "+preview.fileName+": "+todo.filter(o=>o.status==="new").length+" new, "+hist.length+" price changes, "+todo.filter(o=>o.status==="upd").length+" detail changes; masters: "+newItems.length+" items, "+newSizes.length+" sizes, "+newModels.length+" models added"+(newItems.length?" ("+newItems.join(", ")+")":""),who,null,null);
+      const errCount = preview.rows.filter(o=>o.status==="err").length;
+      setDoneMsg("Applied "+todo.length+" row(s)"+(hist.length?", "+hist.length+" with a new price (old prices kept in history)":"")+"."+(newItems.length?" Added to the Item master: "+newItems.join(", ")+".":"")+(newSizes.length?" Sizes added: "+newSizes.join(", ")+".":"")+(newModels.length?" "+newModels.length+" model(s) added to the Model master.":"")+(errCount?" "+errCount+" row(s) with mistakes were left out; fix them and upload the file again.":""));
+      setPreview(null);
+      await load();
+    } catch(e){ alert("Saving stopped: "+e.message+"\n\nRows saved before this point are kept. Upload the same file again to finish; unchanged rows are skipped."); await load(); }
+    finally{ setBusy(""); }
+  };
+
+  const counts = useMemo(()=>{ const c={all:0,new:0,chg:0,upd:0,same:0,err:0}; (preview?preview.rows:[]).forEach(o=>{ c.all++; c[o.status]++; }); return c; },[preview]);
+  const shown = preview ? preview.rows.filter(o=>filter==="all"||o.status===filter) : [];
+  const STATUS = { new:["New","#eafaf1","#0f6e3f"], chg:["Price changed","#fff6dc","#8a5a10"], upd:["Details changed","#eaf2fb","#0c447c"], same:["No change","#f0eee6","#6b6a62"], err:["Mistake","#fdeee9","#a3312a"] };
+  const tile = (k,label,color)=>h("div",{key:k,onClick:()=>setFilter(k),style:{background:"#fff",border:"1px solid "+colors.border,outline:filter===k?"2px solid #1d5fa8":"none",borderRadius:6,padding:"6px 14px",minWidth:110,cursor:"pointer"}},
+    h("div",{style:{fontSize:11,color:colors.muted}},label), h("div",{style:{fontSize:18,fontWeight:700,color:color||colors.text}},counts[k]));
+  return h("div",{style:{padding:"20px 24px",display:"flex",flexDirection:"column",gap:14,maxWidth:1400}},
+    h("div",null,
+      h("h2",{style:{margin:0,fontSize:18}},"Price List"),
+      h("div",{style:{fontSize:12,color:colors.muted,marginTop:4}},"Vendor prices for the Pricelist way of pricing a line. The file goes into the database of the company you're signed in to.")
+    ),
+    loadErr && h("div",{style:{background:"#fdeee9",border:"1px solid #f0b8b8",color:colors.danger,borderRadius:6,padding:"8px 12px",fontSize:12.5}},loadErr),
+    doneMsg && h("div",{style:{background:"#eafaf1",border:"1px solid #9fd8c6",color:"#0f6e3f",borderRadius:6,padding:"8px 12px",fontSize:12.5}},"✓ "+doneMsg),
+    h("div",{style:{display:"flex",gap:10,flexWrap:"wrap"}},
+      h("button",{onClick:()=>downloadTemplate(false),style:btnSecondary},"Download blank template"),
+      h("button",{onClick:()=>downloadTemplate(true),disabled:!existing||!existing.length,style:{...btnSecondary,opacity:(!existing||!existing.length)?0.5:1}},"Download current price list"),
+      h("label",{style:{...btnPrimary,display:"inline-flex",alignItems:"center",cursor:busy?"default":"pointer",opacity:busy?0.6:1}},
+        busy||"Upload a price list (.xlsx)",
+        h("input",{ref:fileRef,type:"file",accept:".xlsx,.xls",disabled:!!busy||!!loadErr,style:{display:"none"},onChange:e=>onFile(e.target.files[0])}))
+    ),
+    preview && h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,background:"#fbfaf6",padding:"12px 14px",display:"flex",flexDirection:"column",gap:10}},
+      h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}},
+        h("div",{style:{fontSize:13,fontWeight:700}},"Check before applying — "+preview.fileName),
+        h("div",{style:{display:"flex",gap:8}},
+          h("button",{onClick:()=>setPreview(null),disabled:!!busy,style:btnSecondary},"Cancel"),
+          h("button",{onClick:apply,disabled:!!busy||!(counts.new+counts.chg+counts.upd),style:{...btnPrimary,opacity:(busy||!(counts.new+counts.chg+counts.upd))?0.5:1}},"Apply "+(counts.new+counts.chg+counts.upd)+" row(s)"))
+      ),
+      h("div",{style:{fontSize:11.5,color:colors.muted}},"Only rows without mistakes are applied. Fix the rest in the file and upload it again."),
+      h("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
+        tile("all","All rows"), tile("new","New models","#0f6e3f"), tile("chg","Price changed","#8a5a10"), tile("upd","Details changed","#0c447c"), tile("same","No change"), tile("err","Mistakes",colors.danger)),
+      h("div",{style:{overflow:"auto",maxHeight:"55vh",border:"1px solid "+colors.border,borderRadius:6,background:"#fff"}},
+        h("table",{style:{borderCollapse:"collapse",width:"100%",fontSize:12}},
+          h("thead",null,h("tr",{style:{background:"#f7f6f1",position:"sticky",top:0}},
+            ["Row","Status","Model code","Item","Size","Vendor","Vendor ref","Cost price (INR)","What to fix"].map(t=>h("th",{key:t,style:{padding:"6px 8px",textAlign:t.startsWith("Cost")?"right":"left",fontSize:11,color:colors.muted,whiteSpace:"nowrap"}},t)))),
+          h("tbody",null, shown.slice(0,1500).map(o=>{
+            const st = STATUS[o.status];
+            return h("tr",{key:o.row,style:{borderTop:"1px solid #eceae0"}},
+              h("td",{style:{padding:"5px 8px",color:colors.mutedLight}},o.row),
+              h("td",{style:{padding:"5px 8px"}},h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:8,padding:"1px 8px",background:st[1],color:st[2],whiteSpace:"nowrap"}},st[0])),
+              h("td",{style:{padding:"5px 8px",fontFamily:"ui-monospace,Consolas,monospace",fontSize:11.5,whiteSpace:"nowrap"}},o.rec.model_code||"—"),
+              h("td",{style:{padding:"5px 8px",whiteSpace:"nowrap"}},o.rec.item),
+              h("td",{style:{padding:"5px 8px"}},o.rec.size),
+              h("td",{style:{padding:"5px 8px",whiteSpace:"nowrap"}},o.rec.vendor),
+              h("td",{style:{padding:"5px 8px",whiteSpace:"nowrap"}},o.rec.vendor_ref||""),
+              h("td",{style:{padding:"5px 8px",textAlign:"right",whiteSpace:"nowrap",fontVariantNumeric:"tabular-nums"}},
+                o.status==="chg" && h("span",{style:{textDecoration:"line-through",color:colors.mutedLight,marginRight:6}},fmt2(pricelistCost(o.old))),
+                o.errors.length?"—":fmt2(pricelistCost(o.rec))),
+              h("td",{style:{padding:"5px 8px",color:colors.danger,fontSize:11.5}},o.errors.join(" "))
+            );
+          }))
+        ),
+        shown.length>1500 && h("div",{style:{padding:8,fontSize:11.5,color:colors.muted}},"Showing the first 1,500 of "+shown.length+" rows. Use the tiles above to narrow down.")
+      )
+    ),
+    h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,background:"#fff",padding:"12px 16px"}},
+      h("div",{style:{fontSize:13,fontWeight:700,marginBottom:8}},"Price lists in this database"),
+      existing===null ? h("div",{style:{fontSize:12,color:colors.mutedLight}},"Loading…") :
+      !summary.length ? h("div",{style:{fontSize:12,color:colors.mutedLight}},"None yet. Upload a filled template to start.") :
+      h("table",{style:{borderCollapse:"collapse",width:"100%",fontSize:12.5}},
+        h("thead",null,h("tr",null,["Vendor","Price list no","W.e.f.","Uplift","Models","Last upload"].map(t=>h("th",{key:t,style:{textAlign:t==="Models"?"right":"left",padding:"5px 8px",fontSize:11,color:colors.muted,borderBottom:"1px solid #eceae0"}},t)))),
+        h("tbody",null,summary.map(s=>h("tr",{key:s.vendor+"|"+s.pricelist_no},
+          h("td",{style:{padding:"5px 8px"}},s.vendor),h("td",{style:{padding:"5px 8px"}},s.pricelist_no||"—"),h("td",{style:{padding:"5px 8px"}},s.wef||"—"),
+          h("td",{style:{padding:"5px 8px"}},Array.from(s.uplift).map(u=>u?("+"+u+"%"):"none").join(", ")),
+          h("td",{style:{padding:"5px 8px",textAlign:"right"}},s.count.toLocaleString("en-IN")),
+          h("td",{style:{padding:"5px 8px",color:colors.muted}},(s.last?new Date(s.last).toLocaleDateString("en-GB"):"—")+(s.by?" · "+s.by:""))
+        )))
+      )
+    )
+  );
+}
+
 function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefresh, onOpenQuote, initialModel, onConsumedInitialModel, pendingNewSlNo, onConsumedPendingNewSlNo, onGoToTab }) {
   const { models, customModelName, itemOptions, modelCatalog, gradesBySpec, rateBySpecGrade, allSpecs, uoms, allComponents, subAssembliesByComponent, loadingMaster } = masterData;
   const [isCustomModel,setIsCustomModel]=useState(false);
+  // 28 Sep (92) — how the line being built is priced: "bom" (a model's BOM),
+  // "custom" (the Custom model, typed prices) or "pricelist" (a vendor price
+  // list model — see PRICELIST above PriceListMaster).
+  const [pricingWay,setPricingWay]=useState("bom");
+  const [plModels,setPlModels]=useState(null); // null = not loaded yet
+  const [plLoadErr,setPlLoadErr]=useState("");
+  const [plItem,setPlItem]=useState(""); const [plSize,setPlSize]=useState(""); const [plFilter,setPlFilter]=useState("");
+  const [plSel,setPlSel]=useState(null);
+  const [plSf,setPlSf]=useState(String(PRICELIST_DEFAULT_SF));
+  const [plQty,setPlQty]=useState("1"); const [plUom,setPlUom]=useState("Nos"); const [plDesc,setPlDesc]=useState("");
+  const [plMocLabels,setPlMocLabels]=useState(null); // null = loading; [] = this item has no Datasheet MOC rule
+  const [plMissing,setPlMissing]=useState({}); // typed values for materials the price list doesn't give
+  const [plAdded,setPlAdded]=useState(""); // confirmation after "+ Add to estimate"
+  // A model picked under BOM that has no BOM yet (e.g. a price-list model):
+  // say so instead of opening an empty BOM. noBomPl = its price-list row, if any.
+  const [noBomAck,setNoBomAck]=useState(false);
+  const [noBomPl,setNoBomPl]=useState(null);
   const [directPriceLine,setDirectPriceLine]=useState(null); // {item,description,qty,uom,sales_price,recordAs,customModelText,excel_file_name,excel_file_path,no_excel_code}
   const [dpFile,setDpFile]=useState(null);
   const [dpUploading,setDpUploading]=useState(false);
@@ -5625,7 +5978,83 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     const f=modelFilter.toLowerCase(); return pool.filter(m=>m.toLowerCase().includes(f)).slice(0,80);
   },[modelFilter,modelsForItemSizeEst]);
 
+  const loadPricelist = async()=>{
+    setPlLoadErr("");
+    try{ setPlModels(await fetchAllPricelistModels(false)); }
+    catch(e){ setPlModels([]); setPlLoadErr((e&&(e.code==="42P01"||/pricelist_models/.test(e.message||"")))?"The price list isn't set up in this database yet. An Admin needs to run pricelist_2026-09-28.sql and upload a price list (BOM › Price List).":("Couldn't load the price list: "+(e&&e.message))); }
+  };
+  const choosePricingWay = (w)=>{
+    if(w==="custom"){ if(customModelName) selectModel(customModelName); return; }
+    if(w==="bom"){ setPricingWay("bom"); if(isCustomModel){ setSelectedModel(null); setIsCustomModel(false); } return; }
+    setPricingWay("pricelist"); setSelectedModel(null); setIsCustomModel(false); setLines([]); setShowMOC(false);
+    if(plModels===null) loadPricelist();
+  };
+  const plItems = useMemo(()=> Array.from(new Set((plModels||[]).map(r=>r.item))).sort(), [plModels]);
+  const plSizes = useMemo(()=> plItem ? Array.from(new Set((plModels||[]).filter(r=>norm(r.item)===norm(plItem)).map(r=>r.size))).sort(naturalCompare) : [], [plModels,plItem]);
+  const plPool = useMemo(()=> (plItem&&plSize) ? (plModels||[]).filter(r=>norm(r.item)===norm(plItem)&&norm(r.size)===norm(plSize)) : null, [plModels,plItem,plSize]);
+  const plCands = useMemo(()=>{
+    if(!plPool) return [];
+    const f=plFilter.trim().toUpperCase();
+    return (f ? plPool.filter(r=>r.model_code.includes(f)||String(r.vendor_ref||"").toUpperCase().includes(f)) : plPool).slice(0,200);
+  },[plPool,plFilter]);
+  const selectPricelistModel = (r)=>{
+    setPlAdded(""); setPlSel(r); setPlSf(String(PRICELIST_DEFAULT_SF)); setPlDesc(r.description||""); setPlMissing({}); setPlQty("1"); setPlUom("Nos");
+    setPlMocLabels(null);
+    // Which materials the datasheet wants: the item's Datasheet MOC rule
+    // labels if it has one, else the Material Data rows of its Datasheet
+    // Master template, else (empty) whatever the price list gives.
+    (async()=>{
+      let labels = [];
+      try{
+        const { data } = await sb.from("item_moc_rules").select("parameters").eq("item",r.item).maybeSingle();
+        labels = Array.from(new Set(((data&&data.parameters)||[]).map(p=>String(p.label||"").trim()).filter(Boolean)));
+        if(!labels.length){
+          const t = await loadDatasheetMaster(r.item);
+          if(t) labels = Array.from(new Set(t.sections.filter(sec=>sec.bomSection).flatMap(sec=>sec.fields.map(f=>String(f.label||"").trim())).filter(l=>l && !isSlNoLabel(l))));
+        }
+      } catch(e){ labels = []; }
+      setPlMocLabels(labels);
+    })();
+  };
+  // Material rows for the chosen model: the item's Datasheet MOC labels when
+  // it has a rule (those are what its datasheet shows), otherwise whatever
+  // materials the price list gives. fromList "" = the user must type it.
+  const plMaterialRows = useMemo(()=>{
+    if(!plSel || plMocLabels===null) return [];
+    const attrs = plSel.attrs||{};
+    const labels = plMocLabels.length ? plMocLabels : PRICELIST_MATERIAL_LABELS.filter(l=>String(attrs[l]||"").trim());
+    return labels.map(l=>({ label:l, fromList: pricelistLookup(attrs,l) }));
+  },[plSel,plMocLabels]);
+  const addPricelistLineToCart = ()=>{
+    const r = plSel; if(!r) return;
+    const sf = Number(plSf); const qty = Math.max(1, Math.floor(Number(plQty)||1));
+    if(!(sf>0)){ alert("Enter a Sales factor greater than 0."); return; }
+    if(plMocLabels===null){ alert("Still loading this item's datasheet materials — try again in a moment."); return; }
+    const gaps = plMaterialRows.filter(m=>!m.fromList && !String(plMissing[m.label]||"").trim());
+    if(gaps.length){ alert("Fill in the materials the price list doesn't give: "+gaps.map(g=>g.label).join(", ")+"."); return; }
+    const cost = pricelistCost(r);
+    const material_values = {...(r.attrs||{})};
+    plMaterialRows.forEach(m=>{ material_values[m.label] = m.fromList || String(plMissing[m.label]).trim(); });
+    material_values.__material_labels = plMaterialRows.map(m=>m.label); // the rows its datasheet shows, in order
+    const desc = plDesc.trim() || r.description || r.model_code;
+    const newItem = {
+      model:r.model_code, item:r.item, size:r.size, sub_assembly:"", component:desc,
+      material_shape:"", material_spec:"", grade:"",
+      qty_required:1, dp_order_qty:qty, uom:plUom||"Nos",
+      rate:cost, cost, sf, sales_price:computeSalesPrice(cost, sf),
+      cutting_plan_layout_size:"", cutting_plan_qty:0, cutting_plan_uom:"",
+      is_direct_price:true, validation_status:"Validated",
+      excel_file_name:"", excel_file_path:"", no_excel_code_used:"",
+      added_by:user.username, custom_item:r.item, custom_model_recorded:r.model_code,
+      price_source:"pricelist", pricelist_model_code:r.model_code, pricelist_ref:pricelistRefText(r), material_values
+    };
+    setCart(c=>c.concat([newItem]));
+    if(!refDesc.trim()) setRefDesc(desc);
+    setPlAdded(r.model_code+" × "+qty+" added to the estimate at ₹"+fmt2(computeSalesPrice(cost, sf))+" each.");
+    setPlSel(null); setPlMissing({});
+  };
   const selectModel = async(m)=>{
+    setPricingWay(customModelName && m===customModelName ? "custom" : "bom");
     setSelectedModel(m); setOverrides({}); setLoadingLines(true); setShowMOC(false); setMocSelections({}); setMocMode("shape"); setFreeText(""); setParsedMatches(null);
     if(customModelName && m===customModelName){
       setIsCustomModel(true);
@@ -5638,11 +6067,23 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     const { data, error:err } = await sb.from("bom").select("*").eq("model",m);
     if(err) { setError(err.message); setLoadingLines(false); return; }
     const loadedLines = data||[];
+    setNoBomAck(false); setNoBomPl(null);
+    if(!loadedLines.length){
+      setLines([]); setLoadingLines(false); setShowMOC(false);
+      sb.from("pricelist_models").select("*").eq("model_code",m).eq("active",true).maybeSingle().then(({data:pl})=>setNoBomPl(pl||null),()=>{});
+      return;
+    }
     setLines(loadedLines);
     setLoadingLines(false);
     // Show MOC popup automatically
     setMocLines(loadedLines);
     setShowMOC(true);
+  };
+  const priceThisModelFromList = (row)=>{
+    setSelectedModel(null); setIsCustomModel(false); setLines([]);
+    setPricingWay("pricelist"); if(plModels===null) loadPricelist();
+    setPlItem(row.item); setPlSize(row.size); setPlFilter("");
+    selectPricelistModel(row);
   };
 
   // Bridge from Reports > BOM Coverage's "Open BOM" button: jump straight to a model.
@@ -6807,7 +7248,10 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
       // item, with the count held on order_qty. Every other cart keeps the
       // quantity exactly as it was. dp_order_qty is deliberately not in
       // this list — it is a carrier, not a column.
-      const rows=effectiveCart.map((l,idx)=>({reference_number:ref,item_sl_no:slNo,sl_no:idx+1,estimate_id:estimateId,model:l.model,item:l.item,size:l.size,sub_assembly:l.sub_assembly,component:l.component,material_shape:l.material_shape||"",material_spec:l.material_spec,grade:l.grade,qty_required:(dpOnlyCart?1:l.qty_required),uom:l.uom,rate:l.rate,cost:l.cost,sf:l.sf,sales_price:l.sales_price,cutting_plan_layout_size:l.cutting_plan_layout_size||"",cutting_plan_qty:Number(l.cutting_plan_qty)||0,cutting_plan_uom:l.cutting_plan_uom||"",is_direct_price:l.is_direct_price===true,validation_status:l.validation_status||null,excel_file_name:l.excel_file_name||null,excel_file_path:l.excel_file_path||null,no_excel_code_used:l.no_excel_code_used||null,added_by:l.added_by||null,custom_item:l.custom_item||null,custom_model_recorded:l.custom_model_recorded||null}));
+      const rows=effectiveCart.map((l,idx)=>({reference_number:ref,item_sl_no:slNo,sl_no:idx+1,estimate_id:estimateId,model:l.model,item:l.item,size:l.size,sub_assembly:l.sub_assembly,component:l.component,material_shape:l.material_shape||"",material_spec:l.material_spec,grade:l.grade,qty_required:(dpOnlyCart?1:l.qty_required),uom:l.uom,rate:l.rate,cost:l.cost,sf:l.sf,sales_price:l.sales_price,cutting_plan_layout_size:l.cutting_plan_layout_size||"",cutting_plan_qty:Number(l.cutting_plan_qty)||0,cutting_plan_uom:l.cutting_plan_uom||"",is_direct_price:l.is_direct_price===true,validation_status:l.validation_status||null,excel_file_name:l.excel_file_name||null,excel_file_path:l.excel_file_path||null,no_excel_code_used:l.no_excel_code_used||null,added_by:l.added_by||null,custom_item:l.custom_item||null,custom_model_recorded:l.custom_model_recorded||null,
+        // Pricelist lines only — the keys are left off other lines so a
+        // database without the price list columns keeps saving as before.
+        ...(l.price_source ? {price_source:l.price_source, pricelist_model_code:l.pricelist_model_code||null, pricelist_ref:l.pricelist_ref||null, material_values:l.material_values||null} : {})}));
       const{error:insErr}=await sb.from("estimate_lines").insert(rows); if(insErr)throw insErr;
       if(mocDeletedExceptions.length>0){
         try{
@@ -6861,7 +7305,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     if(!orderQtyGate) return;
     setOrderQtyGateSaving(true);
     const gateCart = orderQtyGate.cartOverride||[];
-    const hasDirectPrice = gateCart.some(l=>l.is_direct_price===true);
+    const hasDirectPrice = gateCart.some(l=>l.is_direct_price===true && l.price_source!=="pricelist");
     const ok = await saveReference(orderQtyGate.cartOverride, Number(orderQtyGateInput), hasDirectPrice && datasheetChoice==="no");
     if(ok && (orderQtyGateTag.trim()||orderQtyGateLocation.trim()||orderQtyGateEnq.trim())){
       await sb.from("estimates").update({
@@ -7120,7 +7564,27 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     h("div",{style:{display:"flex",minHeight:"calc(100vh - 96px)"},className:"layout"},
     h("div",{className:"sidebar",style:{width:280,flexShrink:0,borderRight:"1px solid "+colors.border,background:colors.panel,display:"flex",flexDirection:"column"}},
       h("div",{style:{padding:"16px 16px 10px",position:"relative"}},
-        customModelName&&h("button",{onClick:()=>selectModel(customModelName),style:{...btnSecondary,width:"100%",fontSize:12,marginBottom:12,background:selectedModel===customModelName?colors.dark:"#fff",color:selectedModel===customModelName?"#fff":colors.text}},"Custom — no BOM"),
+        // 28 Sep (92) — BOM | Custom | Pricelist: how this line is priced.
+        h("div",{style:{fontSize:11,letterSpacing:"0.08em",color:colors.mutedLight,marginBottom:6}},"HOW IS THIS LINE PRICED?"),
+        h("div",{style:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",border:"1px solid "+colors.border,borderRadius:7,overflow:"hidden",marginBottom:12}},
+          [["bom","BOM","built up"],["custom","Custom","typed price"],["pricelist","Pricelist","from master"]].map(([k,l,sub],i)=>{
+            const on = pricingWay===k; const off = k==="custom" && !customModelName;
+            return h("button",{key:k,type:"button",disabled:off,title:off?"No Custom model is set up in this database":"",onClick:()=>choosePricingWay(k),
+              style:{border:"none",borderRight:i<2?"1px solid "+colors.border:"none",background:on?colors.dark:"#fff",color:on?"#fff":colors.text,padding:"7px 2px",fontSize:12.5,fontWeight:600,cursor:off?"not-allowed":"pointer",opacity:off?0.45:1,fontFamily:"inherit",lineHeight:1.2}},
+              l, h("div",{style:{fontSize:9.5,fontWeight:400,opacity:0.75}},sub));
+          })
+        ),
+        pricingWay==="pricelist" && h(React.Fragment,null,
+          h("div",{style:{fontSize:11,letterSpacing:"0.08em",color:colors.mutedLight,marginBottom:8}},"ITEM"),
+          h("input",{list:"pl-item-list",value:plItem,onChange:e=>{ setPlItem(e.target.value); setPlSize(""); setPlFilter(""); setPlSel(null); },placeholder:plModels===null?"Loading the price list…":"Type or pick an item…",style:{...inputStyle,fontSize:13,marginBottom:8}}),
+          h("datalist",{id:"pl-item-list"},plItems.map(m=>h("option",{key:m,value:m}))),
+          h("div",{style:{fontSize:11,letterSpacing:"0.08em",color:colors.mutedLight,marginBottom:8,opacity:plItem?1:0.5}},"SIZE"),
+          h("input",{list:"pl-size-list",disabled:!plItem,value:plSize,onChange:e=>{ setPlSize(e.target.value); setPlFilter(""); setPlSel(null); },placeholder:plItem?"Type or pick a size…":"Select item first",style:{...inputStyle,fontSize:13,marginBottom:8,background:plItem?"#fff":colors.bg,opacity:plItem?1:0.5}}),
+          h("datalist",{id:"pl-size-list"},plSizes.map(m=>h("option",{key:m,value:m}))),
+          h("div",{style:{fontSize:11,letterSpacing:"0.08em",color:colors.mutedLight,marginBottom:8,opacity:plPool?1:0.5}},"MODEL ("+(plPool?plPool.length:0)+")"),
+          h("input",{disabled:!plPool,value:plFilter,onChange:e=>setPlFilter(e.target.value),placeholder:plPool?"Type to filter models…":"Select size first",style:{...inputStyle,fontSize:13,background:plPool?"#fff":colors.bg,opacity:plPool?1:0.5}})
+        ),
+        pricingWay!=="pricelist" && h(React.Fragment,null,
         h("div",{style:{fontSize:11,letterSpacing:"0.08em",color:colors.mutedLight,marginBottom:8}},"ITEM"),
         h("input",{list:"est-item-list",value:itemFilterEst,onChange:e=>handleItemSelectEst(e.target.value),placeholder:"Type or pick an item…",style:{...inputStyle,fontSize:13,marginBottom:8}}),
         h("datalist",{id:"est-item-list"},itemOptionsCascadeEst.map(m=>h("option",{key:m,value:m}))),
@@ -7140,8 +7604,21 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
           style:{...inputStyle,fontSize:13,background:sizeFilterEst?"#fff":colors.bg,opacity:sizeFilterEst?1:0.5,
             ...(modelFieldFocused?{position:"absolute",width:360,zIndex:50,boxShadow:"0 4px 14px rgba(0,0,0,0.15)",border:"1px solid #0f766e"}:{})}
         })
+        )
       ),
       h("div",{style:{overflowY:"auto",flex:1}},
+        pricingWay==="pricelist" ? (
+          plModels===null ? h("div",{style:{padding:16,fontSize:12,color:colors.mutedLight}},"Loading the price list…") :
+          plLoadErr ? h("div",{style:{padding:16,fontSize:12,color:colors.danger}},plLoadErr) :
+          !plModels.length ? h("div",{style:{padding:16,fontSize:12,color:colors.mutedLight}},"The price list is empty. An Admin can upload one under BOM › Price List.") :
+          !plPool ? h("div",{style:{padding:16,fontSize:12,color:colors.mutedLight}},"Pick an item and size above to see models.") :
+          !plCands.length ? h("div",{style:{padding:16,fontSize:12,color:colors.mutedLight}},"No model matches that filter.") :
+          plCands.map(r=>{ const on = plSel && plSel.model_code===r.model_code;
+            return h("div",{key:r.model_code,onClick:()=>selectPricelistModel(r),style:{padding:"8px 16px",cursor:"pointer",background:on?colors.dark:"transparent",color:on?"#fff":colors.text,borderBottom:"1px solid #f0eee5"}},
+              h("div",{style:{fontFamily:"ui-monospace,Consolas,monospace",fontSize:11.5,wordBreak:"break-all"}},r.model_code),
+              h("div",{style:{fontSize:11,opacity:0.75,display:"flex",justifyContent:"space-between",gap:6}},h("span",null,(r.vendor||"")+(r.vendor_ref?" · "+r.vendor_ref:"")),h("span",null,"₹ "+fmt2(pricelistCost(r)))));
+          })
+        ) :
         loadingMaster?h("div",{style:{padding:16,fontSize:12,color:colors.mutedLight}},"Loading models…"):
         !sizeFilterEst?h("div",{style:{padding:16,fontSize:12,color:colors.mutedLight}},"Pick an item and size above to see models."):
         filteredModels.map(m=>h("div",{key:m,onClick:()=>selectModel(m),style:{padding:"9px 16px",fontSize:13,cursor:"pointer",background:m===selectedModel?colors.dark:"transparent",color:m===selectedModel?"#fff":colors.text,borderBottom:"1px solid #f0eee5"}},m))
@@ -7153,6 +7630,60 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     ),
     h("div",{style:{flex:"1 1 0%",minWidth:0,padding:"20px 24px",overflow:"visible"}},
       error&&h("div",{style:{color:colors.danger,fontSize:13,marginBottom:10}},error),
+      // 28 Sep (92) — Pricelist: cost from the price list, Sf chosen here,
+      // sales = cost × Sf; the datasheet materials the list doesn't give are
+      // asked for before the line goes in.
+      pricingWay==="pricelist" ? (!plSel
+        ? h("div",{style:{marginTop:60,textAlign:"center"}},
+            plAdded && h("div",{style:{display:"inline-block",background:"#eafaf1",border:"1px solid #9fd8c6",color:"#0f6e3f",borderRadius:6,padding:"8px 14px",fontSize:13,marginBottom:14}},"✓ "+plAdded+" Save it with Save to estimate, or pick another model to add."),
+            h("div",{style:{color:colors.mutedLight,fontSize:14}},"Pick a model from the price list on the left. The cost comes from the price list; you choose the sales factor."))
+        : (()=>{
+          const r = plSel; const cost = pricelistCost(r); const sfN = Number(plSf); const sfOk = sfN>0;
+          const segs = [["Type",r.valve_type],["Construction",r.construction],["Size",r.size],["End",r.end_conn],["Rating",r.rating],["Body",r.body],["Trim",r.trim],["Seat",r.seat],["Operator",r.operator]];
+          const specRows = Object.keys(r.attrs||{}).filter(k=>!plMaterialRows.some(m=>plNorm(m.label)===plNorm(k)) && !PRICELIST_MATERIAL_LABELS.some(l=>plNorm(l)===plNorm(k)));
+          const gaps = plMaterialRows.filter(m=>!m.fromList && !String(plMissing[m.label]||"").trim());
+          return h("div",{style:{maxWidth:640}},
+            h("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:12,flexWrap:"wrap"}},
+              h("h2",{style:{margin:0,fontSize:19,fontWeight:700}},"Pricelist — no BOM"),
+              h("span",{style:{fontSize:10.5,padding:"2px 8px",borderRadius:8,background:"#e6f4f1",color:"#0f6e56"}},"price from master")),
+            h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Model"),
+            h("div",{style:{fontFamily:"ui-monospace,Consolas,monospace",fontSize:13,background:"#f6f5f0",border:"1px solid "+colors.border,borderRadius:6,padding:"8px 10px",wordBreak:"break-all"}},r.model_code),
+            h("div",{style:{display:"flex",flexWrap:"wrap",gap:4,margin:"6px 0 10px"}},segs.map(([k,v])=>h("span",{key:k,style:{fontSize:11,background:"#fff",border:"1px solid #eceae0",borderRadius:4,padding:"1px 6px"}},h("span",{style:{color:colors.mutedLight,marginRight:3}},k),v||"—"))),
+            h("div",{style:{border:"1px solid #b9d3ef",background:"#eaf2fb",borderRadius:6,padding:"8px 12px",fontSize:12,color:"#0c447c",marginBottom:10}},
+              h("strong",null,r.vendor), " · ", [r.vendor_ref, r.pricelist_no, r.wef?("w.e.f. "+r.wef):"", r.source_page?("page "+r.source_page):""].filter(Boolean).join(" · "),
+              Number(r.uplift_pct)>0 && h("div",null,"List ₹"+fmt2(r.list_price)+" + "+r.uplift_pct+"% uplift = cost ₹"+fmt2(cost)+"."),
+              r.note && h("div",{style:{marginTop:3,color:"#5a6b80"}},r.note)),
+            h("div",{style:{border:"1px solid "+colors.border,borderRadius:6,background:"#fff",padding:"10px 12px",marginBottom:10}},
+              h("div",{style:{display:"flex",justifyContent:"space-between",gap:8,flexWrap:"wrap",marginBottom:6}},
+                h("div",{style:{fontSize:12.5,fontWeight:700}},"Datasheet · Material Data"),
+                h("div",{style:{fontSize:11,color:colors.muted}}, plMocLabels===null ? "Loading…" :
+                  (plMocLabels.length ? (plMaterialRows.length-plMaterialRows.filter(m=>!m.fromList).length)+" of "+plMaterialRows.length+" from the price list" : "From the price list (no datasheet template or MOC rule for this item yet)"))),
+              plMocLabels!==null && h("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:12}},h("tbody",null,
+                plMaterialRows.map(m=>h("tr",{key:m.label,style:{borderTop:"1px solid #f0eee5"}},
+                  h("td",{style:{padding:"4px 6px",width:150}},m.label),
+                  h("td",{style:{padding:"4px 6px"}}, m.fromList ? h("span",null,h("span",{style:{color:"#0f6e3f",marginRight:5}},"✓"),m.fromList)
+                    : h("input",{value:plMissing[m.label]||"",onChange:e=>{ const v=e.target.value; setPlMissing(x=>({...x,[m.label]:v})); },placeholder:"Not in the price list. Type it",style:{...inputStyle,padding:"4px 7px",fontSize:12,borderColor:"#f0d58a",background:"#fffdf5"}})))),
+                specRows.map(k=>h("tr",{key:"s-"+k,style:{borderTop:"1px solid #f0eee5",color:colors.muted}},h("td",{style:{padding:"4px 6px"}},k),h("td",{style:{padding:"4px 6px"}},String(r.attrs[k]))))
+              ))
+            ),
+            h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Description (from the price list, can be edited)"),
+            h("input",{value:plDesc,onChange:e=>setPlDesc(e.target.value),style:{...inputStyle,padding:"8px 10px",fontSize:13,marginBottom:10,width:"100%"}}),
+            h("div",{style:{display:"flex",gap:8,marginBottom:10}},
+              h("div",{style:{flex:1}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Qty (order qty)"),h("input",{type:"number",min:1,value:plQty,onChange:e=>setPlQty(e.target.value),style:{...inputStyle,padding:"8px 10px",fontSize:13}})),
+              h("div",{style:{flex:1}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"UOM"),h(MasterSelect,{value:plUom,onChange:v=>setPlUom(v),options:(uoms||[]).slice(),table:"uom_tbl",valueCol:"uom",fieldLabel:"UOM",placeholder:"Select…",style:{padding:"8px 10px",fontSize:13},refreshOptions:onRefresh}))
+            ),
+            h("div",{style:{display:"flex",gap:8,alignItems:"flex-end",marginBottom:6,flexWrap:"wrap"}},
+              h("div",{style:{flex:1,minWidth:130}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Cost price (INR, from price list)"),h("input",{readOnly:true,value:fmt2(cost),style:{...inputStyle,padding:"8px 10px",fontSize:13,background:"#f6f5f0"}})),
+              h("div",{style:{paddingBottom:9,color:colors.mutedLight}},"×"),
+              h("div",{style:{flex:1,minWidth:110}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Sales factor (default "+PRICELIST_DEFAULT_SF+")"),h("input",{type:"number",step:"0.05",min:0,value:plSf,onChange:e=>setPlSf(e.target.value),style:{...inputStyle,padding:"8px 10px",fontSize:13}})),
+              h("div",{style:{paddingBottom:9,color:colors.mutedLight}},"="),
+              h("div",{style:{flex:1,minWidth:130}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Sales price (INR, per item)"),h("input",{readOnly:true,value:sfOk?fmt2(computeSalesPrice(cost,sfN)):"—",style:{...inputStyle,padding:"8px 10px",fontSize:13,background:"#f6f5f0"}}))
+            ),
+            h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:12,lineHeight:1.45}},"Qty is the number of items ordered; cost and sales prices are per item. The cost is locked to the price list; change the sales factor to change the price. No Excel reference, code or validation is needed."),
+            h("button",{onClick:addPricelistLineToCart,disabled:!sfOk||plMocLabels===null||gaps.length>0,title:gaps.length?"Fill the yellow Material Data rows first":"",
+              style:{...btnPrimary,fontSize:12,padding:"8px 16px",opacity:(!sfOk||plMocLabels===null||gaps.length>0)?0.5:1}},"+ Add to estimate")
+          );
+        })()) :
       !selectedModel?h("div",{style:{color:colors.mutedLight,fontSize:14,marginTop:60,textAlign:"center"}},"Select a model from the left to build its estimate."):
       isCustomModel?h("div",{style:{maxWidth:560}},
         h("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:14}},
@@ -7210,6 +7741,15 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
         h("button",{onClick:addDirectPriceLineToCart,style:{...btnPrimary,fontSize:12,padding:"8px 16px"}},"+ Add to estimate")
       ):
       loadingLines?h("div",{style:{color:colors.mutedLight,fontSize:14,marginTop:40}},"Loading line items…"):
+      (lines.length===0 && !noBomAck) ? h("div",{style:{maxWidth:560,marginTop:40,border:"1px solid "+colors.border,borderRadius:8,background:"#fff",padding:"16px 18px"}},
+        h("div",{style:{fontSize:15,fontWeight:700,marginBottom:6}},"No BOM yet for "+selectedModel),
+        h("div",{style:{fontSize:12.5,color:colors.muted,marginBottom:12,lineHeight:1.5}},
+          noBomPl ? ("This model is in the price list ("+pricelistRefText(noBomPl)+"). Price it with Pricelist, or build its BOM in BOM Entry Form so it can be priced either way.")
+                  : "Build its BOM in BOM Entry Form, or add lines here by hand."),
+        h("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
+          noBomPl && h("button",{onClick:()=>priceThisModelFromList(noBomPl),style:{...btnPrimary,fontSize:12}},"Price it with Pricelist"),
+          h("button",{onClick:()=>setNoBomAck(true),style:{...btnSecondary,fontSize:12}},"Add lines here by hand")))
+      :
       h(React.Fragment,null,
         h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:8}},
           h("div",null,
@@ -7707,7 +8247,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     // Order Qty gate — no Cancel/close button by design (see saveReference).
     orderQtyGate && (()=>{
       const gateCart = orderQtyGate.cartOverride||[];
-      const hasDirectPrice = gateCart.some(l=>l.is_direct_price===true);
+      const hasDirectPrice = gateCart.some(l=>l.is_direct_price===true && l.price_source!=="pricelist");
       const qtyOk = Number(orderQtyGateInput)>=1;
       const dsOk = !hasDirectPrice || datasheetChoice!==null;
       return h("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.65)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}},
@@ -8250,7 +8790,21 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
         const { data } = await sb.from("datasheets").select("*").eq("reference_number",openRef.reference_number).eq("item_sl_no",openRef.item_sl_no).eq("template_key",normalizeItemName(itemName)).maybeSingle();
         if(!cancelled){
           const loadedValues = (data&&data.field_values)||{};
-          setValues(loadedValues);
+          // 28 Sep (92) — a Pricelist Sl No starts its datasheet with every
+          // field whose label the price list also carries (standards, ends,
+          // hydro test…). Anything already saved wins.
+          const plLine = (openLines||[]).find(l=>l && l.price_source==="pricelist" && l.material_values);
+          const prefill = {};
+          if(plLine && !data){
+            t.sections.filter(sec=>!sec.bomSection).forEach(sec=>sec.fields.forEach(f=>{
+              if(f.type==="bom"||f.type==="auto_model"||isSlNoLabel(f.label)) return;
+              const v = pricelistLookup(plLine.material_values, f.label);
+              if(!v) return;
+              if(f.options && f.options.length){ const hit=f.options.find(o=>plNorm(o)===plNorm(v)); if(hit) prefill[f.key]=hit; }
+              else prefill[f.key]=v;
+            }));
+          }
+          setValues({...prefill, ...loadedValues});
           setOverrides((data&&data.overrides)||{});
           originalValuesRef.current = loadedValues;
         }
@@ -24127,6 +24681,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"28 Sep 2026 (93)", summary:"Price list models are also models. The same model code now serves BOM and Pricelist, so a price-list model can later get a detailed BOM without moving anything. PRICE LIST UPLOAD: on Apply, any item, size or model the file uses that isn't in the Item, Size or Model master is added (model_tbl item/size/model, is_custom false; sizes to size_tbl), in batches. Items and sizes are matched to the masters' own spelling before the preview (\"Ball valve\", \"50 NB\" are kept as written in the master), so re-uploading a downloaded list doesn't show every row as changed and nothing is added twice; the model code check ignores spaces in the size. The template download gains a Codes sheet (PRICELIST_CODES) listing the abbreviations for each part of the code, and the Read me says the masters are filled on apply. ESTIMATOR: picking a model under BOM that has no BOM no longer opens an empty BOM and an empty MOC popup; it says \"No BOM yet for <model>\" and, if the model is in the price list, names the source and offers \"Price it with Pricelist\" (switches to Pricelist with the same item, size and model picked). \"Add lines here by hand\" keeps the old way open. FIRST LOAD: levaflow_pricelist_data_part1of3/2of3/3of3.sql load Levaflow's 2,769 valve models and fill the Item, Size and Model masters the same way (one transaction per part, safe to run again). Structure SQL unchanged (pricelist_2026-09-28.sql, both databases)." },
+  { date:"28 Sep 2026 (92)", summary:"Pricelist: a third way to price a line, beside BOM and Custom. ESTIMATOR: the sidebar now opens with \"How is this line priced? BOM | Custom | Pricelist\" (the old Custom button is the middle choice). Pricelist uses the same Item \u2192 Size \u2192 Model boxes as BOM, filled from the price list; each model shows its vendor, vendor ref and cost. Picking one shows the model code split into its nine parts, the source (vendor \u00b7 ref \u00b7 list no \u00b7 w.e.f. \u00b7 page, and the uplift if any), Material Data, description, Qty (order qty), UOM, and Cost \u00d7 Sales factor = Sales price: cost locked to the price list, Sf defaults to 1.3 (PRICELIST_DEFAULT_SF), sales via computeSalesPrice like BOM. MATERIALS: the rows are the item's Datasheet MOC rule labels (Rules \u203a Datasheet MOC); a row the price list covers fills itself in (label match, plus aliases such as Trim\u2192Wedge, Stem\u2194Shaft), a row it doesn't is asked for in yellow and the line can't be added until it's filled. With no MOC rule, the Material Data rows of the item's Datasheet Master template are used instead; with neither, the price list's own materials. The chosen labels are saved on the line (material_values.__material_labels) so the datasheet shows the same rows. After adding, the panel confirms what went in. STORED as a Direct Price line (is_direct_price, qty_required 1, count on order_qty, so every per-item pricing rule applies) with price_source='pricelist', validation_status 'Validated' from the start (no Excel, no code, no validation), pricelist_model_code, pricelist_ref and material_values (every price-list attribute plus the typed gaps). The Datasheet Yes/No question on saving isn't asked for Pricelist lines. DATASHEET: buildMocMaterialDataRows returns a Pricelist line's material_values (screen, PDF and Excel all go through it); a new datasheet also starts with every template field whose label the price list carries (Mfg standard, Ends, Hydro test\u2026). QUOTE SCREEN: a Pricelist line's card shows item and cost locked, description/qty/UOM/Sf editable, sales = cost \u00d7 Sf, no Pending badge, and the source instead of the Excel reference box. ADMIN: new BOM \u203a Price List screen \u2014 download a blank template or the current list, upload an .xlsx, see every row as New / Price changed / Details changed / No change / Mistake with what to fix, apply only the clean rows (upsert on model code in batches of 400; price changes logged to pricelist_price_history; items not yet in the Item master are added). One column list (PRICELIST_COLUMNS) drives both the template and the reader; \"Mat: <label>\" columns carry the materials. The upload goes into the signed-in company's database. NEEDS pricelist_2026-09-28.sql run once in each database (two new tables, four new estimate_lines columns; nothing existing changed). Saving a BOM or Custom line never sends the new columns, so a database without the SQL keeps working." },
   { date:"27 Sep 2026 (91)", summary:"A fixed action ribbon on the Quote and Sale Order screens, and fixed buttons on every Cart row. WHY: buttons moved depending on what was on the page \u2014 Go to Cart, Delete this Revision, Delete Entire Quote and Close shared a row with the Incomplete BOM warning and jumped when it came and went (so Delete could land where Cart had been); Create Sale Order and Amend moved with the no-country warning; the coloured buttons wrapped to a new line on narrower screens. RIBBON (ActionRibbon, sticky under the main menu at appHeaderHeight): groups in a fixed order \u2014 Find (quote search, New quote, All quotes) \u00b7 This quote (Edit header, Commercial Terms, Deviations / Suggestions, Extra Price Addition, NDE Testing) \u00b7 Pricing (Sf for all Sl Nos, Apply, Undo, refresh totals) \u00b7 Go to (Cart, Documents, Follow-up log, History, Quotes Report) \u00b7 Output (Generate Quote PDF / Generate Sale Order, Summarised datasheets toggle) \u00b7 Next step (Create Sale Order, Amend) \u00b7 and, set apart at the far right, Close and a Delete menu (Delete this Revision / Delete Entire Quote, each still asking for the typed number). A button that does not apply is greyed, never removed, so nothing beside it moves; clicking it puts the reason in the ribbon's message line (e.g. NDE lists what is still missing). Below 1720px wide the ribbon splits into two rows, and the split is fixed per group (Find, This quote, Pricing on top), never decided by content; one row needs about 1690px. The same handlers as before are called \u2014 nothing about what each action does has changed. Removed from the page body: the search/New/All row at the top, the Cart/Delete/Close row beside the Incomplete BOM warning, Create Sale Order/Amend/Edit on the header card, the coloured button row beside the Sl No filter (its compliance chips stay), and the in-page Back to Quotes Report. The Export box, the three side boxes and the admin code buttons are unchanged. The saved-quotes list panel now sticks below the ribbon (ribbonHeight). CART: the top bar (Back to quote, + Add New Sl No, title) stays at the top of the Cart while it scrolls. Every row now has the same seven buttons, same order, fixed widths: Edit/Save \u00b7 Goto BOM/Cancel \u00b7 Datasheet \u00b7 Clone Sl No \u00b7 Fresh BOM \u00b7 Restore BOM \u00b7 (gap) Remove. Fresh BOM and Restore BOM show greyed on a quote (Sale Orders only) and Restore is greyed until a Fresh BOM has saved an earlier one; Remove is greyed for non-admins; while a row is being edited the others are greyed with 'Save or cancel the edit on this row first.' Later stages: the same ribbon on the Quotes Report, CRM, Inventory and the other screens." },
   { date:"27 Sep 2026 (90)", summary:"settings.js is now REQUIRED on every site. Until now a missing settings.js made the app fall back to a database address built into Index.html (Flometriq\u2019s), so a Levaflow site that lost its settings.js would open Flometriq\u2019s database under Levaflow\u2019s name \u2014 and anyone with a login on both (the MD) could save Levaflow work into Flometriq without noticing. The built-in address and key are removed. If settings.js is missing, renamed, unreadable, or lacks supabaseUrl/supabaseKey, the app does not mount at all: SettingsMissingScreen says what is wrong, that nothing was read or saved, and how to fix it (put settings.js back beside Index.html, wait for the site to update, click Try again). The Supabase client is created against a dummy .invalid address in that case so nothing can reach a real database. Flometriq\u2019s site therefore MUST also have its own settings.js with its own supabaseUrl/supabaseKey. Deploy is unchanged: upload Index.html and version.txt only; settings.js stays in each repo untouched." },
   { date:"25 Sep 2026 (89)", summary:"The 8 Sep no-id fix, finished. estimate_lines has no id column \u2014 build 58 corrected the ten database writes that filtered on it, but two screens were still keying their own React state on line.id, which is undefined on every row. Every line therefore shared the single key \"undefined\". CONSEQUENCES, both real: on the Pending validation card (Pricing & Description), a Sl No with two or more Direct Price lines showed the LAST line's item, description, qty, cost and sales price in every line's boxes, and saving one line wrote those values over the other; on the Pending Validation screen, marking one line Validated ran rs.filter(r=>r.id!==row.id), and since undefined !== undefined is false for every row, the whole list disappeared from the screen instead of that one line (the other lines were not actually validated \u2014 they came back on reload, which is how it stayed hidden). A Sl No with a single Direct Price line, which is the common case, was never affected. FIX: one shared lineKey(line) beside byLine, returning reference_number|item_sl_no|sl_no \u2014 the same key byLine already filters the database on, so screen state and database writes now agree on what \"this line\" means. Applied to all 38 places across the two components; no other line list in the file was keyed this way. Nothing else changed: no pricing, no layout, no wording." },
@@ -25156,6 +25712,19 @@ function buildAutoDescription(masterRow, lines, itemName, sizeText){
 // a joined description string. One row per parameter that actually found
 // a match; multiple matching lines combine their values with " / ".
 function buildMocMaterialDataRows(mocRow, lines, mocChoices){
+  // 28 Sep (92) — a Pricelist line has no BOM to match: its Material Data
+  // was settled when it was added (price list values, gaps typed by the
+  // user) and saved on the line as material_values. Rows follow the item's
+  // MOC rule labels when there is a rule, else the material labels present.
+  const plLine = (lines||[]).find(l=>l && l.price_source==="pricelist" && l.material_values && typeof l.material_values==="object");
+  if(plLine){
+    const mv = plLine.material_values;
+    const ruleLabels = Array.from(new Set(((mocRow&&mocRow.parameters)||[]).map(p=>String(p.label||"").trim()).filter(Boolean)));
+    const saved = Array.isArray(mv.__material_labels) ? mv.__material_labels.filter(Boolean) : [];
+    const labels = ruleLabels.length ? ruleLabels : (saved.length ? saved : PRICELIST_MATERIAL_LABELS.filter(l=>String(mv[l]||"").trim()));
+    return labels.map((label,idx)=>({ key:"pl-"+idx+"-"+label, label, value: String(mv[label]!=null&&String(mv[label]).trim()?mv[label]:pricelistLookup(mv,label)) }))
+      .filter(r=>r.value.trim());
+  }
   if(!mocRow || !lines || lines.length===0) return [];
   return (mocRow.parameters||[]).flatMap((p,idx)=>{
     const matchVals = mocParamValues(p);
@@ -31962,7 +32531,7 @@ function PricingDescriptionPanel({ openRef, openLines, user, sessionCompany, ite
   // this bought-in part go into each item.
   const dpOnly = !hasRealBom && isDirectPriceOnly(openLines);
   const slOrderQty = Math.max(1, Number(orderQty!=null ? orderQty : openRef.order_qty)||1);
-  const draftFor = (l)=>({ item:l.item||"", description:l.component||"", qty:String(dpOnly ? slOrderQty : (l.qty_required||1)), uom:l.uom||"Nos", cost_price:l.cost?String(l.cost):"", sales_price:l.sales_price?String(l.sales_price):"" });
+  const draftFor = (l)=>({ item:l.item||"", description:l.component||"", qty:String(dpOnly ? slOrderQty : (l.qty_required||1)), uom:l.uom||"Nos", cost_price:l.cost?String(l.cost):"", sales_price:l.sales_price?String(l.sales_price):"", sf:String(Number(l.sf)>0?l.sf:PRICELIST_DEFAULT_SF) });
   const [drafts,setDrafts] = useState(()=>{ const d={}; dpLines.forEach(l=>{ d[lineKey(l)]=draftFor(l); }); return d; });
   const [fileState,setFileState] = useState(()=>{ const f={}; dpLines.forEach(l=>{ f[lineKey(l)]={name:l.excel_file_name||"",path:l.excel_file_path||""}; }); return f; });
   useEffect(()=>{
@@ -32008,7 +32577,27 @@ function PricingDescriptionPanel({ openRef, openLines, user, sessionCompany, ite
     if(data?.signedUrl) window.open(data.signedUrl,"_blank");
   };
 
+  // 28 Sep (92) — a Pricelist line: the cost stays locked to the price
+  // list; description, qty, UOM and the sales factor can change, and the
+  // sales price follows cost × Sf. No re-validation — it never needed any.
+  const savePricelist = async(line)=>{
+    const draft = drafts[lineKey(line)]||{};
+    const sf = Number(draft.sf);
+    if(!(sf>0)){ alert("Enter a Sales factor greater than 0."); return; }
+    if(!String(draft.description||"").trim()){ alert("Enter a description."); return; }
+    const typedQty = Math.max(1, Number(draft.qty)||1);
+    setSaving(s=>({...s,[lineKey(line)]:true}));
+    try{
+      const payload = { component: draft.description.trim(), qty_required: dpOnly ? 1 : typedQty, uom: draft.uom||"Nos", sf, sales_price: computeSalesPrice(line.cost, sf) };
+      const { error } = await byLine(sb.from("estimate_lines").update(payload), line);
+      if(error) throw error;
+      await logAudit("UPDATE","estimate_lines",openRef.reference_number+"-"+openRef.item_sl_no,"Updated Pricelist line \""+payload.component+"\" (Sf "+sf+")",user?.username||"unknown",null,payload);
+      if(dpOnly && typedQty!==slOrderQty && onOrderQtyChange){ await onOrderQtyChange(typedQty); onSaved(typedQty); } else { onSaved(); }
+    } catch(e){ alert("Save failed: "+e.message); }
+    finally { setSaving(s=>({...s,[lineKey(line)]:false})); }
+  };
   const save = async(line)=>{
+    if(line.price_source==="pricelist") return savePricelist(line);
     const draft = drafts[lineKey(line)]||{};
     if(!draft.item.trim()){ alert("Enter an Item."); return; }
     if(!draft.description.trim()){ alert("Enter a description."); return; }
@@ -32069,7 +32658,9 @@ function PricingDescriptionPanel({ openRef, openLines, user, sessionCompany, ite
         h("div",{style:{fontSize:12.5,fontWeight:600,color: hasDatasheet?"#085041":"#854f0b"}}, hasDatasheet===null?"Checking Datasheet…":hasDatasheet?"✓ Datasheet on file":"No Datasheet yet for this Sl No"),
         hasDatasheet!==null && h("button",{onClick:()=>setShowDatasheet(true),style:btnSecondary}, hasDatasheet?"Open / Edit Datasheet":"Add Datasheet")
       ),
-      singleDp && h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,padding:"10px 14px",background: singleFile.name?"#eaf9f4":"#fff4d6",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}},
+      singleDp && singleDp.price_source==="pricelist" && h("div",{style:{border:"1px solid #b9d3ef",borderRadius:8,padding:"10px 14px",background:"#eaf2fb",fontSize:12,color:"#0c447c"}},
+        h("div",{style:{fontWeight:700,marginBottom:2}},"Priced from the price list"), singleDp.pricelist_ref||singleDp.pricelist_model_code||""),
+      singleDp && singleDp.price_source!=="pricelist" && h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,padding:"10px 14px",background: singleFile.name?"#eaf9f4":"#fff4d6",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}},
         singleFile.name
           ? h("div",{style:{fontSize:12.5,fontWeight:600,color:"#085041"}},"✓ "+singleFile.name)
           : h("div",{style:{fontSize:12.5,fontWeight:600,color:"#854f0b"}}, uploading[lineKey(singleDp)]?"Uploading…":"No BOM/Excel attached"),
@@ -32084,6 +32675,26 @@ function PricingDescriptionPanel({ openRef, openLines, user, sessionCompany, ite
     dpLines.length===0 && h("div",{style:{fontSize:12,color:colors.mutedLight}},"No Direct Price lines here."),
     dpLines.map(line=>{
       const draft = drafts[lineKey(line)]||draftFor(line);
+      if(line.price_source==="pricelist"){
+        const sfN = Number(draft.sf);
+        const lab = t=>h("div",{style:{fontSize:10,color:colors.muted,marginBottom:2}},t);
+        const ro = {...inputStyle,padding:"7px 9px",fontSize:12,background:"#f6f5f0"};
+        return h("div",{key:lineKey(line),style:{border:"1px solid "+colors.border,borderRadius:8,padding:"14px 16px",marginBottom:12,background:"#fff"}},
+          h("div",{style:{marginBottom:10,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},
+            h("span",{style:{fontSize:11,fontWeight:700,padding:"3px 9px",borderRadius:20,background:"#e6f4f1",color:"#0f6e56"}},"● Pricelist"),
+            h("span",{style:{fontFamily:"ui-monospace,Consolas,monospace",fontSize:11.5,color:colors.muted,wordBreak:"break-all"}},line.pricelist_model_code||line.model||"")),
+          h("div",{style:{marginBottom:8}},lab("Item"),h("input",{readOnly:true,value:line.item||"",style:ro})),
+          h("div",{style:{marginBottom:8}},lab("Description"),h("input",{value:draft.description,onChange:e=>setDraft(lineKey(line),"description",e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12,width:"100%"}})),
+          h("div",{style:{display:"flex",gap:10,marginBottom:8,flexWrap:"wrap"}},
+            h("div",{style:{flex:1,minWidth:80}},lab(dpOnly?"Qty (order qty)":"Qty per item"),h("input",{type:"number",min:1,value:draft.qty,onChange:e=>setDraft(lineKey(line),"qty",e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12}})),
+            h("div",{style:{flex:1,minWidth:80}},lab("UOM"),h("input",{value:draft.uom,onChange:e=>setDraft(lineKey(line),"uom",e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12}}))),
+          h("div",{style:{display:"flex",gap:10,marginBottom:10,flexWrap:"wrap",alignItems:"flex-end"}},
+            h("div",{style:{flex:1,minWidth:120}},lab("Cost price (INR, from price list)"),h("input",{readOnly:true,value:fmt2(line.cost),style:ro})),
+            h("div",{style:{flex:1,minWidth:100}},lab("Sales factor"),h("input",{type:"number",step:"0.05",min:0,value:draft.sf,onChange:e=>setDraft(lineKey(line),"sf",e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12}})),
+            h("div",{style:{flex:1,minWidth:120}},lab("Sales price (INR, per item)"),h("input",{readOnly:true,value:sfN>0?fmt2(computeSalesPrice(line.cost,sfN)):"—",style:ro}))),
+          h("button",{onClick:()=>save(line),disabled:saving[lineKey(line)],style:{...btnPrimary,opacity:saving[lineKey(line)]?0.6:1}},saving[lineKey(line)]?"Saving…":"Save")
+        );
+      }
       const file = fileState[lineKey(line)]||{name:line.excel_file_name||"",path:line.excel_file_path||""};
       return h("div",{key:lineKey(line),style:{border:"1px solid "+colors.border,borderRadius:8,padding:"14px 16px",marginBottom:12,background:"#fff"}},
         h("div",{style:{marginBottom:10}},
@@ -37292,6 +37903,7 @@ function App() {
     tab==="version_history"?h(VersionHistoryScreen,null):
     tab==="allowable_stress"?h(AllowableStressEditor,{user}):
     tab==="datasheet_master"?h(DatasheetMasterEditor,{onGoToTab:setTab,user}):
+    tab==="price_list"?h(PriceListMaster,{user}):
     tab==="item_moc_rules"?h(ItemMocRulesEditor,{user}):
     tab==="company_master"?h(CompanyMasterEditor,{user}):
     tab==="gst_structures"?h(GstStructureEditor,{user}):
