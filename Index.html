@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-09-29T16:00:00Z";
+  var APP_BUILD_VERSION = "2026-09-29T20:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -1925,6 +1925,9 @@ function MenuTabs({ user, active, onChange }) {
     ]},
     { label:"Dashboards", tabs:[
       {key:"dashboards",label:"Dashboards"},
+    ]},
+    { label:"Valve Price", tabs:[
+      {key:"valve_price",label:"Valve Price"},
     ]},
     { label:"Inventory", subgroups:[
       { label:"Inventory", tabs:[
@@ -5560,7 +5563,7 @@ function readPricelistSheet(ws){
     const sz = String(rec.size||"").trim().toUpperCase().replace(/\s+/g,"");
     if(/^\d+(\.\d+)?$/.test(sz)) rec.size = sz+"NB";
     else rec.size = sz;
-    if(!/^\d+NB$/.test(rec.size)) errors.push("Size \""+get("size")+"\": write it in NB, e.g. 50NB.");
+    if(!/^\d+(X\d+)?NB$/.test(rec.size)) errors.push("Size \""+get("size")+"\": write it in NB, e.g. 50NB (or 80X50NB for a two-size valve).");
     PRICELIST_COLUMNS.filter(c=>c.req && !c.num).forEach(c=>{ if(!String(rec[c.key]||"").trim()) errors.push(c.head+" is empty."); });
     const lp = Number(String(rec.list_price).replace(/[,₹\s]/g,""));
     if(!(lp>0)) errors.push("List price \""+get("list_price")+"\" isn't a number above 0.");
@@ -5820,6 +5823,100 @@ function PriceListBrowse({ rows, vendorPick, onVendorPickUsed }){
     ),
     shown.length>limit && h("div",{style:{display:"flex",justifyContent:"center",paddingTop:10}},h("button",{onClick:()=>setLimit(l=>l+100),style:{...btnSecondary,fontSize:12}},"Show "+Math.min(100,shown.length-limit)+" more")),
     h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:8}},"View only. Click a row for its description and materials; click a heading to sort. Prices change through Upload a price list.")
+  );
+}
+
+// 29 Sep 2026 (101) — Valve Price. A look-up of valve prices for anyone,
+// like Material Rates: not tied to a quote, so an engineer pricing a drain
+// valve or a sub-component can find it. One row per model; the price is the
+// average cost of the vendors that price it (in Flometriq that is the single
+// Levaflow price). Vendor names and each vendor's figure show to admins only.
+function ValvePriceScreen({ user }){
+  const isAdmin = user && (user.role==="admin" || user.role==="super_admin");
+  const [rows,setRows]=useState(null); const [err,setErr]=useState("");
+  const [fItem,setFItem]=useState(""); const [fSize,setFSize]=useState(""); const [q,setQ]=useState("");
+  const [open,setOpen]=useState(null); const [limit,setLimit]=useState(100); const [sort,setSort]=useState({k:"item",dir:1});
+  useEffect(()=>{ (async()=>{ try{ setRows(await fetchAllPricelistModels(false)); } catch(e){ setRows([]); setErr(/pricelist_models/.test(e.message||"")||e.code==="42P01" ? "There is no price list in this database yet." : ("Couldn't read the price list: "+(e.message||e))); } })(); },[]);
+  const models = useMemo(()=>{
+    const m = new Map();
+    (rows||[]).forEach(r=>{
+      let g = m.get(r.model_code);
+      if(!g){ g = { model_code:r.model_code, item:r.item, size:r.size, description:r.description||"", attrs:r.attrs||{}, offers:[] }; m.set(r.model_code,g); }
+      g.offers.push({ vendor:r.vendor, cost:pricelistCost(r), pricelist_no:r.pricelist_no, wef:r.wef });
+    });
+    return Array.from(m.values()).map(g=>({...g, price: g.offers.reduce((s,o)=>s+o.cost,0)/g.offers.length}));
+  },[rows]);
+  const itemOpts = useMemo(()=>Array.from(new Set(models.map(r=>r.item))).sort(),[models]);
+  const sizeOpts = useMemo(()=>Array.from(new Set(models.filter(r=>!fItem||norm(r.item)===norm(fItem)).map(r=>r.size))).sort(naturalCompare),[models,fItem]);
+  const shown = useMemo(()=>{
+    const words = norm(q).split(/\s+/).filter(Boolean);
+    const out = models.filter(r=>(!fItem||norm(r.item)===norm(fItem)) && (!fSize||norm(r.size)===norm(fSize))
+      && words.every(w=>norm(r.model_code+" "+r.description).includes(w)));
+    const val = r=> sort.k==="price" ? r.price : String(r[sort.k]||"");
+    out.sort((a,b)=>{ const c = sort.k==="size" ? naturalCompare(a.size,b.size) : (sort.k==="price" ? a.price-b.price : val(a).localeCompare(val(b)));
+      return c*sort.dir || String(a.item).localeCompare(String(b.item)) || naturalCompare(a.size,b.size) || a.model_code.localeCompare(b.model_code); });
+    return out;
+  },[models,fItem,fSize,q,sort]);
+  const pickItem = v=>{ setFItem(v); setLimit(100); setOpen(null); if(v && fSize && !models.some(r=>norm(r.item)===norm(v)&&norm(r.size)===norm(fSize))) setFSize(""); };
+  const exportXlsx = ()=>{
+    const mats = Array.from(new Set(shown.flatMap(r=>Object.keys(r.attrs||{})))).sort();
+    const head = ["Model code","Item","Size","Description","Price per piece (INR)"].concat(mats);
+    const body = shown.map(r=>[r.model_code,r.item,r.size,r.description,Math.round(r.price)].concat(mats.map(k=>(r.attrs||{})[k]||"")));
+    const wb = XLSX.utils.book_new(); const ws = XLSX.utils.aoa_to_sheet([head,...body]);
+    ws["!cols"] = head.map((x,i)=>({wch: i===3?70 : i===0?40 : 16}));
+    XLSX.utils.book_append_sheet(wb, ws, "Valve prices");
+    XLSX.writeFile(wb, "Valve_prices_"+new Date().toISOString().slice(0,10)+".xlsx");
+  };
+  const th = (k,label,right)=>h("th",{key:label,onClick:k?()=>setSort(s=>({k,dir:s.k===k?-s.dir:1})):undefined,
+    style:{padding:"7px 8px",textAlign:right?"right":"left",fontSize:11,color:colors.muted,whiteSpace:"nowrap",cursor:k?"pointer":"default",borderBottom:"1px solid "+colors.border,userSelect:"none"}},
+    label+(k&&sort.k===k?(sort.dir>0?" ▲":" ▼"):""));
+  const lbl = t=>h("div",{style:{fontSize:10.5,color:colors.muted,marginBottom:3}},t);
+  const box = {...inputStyle,padding:"7px 9px",fontSize:12.5};
+  const td = {padding:"6px 8px",borderTop:"1px solid #eceae0",verticalAlign:"top"};
+  return h("div",{style:{padding:"20px 24px",maxWidth:1300,margin:"0 auto"}},
+    h("div",{style:{fontWeight:700,fontSize:18,marginBottom:2}},"Valve Price"),
+    h("div",{style:{fontSize:12.5,color:colors.muted,marginBottom:14}},"Look up the price of any valve in the price list, per piece in ₹. Pick an item and size, or type any part of the code or description (e.g. \"ball 50nb cf8m\")."),
+    err && h("div",{style:{background:"#fdeee9",color:"#a3312a",padding:"10px 14px",borderRadius:6,marginBottom:12,fontSize:12.5}},err),
+    h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,background:"#fff",padding:"12px 16px"}},
+      h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end",marginBottom:10}},
+        h("div",{style:{flex:"1 1 200px"}},lbl("Item"),h(LimitToListCombo,{value:fItem,onChange:pickItem,options:itemOpts,placeholder:"Any item",style:box})),
+        h("div",{style:{flex:"1 1 130px"}},lbl("Size"),h(LimitToListCombo,{value:fSize,onChange:v=>{ setFSize(v); setLimit(100); setOpen(null); },options:sizeOpts,placeholder:"Any size",style:box})),
+        h("div",{style:{flex:"3 1 300px"}},lbl("Search code or description"),h("input",{value:q,onChange:e=>{ setQ(e.target.value); setLimit(100); setOpen(null); },placeholder:"e.g. gate 100nb wcb 300",style:box})),
+        h("button",{onClick:()=>{ setFItem(""); setFSize(""); setQ(""); setLimit(100); setOpen(null); },style:{...btnSecondary,padding:"7px 12px",fontSize:12}},"Clear"),
+        h("button",{onClick:exportXlsx,disabled:!shown.length,style:{...btnSecondary,padding:"7px 12px",fontSize:12}},"Export to Excel"),
+        h("div",{style:{fontSize:11.5,color:colors.muted,paddingBottom:8,whiteSpace:"nowrap"}},rows===null?"Loading…":(shown.length.toLocaleString("en-IN")+" of "+models.length.toLocaleString("en-IN")+" valves"))
+      ),
+      h("div",{style:{overflowX:"auto"}},
+        h("table",{style:{borderCollapse:"collapse",width:"100%",fontSize:12.5}},
+          h("thead",null,h("tr",null,th("model_code","Model code"),th("item","Item"),th("size","Size"),th(null,"Description"),th("price","Price ₹ / pc",true))),
+          h("tbody",null,
+            rows!==null && !shown.length ? h("tr",null,h("td",{colSpan:5,style:{...td,color:colors.mutedLight,padding:14}},models.length?"No valves match. Clear a box or change the search.":"The price list is empty.")) :
+            shown.slice(0,limit).flatMap(r=>{
+              const isOpen = open===r.model_code;
+              const out=[h("tr",{key:r.model_code,onClick:()=>setOpen(isOpen?null:r.model_code),style:{cursor:"pointer",background:isOpen?"#eef5fb":"transparent"}},
+                h("td",{style:{...td,fontFamily:"ui-monospace,Consolas,monospace",fontSize:11.5,wordBreak:"break-all",minWidth:220}},r.model_code),
+                h("td",{style:{...td,whiteSpace:"nowrap"}},r.item), h("td",{style:td},r.size),
+                h("td",{style:{...td,color:colors.muted}},r.description.length>110?r.description.slice(0,110)+"…":r.description),
+                h("td",{style:{...td,textAlign:"right",fontWeight:700,fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap"}},fmt0(r.price)))];
+              if(isOpen){ const a=Object.entries(r.attrs||{});
+                out.push(h("tr",{key:r.model_code+"-d",style:{background:"#eef5fb"}},h("td",{colSpan:5,style:{padding:"2px 8px 12px"}},
+                  h("div",{style:{display:"flex",gap:18,flexWrap:"wrap"}},
+                    h("div",{style:{flex:"1 1 320px"}},lbl("Description"),h("div",{style:{fontSize:12.5}},r.description||"—"),
+                      isAdmin && h("div",{style:{marginTop:8}},lbl("Vendors (admin only)"),
+                        r.offers.map((o,i)=>h("div",{key:i,style:{fontSize:12}},o.vendor+" — ₹"+fmt2(o.cost)+([o.pricelist_no,o.wef?("w.e.f. "+o.wef):""].filter(Boolean).length?" · "+[o.pricelist_no,o.wef?("w.e.f. "+o.wef):""].filter(Boolean).join(" · "):""))),
+                        r.offers.length>1 && h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:2}},"Price shown is the average of these "+r.offers.length+"."))),
+                    h("div",{style:{flex:"1 1 300px"}},lbl("Materials and specs"),
+                      a.length ? h("div",{style:{display:"grid",gridTemplateColumns:"max-content 1fr",gap:"2px 12px",fontSize:12}},a.flatMap(([k,v])=>[h("span",{key:k+"k",style:{color:colors.muted}},k),h("span",{key:k+"v"},String(v))])) : h("div",{style:{fontSize:12,color:colors.mutedLight}},"—"))
+                  ))));
+              }
+              return out;
+            })
+          )
+        )
+      ),
+      shown.length>limit && h("div",{style:{display:"flex",justifyContent:"center",paddingTop:10}},h("button",{onClick:()=>setLimit(l=>l+100),style:{...btnSecondary,fontSize:12}},"Show "+Math.min(100,shown.length-limit)+" more")),
+      h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:8}},"View only. Click a row for its description and materials. Prices are kept on BOM › Price List.")
+    )
   );
 }
 
@@ -25340,6 +25437,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"29 Sep 2026 (101)", summary:"New Valve Price tab on the top ribbon, open to every user. A look-up of valve prices like Material Rates, not tied to a quote, so an engineer pricing a drain valve or a sub-component can find it. Pick an item and size, or type any part of the code or description; one row per model with its price per piece in rupees (the average of the vendors that price it; in Flometriq that is the Levaflow price). Click a row for the description and materials. Export to Excel gives the rows on screen. Vendor names and each vendor's figure show to admins only. Prices are still kept on BOM › Price List. PRICE LIST UPLOAD: a two-size valve (flush bottom, e.g. 80X50NB) is accepted as a size." },
   { date:"29 Sep 2026 (100)", summary:"Offer prices are whole numbers everywhere — no paise, no cents. One rule at the root: an INR figure rounds to the nearest 5 rupees; any other currency rounds to the nearest whole unit. It applies to the unit price first, and the total is that unit × qty, so every line multiplies out. The same rule runs through Annexure II (unit, total, NDE/Testing and Other options lines, Grand total), the Cover Letter's Total Basic Price, Packing & Forwarding, each Datasheet's Price Data, the price card on the quote screen, the Cart Summary's As printed columns and its Excel/PDF. The Grand total is now the sum of the figures printed on the page. A Sl No priced only by Direct Price lines is now rounded too (it was printed to the paisa before). A Sale Order Sl No carrying the customer's PO price still prints that price exactly, as it is the customer's own figure." },
   { date:"29 Sep 2026 (99)", summary:"Exports no longer stop at 1,000 rows. The database hands back at most 1,000 rows per request whatever the app asks for, so Material Rates \u203a Export (and the missing-rates export, every Master Data table export, and the Reports \u203a Material Rates export) silently gave only the first 1,000 rows in alphabetical order. They now fetch page by page and export every matching row." },
   { date:"29 Sep 2026 (98)", summary:"Valve finder follow-up. The questions and item families are read again every time Find by questions opens, so a change on Rules \u203a Selection Questions or the Item master shows without reloading the app. When an item gets no questions the form now says why: the item has no Family, or its family has no questions (naming the family). levaflow_valves_family_2026-09-29.sql sets Family = Valves on every Price List item in Levaflow." },
@@ -38587,6 +38685,7 @@ function App() {
     tab==="users"?h(UsersEditor,{user}):
     tab==="permissions"?h(PermissionsEditor,null):
     tab==="dashboards"?h(DashboardsScreen,{user}):
+    tab==="valve_price"?h(ValvePriceScreen,{user}):
     tab==="po_register"?h(PoRegisterScreen,{user}):
     tab==="material_inward"?h(MaterialInwardScreen,{user,sessionCompany}):
     tab==="tag_register"?h(TagRegisterScreen,{user}):
