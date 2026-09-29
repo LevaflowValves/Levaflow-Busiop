@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-09-29T12:30:00Z";
+  var APP_BUILD_VERSION = "2026-09-29T16:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -865,11 +865,12 @@ function buildPriceDataSection(currency, orderQty, totalSalesValue, conversionRa
   const totalDisplay = (paidUnit!==null && paidUnit!==undefined)
     ? Number(paidUnit)*qty
     : (isInr ? Number(totalSalesValue)||0 : (fx>0 ? (Number(totalSalesValue)||0)/fx : 0));
-  const { unit, total } = priceUnitTotal(totalDisplay, qty, !!exact);   // exact = PO price, see poUnitPriceInr
+  const { unit, total } = priceUnitTotal(totalDisplay, qty, !!exact, cur);   // exact = PO price only (build 100)
+  const m = (v)=> exact ? fmt2(v) : fmt0(v);
   const rows = [
-    { key:"price-rate", label:"Rate - "+cur, value: fmt2(unit) },
-    { key:"price-qty", label:"Qty", value: fmt2(qty)+" Nos" },
-    { key:"price-total", label:"Total Price - "+cur, value: fmt2(total) }
+    { key:"price-rate", label:"Rate - "+cur, value: m(unit) },
+    { key:"price-qty", label:"Qty", value: (qty%1===0 ? String(qty) : fmt2(qty))+" Nos" },
+    { key:"price-total", label:"Total Price - "+cur, value: m(total) }
   ];
   return { title: "Price Data", rows };
 }
@@ -955,8 +956,8 @@ function poUnitPriceIn(est, currency){
 }
 // Unit and total for display. exact=true (a PO price): unit rounded to 2
 // decimals only. exact=false: the offer's round-to-5, unchanged.
-function priceUnitTotal(rawTotalDisplay, qty, exact){
-  if(!exact) return roundedUnitTotal(rawTotalDisplay, qty);
+function priceUnitTotal(rawTotalDisplay, qty, exact, currency){
+  if(!exact) return roundedUnitTotal(rawTotalDisplay, qty, currency);
   const q = Number(qty)||0;
   const unit = r2(q>0 ? (Number(rawTotalDisplay)||0)/q : (Number(rawTotalDisplay)||0));
   return { unit, total: r2(unit*q) };
@@ -1048,7 +1049,7 @@ async function computeSlNoPricing(referenceNumber, itemSlNo, orderQty){
   // round-to-5 was applied to a price the user had typed to the rupee.
   // allLines is already fetched above with is_direct_price on it.
   const dpOnly = slNoIsDirectPriceOnly(itemSlNo, allLines);
-  return { total: baseGrandTotal + slExtraTotal + (testingMode==="prorata" ? slTestingTotal + globalFoldShare : 0), exact:dpOnly, paid:null };
+  return { total: baseGrandTotal + slExtraTotal + (testingMode==="prorata" ? slTestingTotal + globalFoldShare : 0), exact:false, paid:null };   // build 100: Direct Price is rounded like any offer figure
 }
 // Value snapshot (30 Aug) — captured on leaving a Quote or Sale Order
 // screen (React unmount), upserted per reference_number. Header total
@@ -1244,7 +1245,13 @@ function fmt(n) {
 // rounding — .5 rounds up). Quantities, Sf, and percentages must NOT go
 // through this — they keep using fmt() as before.
 function roundTo5(n){ if(typeof n!=="number"||isNaN(n)) return 0; return Math.round(n/5)*5; }
-function fmtR(n){ return fmt(roundTo5(Number(n)||0)); }
+// 29 Sep 2026 (build 100) — offer money is whole: no paise, no cents.
+// INR rounds to the nearest 5 rupees; every other currency rounds to the
+// nearest whole unit. offerRound is the ONE rule; fmt0 prints without
+// decimals. fmtR(n, currency) = both, and defaults to INR.
+function offerRound(n, currency){ const x=Number(n)||0; if(!isFinite(x)) return 0; return String(currency||"INR").trim().toUpperCase()==="INR" ? Math.round(x/5)*5 : Math.round(x); }
+function fmt0(n){ const x=Math.round(Number(n)||0); return x.toLocaleString("en-IN",{maximumFractionDigits:0}); }
+function fmtR(n, currency){ return fmt0(offerRound(n, currency)); }
 
 // Number-to-words (24 Aug, Contract PDF's "Net Amount in words" line) —
 // Indian numbering system (lakh/crore), matching the real Invoice/OA
@@ -1305,9 +1312,9 @@ function buildDocHeaderRows(mode, contractInfo, openRef){
 // rounded_unit × qty, so what's displayed always multiplies out correctly
 // — matches what a customer would check by hand, and matches Excel, which
 // was never wrong (it never rounds mid-calculation).
-function roundedUnitTotal(rawTotal, qty){
+function roundedUnitTotal(rawTotal, qty, currency){
   const q = Number(qty)||0;
-  const unit = q>0 ? roundTo5(Number(rawTotal||0)/q) : roundTo5(Number(rawTotal||0));
+  const unit = q>0 ? offerRound(Number(rawTotal||0)/q, currency) : offerRound(Number(rawTotal||0), currency);
   const total = unit*q;
   return { unit, total };
 }
@@ -4084,39 +4091,46 @@ function MasterEditor({ tableKey, user }) {
   const openMrExportPreview = async(format)=>{
     setExportPreviewLoading(true);
     try{
-      let q = sb.from("material_rates").select("*");
-      if(search.trim()){
-        const s = search.trim();
-        q = q.or("material_spec.ilike.%"+s+"%,material_grade.ilike.%"+s+"%,material_shape.ilike.%"+s+"%,uom.ilike.%"+s+"%,spec_grade.ilike.%"+s+"%");
-      } else {
-        if(mrShapeFocus) q = q.eq("material_shape",mrShapeFocus);
-        if(mrSpecFilter) q = q.eq("material_spec",mrSpecFilter);
-        if(mrGradeFilter) q = q.eq("material_grade",mrGradeFilter);
-      }
-      const { data } = await q.order("material_shape",{ascending:true}).order("material_spec",{ascending:true}).order("material_grade",{ascending:true}).limit(5000);
+      const make = ()=>{
+        let q = sb.from("material_rates").select("*");
+        if(search.trim()){
+          const s = search.trim();
+          q = q.or("material_spec.ilike.%"+s+"%,material_grade.ilike.%"+s+"%,material_shape.ilike.%"+s+"%,uom.ilike.%"+s+"%,spec_grade.ilike.%"+s+"%");
+        } else {
+          if(mrShapeFocus) q = q.eq("material_shape",mrShapeFocus);
+          if(mrSpecFilter) q = q.eq("material_spec",mrSpecFilter);
+          if(mrGradeFilter) q = q.eq("material_grade",mrGradeFilter);
+        }
+        return q.order("material_shape",{ascending:true}).order("material_spec",{ascending:true}).order("material_grade",{ascending:true}).order("id",{ascending:true});
+      };
+      const data = await fetchPagedRows(make);
       setExportPreview({ rows:data||[], format, title:"Material Rates", filenameBase:"material_rates" });
     } finally { setExportPreviewLoading(false); }
   };
   const openZrExportPreview = async(format)=>{
     setExportPreviewLoading(true);
     try{
-      let q = sb.from("material_rates").select("*").eq("rate",0);
-      if(zrShapeFocus) q = q.eq("material_shape",zrShapeFocus);
-      if(zrSpecFilter) q = q.eq("material_spec",zrSpecFilter);
-      const { data } = await q.order("material_shape",{ascending:true}).order("material_spec",{ascending:true}).limit(5000);
+      const data = await fetchPagedRows(()=>{
+        let q = sb.from("material_rates").select("*").eq("rate",0);
+        if(zrShapeFocus) q = q.eq("material_shape",zrShapeFocus);
+        if(zrSpecFilter) q = q.eq("material_spec",zrSpecFilter);
+        return q.order("material_shape",{ascending:true}).order("material_spec",{ascending:true}).order("id",{ascending:true});
+      });
       setExportPreview({ rows:data||[], format, title:"Rates Missing a Value", filenameBase:"material_rates_missing" });
     } finally { setExportPreviewLoading(false); }
   };
   const openGenericExportPreview = async(format)=>{
     setExportPreviewLoading(true);
     try{
-      let q = sb.from(tableKey).select("*");
-      if(search.trim()){
-        const s = search.trim();
-        const textCols = tableDef.columns.filter(c=>!NUMERIC_COLS.has(c));
-        if(textCols.length) q = q.or(textCols.map(c=>c+".ilike.%"+s+"%").join(","));
-      }
-      const { data } = await q.order("id",{ascending:true}).limit(5000);
+      const data = await fetchPagedRows(()=>{
+        let q = sb.from(tableKey).select("*");
+        if(search.trim()){
+          const s = search.trim();
+          const textCols = tableDef.columns.filter(c=>!NUMERIC_COLS.has(c));
+          if(textCols.length) q = q.or(textCols.map(c=>c+".ilike.%"+s+"%").join(","));
+        }
+        return q.order("id",{ascending:true});
+      });
       setExportPreview({ rows:data||[], format, title:tableDef.label, filenameBase:tableKey, columns:tableDef.columns });
     } finally { setExportPreviewLoading(false); }
   };
@@ -5497,6 +5511,20 @@ function buildPricelistDescription(rule, r, materialRows, typed){
 }
 // Every active model, paged (the API returns at most 1000 rows a call).
 function plKey(r){ return (r.model_code||"")+"|"+(r.vendor||""); } // one price per model per vendor (95)
+// 29 Sep (99) — the database hands back at most 1,000 rows per request,
+// whatever .limit() says, so an export silently stopped at 1,000. Page
+// through instead. make() must return a fresh, fully filtered and ordered
+// query each time.
+async function fetchPagedRows(make, cap){
+  const out=[]; const step=1000; const max=cap||100000;
+  for(let from=0; from<max; from+=step){
+    const { data, error } = await make().range(from, Math.min(from+step, max)-1);
+    if(error) throw error;
+    out.push(...(data||[]));
+    if(!data || data.length<step) break;
+  }
+  return out;
+}
 async function fetchAllPricelistModels(includeInactive){
   const out=[]; const step=1000;
   for(let from=0; from<200000; from+=step){
@@ -15749,10 +15777,10 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     const fx = Number(conversionRate)||1;
     // A Sl No priced entirely by hand is shown to the rupee, not rounded to
     // the nearest 5 — the same rule the screen card uses.
-    const exact = isDirectPriceOnly(lines);
-    const costR = priceUnitTotal(cost,q,exact);
-    const saleR = priceUnitTotal(sale,q,exact);
-    const saleConvR = (ccy!=="INR" && fx>0) ? priceUnitTotal(sale/fx,q,exact) : null;
+    const exact = false;   // build 100: offer figures are whole — Direct Price rounds too
+    const costR = priceUnitTotal(cost,q,exact,"INR");
+    const saleR = priceUnitTotal(sale,q,exact,"INR");
+    const saleConvR = (ccy!=="INR" && fx>0) ? priceUnitTotal(sale/fx,q,exact,ccy) : null;
     return { q, ccy, costR, saleR, saleConvR };
   };
 
@@ -16051,7 +16079,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           // immediately follow make a pointer line redundant.
           if(hasAttachment) dsRows.push({key:"custom-pdf",label:"Reference",value:"Attached — see following page(s)"});
           const customSections = [ { title:"Datasheet", rows: dsRows } ];
-          customSections.push(buildPriceDataSection(est.currency, est.order_qty, totalSalesValue, est.conversion_rate, poUnitPriceIn(est, est.currency)!==null || slNoIsDirectPriceOnly(est.item_sl_no, linesRows), poUnitPriceIn(est, est.currency)));
+          customSections.push(buildPriceDataSection(est.currency, est.order_qty, totalSalesValue, est.conversion_rate, poUnitPriceIn(est, est.currency)!==null, poUnitPriceIn(est, est.currency)));
           // itemNameForTemplate is now already the real typed Item (see fix
           // above) — no separate display-name fallback needed here anymore.
           list.push({ slNo: est.item_sl_no, model: est.model||"", itemName: itemNameForTemplate, sectionsRows: customSections,
@@ -16076,7 +16104,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         .map(sec=>({ ...sec, rows: sec.rows.filter(r=> r.value!==undefined && r.value!==null && String(r.value).trim()!=="") }))
         .filter(sec=>sec.rows.length>0);
       const totalSalesValue = await computeSlNoFoldedSalesTotal(est.reference_number, est.item_sl_no, est.order_qty);
-      sectionsRows.push(buildPriceDataSection(est.currency, est.order_qty, totalSalesValue, est.conversion_rate, poUnitPriceIn(est, est.currency)!==null || slNoIsDirectPriceOnly(est.item_sl_no, linesRows), poUnitPriceIn(est, est.currency)));
+      sectionsRows.push(buildPriceDataSection(est.currency, est.order_qty, totalSalesValue, est.conversion_rate, poUnitPriceIn(est, est.currency)!==null, poUnitPriceIn(est, est.currency)));
       list.push({ slNo: est.item_sl_no, model: est.model||"", itemName: itemNameForTemplate, sectionsRows, renderOwnPdfPage:true });
     }
     list.sort((a,b)=>a.slNo-b.slNo);
@@ -16351,8 +16379,11 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       // is exact for the same reason a PO price is: the figure was typed,
       // and round-to-5 would move it. Keeps Annexure II, the grand total
       // and the cover letter's Total Basic Price in agreement.
-      const exactPricing = estimatesRows.some(est=>poUnitPriceIn(est, quoteCurrency)!==null || slNoIsDirectPriceOnly(est.item_sl_no, linesRows));
-      const money = (v)=> exactPricing ? fmt(r2(v)) : fmtR(v);
+      // Build 100: Direct Price Sl Nos round like everything else; only a
+      // PO price (Sale Order) stays exact, since it is the customer's figure.
+      const exactPricing = estimatesRows.some(est=>poUnitPriceIn(est, quoteCurrency)!==null);
+      const money = (v)=> exactPricing ? fmt(r2(v)) : fmtR(v, quoteCurrency);
+      const moneyVal = (v)=> exactPricing ? r2(v) : offerRound(v, quoteCurrency);
       // pfQuoteIsInr / pfQuoteFx were removed here on 7 Sep. They were a local
       // duplicate of quoteIsInr/quoteFx for the old lumpsum conversion, and that
       // conversion went away on 3 Sep when a lumpsum became a figure already in
@@ -16448,10 +16479,13 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       const grandTotalPrinted = (()=>{
         const slNoSum = estimatesRows.reduce((acc,est)=>{
           const q = est.order_qty||1;
-          return acc + priceUnitTotal(slNoFoldedTotalDisp(est), q, poUnitPriceIn(est, quoteCurrency)!==null || slNoIsDirectPriceOnly(est.item_sl_no, linesRows)).total;
+          return acc + priceUnitTotal(slNoFoldedTotalDisp(est), q, poUnitPriceIn(est, quoteCurrency)!==null, quoteCurrency).total;
         },0);
-        const extrasInr = extraPriceTotal + testingSeparateTotal;
-        const extrasDisp = quoteIsInr ? extrasInr : (quoteFx>0 ? extrasInr/quoteFx : 0);
+        // Build 100: each extra / testing line is added as printed (rounded),
+        // so the Grand total is exactly the sum of the figures on the page.
+        const toDisp = (v)=> quoteIsInr ? (Number(v)||0) : (quoteFx>0 ? (Number(v)||0)/quoteFx : 0);
+        const extrasDisp = (extraPriceForPdf||[]).reduce((s,l)=>s+moneyVal(toDisp(l.price)),0)
+          + (testingMode==="separate" ? ((slTestingAll||[]).reduce((s,l)=>s+moneyVal(toDisp(l.price)),0) + (globalTestingAll||[]).reduce((s,l)=>s+moneyVal(toDisp(l.rate)),0)) : 0);
         return exactPricing ? r2(slNoSum + extrasDisp) : slNoSum + extrasDisp;
       })();
 
@@ -16942,14 +16976,15 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       const annexureIITitle = "ANNEXURE II - PRICE SUMMARY";
       const summaryRows = estimatesRows.map(est=>{
         const qty = est.order_qty||1;
-        const { unit, total } = priceUnitTotal(slNoFoldedTotalDisp(est), qty, poUnitPriceIn(est, quoteCurrency)!==null || slNoIsDirectPriceOnly(est.item_sl_no, linesRows));
+        const slExact = poUnitPriceIn(est, quoteCurrency)!==null;
+        const { unit, total } = priceUnitTotal(slNoFoldedTotalDisp(est), qty, slExact, quoteCurrency);
         // A Direct Price line's real Item lives on the line itself, typed
         // by the user — est.model is "Custom" (or a typed model label),
         // never the Item. Real BOM Sl Nos are unaffected (no dpLine found).
         const dpLine = linesRows.find(l=>l.item_sl_no===est.item_sl_no && l.is_direct_price===true);
         const itemDisplay = dpLine ? (dpLine.item||"Custom") : (modelItemMap.get(est.model)||est.model||"—");
         return [est.item_sl_no, itemDisplay, est.description||"—",
-          fmt(unit), qty, fmt(total)];
+          slExact ? fmt(unit) : fmt0(unit), qty, slExact ? fmt(total) : fmt0(total)];
       });
       // grandTotalInr, extraPriceTotal, testingSeparateTotal already computed
       // once, early — shared with the Cover Letter's Total Basic Price so
@@ -17590,7 +17625,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     (rows||[]).forEach(r=>{
       const eff = r.cost ? r.sale/r.cost : 0;
       const enq = (r.est && r.est.sl_no_in_enq) || r.slNo;
-      const pr = cartSummaryPrinted(c(r.sale), r.qty, cartSummaryPoUnit(r, fx.div, !!o.inr));
+      const pr = cartSummaryPrinted(c(r.sale), r.qty, cartSummaryPoUnit(r, fx.div, !!o.inr), fx.code);
       if(o.includeCost){
         body.push([enq, (r.est&&r.est.item)||"", (r.est&&r.est.description)||"",
                    c(r.cost), Number(eff.toFixed(2)), c(r.sale), pr.unit, r.qty,
@@ -17608,7 +17643,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     });
     const gCost = (rows||[]).reduce((s,r)=>s+r.cost*r.qty,0);
     const gSale = (rows||[]).reduce((s,r)=>s+r.sale*r.qty,0);
-    const gPrinted = (rows||[]).reduce((s,r)=>s+cartSummaryPrinted(c(r.sale), r.qty, cartSummaryPoUnit(r, fx.div, !!o.inr)).total, 0);
+    const gPrinted = (rows||[]).reduce((s,r)=>s+cartSummaryPrinted(c(r.sale), r.qty, cartSummaryPoUnit(r, fx.div, !!o.inr), fx.code).total, 0);
     const foot = o.includeCost
       ? ["","","","","","","","Total "+fx.code, c(gCost), c(gSale), gPrinted]
       : ["","","","","","Total "+fx.code, c(gSale), gPrinted];
@@ -17649,7 +17684,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       const D = cartSummaryDoc(ests, rows, opts);
       const customer = (ests[0] && ests[0].customer_name) || "";
       const money = (v)=> (Number(v)||0).toLocaleString("en-IN",{minimumFractionDigits:2,maximumFractionDigits:2});
-      const cell = (v,i)=> typeof v==="number" ? (i===4&&opts&&opts.includeCost ? v.toFixed(2) : money(v)) : String(v==null?"":v);
+      const printedCols = (opts&&opts.includeCost) ? [6,10] : [4,7];   // "As printed" / "Total as printed" — whole, build 100
+      const cell = (v,i)=> typeof v==="number" ? (i===4&&opts&&opts.includeCost ? v.toFixed(2) : printedCols.includes(i) ? fmtPrinted(v) : money(v)) : String(v==null?"":v);
       const { jsPDF } = window.jspdf;
       const doc = new jsPDF({orientation:"landscape",unit:"mm",format:"a4"});
       const W = doc.internal.pageSize.getWidth();
@@ -17835,11 +17871,11 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       refFilter && h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",marginTop:10}},
         h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:6,padding:"6px 12px"}},
           h("div",{style:{fontSize:10,color:colors.mutedLight}},"Total cost"),
-          h("div",{style:{fontSize:13,fontWeight:700}},quoteTotalsLoading?"…":(quoteTotals?fmt(quoteTotals.cost):"—"))
+          h("div",{style:{fontSize:13,fontWeight:700}},quoteTotalsLoading?"…":(quoteTotals?fmt0(quoteTotals.cost):"—"))
         ),
         h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:6,padding:"6px 12px"}},
           h("div",{style:{fontSize:10,color:colors.mutedLight}},"Total sales price"),
-          h("div",{style:{fontSize:13,fontWeight:700}},quoteTotalsLoading?"…":(quoteTotals?fmt(quoteTotals.salesPrice):"—"))
+          h("div",{style:{fontSize:13,fontWeight:700}},quoteTotalsLoading?"…":(quoteTotals?fmt0(quoteTotals.salesPrice):"—"))
         ),
         h("div",{style:{background:"#eaf9f4",border:"1px solid #8fd0bf",borderRadius:6,padding:"6px 12px"}},
           h("div",{style:{fontSize:10,color:"#4a8d78"}},"Material %"),
@@ -18658,16 +18694,16 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               // priced by hand to the rupee. Round-to-5 would move a number
               // the user typed, so it is shown exactly, the same way a PO
               // price is. A BOM Sl No is unaffected.
-              const dpOnlyOpen = isDirectPriceOnly(openLines);
-              const costR = priceUnitTotal(totalOrderCost, orderQty, dpOnlyOpen);
+              // Build 100: Direct Price rounds like any offer figure now.
+              const costR = priceUnitTotal(totalOrderCost, orderQty, false, "INR");
               // 17 Sep -- on a Sale Order with a PO price, the sale shown is
               // the PO price (exact, not rounded to 5), and the BOM-computed
               // sale drops to a note underneath so the two can be compared.
               const poSales = openSlNoPoUnitInr!==null ? openSlNoPoUnitInr*(Number(orderQty)||1) : null;
               const saleBasis = poSales!==null ? poSales : totalOrderSales;
-              const saleExact = poSales!==null || dpOnlyOpen;
-              const salesR = priceUnitTotal(saleBasis, orderQty, saleExact);
-              const salesConvR = isNonInr ? priceUnitTotal(fx>0?saleBasis/fx:0, orderQty, saleExact) : null;
+              const saleExact = poSales!==null;
+              const salesR = priceUnitTotal(saleBasis, orderQty, saleExact, "INR");
+              const salesConvR = isNonInr ? priceUnitTotal(fx>0?saleBasis/fx:0, orderQty, saleExact, openRef.currency) : null;
               const cell = (label,value,extra)=>h("div",null,
                 h("div",{style:{fontSize:10,color:colors.mutedLight,textTransform:"uppercase",letterSpacing:"0.04em"}},label),
                 h("div",{style:{fontWeight:700,fontSize:16,color:colors.text,marginTop:3}},value),
@@ -18675,14 +18711,14 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               );
               const saleCell = (label,value,convertedValue)=>h("div",null,
                 h("div",{style:{fontSize:10,color:colors.mutedLight,textTransform:"uppercase",letterSpacing:"0.04em"}},label),
-                h("div",{style:{fontWeight:700,fontSize:16,color:colors.accent,marginTop:3}},fmt(value)),
-                isNonInr&&h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:2,fontWeight:600}},fmt(convertedValue)+" "+openRef.currency)
+                h("div",{style:{fontWeight:700,fontSize:16,color:colors.accent,marginTop:3}},fmtPrinted(value)),
+                isNonInr&&h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:2,fontWeight:600}},fmtPrinted(convertedValue)+" "+openRef.currency)
               );
               return h("div",{style:{marginTop:12,padding:"14px 18px",background:"#fff",border:"1px solid "+colors.border,borderRadius:8,maxWidth:520,marginLeft:"auto"}},
                 h("div",{style:{display:"grid",gridTemplateColumns:"1fr 0.6fr 1fr",gap:"4px 20px",paddingBottom:12,borderBottom:"1px solid #eceae0",marginBottom:12}},
-                  cell("Unit cost", fmt(costR.unit)),
+                  cell("Unit cost", fmt0(costR.unit)),
                   cell("Qty", orderQty),
-                  cell("Total cost", fmt(costR.total))
+                  cell("Total cost", fmt0(costR.total))
                 ),
                 h("div",{style:{display:"grid",gridTemplateColumns:"1fr 0.6fr 1fr",gap:"4px 20px"}},
                   saleCell(poSales!==null?"Unit sale (PO)":"Unit sale", salesR.unit, salesConvR?salesConvR.unit:null),
@@ -18690,7 +18726,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
                   saleCell(poSales!==null?"Total sale (PO)":"Total sale", salesR.total, salesConvR?salesConvR.total:null)
                 ),
                 poSales!==null && h("div",{style:{fontSize:11,color:colors.muted,marginTop:10,paddingTop:8,borderTop:"1px dashed #eceae0"}},
-                  "BOM-computed sale: "+fmt(roundedUnitTotal(totalOrderSales, orderQty).total)+" INR"+
+                  "BOM-computed sale: "+fmt0(roundedUnitTotal(totalOrderSales, orderQty, "INR").total)+" INR"+
                   (totalOrderSales>0 ? " \u2014 PO price is "+(poSales/totalOrderSales*100).toFixed(1)+"% of it" : ""))
               );
             })()
@@ -20055,12 +20091,12 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
                     // No conversion any more — entered and printed in the same
                     // currency (3 Sep). Previously the value was always INR and
                     // was divided by the rate here and in the PDF.
-                    return "Prints as: "+quoteCcy+" "+fmtR(v)+" — entered and shown in the same currency, no conversion.";
+                    return "Prints as: "+quoteCcy+" "+fmtR(v, quoteCcy)+" — entered and shown in the same currency, no conversion.";
                   }
                   // ctBasicPrice is already in the quote currency (19 Sep).
                   const basicDisp = ctBasicPrice;
                   const amt = basicDisp*v/100;
-                  const money = (x)=> mode==="contract" ? fmt(r2(x)) : fmtR(x);   // a Sale Order PDF only prints once every Sl No has its PO price
+                  const money = (x)=> mode==="contract" ? fmt(r2(x)) : fmtR(x, quoteCcy);   // a Sale Order PDF only prints once every Sl No has its PO price
                   return "Computed: "+quoteCcy+" "+money(amt)+" ("+v+"% of "+quoteCcy+" "+money(basicDisp)+" basic)";
                 })()
               )
@@ -25304,6 +25340,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"29 Sep 2026 (100)", summary:"Offer prices are whole numbers everywhere — no paise, no cents. One rule at the root: an INR figure rounds to the nearest 5 rupees; any other currency rounds to the nearest whole unit. It applies to the unit price first, and the total is that unit × qty, so every line multiplies out. The same rule runs through Annexure II (unit, total, NDE/Testing and Other options lines, Grand total), the Cover Letter's Total Basic Price, Packing & Forwarding, each Datasheet's Price Data, the price card on the quote screen, the Cart Summary's As printed columns and its Excel/PDF. The Grand total is now the sum of the figures printed on the page. A Sl No priced only by Direct Price lines is now rounded too (it was printed to the paisa before). A Sale Order Sl No carrying the customer's PO price still prints that price exactly, as it is the customer's own figure." },
+  { date:"29 Sep 2026 (99)", summary:"Exports no longer stop at 1,000 rows. The database hands back at most 1,000 rows per request whatever the app asks for, so Material Rates \u203a Export (and the missing-rates export, every Master Data table export, and the Reports \u203a Material Rates export) silently gave only the first 1,000 rows in alphabetical order. They now fetch page by page and export every matching row." },
   { date:"29 Sep 2026 (98)", summary:"Valve finder follow-up. The questions and item families are read again every time Find by questions opens, so a change on Rules \u203a Selection Questions or the Item master shows without reloading the app. When an item gets no questions the form now says why: the item has no Family, or its family has no questions (naming the family). levaflow_valves_family_2026-09-29.sql sets Family = Valves on every Price List item in Levaflow." },
   { date:"29 Sep 2026 (97)", summary:"Valve finder, Add a price, vendor approval and terms. ESTIMATOR, Pricelist: Find by questions opens a pop-up \u2014 pick the item (tiles), then answer its questions (Size, Construction, Body, Trim, Seal, Rating, Connection, Actuator, in each item's own words, e.g. Ball material, Liner material). Every list shows only answers that exist in the price list given the other answers, with a model count; a question the item has only one answer for is not asked. The moment one model is left (with the required questions answered) it opens by itself; with several, one button opens the lowest-cost one and the rest stay in the list. Nothing fits: the form suggests the closest answer to change. Picking an item in the Item box opens the form too; Skip shows all its models. COST FROM: with one vendor its price is taken; with several nothing is pre-picked \u2014 you choose, cheapest listed first. Each vendor shows its approval status and terms (payment, lead time, freight, P&F, validity) from the Vendors master. Not approved / Blocked / expired approval are flags only, never a block. The vendor is saved on the line (pricelist_vendor) and shown in the Estimator cart and in the Quote Cart's new Vendor column (internal, never printed). DATASHEET: answers whose question has a datasheet field (Size, Construction, Pressure rating, End connection, Operation) fill that field when the datasheet is first opened. RULES \u203a SELECTION QUESTIONS: the question set per family (order, wording, required, datasheet field) and each item's own wording, with a live view of what each item is asked. PRICE LIST \u203a + Add a price: pick the item, answer the same questions from strict lists, choose the vendor (or + New vendor), type the price; the model code is built and the screen says whether it is a new model, a second vendor's price, or an update (old price to history). New models go to the Model master. Excel upload stays for whole catalogues. VENDORS (Inventory \u203a Vendors, also BOM \u203a Price List \u203a Vendors): search and status filter; list shows status, prices held, primary contact, payment terms, lead time; approval block (status, approved on/by, valid till, remarks) and commercial terms; tabs for Contacts (several, one primary), Addresses, Price lists held, Quotes using their cost, POs. A reminder lists vendors whose approval has run out. QUOTE SCREEN: moving a quote from Draft to Offer Sent no longer needs an authorization code. Run valve_finder_vendors_structure_2026-09-29.sql and valve_finder_questions_data_2026-09-29.sql in both databases; levaflow_price_list_vendors_2026-09-29.sql in Levaflow only." },
   { date:"29 Sep 2026 (96)", summary:"Family level above Item. New master BOM \u203a Item Master \u203a Families (starts with Valves, Strainers, Tanks). The Items screen has a new Family column: pick the family from the list, or as an Admin choose \u201c+ Add new\u2026\u201d to add a family on the spot. Edit all on Items lets you set families for many items in one go. Family can be left blank, so every existing item keeps working until it is assigned. Renaming a family on the Families screen renames it on every item that uses it. Structure only for now: the Estimator, Price List and reports don\u2019t use Family yet. Run item_family_structure_2026-09-29.sql, then item_family_data_2026-09-29.sql, in both databases." },
@@ -36242,19 +36280,20 @@ function sortCartSummaryRows(rows){
 
    Rounding happens AFTER currency conversion, because that is where the
    PDF does it -- it rounds the display figure, not the rupee one. */
-function cartSummaryPrinted(unitInDisplayCurrency, qty, poUnitInDisplayCurrency){
+function cartSummaryPrinted(unitInDisplayCurrency, qty, poUnitInDisplayCurrency, currency){
   // 17 Sep -- a Sale Order Sl No with a PO price prints that price, exactly.
   if(poUnitInDisplayCurrency!==null && poUnitInDisplayCurrency!==undefined){
     const unit = r2(poUnitInDisplayCurrency);
     return { unit, total: r2(unit * (Number(qty)||0)) };
   }
-  const unit = roundTo5(Number(unitInDisplayCurrency)||0);
+  const unit = offerRound(Number(unitInDisplayCurrency)||0, currency);   // build 100: INR to 5, others whole
   return { unit, total: unit * (Number(qty)||0) };
 }
 // PO unit price of a Cart Summary row (19 Sep). When the row is being
 // shown in the PO's own currency the PO figure is used as it stands; when
 // the user has flipped the Summary to rupees it is the pinned rupee
 // value. Only if the two disagree does it fall back to dividing.
+function fmtPrinted(v){ const x=Number(v)||0; return Number.isInteger(x) ? fmt0(x) : fmt(x); }
 function cartSummaryPoUnit(row, div, showInr){
   const paid = poPricePaid(row && row.est);
   if(!paid) return null;
@@ -36353,7 +36392,7 @@ function CartSummaryScreen({ user, quoteRef, exportCartSummaryExcel, exportCartS
   const gCost = rows.reduce((s,r)=>s+r.cost*r.qty,0);
   const gSale = rows.reduce((s,r)=>s+r.sale*r.qty,0);
   // Sum of what the offer will actually print, in the display currency.
-  const gPrinted = rows.reduce((s,r)=>s+cartSummaryPrinted((Number(r.sale)||0)/(cartSummaryFx(ests,showInr).div||1), r.qty, cartSummaryPoUnit(r, cartSummaryFx(ests,showInr).div, showInr)).total, 0);
+  const gPrinted = rows.reduce((s,r)=>s+cartSummaryPrinted((Number(r.sale)||0)/(cartSummaryFx(ests,showInr).div||1), r.qty, cartSummaryPoUnit(r, cartSummaryFx(ests,showInr).div, showInr), cartSummaryFx(ests,showInr).code).total, 0);
   // The factor actually achieved once the offer rounds. Cost converted to
   // the same currency so the ratio is comparable.
   const gCostDisp = gCost / (cartSummaryFx(ests,showInr).div||1);
@@ -36493,7 +36532,7 @@ function CartSummaryScreen({ user, quoteRef, exportCartSummaryExcel, exportCartS
         h("tbody",null, rows.flatMap(r=>{
           const eff = r.cost ? r.sale/r.cost : 0;
           // Rounded AFTER conversion, exactly where the Offer PDF rounds.
-          const pr = cartSummaryPrinted(conv(r.sale), r.qty, cartSummaryPoUnit(r, fxInfo.div, showInr));
+          const pr = cartSummaryPrinted(conv(r.sale), r.qty, cartSummaryPoUnit(r, fxInfo.div, showInr), fxInfo.code);
           const main = h("tr",{key:r.slNo,style:{borderBottom:"1px solid "+colors.border}},
             h("td",{style:{padding:"8px 5px"}},
               r.mixed
@@ -36508,11 +36547,11 @@ function CartSummaryScreen({ user, quoteRef, exportCartSummaryExcel, exportCartS
             includeCost?h("td",{key:"uc",style:{padding:"8px 6px",textAlign:"right"}},fmtC(r.cost)):null,
             includeCost?h("td",{key:"sf",style:{padding:"8px 6px",textAlign:"right",fontStyle:r.mixed?"italic":"normal"}},eff.toFixed(2)+(r.mixed?" *":"")):null,
             h("td",{style:{padding:"8px 6px",textAlign:"right"}},fmtC(r.sale)),
-            h("td",{style:{padding:"8px 6px",textAlign:"right",color:colors.muted}},fmt(pr.unit)),
+            h("td",{style:{padding:"8px 6px",textAlign:"right",color:colors.muted}},fmtPrinted(pr.unit)),
             h("td",{style:{padding:"8px 6px",textAlign:"right"}},r.qty),
             includeCost?h("td",{key:"tc",style:{padding:"8px 6px",textAlign:"right"}},fmtC(r.cost*r.qty)):null,
             h("td",{style:{padding:"8px 6px",textAlign:"right"}},fmtC(r.sale*r.qty)),
-            h("td",{style:{padding:"8px 6px",textAlign:"right",color:colors.muted}},fmt(pr.total)));
+            h("td",{style:{padding:"8px 6px",textAlign:"right",color:colors.muted}},fmtPrinted(pr.total)));
           if(!(open[r.slNo]||expandAll)) return [main];
           const det = h("tr",{key:r.slNo+"-d",style:{background:"#faf9f4"}},
             h("td",null), h("td",{colSpan:includeCost?11:8,style:{padding:"9px 6px 12px"}},
@@ -36530,7 +36569,7 @@ function CartSummaryScreen({ user, quoteRef, exportCartSummaryExcel, exportCartS
           h("td",{colSpan:includeCost?8:6,style:{padding:"9px 6px"}},"Total "+fxInfo.code),
           includeCost?h("td",{key:"ftc",style:{padding:"9px 6px",textAlign:"right"}},fmtC(gCost)):null,
           h("td",{style:{padding:"9px 6px",textAlign:"right"}},fmtC(gSale)),
-          h("td",{style:{padding:"9px 6px",textAlign:"right",color:colors.muted}},fmt(gPrinted)))))),
+          h("td",{style:{padding:"9px 6px",textAlign:"right",color:colors.muted}},fmtPrinted(gPrinted)))))),
 
     edit ? h("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.55)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:20}},
       h("div",{style:{background:"#fff",borderRadius:8,padding:"20px 24px",width:600,maxWidth:"100%",maxHeight:"88vh",overflow:"auto"}},
@@ -37682,10 +37721,12 @@ function MaterialRatesReport({ user }){
   // a one-off action, not habitual browsing, so a larger capped fetch here
   // is fine; still capped at 5000 as a safety net against something huge.
   const fetchExportRows = async()=>{
-    let q = filteredQuery("material_spec,material_grade,material_shape,rate,uom,created_at,created_by");
-    if(view==="stale") q = q.lt("created_at",cutoffISO);
-    else if(view==="zero") q = q.eq("rate",0);
-    const { data } = await q.order("created_at",{ascending:true}).limit(5000);
+    const data = await fetchPagedRows(()=>{
+      let q = filteredQuery("material_spec,material_grade,material_shape,rate,uom,created_at,created_by");
+      if(view==="stale") q = q.lt("created_at",cutoffISO);
+      else if(view==="zero") q = q.eq("rate",0);
+      return q.order("created_at",{ascending:true}).order("id",{ascending:true});
+    });
     return (data||[]).map(r=>{ const _date=effectiveDate(r); return {...r,_date,_estimated:!r.created_at,daysOld:Math.floor((Date.now()-_date.getTime())/86400000)}; });
   };
   const exportExcel = async()=>{
