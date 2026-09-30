@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-09-30T04:00:00Z";
+  var APP_BUILD_VERSION = "2026-09-30T06:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -12187,6 +12187,47 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   // unreliable in-browser and could silently resolve as Cancel even on a
   // real OK click. An in-app modal with a real scroll area and buttons
   // that call real functions directly has no such length ceiling.
+  // 30 Sep (104) — Annexure II print choice: basic prices (as before) or with
+  // extras and taxes (proforma style). Asked at every Generate PDF with the
+  // quote's last choice pre-selected; kept in priceSummaryChoiceRef so the
+  // resume paths (summary review, no-documents confirm) print the same way.
+  const [psAsk,setPsAsk]=useState(null);
+  const psResolveRef=useRef(null);
+  const priceSummaryChoiceRef=useRef({mode:"basic",gst:null});
+  const closePriceSummaryAsk=(result)=>{ setPsAsk(null); if(psResolveRef.current){ psResolveRef.current(result); psResolveRef.current=null; } };
+  const askPriceSummary=async()=>{
+    const currency=String(quoteHeaderRow?.currency||"INR").toUpperCase();
+    const safe=async(q)=>{ try{ const {data,error}=await q; return error?null:data; } catch(e){ return null; } };
+    const [termsRow, structs, comps, custCo, gstins] = await Promise.all([
+      safe(sb.from("quote_commercial_terms").select("*").eq("reference_number",quoteExportRef).maybeSingle()),
+      safe(sb.from("gst_structure_tbl").select("*").order("structure_name")),
+      safe(sb.from("gst_structure_component_tbl").select("*").order("sort_order")),
+      quoteHeaderRow?.customer_name ? safe(sb.from("companies").select("billing_state").eq("company_name",quoteHeaderRow.customer_name).maybeSingle()) : null,
+      quoteHeaderRow?.company_id ? safe(sb.from("company_gstin_tbl").select("state,is_default").eq("company_id",quoteHeaderRow.company_id)) : null,
+    ]);
+    const opts=[];
+    (structs||[]).forEach(st=>{ const cs=(comps||[]).filter(c=>String(c.structure_id)===String(st.id)).map(c=>({label:c.label,rate_percent:Number(c.rate_percent)||0}));
+      if(cs.length) opts.push({key:"s"+st.id, label:st.structure_name+" ("+cs.map(c=>c.label+" "+c.rate_percent+"%").join(" + ")+")", components:cs}); });
+    if(!opts.some(o=>o.components.some(c=>/cgst/i.test(c.label)))) opts.push({key:"b-intra",label:"CGST 9% + SGST 9%",components:[{label:"CGST",rate_percent:9},{label:"SGST",rate_percent:9}]});
+    if(!opts.some(o=>o.components.some(c=>/igst/i.test(c.label)))) opts.push({key:"b-inter",label:"IGST 18%",components:[{label:"IGST",rate_percent:18}]});
+    opts.push({key:"none",label:"No GST (export / SEZ / LUT)",components:[]});
+    const custState=String(custCo?.billing_state||"").trim();
+    const def=(gstins||[]).find(g=>g.is_default)||(gstins||[])[0]||null;
+    const ourState=String(def?.state||"").trim();
+    const saved=termsRow && termsRow.price_summary_gst ? termsRow.price_summary_gst : null;
+    let gstKey=null, why="";
+    if(currency!=="INR"){ gstKey="none"; why="This is a "+currency+" offer, so no GST lines are printed."; }
+    else if(saved && opts.some(o=>o.key===saved.key)){ gstKey=saved.key; why="Last used on this quote."; }
+    else if(mode==="contract" && contractInfo && contractInfo.gst_structure_id && opts.some(o=>o.key==="s"+contractInfo.gst_structure_id)){ gstKey="s"+contractInfo.gst_structure_id; why="The Sale Order's GST structure."; }
+    else if(custState && ourState){
+      const same=normalizeItemName(custState)===normalizeItemName(ourState);
+      const hit=opts.find(o=>o.components.some(c=>(same?/cgst/i:/igst/i).test(c.label)));
+      gstKey=hit?hit.key:null;
+      why=same ? "Customer in "+custState+", same state as your GSTIN: CGST + SGST." : "Customer in "+custState+", your GSTIN is in "+ourState+": IGST.";
+    } else { gstKey=(opts.find(o=>o.components.some(c=>/cgst/i.test(c.label)))||opts[0]).key; why=!custState?"The customer has no state on file; check this.":"No GSTIN state on the Company Master; check this."; }
+    const savedMode=termsRow && termsRow.price_summary_mode==="proforma" ? "proforma" : "basic";
+    return new Promise(resolve=>{ psResolveRef.current=resolve; setPsAsk({mode:savedMode, gstKey, why, opts, currency, hasPf:!!(termsRow&&(termsRow.packing_forwarding_basis||termsRow.packing_forwarding))}); });
+  };
   const [draftConfirm,setDraftConfirm]=useState(null); // {missing, incompleteBomDetails}
   const draftConfirmResolveRef = useRef(null);
   // Template chooser removed 21 Sep — Classic is the only layout.
@@ -16388,6 +16429,10 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           await declineExtraPrice(quoteExportRef);
         }
       }
+      const psChoice = await askPriceSummary();
+      if(!psChoice) return; // cancelled
+      priceSummaryChoiceRef.current = psChoice;
+      try{ await sb.from("quote_commercial_terms").update({price_summary_mode:psChoice.mode, price_summary_gst:psChoice.gst?{key:psChoice.gst.key,label:psChoice.gst.label}:null}).eq("reference_number",quoteExportRef); } catch(e){ /* column missing: choice just isn't remembered */ }
       const testingMode = await resolveTestingMode(quoteExportRef, user?.username);
       if(summaryMode){
         const misses = await runSummaryReview();
@@ -16589,6 +16634,34 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           + (testingMode==="separate" ? ((slTestingAll||[]).reduce((s,l)=>s+moneyVal(toDisp(l.price)),0) + (globalTestingAll||[]).reduce((s,l)=>s+moneyVal(toDisp(l.rate)),0)) : 0);
         return exactPricing ? r2(slNoSum + extrasDisp) : slNoSum + extrasDisp;
       })();
+
+      // 30 Sep (104) — Annexure II "with extras and taxes" (proforma style).
+      // Same rounded figures as the basic summary, then P&F (on basic price,
+      // taxable), freight / insurance terms, GST per component, grand total.
+      const psChoice = priceSummaryChoiceRef.current || {mode:"basic",gst:null};
+      const psPro = psChoice.mode==="proforma";
+      const psToDisp = (v)=> quoteIsInr ? (Number(v)||0) : (quoteFx>0 ? (Number(v)||0)/quoteFx : 0);
+      let hsnByItem = new Map();
+      if(psPro){ try{ const { data:hi } = await sb.from("item_tbl").select("item,hsn_code"); (hi||[]).forEach(r=>{ if(r.item) hsnByItem.set(normalizeItemName(r.item), String(r.hsn_code||"").trim()); }); } catch(e){} }
+      const psItems = estimatesRows.map(est=>{
+        const qty = est.order_qty||1; const slExact = poUnitPriceIn(est, quoteCurrency)!==null;
+        const { unit, total } = priceUnitTotal(slNoFoldedTotalDisp(est), qty, slExact, quoteCurrency);
+        const dp = linesRows.find(l=>l.item_sl_no===est.item_sl_no && l.is_direct_price===true);
+        const it = dp ? (dp.item||"Custom") : (modelItemMap.get(est.model)||est.model||"—");
+        return { sl:est.item_sl_no, item:it, desc:est.description||"—", hsn:hsnByItem.get(normalizeItemName(it))||"", unit, qty, total, exact:slExact };
+      });
+      const psOptions = (extraPriceForPdf||[]).map(l=>({ label:l.label||"—", amt:moneyVal(psToDisp(l.price)) }));
+      const psTests = testingMode==="separate" ? [
+        ...(slTestingAll||[]).map(l=>({ sl:l.item_sl_no, label:l.test_name, amt:moneyVal(psToDisp(l.price)) })),
+        ...(globalTestingAll||[]).map(l=>({ sl:l.item_sl_no, label:l.test_name, amt:moneyVal(psToDisp(l.rate)) }))] : [];
+      const psBasic = psItems.reduce((s0,r)=>s0+r.total,0);
+      const psSub = psBasic + psOptions.reduce((s0,r)=>s0+r.amt,0) + psTests.reduce((s0,r)=>s0+r.amt,0);
+      const psPf = terms.packing_forwarding_basis ? moneyVal(pfComputedAmount) : 0;
+      const psTaxable = psSub + psPf;
+      const psTaxes = (psPro && quoteIsInr && psChoice.gst && psChoice.gst.components ? psChoice.gst.components : [])
+        .map(c=>{ const rate=Number(c.rate_percent)||0; const raw=psTaxable*rate/100; return { label:c.label+" @ "+rate+"%", comp:c.label, rate, amt: exactPricing ? r2(raw) : Math.round(raw) }; });
+      const psNet = psTaxable + psTaxes.reduce((s0,t)=>s0+t.amt,0);
+      const psMoney = (v)=> exactPricing ? fmt(r2(v)) : fmt0(v);
 
       const {data:revChangesRows} = isRevisionPdf ? await sb.from("revision_changes").select("*").eq("revision_ref",quoteExportRef).order("changed_at",{ascending:true}) : {data:[]};
       const revChangesForPdf = revChangesRows||[];
@@ -16816,7 +16889,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           ["Delivery", effDelivery],
           ["Validity", effValidity],
           // Same figure the Price Summary adds up to — see grandTotalPrinted.
-          ["Total Basic Price", quoteCurrency+" "+money(grandTotalPrinted)]
+          ["Gross Amount (Basic Price)", quoteCurrency+" "+money(grandTotalPrinted)],
+          ...(psPro ? [["Net Amount (incl. P&F"+(psTaxes.length?" & GST":"")+")", quoteCurrency+" "+psMoney(psNet)]] : [])
         ];
         doc.autoTable({
           startY:y,
@@ -17114,60 +17188,120 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         doc.setFont("helvetica","normal"); doc.setFontSize(9.5); doc.setTextColor(...dark);
         // Kept clear of the classic footer bar (H-23 to H-16).
         const gtY = classic ? H-28 : H-14;
-        doc.text("Grand total: "+quoteCurrency+" "+money(grandTotalDisplay), W-12, gtY, {align:"right"});
+        doc.text(psPro ? ("Grand total"+(psTaxes.length?" (incl. GST)":"")+": "+quoteCurrency+" "+psMoney(psNet)) : ("Grand total: "+quoteCurrency+" "+money(grandTotalDisplay)), W-12, gtY, {align:"right"});
         doc.setDrawColor(200,197,185); doc.setLineWidth(0.3);
         doc.line(12,gtY-4,W-12,gtY-4);
       };
+      if(psPro){
+        // Proforma style: one table, green headings, extras and taxes in line.
+        const green=[31,92,64], pale=[232,242,236], white=[255,255,255];
+        const grp = t=>[{content:t,colSpan:7,styles:{fillColor:pale,textColor:green,fontStyle:"bold",fontSize:7.2}}];
+        const sumRow = (label,val,bold)=>[{content:label,colSpan:6,styles:{halign:"right",fontStyle:bold?"bold":"normal"}},{content:val,styles:{halign:"right",fontStyle:bold?"bold":"normal"}}];
+        const body=[grp("ITEMS")];
+        psItems.forEach(r=>body.push([r.sl, r.item, r.desc, r.hsn||"—", r.exact?fmt(r.unit):fmt0(r.unit), r.qty, r.exact?fmt(r.total):fmt0(r.total)]));
+        if(psOptions.length){ body.push(grp("OTHER OPTIONS")); psOptions.forEach(o=>body.push(["—", o.label, "", "—", psMoney(o.amt), 1, psMoney(o.amt)])); }
+        if(psTests.length){ body.push(grp("NDE / TESTING")); psTests.forEach(t=>body.push([t.sl, t.label, "", "9983", psMoney(t.amt), 1, psMoney(t.amt)])); }
+        body.push(sumRow("Sub total (basic price"+(psOptions.length?" + options":"")+(psTests.length?" + testing":"")+")", psMoney(psSub), true));
+        if(terms.packing_forwarding_basis) body.push(sumRow("Packing & forwarding"+(terms.packing_forwarding_basis==="Flat"?" (lumpsum)":" @ "+(Number(terms.packing_forwarding_value)||0)+"% on basic price"), psMoney(psPf)));
+        else if(terms.packing_forwarding) body.push(sumRow("Packing & forwarding", String(terms.packing_forwarding)));
+        if(terms.freight) body.push(sumRow("Freight", String(terms.freight)));
+        if(terms.insurance) body.push(sumRow("Insurance", String(terms.insurance)));
+        body.push(sumRow("Total before tax (taxable value)", psMoney(psTaxable), true));
+        if(!quoteIsInr) body.push(sumRow("GST", "Not applicable ("+quoteCurrency+" offer)"));
+        else if(!psTaxes.length) body.push(sumRow("GST", "Not charged"+(psChoice.gst&&psChoice.gst.note?" ("+psChoice.gst.note+")":"")));
+        else psTaxes.forEach(t=>body.push(sumRow(t.label, psMoney(t.amt))));
+        body.push([{content:"Grand total"+(psTaxes.length?" (incl. GST)":"")+" "+quoteCurrency,colSpan:6,styles:{halign:"right",fontStyle:"bold",fillColor:green,textColor:white}},{content:psMoney(psNet),styles:{halign:"right",fontStyle:"bold",fillColor:green,textColor:white}}]);
+        doc.autoTable({
+          startY:classic ? CLASSIC_CONTENT_TOP+8 : 42,
+          head:[["S.No","Item","Description","HSN/SAC","Unit price ("+quoteCurrency+")","Qty","Total ("+quoteCurrency+")"]],
+          body,
+          theme:"grid",
+          headStyles:{fillColor:green,textColor:white,fontStyle:"bold",fontSize:8.2,font:"times"},
+          bodyStyles:{font:"helvetica",fontSize:7.8,textColor:dark},
+          columnStyles:{0:{cellWidth:11},3:{cellWidth:17},4:{halign:"right",cellWidth:25},5:{halign:"right",cellWidth:11},6:{halign:"right",cellWidth:27}},
+          margin:{top:topY(42),left:12,right:12,bottom:botM(22)},
+          didDrawPage:priceSummaryPageFooter
+        });
+        let py = doc.lastAutoTable.finalY + 5;
+        doc.setFont("helvetica","normal"); doc.setFontSize(7.8); doc.setTextColor(...dark);
+        const wordsLines = doc.splitTextToSize("Amount in words: "+amountInWordsLine(Math.round(psNet), quoteCurrency), W-24);
+        if(py + wordsLines.length*4 > H-botM(22)){ doc.addPage(); priceSummaryPageFooter(); py = topY(42); }
+        wordsLines.forEach((ln,k)=>doc.text(ln,12,py+k*4)); py += wordsLines.length*4 + 3;
+        if(psTaxes.length){
+          // Tax summary by HSN / SAC. P&F carries the tax of the goods it goes with (the largest HSN).
+          const byHsn = new Map(); const addH=(k,v)=>byHsn.set(k,(byHsn.get(k)||0)+v);
+          psItems.forEach(r=>addH(r.hsn||"—", r.total)); psOptions.forEach(o=>addH("—",o.amt)); psTests.forEach(t=>addH("9983",t.amt));
+          if(psPf){ let top=null; byHsn.forEach((v,k)=>{ if(k!=="9983" && (top===null || v>byHsn.get(top))) top=k; }); addH(top||"—", psPf); }
+          const hRows = Array.from(byHsn.entries()).map(([k,v])=>[k, psMoney(v)].concat(psTaxes.map(t=>psMoney(exactPricing ? r2(v*t.rate/100) : Math.round(v*t.rate/100)))));
+          doc.autoTable({
+            startY: py,
+            head:[["HSN/SAC","Taxable value"].concat(psTaxes.map(t=>t.label))],
+            body: hRows,
+            theme:"grid",
+            headStyles:{fillColor:pale,textColor:green,fontStyle:"bold",fontSize:7.6,font:"times"},
+            bodyStyles:{font:"helvetica",fontSize:7.6,textColor:dark},
+            columnStyles:Object.fromEntries([1].concat(psTaxes.map((_,k)=>k+2)).map(c=>[c,{halign:"right"}])),
+            margin:{top:topY(42),left:12,right:12,bottom:botM(22)},
+            tableWidth: 150,
+            didDrawPage:priceSummaryPageFooter
+          });
+          py = doc.lastAutoTable.finalY + 4;
+          doc.setFont("helvetica","italic"); doc.setFontSize(7); doc.setTextColor(110,110,110);
+          doc.text("GST as applicable at the time of invoicing; rates shown are current rates. Tax summary figures are rounded per line.", 12, py);
+          doc.setTextColor(...dark);
+        }
+      } else {
       doc.autoTable({
-        startY:classic ? CLASSIC_CONTENT_TOP+8 : 42,
-        head:[summaryHead],
-        body: summaryRows,
-        theme:"grid",
-        headStyles:{fillColor:neutral,textColor:dark,fontStyle:"bold",fontSize:8.4,font:"times"},
-        bodyStyles:{font:"helvetica",fontSize:8,textColor:dark},
-        columnStyles:summaryColumnStyles,
-        margin:{top:topY(42),left:12,right:12,bottom:botM(22)},
-        didDrawPage:priceSummaryPageFooter
-      });
-      // NDE/Testing now sits above Other options (order swapped 3 Aug).
-      if(testingSectionPresent){
-        doc.setFontSize(9); doc.setFont("times","bold"); doc.setTextColor(...dark);
-        const afterY = doc.lastAutoTable.finalY + 6;
-        doc.text("NDE / Testing", 12, afterY);
-        doc.autoTable({
-          startY: afterY+3,
-          head: [["S.No","Test",""]],
-          body: allTestingRowsForPdf,
+          startY:classic ? CLASSIC_CONTENT_TOP+8 : 42,
+          head:[summaryHead],
+          body: summaryRows,
           theme:"grid",
           headStyles:{fillColor:neutral,textColor:dark,fontStyle:"bold",fontSize:8.4,font:"times"},
           bodyStyles:{font:"helvetica",fontSize:8,textColor:dark},
-          columnStyles:{2:{halign:"right"}},
+          columnStyles:summaryColumnStyles,
           margin:{top:topY(42),left:12,right:12,bottom:botM(22)},
           didDrawPage:priceSummaryPageFooter
         });
-      }
-      // "Other options" — renamed from "Extra Price Addition" (3 Aug). Still
-      // sourced from the quote-level quote_extra_price_tbl only — these lines
-      // apply to the whole quote, not one Sl No, so S.No shows "—" for all of
-      // them. The Sl No-level "Options" tab (quote_sl_extra_price_tbl) still
-      // folds silently into each item's unit price and is NOT pulled in here
-      // — that would be a real behaviour change (double-count risk), not just
-      // a label/column change, and was explicitly deferred.
-      if(extraPriceForPdf.length){
-        doc.setFontSize(9); doc.setFont("times","bold"); doc.setTextColor(...dark);
-        const afterExtraY = doc.lastAutoTable.finalY + 6;
-        doc.text("Other options", 12, afterExtraY);
-        doc.autoTable({
-          startY: afterExtraY+3,
-          head: [["S.No","Description",""]],
-          body: extraPriceForPdf.map(l=>["—", l.label, money(quoteIsInr?(Number(l.price)||0):((Number(l.price)||0)/quoteFx))]),
-          theme:"grid",
-          headStyles:{fillColor:neutral,textColor:dark,fontStyle:"bold",fontSize:8.4,font:"times"},
-          bodyStyles:{font:"helvetica",fontSize:8,textColor:dark},
-          columnStyles:{2:{halign:"right"}},
-          margin:{top:topY(42),left:12,right:12,bottom:botM(22)},
-          didDrawPage:priceSummaryPageFooter
-        });
+        // NDE/Testing now sits above Other options (order swapped 3 Aug).
+        if(testingSectionPresent){
+          doc.setFontSize(9); doc.setFont("times","bold"); doc.setTextColor(...dark);
+          const afterY = doc.lastAutoTable.finalY + 6;
+          doc.text("NDE / Testing", 12, afterY);
+          doc.autoTable({
+            startY: afterY+3,
+            head: [["S.No","Test",""]],
+            body: allTestingRowsForPdf,
+            theme:"grid",
+            headStyles:{fillColor:neutral,textColor:dark,fontStyle:"bold",fontSize:8.4,font:"times"},
+            bodyStyles:{font:"helvetica",fontSize:8,textColor:dark},
+            columnStyles:{2:{halign:"right"}},
+            margin:{top:topY(42),left:12,right:12,bottom:botM(22)},
+            didDrawPage:priceSummaryPageFooter
+          });
+        }
+        // "Other options" — renamed from "Extra Price Addition" (3 Aug). Still
+        // sourced from the quote-level quote_extra_price_tbl only — these lines
+        // apply to the whole quote, not one Sl No, so S.No shows "—" for all of
+        // them. The Sl No-level "Options" tab (quote_sl_extra_price_tbl) still
+        // folds silently into each item's unit price and is NOT pulled in here
+        // — that would be a real behaviour change (double-count risk), not just
+        // a label/column change, and was explicitly deferred.
+        if(extraPriceForPdf.length){
+          doc.setFontSize(9); doc.setFont("times","bold"); doc.setTextColor(...dark);
+          const afterExtraY = doc.lastAutoTable.finalY + 6;
+          doc.text("Other options", 12, afterExtraY);
+          doc.autoTable({
+            startY: afterExtraY+3,
+            head: [["S.No","Description",""]],
+            body: extraPriceForPdf.map(l=>["—", l.label, money(quoteIsInr?(Number(l.price)||0):((Number(l.price)||0)/quoteFx))]),
+            theme:"grid",
+            headStyles:{fillColor:neutral,textColor:dark,fontStyle:"bold",fontSize:8.4,font:"times"},
+            bodyStyles:{font:"helvetica",fontSize:8,textColor:dark},
+            columnStyles:{2:{halign:"right"}},
+            margin:{top:topY(42),left:12,right:12,bottom:botM(22)},
+            didDrawPage:priceSummaryPageFooter
+          });
+        }
       }
       summaryEndPage = doc.internal.getNumberOfPages();
 
@@ -19434,6 +19568,34 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         )
       )
     ),
+    psAsk && (()=>{
+      const pro = psAsk.mode==="proforma";
+      const pick = m=>setPsAsk(a=>({...a,mode:m}));
+      const card = (m,title,text)=>h("label",{key:m,style:{display:"flex",gap:10,alignItems:"flex-start",border:"1px solid "+(psAsk.mode===m?"#1f5c40":colors.border),background:psAsk.mode===m?"#e8f2ec":"#fff",borderRadius:7,padding:"10px 12px",cursor:"pointer"}},
+        h("input",{type:"radio",name:"ps-mode",checked:psAsk.mode===m,onChange:()=>pick(m),style:{marginTop:3,accentColor:"#1f5c40"}}),
+        h("div",null,h("div",{style:{fontWeight:700,fontSize:13.5}},title),h("div",{style:{fontSize:12,color:colors.muted,marginTop:2}},text)));
+      const go = ()=>{ const g = psAsk.opts.find(o=>o.key===psAsk.gstKey)||null; closePriceSummaryAsk({mode:psAsk.mode, gst: pro ? (g?{key:g.key,label:g.label,components:g.components,note:g.key==="none"?"export / SEZ / LUT":""}:null) : null}); };
+      return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1400,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"60px 16px",overflow:"auto"}},
+        h("div",{role:"dialog","aria-modal":"true",style:{background:"#fff",borderRadius:10,width:520,maxWidth:"100%",boxShadow:"0 10px 40px rgba(0,0,0,0.25)"}},
+          h("div",{style:{background:"#1f5c40",color:"#fff",padding:"12px 16px",borderRadius:"10px 10px 0 0"}},
+            h("div",{style:{fontSize:15,fontWeight:700}},"How should the price summary print?"),
+            h("div",{style:{fontSize:12,opacity:0.85}},quoteExportRef+(quoteHeaderRow?.customer_name?" · "+quoteHeaderRow.customer_name:"")+" · "+psAsk.currency)),
+          h("div",{style:{padding:"14px 16px",display:"flex",flexDirection:"column",gap:10}},
+            card("basic","As now: basic prices","Items, other options and testing with a grand total of basic prices. P&F, freight and GST are left to the Commercial Terms."),
+            card("proforma","With extras and taxes (proforma style)","Items, other options, testing, P&F, freight and insurance from the Commercial Terms, then GST and the grand total including tax. The cover letter shows the Gross (basic) and Net (all added) amounts."),
+            pro && h("div",{style:{borderTop:"1px solid "+colors.border,paddingTop:10,display:"flex",flexDirection:"column",gap:6}},
+              psAsk.currency!=="INR"
+                ? h("div",{style:{fontSize:12.5,color:"#8a5a10",background:"#fff6dc",borderRadius:6,padding:"7px 10px"}},psAsk.why)
+                : h(React.Fragment,null,
+                    h("label",{htmlFor:"ps-gst",style:{fontSize:12.5,fontWeight:600}},"GST"),
+                    h("select",{id:"ps-gst",value:psAsk.gstKey||"",onChange:e=>setPsAsk(a=>({...a,gstKey:e.target.value})),style:{...inputStyle,padding:"7px 9px",fontSize:12.5}},
+                      psAsk.opts.map(o=>h("option",{key:o.key,value:o.key},o.label))),
+                    h("div",{style:{fontSize:11.5,color:colors.muted}},psAsk.why)),
+              !psAsk.hasPf && h("div",{style:{fontSize:11.5,color:"#8a5a10"}},"Packing & Forwarding isn't set in the Commercial Terms, so no P&F line will print."))),
+          h("div",{style:{padding:"12px 16px",borderTop:"1px solid "+colors.border,display:"flex",gap:8,justifyContent:"flex-end"}},
+            h("button",{type:"button",onClick:()=>closePriceSummaryAsk(null),style:btnSecondary},"Cancel"),
+            h("button",{type:"button",onClick:go,style:{...btnPrimary,background:"#1f5c40",borderColor:"#1f5c40"}},"Generate PDF"))));
+    })(),
     draftConfirm && (()=>{
       const bomMissing = draftConfirm.missing.filter(m=>m.type==="bom");
       const validationMissing = draftConfirm.missing.filter(m=>m.type==="validation");
@@ -25441,6 +25603,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"30 Sep 2026 (104)", summary:"Price summary with extras and taxes. GENERATE PDF now asks how Annexure II should print, with the quote's last choice pre-selected: As now (basic prices, unchanged), or With extras and taxes (proforma style). PROFORMA: one table with green headings — Items (with HSN from the Item master), Other options, NDE / Testing (SAC 9983), Sub total, Packing & forwarding on basic price (taxable), Freight and Insurance terms from the Commercial Terms, Total before tax, one line per GST component (from GST Structures: CGST + SGST or IGST, picked from the customer's state against your GSTIN state, or No GST for export / SEZ / LUT; a foreign-currency offer prints GST not applicable), Grand total incl. GST, amount in words, and a tax summary by HSN/SAC. Prices follow the whole-number rule; GST is rounded to the rupee. COVER LETTER: Gross Amount (Basic Price) always; Net Amount (incl. P&F & GST) too when the proforma style is chosen. The choice is saved on the quote (run price_summary_proforma SQL once in each company to remember it)." },
   { date:"30 Sep 2026 (103)", summary:"Valve finder: the Actuator question no longer disappears. The form used to open a model as soon as the other answers left only one, before Actuator type was asked. Actuator type is now a required question for Valves (valve_finder_actuator_required SQL), so the form waits for it, and each list now shows every answer the item has; answers not available with the other choices are greyed with \"none with the other answers\", and picking one shows which answer to change (e.g. Pneumatic at a size that only comes gear operated). Gear operated is one of the actuator answers." },
   { date:"30 Sep 2026 (102)", summary:"Datasheets and price-list codes. The valve finder and the datasheet now know the codes added with the Prime list: construction Angle, Open, Double window, Fabricated, Thermodynamic, Ball float, Round body, Square body, 2-way, 5-way, Y-type, Y-type 2/2 way; ratings 3000/6000/10000 PSI; CA40, CA15, Stainless steel; FEP / PFA lining; Pneumatic diaphragm and Pneumatic cylinder. A Pricelist line's datasheet fills more rows from the price list: Seat also takes a liner, Disc takes a plate, Door takes a disc, Spindle takes a stem, Mfg standard takes a design standard and Flange standard takes the drilling. For the new Levaflow datasheet masters (one file per item, uploaded on Engineering Calc › Datasheet Master)." },
   { date:"29 Sep 2026 (101)", summary:"New Valve Price tab on the top ribbon, open to every user. A look-up of valve prices like Material Rates, not tied to a quote, so an engineer pricing a drain valve or a sub-component can find it. Pick an item and size, or type any part of the code or description; one row per model with its price per piece in rupees (the average of the vendors that price it; in Flometriq that is the Levaflow price). Click a row for the description and materials. Export to Excel gives the rows on screen. Vendor names and each vendor's figure show to admins only. Prices are still kept on BOM › Price List. PRICE LIST UPLOAD: a two-size valve (flush bottom, e.g. 80X50NB) is accepted as a size." },
