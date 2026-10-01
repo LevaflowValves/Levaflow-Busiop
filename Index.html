@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-01T16:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-01T18:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -1169,19 +1169,70 @@ function isSlNoLabel(label){
   return /^sl\.?\s*no\.?$/i.test((label||"").trim());
 }
 
+// 1 Oct (112) — datasheet "show only when" rules. A field that cannot
+// apply to this valve is not asked, not shown and not printed: Thread
+// standard on a flanged valve, Flange standard / face on a screwed one,
+// actuator details on a lever or handwheel valve, timer / power details on a
+// float-type trap. The value, if any, is kept. Read from the datasheet's own
+// End connection / Operation / Construction, else from the price-list line
+// (its materials, then the END and OPERATOR parts of its model code).
+const DS_END_CODE = {FL:"Flanged",SW:"Socket weld",SCRD:"Screwed",SWSC:"Screwed or socket weld",BW:"Butt weld",WF:"Wafer",LUG:"Lugged"};
+const DS_OP_CODE = {LO:"Lever",HW:"Handwheel",GO:"Gear operated",CAP:"Cap",PNA:"Pneumatic actuator",ELA:"Electric actuator"};
+function datasheetContext(template, values, lines){
+  const all = ((template&&template.sections)||[]).filter(s=>!s.bomSection).flatMap(s=>s.fields||[]);
+  const val = re=>{ const f = all.find(x=>re.test(String(x.label||"").trim())); if(!f) return ""; const v = values && values[f.key]!==undefined ? values[f.key] : (f.default||""); return String(v==null?"":v).trim(); };
+  let end = val(/^(end connection|end connections|ends?|end type|connection type|ends pattern)$/i);
+  let op = val(/^(operation|operator|actuation|operated by|mode of operation)$/i);
+  const construction = val(/^(construction|type)$/i);
+  const pl = (lines||[]).find(l=>l && l.price_source==="pricelist");
+  if(pl){
+    const mv = pl.material_values||{};
+    if(!end) end = String(pricelistLookup(mv,"End connection")||pricelistLookup(mv,"Ends")||"").trim();
+    if(!op) op = String(pricelistLookup(mv,"Operation")||"").trim();
+    const seg = String(pl.pricelist_model_code||pl.model||"").toUpperCase().split("-");
+    if(!end && seg[3] && DS_END_CODE[seg[3]]) end = DS_END_CODE[seg[3]];
+    if(!op && seg[8] && DS_OP_CODE[seg[8]]) op = DS_OP_CODE[seg[8]];
+  }
+  return { end, op, construction };
+}
+// Why a field does not apply, or "" when it does.
+function datasheetFieldNotApplicable(field, ctx){
+  const L = String((field&&field.label)||"").trim();
+  if(!L || isSlNoLabel(L) || (field && field.type==="auto_model")) return "";
+  const end = String((ctx&&ctx.end)||""), op = String((ctx&&ctx.op)||""), con = String((ctx&&ctx.construction)||"");
+  if(end){
+    const flanged = /flang|wafer|lug/i.test(end), threaded = /screw|thread|npt|bsp/i.test(end), socket = /socket/i.test(end);
+    if(/thread|\bnpt\b|\bbsp/i.test(L) && !threaded) return end+" ends";
+    if((/^flange\b/i.test(L) || /^facing\b|flange (standard|face|drilling|rating)|\bdrilling\b/i.test(L)) && !flanged) return end+" ends";
+    if(/socket ?weld/i.test(L) && !socket) return end+" ends";
+  }
+  if(op){
+    const pneu = /pneumatic|diaphragm|cylinder|\bair\b/i.test(op), elec = /electric|motor/i.test(op), hyd = /hydraulic/i.test(op);
+    const powered = pneu || elec || hyd || /actuat/i.test(op), gear = /gear/i.test(op);
+    if(/air supply|air filter|instrument air|solenoid/i.test(L) && !pneu && !/solenoid/i.test(op)) return op;
+    if(/fail position|limit switch|positioner|^signal\b|supply voltage|torque/i.test(L) && !powered) return op;
+    if(/actuator make|actuator model|gear ?box/i.test(L) && !powered && !gear) return op;
+  }
+  if(con && /float|thermodynamic/i.test(con) && !/solenoid|level|timer|electronic/i.test(con)){
+    if(/power supply|enclosure protection|timer setting|alarm contact/i.test(L)) return con;
+  }
+  return "";
+}
+
 // Mirrors DatasheetModal's getSectionRows, but as a standalone function so the
 // quote-wide export can rebuild a datasheet's sections without mounting the modal.
 // mocLines must be the ticked ("Show in MOC") lines for that one Sl No only.
 function buildDatasheetSectionRows(template, fieldValues, mocRow, slLines, model, slNo){
   const values = fieldValues || {};
   const materialDataRows = buildMocMaterialDataRows(mocRow, slLines||[], values.__mocChoices, values.__mocEdits);
+  const dsCtx = datasheetContext(template, values, slLines);
   return template.sections.map(section=>{
     const deleted = new Set((values.__deletedKeys && values.__deletedKeys[section.no]) || []);
     let base;
     if(section.bomSection){
       base = materialDataRows.map(r=>({ key:r.key, label:r.label, value:r.value }));
     } else {
-      base = section.fields.map(f=>{
+      base = section.fields.filter(f=>!datasheetFieldNotApplicable(f, dsCtx)).map(f=>{
         let val;
         if(isSlNoLabel(f.label)) val = slNo!==undefined&&slNo!==null ? String(slNo) : "";
         else if(f.type==="auto_model") val = model||"";
@@ -9622,6 +9673,9 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
   const isRevisionDs = openRef.reference_number.includes("-Rev-");
   const originalValuesRef = useRef({});
   const originalOverridesRef = useRef({});
+  // 1 Oct (112) — has a person reviewed this datasheet, or is it straight from the template?
+  const [review,setReview] = useState({ exists:false, by:null, at:null });
+  const [reviewBusy,setReviewBusy] = useState(false);
   const [changedFieldKeys,setChangedFieldKeys] = useState(new Set());
   const [closeBlockedMsg,setCloseBlockedMsg] = useState("");
   const [mocSaveError,setMocSaveError] = useState(null);
@@ -9655,6 +9709,7 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
           }
           setValues({...prefill, ...loadedValues});
           setOverrides((data&&data.overrides)||{});
+          setReview({ exists:!!data, by:(data&&data.reviewed_by)||null, at:(data&&data.reviewed_at)||null });
           originalOverridesRef.current = (data&&data.overrides)||{};
           originalValuesRef.current = loadedValues;
         }
@@ -9688,7 +9743,11 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
     );
   }
 
-  const editableSections = template.sections.filter(s=>!s.bomSection);
+  // 1 Oct (112) — fields that cannot apply to this valve are left out.
+  const dsCtx = datasheetContext(template, values, openLines);
+  const fieldShown = f=> !datasheetFieldNotApplicable(f, dsCtx);
+  const editableSections = template.sections.filter(s=>!s.bomSection).map(s=>({...s, fields:s.fields.filter(fieldShown)})).filter(s=>s.fields.length);
+  const secIdx = Math.max(0, Math.min(sectionIdx, editableSections.length-1));
   const setField = (k,v)=>setValues(vv=>({...vv,[k]:v}));
 
   const getDisplayValue = (field)=>{
@@ -9714,7 +9773,7 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
     if(section.bomSection){
       base = materialDataRows.map(r=>({ key:r.key, label:r.label, value:r.value, needsChoice:r.needsChoice, options:r.options, sourceLabelByGrade:r.sourceLabelByGrade, isMoc:true, edited:r.edited, original:r.original }));
     } else {
-      base = section.fields.map(f=>({ key:f.key, label:f.label, value:getDisplayValue(f), field:f }));
+      base = section.fields.filter(fieldShown).map(f=>({ key:f.key, label:f.label, value:getDisplayValue(f), field:f }));
     }
     base = base.filter(r=>!deleted.has(r.key));
     const extra = getExtraRows(section.no).map(r=>({ key:r.id, label:r.label, value:r.value, isExtra:true }));
@@ -9873,12 +9932,27 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
         if(logs.length){ await Promise.all(logs); setChangedFieldKeys(newlyChanged); originalValuesRef.current = {...values}; }
       }
       setSaved(true); setTimeout(()=>setSaved(false),2000);
+      setReview(r=>({...r, exists:true}));
       setAddLineError({});
       setCloseBlockedMsg("");
       originalValuesRef.current = {...values};
       originalOverridesRef.current = {...overrides};
     } catch(e){ console.error("Datasheet save failed",e); alert("Save failed: "+(e.message||e)); }
     finally{ setSaving(false); }
+  };
+
+  const markReviewed = async()=>{
+    if(hasUnresolvedMoc){ alert("Resolve the pending grade selection(s) in Material Data first."); return; }
+    setReviewBusy(true);
+    try{
+      if(isDirty || !review.exists) await saveAll();
+      const at = new Date().toISOString();
+      const { error } = await sb.from("datasheets").update({ reviewed_by:user.username, reviewed_at:at })
+        .eq("reference_number",openRef.reference_number).eq("item_sl_no",openRef.item_sl_no).eq("template_key",normalizeItemName(itemName));
+      if(error){ alert(/reviewed_/.test(error.message||"") ? "Run the build 112 SQL first (datasheet_review_flag_2026-10-01.sql)." : "Couldn't mark it reviewed: "+error.message); return; }
+      await logAudit("UPDATE","datasheets",openRef.reference_number+"-"+openRef.item_sl_no,"Datasheet ("+itemName+") marked reviewed",user.username,null,{reviewed_by:user.username,reviewed_at:at});
+      setReview({ exists:true, by:user.username, at });
+    } finally { setReviewBusy(false); }
   };
 
   const exportExcel = ()=>{
@@ -10004,6 +10078,11 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
       h("div",{style:{overflowY:"auto",flex:1,padding:"16px 20px"}},
         h("div",{style:{display:"flex",gap:10,alignItems:"center",marginBottom:14,flexWrap:"wrap"}},
           h("button",{onClick:()=>{setSectionIdx(0);setFillOpen(true);},style:btnPrimary},"Fill remaining details ("+filledCount+"/"+totalCount+")"),
+          review.at
+            ? h("span",{title:"Reviewed "+String(review.at).slice(0,10),style:{fontSize:11.5,padding:"3px 10px",borderRadius:9,background:"#e8f2ec",color:"#1f5c40",fontWeight:600}},"\u2713 Reviewed by "+(review.by||"\u2014")+" \u00b7 "+String(review.at).slice(0,10))
+            : h(React.Fragment,null,
+                h("span",{style:{fontSize:11.5,padding:"3px 10px",borderRadius:9,background:"#fff4d6",color:"#854f0b",fontWeight:600}},review.exists?"Saved \u2014 not reviewed yet":"From template \u2014 not reviewed yet"),
+                h("button",{onClick:markReviewed,disabled:reviewBusy,title:"Saves the datasheet if needed and records that you checked it",style:{...btnSecondary,borderColor:"#1f5c40",color:"#1f5c40",opacity:reviewBusy?0.6:1}},reviewBusy?"Saving\u2026":"Mark as reviewed")),
           h("button",{onClick:saveAll,style:{...btnSecondary,color:saved?"#1c8c56":colors.text}}, saving?"Saving…":(saved?"Saved ✓":"Save")),
           h("button",{onClick:exportExcel,style:btnSecondary},"Export Excel"),
           h("button",{onClick:exportPDF,style:btnSecondary},"Export PDF")
@@ -10067,6 +10146,13 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
                   !isEditing && h("button",{onClick:()=>deleteRow(section.no,row),title:"Delete this line",
                     style:{border:"none",background:"none",color:colors.danger,cursor:"pointer",fontSize:14,padding:"2px 6px",flexShrink:0}},"✕")
                 );}),
+            !section.bomSection && (()=>{
+              const na = section.fields.map(f=>({f,why:datasheetFieldNotApplicable(f,dsCtx)})).filter(x=>x.why);
+              if(!na.length) return null;
+              const whys = Array.from(new Set(na.map(x=>x.why)));
+              return h("div",{style:{padding:"5px 14px",fontSize:11,color:colors.mutedLight,borderTop:"1px solid #f0efe8"},title:"Not asked and not printed. Change the End connection or Operation and they come back."},
+                "Not applicable ("+whys.join(", ")+"): "+na.map(x=>x.f.label).join(", "));
+            })(),
             hiddenCount>0 && h("div",{style:{padding:"5px 14px",fontSize:11,color:colors.mutedLight,borderTop:"1px solid #f0efe8"}},
               hiddenCount+" line"+(hiddenCount>1?"s":"")+" hidden — ",
               h("span",{onClick:()=>restoreDeleted(section.no),style:{color:"#1c8c75",cursor:"pointer",textDecoration:"underline"}},"restore")
@@ -10093,14 +10179,14 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
           );
         })()
       ),
-      fillOpen && h("div",{style:{position:"fixed",inset:0,background:"rgba(20,20,20,0.55)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:90}},
+      fillOpen && editableSections.length>0 && h("div",{style:{position:"fixed",inset:0,background:"rgba(20,20,20,0.55)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:90}},
         h("div",{style:{background:"#fff",borderRadius:8,width:560,maxWidth:"92vw",maxHeight:"86vh",display:"flex",flexDirection:"column"}},
           h("div",{style:{background:colors.dark,color:"#fff",padding:"10px 16px",display:"flex",justifyContent:"space-between",alignItems:"center",borderRadius:"8px 8px 0 0"}},
-            h("div",{style:{fontSize:13,fontWeight:700}},editableSections[sectionIdx].no+". "+editableSections[sectionIdx].title),
+            h("div",{style:{fontSize:13,fontWeight:700}},editableSections[secIdx].no+". "+editableSections[secIdx].title),
             h("button",{onClick:()=>setFillOpen(false),style:{background:"none",border:"none",color:"#fff",cursor:"pointer"}},"✕")
           ),
           h("div",{style:{padding:"14px 16px",overflowY:"auto",flex:1}},
-            editableSections[sectionIdx].fields.map(field=>{
+            editableSections[secIdx].fields.map(field=>{
               const fieldChanged = changedFieldKeys.has(field.key);
               const changedStyle = fieldChanged?{background:"#fff8e1",border:"1px solid #e0b325"}:{};
               return h("div",{key:field.key,style:{marginBottom:12}},
@@ -10141,9 +10227,9 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
             h("button",{onClick:exportPDF,style:{...btnSecondary,fontSize:11,padding:"4px 10px"}},"Export PDF")
           ),
           h("div",{style:{padding:"10px 16px",borderTop:"1px solid "+colors.border,display:"flex",justifyContent:"space-between",alignItems:"center"}},
-            h("button",{onClick:()=>setSectionIdx(i=>Math.max(0,i-1)),disabled:sectionIdx===0,style:{...btnSecondary,opacity:sectionIdx===0?0.4:1}},"Back"),
-            h("span",{style:{fontSize:11,color:colors.mutedLight}},"Section "+(sectionIdx+1)+" of "+editableSections.length),
-            sectionIdx<editableSections.length-1
+            h("button",{onClick:()=>setSectionIdx(i=>Math.max(0,i-1)),disabled:secIdx===0,style:{...btnSecondary,opacity:secIdx===0?0.4:1}},"Back"),
+            h("span",{style:{fontSize:11,color:colors.mutedLight}},"Section "+(secIdx+1)+" of "+editableSections.length),
+            secIdx<editableSections.length-1
               ? h("button",{onClick:()=>setSectionIdx(i=>Math.min(editableSections.length-1,i+1)),style:btnPrimary},"Next")
               : h("button",{onClick:async()=>{ await saveAll(); setFillOpen(false); },style:{...btnPrimary,background:"#1c8c56"}},"Save & close")
           )
@@ -25548,6 +25634,25 @@ const MANUAL_SECTIONS = [
         ]
       },
       {
+        "key": "datasheet_rules",
+        "title": "Datasheets: fields that don't apply, and Reviewed",
+        "tag": "Quotes",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "A datasheet only asks what applies to the valve. Thread standard is asked only for screwed ends, Flange standard and face only for flanged, actuator details only when the valve is actuated (air supply only for pneumatic), and timer / power details only on timer or level-sensing traps. The app reads the End connection and Operation on the datasheet, or from the price list when the datasheet doesn't say."
+          },
+          {
+            "type": "p",
+            "text": "Fields left out are not printed. Each section notes what was left out and why, e.g. \"Not applicable (Lever): Air supply pressure\". Change the End connection or the Operation and they come back, with anything typed earlier still there."
+          },
+          {
+            "type": "p",
+            "text": "REVIEWED: a new datasheet starts as \"From template \u2014 not reviewed yet\". After checking it, press Mark as reviewed; the datasheet and the Sl No card then show who reviewed it and when. Datasheets saved before 1 Oct count as reviewed."
+          }
+        ]
+      },
+      {
         "key": "posts",
         "title": "Posts \u2014 who holds each job",
         "tag": "Admin",
@@ -26492,6 +26597,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"1 Oct 2026 (112)", summary:"Datasheets: show-only-when rules and a reviewed flag. RULES (datasheetContext / datasheetFieldNotApplicable): the End connection, Operation and Construction are read from the datasheet itself, else from the price-list line (its materials, then the END and OPERATOR parts of its model code). Thread standard / NPT / BSP fields only on screwed ends; Flange standard / face / drilling only on flanged, wafer or lugged; socket-weld fields only on socket weld; air supply / air filter / solenoid only on pneumatic; fail position / limit switch / positioner / signal / torque only on powered actuators; actuator or gearbox make only on powered or gear operation; power / timer / alarm fields only on timer or level-sensing traps, not float or thermodynamic. A field that does not apply is not asked in Fill remaining details, not counted, not shown, and not printed on the datasheet PDF, Excel or the quote PDF; its value is kept, and the section notes \"Not applicable (Lever): Air supply pressure\". REVIEWED: datasheets.reviewed_by / reviewed_at. The datasheet shows From template / Saved \u2014 not reviewed yet with a Mark as reviewed button (saves first if needed), or Reviewed by X and date. The Sl No card reads Datasheet from template \u2014 not reviewed yet / Datasheet saved \u2014 not reviewed yet / \u2713 Datasheet reviewed by X. Datasheets saved before today count as reviewed. NEEDS SQL: datasheet_review_flag_2026-10-01.sql." },
   { date:"1 Oct 2026 (111)", summary:"Valve Price is admin-only on the Levaflow site (its prices are vendor costs); on Flometriq everyone keeps it. The site is recognised from its own settings.js (instanceLabel / appTitle / companyName containing Levaflow), so one Index.html still serves both. Non-admins at Levaflow no longer see the ribbon tab, and the screen refuses if reached another way." },
   { date:"1 Oct 2026 (110)", summary:"Tabbed Documents box and hand-over to production (the 21 Sep design). DOCUMENTS BOX (DocumentsBox, quotes and Sale Orders): one tab per document grouped under its category, Sl No on the tab, a status dot from the Document Status master bucket, * for mandatory, a DASHED tab for each requirement with nothing sent against it, and a + tab. + adds a requirement only, or a requirement with Rev 0; the document number is suggested from the category prefix and checked live against every document number. A requirement tab logs Rev 0 straight against it, toggles mandatory (authorization code) or removes it. A document tab shows the revision trail (status changeable per row, Edit Out/In on the latest) and the NEXT ENTRY pre-filled with the revision the Out/In sequence expects and the last link; Super Admin override kept. Link mandatory, PDF optional everywhere. Pick several\u2026 adds requirements for many categories, one per Sl No for categories kept per Sl No. CATEGORY MASTER: number_prefix, per_sl_no, for_production_default. FOR PRODUCTION on each document (default from its category), changeable only by the Document Controller, the Technical Head or a Super Admin; In offer PDF beside it on quotes. Requirements carry item_sl_no and carry to the Sale Order by category + Sl No. HAND-OVER: the work order count on the Sale Order opens WorkOrderDocsModal; the Document Controller (or a Super Admin) hands over the For-production documents for each work order's Sl Nos, pinned at the current revision (work_order_doc_handover_tbl); Code 1 / Code 2 pre-ticked, others offered with a Hold-level warning (Full Hold asks to confirm). A later revision marks the hand-over superseded, re-flags the work order to the Technical Head (work_order_ack_tbl) and adds a Reissue item for the Document Controller to Pending Actions; handing the new revision over clears it. NEEDS SQL: documents_tabs_handover_2026-10-01.sql. Manual: new article Documents box, and hand-over to production." },
   { date:"1 Oct 2026 (109)", summary:"Log Follow-ups: the Which date are you logging? box now always has a Cancel. Before a date is chosen it leaves the screen (back to the overdue list when opened from there, otherwise Home); once a date is set it just closes the box, as before." },
@@ -34393,11 +34499,16 @@ function PricingDescriptionPanel({ openRef, openLines, user, sessionCompany, ite
   // other Datasheet entry point in this app reads. Checked on mount and
   // re-checked whenever the Datasheet modal closes.
   const [hasDatasheet,setHasDatasheet] = useState(null); // null=loading, else boolean
+  const [dsReview,setDsReview] = useState(null);          // 1 Oct (112) — {by, at} once a person has reviewed it
   const [showDatasheet,setShowDatasheet] = useState(false);
   const checkDatasheet = useCallback(()=>{
-    sb.from("datasheets").select("id").eq("reference_number",openRef.reference_number).eq("item_sl_no",openRef.item_sl_no).limit(1).then(({data})=>{
-      setHasDatasheet((data||[]).length>0);
-    });
+    (async()=>{
+      let res = await sb.from("datasheets").select("id,reviewed_by,reviewed_at").eq("reference_number",openRef.reference_number).eq("item_sl_no",openRef.item_sl_no).limit(1);
+      if(res.error) res = await sb.from("datasheets").select("id").eq("reference_number",openRef.reference_number).eq("item_sl_no",openRef.item_sl_no).limit(1);
+      const row = (res.data||[])[0];
+      setHasDatasheet(!!row);
+      setDsReview(row && row.reviewed_at ? { by:row.reviewed_by, at:row.reviewed_at } : null);
+    })();
   },[openRef.reference_number, openRef.item_sl_no]);
   useEffect(()=>{ checkDatasheet(); },[checkDatasheet]);
 
@@ -34501,9 +34612,13 @@ function PricingDescriptionPanel({ openRef, openLines, user, sessionCompany, ite
       hasRealBom && h("button",{onClick:onViewBom,style:btnSecondary},"View / Edit BOM lines")
     ),
     h("div",{style:{display:"grid",gridTemplateColumns:singleDp?"1fr 1fr":"1fr",gap:10,marginBottom:14}},
-      h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,padding:"10px 14px",background: hasDatasheet?"#eaf9f4":"#fff4d6",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}},
-        h("div",{style:{fontSize:12.5,fontWeight:600,color: hasDatasheet?"#085041":"#854f0b"}}, hasDatasheet===null?"Checking Datasheet…":hasDatasheet?"✓ Datasheet on file":"No Datasheet yet for this Sl No"),
-        hasDatasheet!==null && h("button",{onClick:()=>setShowDatasheet(true),style:btnSecondary}, hasDatasheet?"Open / Edit Datasheet":"Add Datasheet")
+      h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,padding:"10px 14px",background: dsReview?"#eaf9f4":"#fff4d6",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}},
+        h("div",{style:{fontSize:12.5,fontWeight:600,color: dsReview?"#085041":"#854f0b"}},
+          hasDatasheet===null ? "Checking Datasheet\u2026"
+          : dsReview ? "\u2713 Datasheet reviewed"+(dsReview.by?" by "+dsReview.by:"")
+          : hasDatasheet ? "Datasheet saved \u2014 not reviewed yet"
+          : "Datasheet from template \u2014 not reviewed yet"),
+        hasDatasheet!==null && h("button",{onClick:()=>setShowDatasheet(true),style:btnSecondary}, dsReview?"Open / Edit Datasheet":"Review Datasheet")
       ),
       singleDp && singleDp.price_source==="pricelist" && h("div",{style:{border:"1px solid #b9d3ef",borderRadius:8,padding:"10px 14px",background:"#eaf2fb",fontSize:12,color:"#0c447c"}},
         h("div",{style:{fontWeight:700,marginBottom:2}},"Priced from the price list \u00b7 "+(singleDp.pricelist_model_code||singleDp.model||"")),
