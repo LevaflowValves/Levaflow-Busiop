@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-09-30T08:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-01T04:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -599,6 +599,9 @@ loadQuoteStages();
 // CLASSIC_CONTENT_BOTTOM; the quote builder shifts every table's margins
 // by the difference from its own layout rather than each table carrying
 // its own hand-tuned number.
+// 30 Sep (106) — one green scheme for every page of the quote / Sale Order PDF.
+const PDF_GREEN = [31,92,64];   // table headings, titles, grand totals
+const PDF_PALE  = [232,242,236]; // label columns, section rows, title band, footer bar
 const CLASSIC_MARGIN = 8;           // page border inset, mm
 const CLASSIC_HEADER_BOTTOM = 42;   // company block ends here
 const CLASSIC_TITLE_BOTTOM = 50;    // title band ends here
@@ -660,9 +663,10 @@ function drawClassicPdfFrame(doc, W, H, company, title, opts){
   const lead = wrapped.length ? Math.min(3.6, room/wrapped.length) : 3.6;
   wrapped.forEach((ln,i)=>doc.text(ln, cx, hy+2+i*lead, {align:"center"}));
   doc.setLineWidth(0.3);
-  doc.rect(m, CLASSIC_HEADER_BOTTOM, W-2*m, CLASSIC_TITLE_BOTTOM-CLASSIC_HEADER_BOTTOM);
+  doc.setFillColor(...PDF_PALE);
+  doc.rect(m, CLASSIC_HEADER_BOTTOM, W-2*m, CLASSIC_TITLE_BOTTOM-CLASSIC_HEADER_BOTTOM, "FD");
   doc.setFont("times","bold"); doc.setFontSize(title && title.length>40 ? 8.6 : 10);
-  doc.setTextColor(...dark);
+  doc.setTextColor(...PDF_GREEN);
   doc.text(title||"", cx, CLASSIC_HEADER_BOTTOM+5.6, {align:"center"});
   doc.setFont("helvetica","normal");
 }
@@ -672,9 +676,9 @@ function drawClassicPdfFrame(doc, W, H, company, title, opts){
 // today, so the website is used until one exists.
 function drawClassicPdfFooter(doc, W, H, company, pageNo, pageCount){
   const m = CLASSIC_MARGIN;
-  doc.setFillColor(232,230,223);
+  doc.setFillColor(...PDF_PALE);
   doc.rect(m+0.3, H-CLASSIC_FOOTER_TOP, W-2*m-0.6, 7, "F");
-  doc.setFont("helvetica","bold"); doc.setFontSize(7.2); doc.setTextColor(15,110,86);
+  doc.setFont("helvetica","bold"); doc.setFontSize(7.2); doc.setTextColor(...PDF_GREEN);
   doc.text(pdfFooterCompanyName(company), m+4, H-CLASSIC_FOOTER_TOP+4.6);
   const note = (company&&(company.footer_note||company.website))||"";
   if(note){
@@ -1166,7 +1170,7 @@ function isSlNoLabel(label){
 // mocLines must be the ticked ("Show in MOC") lines for that one Sl No only.
 function buildDatasheetSectionRows(template, fieldValues, mocRow, slLines, model, slNo){
   const values = fieldValues || {};
-  const materialDataRows = buildMocMaterialDataRows(mocRow, slLines||[], values.__mocChoices);
+  const materialDataRows = buildMocMaterialDataRows(mocRow, slLines||[], values.__mocChoices, values.__mocEdits);
   return template.sections.map(section=>{
     const deleted = new Set((values.__deletedKeys && values.__deletedKeys[section.no]) || []);
     let base;
@@ -9339,6 +9343,103 @@ async function mergeAttachedPdfPages(doc, insertions, storageBucket){
   }
 }
 
+// 1 Oct (107) — reads one stored PDF for merging. Never throws: a file that
+// can't be fetched or opened comes back with pages 0 and the reason, so the
+// quote still builds and the user is told which file was left out.
+async function loadStoredPdf(filePath, storageBucket){
+  try{
+    const { data:signed, error } = await sb.storage.from(storageBucket).createSignedUrl(filePath, 300);
+    if(error || !signed?.signedUrl) throw new Error((error&&error.message)||"file not found in storage");
+    const resp = await fetch(signed.signedUrl);
+    if(!resp.ok) throw new Error("download failed ("+resp.status+")");
+    const bytes = await resp.arrayBuffer();
+    const pdf = await window.PDFLib.PDFDocument.load(bytes, { ignoreEncryption:true });
+    const pages = pdf.getPageCount();
+    if(!pages) throw new Error("the PDF has no pages");
+    return { pdf, pages, error:null };
+  } catch(e){
+    console.error("Could not read stored PDF "+filePath, e);
+    return { pdf:null, pages:0, error:(e&&e.message)||String(e) };
+  }
+}
+
+// 1 Oct (107) — the documents that go into a QUOTE PDF as enclosures:
+// every live document on the quote ticked "In offer PDF", using its newest
+// OUT entry (what we sent; a document we only received never goes in), and
+// not if that entry's status is superseded / rejected / void / cancelled /
+// withdrawn. filePath is null when the file is no longer in storage — such
+// a document is listed as sent separately.
+async function fetchOfferEnclosures(ref){
+  if(!ref) return [];
+  try{
+    const { data:parents, error } = await sb.from("universal_documents_tbl").select("*").eq("entity_id",ref);
+    if(error || !parents || !parents.length) return [];
+    const live = parents.filter(p=>!p.is_archived && p.include_in_offer!==false);
+    if(!live.length) return [];
+    const { data:hist } = await sb.from("universal_document_history_tbl").select("*").in("document_id",live.map(p=>p.id))
+      .order("rev_number",{ascending:false}).order("changed_at",{ascending:false});
+    const EXCLUDED = /supersed|reject|void|cancel|withdraw/i;
+    const out = [];
+    live.forEach(p=>{
+      const sent = (hist||[]).find(x=>x.document_id===p.id && x.direction==="Out");
+      if(!sent || EXCLUDED.test(sent.status||"")) return;
+      out.push({ id:p.id, docNumber:p.doc_number||"", title:p.doc_name||"", category:p.category||"", rev:sent.rev_number??0,
+        status:sent.status||"", link:sent.link||"", filePath:(sent.lives_in_supabase && sent.file_path) ? sent.file_path : null, created:p.created_at||"" });
+    });
+    return out.sort((a,b)=> String(a.created).localeCompare(String(b.created)) || String(a.docNumber).localeCompare(String(b.docNumber)));
+  } catch(e){ console.error("Couldn't read the offer enclosures", e); return []; }
+}
+
+// 1 Oct (107) — splices already-loaded PDFs into a finished jsPDF doc and
+// stamps every spliced page with the same page numbering the native pages
+// carry (they were numbered with the final total in mind), plus the DRAFT
+// mark when the offer is a draft. insertions: [{afterPage, loaded:{pdf,pages}, seq}].
+async function mergeLoadedPdfPages(doc, insertions, opts){
+  const list = (insertions||[]).filter(i=>i && i.loaded && i.loaded.pdf && i.loaded.pages);
+  if(!list.length) return doc;
+  const o = opts || {};
+  try{
+    const { PDFDocument, StandardFonts, rgb, degrees } = window.PDFLib;
+    const merged = await PDFDocument.load(doc.output("arraybuffer"));
+    const nativeCount = merged.getPageCount();
+    // Highest insertion point first; same point in reverse order, so they end up in list order.
+    const sorted = [...list].sort((a,b)=> (b.afterPage-a.afterPage) || ((b.seq||0)-(a.seq||0)));
+    const spliced = [];   // [{afterPage, pages}]
+    for(const ins of sorted){
+      const copied = await merged.copyPages(ins.loaded.pdf, ins.loaded.pdf.getPageIndices());
+      copied.forEach((pg,i)=>merged.insertPage(ins.afterPage+i, pg));
+      spliced.push({afterPage:ins.afterPage, pages:copied.length, seq:ins.seq||0});
+    }
+    // Which final positions are spliced pages: walk the native pages in order.
+    const total = merged.getPageCount();
+    const isSpliced = new Array(total).fill(false);
+    const byAfter = {}; spliced.forEach(x=>{ byAfter[x.afterPage]=(byAfter[x.afterPage]||0)+x.pages; });
+    let pos = 0;   // 0-based index into the merged pages
+    for(let n=1;n<=nativeCount;n++){ pos++; const add=byAfter[n]||0; for(let k=0;k<add;k++){ isSpliced[pos]=true; pos++; } }
+    // (native page n sits at index pos-1 after its pos++; its spliced pages follow it.)
+    const font = await merged.embedFont(StandardFonts.Helvetica);
+    const bold = await merged.embedFont(StandardFonts.HelveticaBold);
+    const pages = merged.getPages();
+    pages.forEach((pg,idx)=>{
+      if(!isSpliced[idx]) return;
+      const { width, height } = pg.getSize();
+      const txt = (o.footerText ? o.footerText+"  ·  " : "")+"Page "+(idx+1)+" of "+total;
+      const tw = font.widthOfTextAtSize(txt, 7);
+      pg.drawRectangle({ x:width/2-tw/2-6, y:6, width:tw+12, height:11, color:rgb(232/255,242/255,236/255), borderColor:rgb(31/255,92/255,64/255), borderWidth:0.4 });
+      pg.drawText(txt, { x:width/2-tw/2, y:9.6, size:7, font, color:rgb(31/255,92/255,64/255) });
+      if(o.watermark){
+        const ww = bold.widthOfTextAtSize("DRAFT", 60);
+        pg.drawText("DRAFT", { x:width/2-ww/2*0.82, y:height/2-ww/2*0.57, size:60, font:bold, color:rgb(230/255,195/255,190/255), rotate:degrees(35), opacity:0.75 });
+      }
+    });
+    return wrapAsJsPdfLike(await merged.save());
+  } catch(mergeErr){
+    console.error("PDF merge failed — returning the offer without merged pages", mergeErr);
+    alert("The PDF generated, but the attached pages couldn't be merged in this time: "+mergeErr.message+"\n\nEverything else in the PDF is unaffected. Try generating again.");
+    return doc;
+  }
+}
+
 // Inline resolver for a Material Data row with genuinely ambiguous grades —
 // two paths: pick one grade for the whole row, or split into one row per
 // grade with a user-typed label each (pre-filled from the matched BOM
@@ -9497,7 +9598,10 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
   // Material Data is always rebuilt straight from Item MOC Rules matched
   // against the real BOM/estimate lines — whatever field list the
   // uploaded Excel defined for this section is ignored.
-  const materialDataRows = useMemo(()=> buildMocMaterialDataRows(mocRow, openLines||[], values.__mocChoices), [mocRow, openLines, values.__mocChoices]);
+  const materialDataRows = useMemo(()=> buildMocMaterialDataRows(mocRow, openLines||[], values.__mocChoices, values.__mocEdits), [mocRow, openLines, values.__mocChoices, values.__mocEdits]);
+  // 1 Oct (107) — Edit on every line of the datasheet view. {sectionNo,key} of the line open for editing.
+  const [rowEdit,setRowEdit] = useState(null);
+  const [rowEditDraft,setRowEditDraft] = useState("");
   // Per-section "add line" draft inputs, keyed by section number: {label, value}
   const [addDraft,setAddDraft] = useState({});
   const [addLineSaving,setAddLineSaving] = useState({}); // {sectionNo: true} while the auto-save round-trip is in flight
@@ -9505,6 +9609,7 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
 
   const isRevisionDs = openRef.reference_number.includes("-Rev-");
   const originalValuesRef = useRef({});
+  const originalOverridesRef = useRef({});
   const [changedFieldKeys,setChangedFieldKeys] = useState(new Set());
   const [closeBlockedMsg,setCloseBlockedMsg] = useState("");
   const [mocSaveError,setMocSaveError] = useState(null);
@@ -9538,6 +9643,7 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
           }
           setValues({...prefill, ...loadedValues});
           setOverrides((data&&data.overrides)||{});
+          originalOverridesRef.current = (data&&data.overrides)||{};
           originalValuesRef.current = loadedValues;
         }
         if(isRevisionDs && !cancelled){
@@ -9594,7 +9700,7 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
     const deleted = new Set(getDeletedKeys(section.no));
     let base;
     if(section.bomSection){
-      base = materialDataRows.map(r=>({ key:r.key, label:r.label, value:r.value, needsChoice:r.needsChoice, options:r.options, sourceLabelByGrade:r.sourceLabelByGrade }));
+      base = materialDataRows.map(r=>({ key:r.key, label:r.label, value:r.value, needsChoice:r.needsChoice, options:r.options, sourceLabelByGrade:r.sourceLabelByGrade, isMoc:true, edited:r.edited, original:r.original }));
     } else {
       base = section.fields.map(f=>({ key:f.key, label:f.label, value:getDisplayValue(f), field:f }));
     }
@@ -9625,6 +9731,25 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
       return {...vv, __deletedKeys:{...cur,[sectionNo]:[]}};
     });
   };
+  // Which lines can be typed over here. Sl No and Model come from the quote itself.
+  const rowLocked = (row)=> !!(row.field && (isSlNoLabel(row.field.label) || row.field.type==="auto_model"));
+  const startRowEdit = (sectionNo,row)=>{ setRowEdit({sectionNo,key:row.key}); setRowEditDraft(row.needsChoice?"":String(row.value==null?"":row.value)); };
+  const cancelRowEdit = ()=>{ setRowEdit(null); setRowEditDraft(""); };
+  const saveRowEdit = (sectionNo,row)=>{
+    const v = String(rowEditDraft==null?"":rowEditDraft).trim();
+    if(row.isMoc){
+      // Typing back the BOM / price-list value is the same as Reset.
+      setValues(vv=>{ const cur={...(vv.__mocEdits||{})}; const orig=row.edited?row.original:row.value; if(v===String(orig==null?"":orig).trim() && !row.needsChoice) delete cur[row.label]; else cur[row.label]=v; return {...vv,__mocEdits:cur}; });
+    } else if(row.isExtra){
+      setValues(vv=>{ const cur=vv.__extraRows||{}; return {...vv,__extraRows:{...cur,[sectionNo]:(cur[sectionNo]||[]).map(r=>r.id===row.key?{...r,value:v}:r)}}; });
+    } else if(row.field && row.field.type==="bom"){
+      setOverrides(o=>({...o,[row.field.key]:v}));
+    } else {
+      setField(row.key, v);
+    }
+    cancelRowEdit();
+  };
+  const resetMocEdit = (row)=>{ setValues(vv=>{ const cur={...(vv.__mocEdits||{})}; delete cur[row.label]; return {...vv,__mocEdits:cur}; }); };
   const addLine = async(sectionNo)=>{
     const draft = addDraft[sectionNo]||{};
     if(!draft.label || !draft.label.trim()) return;
@@ -9718,8 +9843,15 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
         const allKeys = new Set([...Object.keys(values),...Object.keys(originalValuesRef.current)]);
         const newlyChanged = new Set(changedFieldKeys);
         const logs=[];
+        // Material Data edits are one object; log them line by line.
+        { const oldE=originalValuesRef.current.__mocEdits||{}, newE=values.__mocEdits||{};
+          new Set([...Object.keys(oldE),...Object.keys(newE)]).forEach(lbl=>{
+            if(String(oldE[lbl]??"")!==String(newE[lbl]??"")){
+              logs.push(sb.from("revision_changes").insert({revision_ref:openRef.reference_number,area:"datasheet",item_sl_no:openRef.item_sl_no,field_name:"Material Data: "+lbl,old_value:oldE[lbl]??"(from BOM / price list)",new_value:newE[lbl]??"(reset to BOM / price list)",changed_by:user.username}));
+            }
+          }); }
         allKeys.forEach(k=>{
-          if(k.startsWith("__custom__")) return;
+          if(k.startsWith("__custom__") || k==="__mocEdits") return;
           const oldV = originalValuesRef.current[k]??""; const newV = values[k]??"";
           if(String(oldV)!==String(newV)){
             logs.push(sb.from("revision_changes").insert({revision_ref:openRef.reference_number,area:"datasheet",item_sl_no:openRef.item_sl_no,field_name:k,old_value:oldV,new_value:newV,changed_by:user.username}));
@@ -9732,6 +9864,7 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
       setAddLineError({});
       setCloseBlockedMsg("");
       originalValuesRef.current = {...values};
+      originalOverridesRef.current = {...overrides};
     } catch(e){ console.error("Datasheet save failed",e); alert("Save failed: "+(e.message||e)); }
     finally{ setSaving(false); }
   };
@@ -9832,6 +9965,7 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
   // anyway" escape hatch, per explicit instruction. Recomputed on every
   // render (cheap — same pattern getSectionRows already uses).
   const isDirty = (()=>{
+    if(JSON.stringify(overrides||{})!==JSON.stringify(originalOverridesRef.current||{})) return true;
     const allKeys = new Set([...Object.keys(values), ...Object.keys(originalValuesRef.current)]);
     for(const k of allKeys){
       if(JSON.stringify(originalValuesRef.current[k]??null) !== JSON.stringify(values[k]??null)) return true;
@@ -9879,9 +10013,24 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
             ),
             rows.length===0
               ? h("div",{style:{padding:"10px 14px",fontSize:12,color:colors.mutedLight}},section.bomSection?"No lines ticked \"Show in MOC\" yet.":"No fields in this section.")
-              : rows.map(row=>h("div",{key:row.key,style:{display:"flex",alignItems:"center",gap:8,padding:"6px 14px",fontSize:12.5,borderTop:"1px solid #f0efe8"}},
+              : rows.map(row=>{
+                  const isEditing = rowEdit && rowEdit.sectionNo===section.no && rowEdit.key===row.key;
+                  const locked = rowLocked(row);
+                  const fieldOpts = row.field && row.field.type==="dropdown" ? (row.field.options||[]) : (row.needsChoice ? (row.options||[]) : null);
+                  return h("div",{key:row.key,style:{display:"flex",alignItems:"center",gap:8,padding:"6px 14px",fontSize:12.5,borderTop:"1px solid #f0efe8",background:isEditing?"#f4faf6":undefined}},
                   h("div",{style:{width:220,color:colors.muted,flexShrink:0}},row.label),
-                  row.needsChoice
+                  isEditing
+                    ? h("div",{style:{flex:1,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}},
+                        fieldOpts && fieldOpts.length
+                          ? h(LimitToListCombo,{value:rowEditDraft,onChange:setRowEditDraft,options:fieldOpts,limitToList:false,placeholder:"Type or pick a value…",style:{...inputStyle,flex:1,minWidth:160,padding:"5px 8px",fontSize:12.5}})
+                          : h("input",{autoFocus:true,value:rowEditDraft,onChange:e=>setRowEditDraft(e.target.value),
+                              onKeyDown:e=>{ if(e.key==="Enter") saveRowEdit(section.no,row); if(e.key==="Escape") cancelRowEdit(); },
+                              style:{...inputStyle,flex:1,minWidth:160,padding:"5px 8px",fontSize:12.5}}),
+                        h("button",{onClick:()=>saveRowEdit(section.no,row),style:{...btnPrimary,padding:"4px 10px",fontSize:11}},"OK"),
+                        h("button",{onClick:cancelRowEdit,style:{...btnSecondary,padding:"4px 10px",fontSize:11}},"Cancel"),
+                        row.isMoc && h("div",{style:{fontSize:10.5,color:colors.mutedLight,width:"100%"}},"Changes this datasheet only. The BOM and the price list stay as they are.")
+                      )
+                  : row.needsChoice
                     ? h(React.Fragment,null,
                         h(MocGradeRow,{
                           row,
@@ -9890,10 +10039,22 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
                         }),
                         mocSaveError && h("div",{style:{fontSize:10.5,color:colors.danger,marginTop:4}},mocSaveError)
                       )
-                    : h("div",{style:{flex:1,color:row.value?colors.text:colors.mutedLight}}, row.value||"— not filled —"),
-                  h("button",{onClick:()=>deleteRow(section.no,row),title:"Delete this line",
+                    : h("div",{style:{flex:1,color:row.value?colors.text:colors.mutedLight,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}},
+                        h("span",null,row.value||"— not filled —"),
+                        row.isMoc && (row.edited
+                          ? h("span",{title:"Typed over on this datasheet",style:{fontSize:9.5,padding:"1px 7px",borderRadius:9,background:"#fff4d6",color:"#854f0b",whiteSpace:"nowrap"}},"Edited · was "+(row.original||"blank"))
+                          : h("span",{style:{fontSize:9.5,padding:"1px 7px",borderRadius:9,background:"#e8f2ec",color:"#1f5c40",whiteSpace:"nowrap"}},(openLines||[]).some(l=>l&&l.price_source==="pricelist")?"from price list":"from BOM")),
+                        changedFieldKeys.has(row.key) && h("span",{style:{fontSize:9,fontWeight:600,color:"#8a6d1f"}},"● changed")
+                      ),
+                  !isEditing && row.isMoc && row.edited && h("button",{onClick:()=>resetMocEdit(row),title:"Put the BOM / price-list value back",
+                    style:{border:"none",background:"none",color:"#0c447c",cursor:"pointer",fontSize:11,textDecoration:"underline",padding:"2px 4px",flexShrink:0}},"Reset"),
+                  !isEditing && (locked
+                    ? h("span",{title:"Comes from the quote itself",style:{fontSize:10.5,color:colors.mutedLight,padding:"2px 6px",flexShrink:0}},"auto")
+                    : h("button",{onClick:()=>startRowEdit(section.no,row),disabled:!!rowEdit,title:"Edit this line",
+                        style:{...btnSecondary,padding:"3px 10px",fontSize:11,flexShrink:0,opacity:rowEdit?0.4:1}},"Edit")),
+                  !isEditing && h("button",{onClick:()=>deleteRow(section.no,row),title:"Delete this line",
                     style:{border:"none",background:"none",color:colors.danger,cursor:"pointer",fontSize:14,padding:"2px 6px",flexShrink:0}},"✕")
-                )),
+                );}),
             hiddenCount>0 && h("div",{style:{padding:"5px 14px",fontSize:11,color:colors.mutedLight,borderTop:"1px solid #f0efe8"}},
               hiddenCount+" line"+(hiddenCount>1?"s":"")+" hidden — ",
               h("span",{onClick:()=>restoreDeleted(section.no),style:{color:"#1c8c75",cursor:"pointer",textDecoration:"underline"}},"restore")
@@ -10744,6 +10905,31 @@ function DatasheetMasterEditor({ onGoToTab, user }){
 // called it, adds a row to the given single-column master table, and hands
 // the new value back via onAdded — the caller re-selects it, nothing the
 // user was filling in elsewhere gets lost or navigated away from.
+// 1 Oct (107) — Out / In for a document entry. Two tick boxes, both blank
+// to start, one required. Ticking one locks the other; Edit clears both.
+// "warn" shows under the boxes (e.g. the Out/In sequence disagrees).
+function DocDirectionPick({ value, onChange, label, warn, missing }){
+  const boxStyle = (on, off)=>({display:"flex",gap:10,alignItems:"center",border:"1px solid "+(on?"#1f5c40":colors.border),borderRadius:7,padding:"10px 12px",
+    background:on?"#e8f2ec":"#fff",cursor:off?"not-allowed":"pointer",opacity:off?0.45:1,flex:"1 1 200px",minWidth:0});
+  const opt = (dir, title, sub)=>{
+    const on = value===dir, off = !!value && !on;
+    return h("label",{style:boxStyle(on,off)},
+      h("input",{type:"checkbox",checked:on,disabled:off,onChange:e=>onChange(e.target.checked?dir:""),style:{width:18,height:18,accentColor:"#1f5c40",flexShrink:0}}),
+      h("span",null,h("b",{style:{fontSize:13.5,display:"block"}},title),h("span",{style:{fontSize:11,color:colors.mutedLight}},sub)));
+  };
+  return h("div",{style:{border:"1px solid "+(missing?"#a3312a":colors.border),background:missing?"#fdecea":"#fff",borderRadius:8,padding:"10px 12px",marginBottom:10}},
+    h("div",{style:{fontSize:12.5,fontWeight:700,marginBottom:8}},label||"This document is:",h("span",{style:{color:"#a3312a",fontWeight:600,marginLeft:6,fontSize:11}},"*required")),
+    h("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
+      opt("Out","Out: we are sending","To the customer or consultant"),
+      opt("In","In: we are receiving","From the customer, consultant or vendor")),
+    value && h("div",{style:{display:"flex",gap:8,alignItems:"center",fontSize:11.5,color:colors.muted,marginTop:8}},
+      h("span",null,value==="Out"?"Marked Out: we are sending.":"Marked In: we are receiving."),
+      h("button",{type:"button",onClick:()=>onChange(""),style:{border:"none",background:"none",color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:11.5,padding:"0 2px"}},"Edit")),
+    missing && !value && h("div",{style:{fontSize:11,color:"#a3312a",marginTop:6}},"Tick Out or In."),
+    warn && h("div",{style:{fontSize:11,color:"#a3312a",marginTop:6}},warn)
+  );
+}
+
 function AddToMasterPanel({ table, fieldLabel, valueCol, onClose, onAdded }){
   const col = valueCol || "value";
   const [val,setVal] = useState("");
@@ -12196,7 +12382,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   // resume paths (summary review, no-documents confirm) print the same way.
   const [psAsk,setPsAsk]=useState(null);
   const psResolveRef=useRef(null);
-  const priceSummaryChoiceRef=useRef({mode:"basic",gst:null});
+  const priceSummaryChoiceRef=useRef({mode:"basic",gst:null,enclosures:true});
   const closePriceSummaryAsk=(result)=>{ setPsAsk(null); if(psResolveRef.current){ psResolveRef.current(result); psResolveRef.current=null; } };
   const askPriceSummary=async()=>{
     const currency=String(quoteHeaderRow?.currency||"INR").toUpperCase();
@@ -12229,7 +12415,9 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       why=same ? "Customer in "+custState+", same state as your GSTIN: CGST + SGST." : "Customer in "+custState+", your GSTIN is in "+ourState+": IGST.";
     } else { gstKey=(opts.find(o=>o.components.some(c=>/cgst/i.test(c.label)))||opts[0]).key; why=!custState?"The customer has no state on file; check this.":"No GSTIN state on the Company Master; check this."; }
     const savedMode=termsRow && termsRow.price_summary_mode==="proforma" ? "proforma" : "basic";
-    return new Promise(resolve=>{ psResolveRef.current=resolve; setPsAsk({mode:savedMode, gstKey, why, opts, currency, hasPf:!!(termsRow&&(termsRow.packing_forwarding_basis||termsRow.packing_forwarding))}); });
+    // 1 Oct (107) — enclosures (quotes only): merged unless "Offer only" is picked.
+    const encl = mode==="contract" ? [] : await fetchOfferEnclosures(quoteExportRef);
+    return new Promise(resolve=>{ psResolveRef.current=resolve; setPsAsk({mode:savedMode, gstKey, why, opts, currency, hasPf:!!(termsRow&&(termsRow.packing_forwarding_basis||termsRow.packing_forwarding)), encl, enclOn:true}); });
   };
   const [draftConfirm,setDraftConfirm]=useState(null); // {missing, incompleteBomDetails}
   const draftConfirmResolveRef = useRef(null);
@@ -13529,6 +13717,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   // convention as universal_documents_tbl.
   const [documentRequests,setDocumentRequests]=useState([]);
   const [newRequestCategory,setNewRequestCategory]=useState("");
+  const [showNewRequestCategory,setShowNewRequestCategory]=useState(false);   // 1 Oct (107) — "+ Category not in the list…"
+  const [docMasterAddFor,setDocMasterAddFor]=useState(null);   // 1 Oct (107) — draft index whose category is being added to the master
   const [newRequestMandatory,setNewRequestMandatory]=useState(false);
   // Quote-stage checklist (20 Sep). Ticked from the Category master, in
   // one pass, instead of adding categories one at a time. Ticking creates
@@ -13617,7 +13807,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     const { data: parents } = await sb.from("universal_documents_tbl").select("*").eq("entity_id",ref);
     if(!parents?.length){ setQuoteDocuments([]); return; }
     const ids = parents.map(p=>p.id);
-    const { data: history } = await sb.from("universal_document_history_tbl").select("*").in("document_id",ids).order("rev_number",{ascending:false});
+    const { data: history } = await sb.from("universal_document_history_tbl").select("*").in("document_id",ids).order("rev_number",{ascending:false}).order("changed_at",{ascending:false});
     const latestByDoc = new Map();
     (history||[]).forEach(h=>{ if(!latestByDoc.has(h.document_id)) latestByDoc.set(h.document_id,h); });
     const merged = parents.map(p=>{
@@ -13627,7 +13817,9 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         link:latest.link||"", file_path:latest.file_path||null, file_name:latest.file_path, lives_in_supabase:!!latest.lives_in_supabase,
         uploaded_at:latest.changed_at||p.created_at, uploaded_by:latest.changed_by||p.created_by, rev_number:latest.rev_number??0,
         direction:latest.direction||null, status:latest.status||null,
-        sequence_flagged:p.sequence_flagged||false, sequence_flag_note:p.sequence_flag_note||null
+        sequence_flagged:p.sequence_flagged||false, sequence_flag_note:p.sequence_flag_note||null,
+        // 1 Oct (107) — enclosure tick (column added by SQL; missing = included)
+        include_in_offer:p.include_in_offer!==false, has_out:(history||[]).some(x=>x.document_id===p.id && x.direction==="Out")
       };
     }).sort((a,b)=> new Date(b.uploaded_at)-new Date(a.uploaded_at));
     setQuoteDocuments(merged);
@@ -13682,6 +13874,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const [docUploadMode,setDocUploadMode]=useState(""); // "combined" | "separate"
   const [docDrafts,setDocDrafts]=useState([]); // [{category,docNumber,title,file,direction,status}] — one entry when combined, several when separate
   const [docUploading,setDocUploading]=useState(false);
+  const [docDirMissing,setDocDirMissing]=useState(false);   // 1 Oct (107) — Upload pressed with Out/In blank
   const [docStatusOptions,setDocStatusOptions]=useState([]);
   useEffect(()=>{
     loadDocStatuses().then(setDocStatusOptions);
@@ -13714,12 +13907,13 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const pickDocMode = (mode)=>{
     setDocUploadMode(mode);
     const nextSeq = quoteDocuments.filter(d=>!d.is_archived).length+1;
-    setDocDrafts([{category:"G.A Drawing",docNumber:suggestedDocNumber("G.A Drawing",nextSeq),title:"",link:"",file:null,direction:"Out",status:"",fulfillsRequestId:""}]);
+    setDocDirMissing(false);
+    setDocDrafts([{category:"G.A Drawing",docNumber:suggestedDocNumber("G.A Drawing",nextSeq),title:"",link:"",file:null,direction:"",status:"",fulfillsRequestId:""}]);
     setDocUploadStep("form");
   };
   const addAnotherDocDraft = ()=>{
     const nextSeq = quoteDocuments.filter(d=>!d.is_archived).length+docDrafts.length+1;
-    setDocDrafts(ds=>ds.concat([{category:"G.A Drawing",docNumber:suggestedDocNumber("G.A Drawing",nextSeq),title:"",link:"",file:null,direction:"Out",status:"",fulfillsRequestId:""}]));
+    setDocDrafts(ds=>ds.concat([{category:"G.A Drawing",docNumber:suggestedDocNumber("G.A Drawing",nextSeq),title:"",link:"",file:null,direction:"",status:"",fulfillsRequestId:""}]));
   };
   const updateDocDraft = (idx,patch)=>{
     setDocDrafts(ds=>ds.map((d,i)=>{
@@ -13736,6 +13930,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const submitDocUpload = async()=>{
     if(!quoteExportRef) return;
     for(const d of docDrafts){
+      if(d.direction!=="Out" && d.direction!=="In"){ setDocDirMissing(true); alert("Tick Out (we are sending) or In (we are receiving) for every document."); return; }
       if(!d.file){ alert("Choose a PDF file for every document before uploading."); return; }
       if(!d.docNumber.trim()){ alert("Every document needs a doc number."); return; }
       if(!confirmDocumentLink(d.link, "Document "+(d.docNumber||"").trim())) return;
@@ -13795,12 +13990,16 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const [continueWhatChanged,setContinueWhatChanged]=useState("");
   const [continueNotes,setContinueNotes]=useState("");
   const [continueFulfillsRequestId,setContinueFulfillsRequestId]=useState("");
+  // 1 Oct (107) — Out/In is ticked fresh on every entry, never pre-set. The
+  // Out/In sequence still decides what is allowed: a tick that disagrees
+  // with it blocks the save unless a Super Admin overrides the sequence.
+  const [continueDirectionPick,setContinueDirectionPick]=useState("");
   const pickContinueDoc = async(docId)=>{
     const docRow = quoteDocuments.find(d=>d.id===Number(docId));
     setContinueDocPick(docRow||null);
-    setContinueOverrideUnlocked(false);
+    setContinueOverrideUnlocked(false); setContinueDirectionPick(""); setDocDirMissing(false);
     if(!docRow){ setContinueDocHistory([]); return; }
-    const { data } = await sb.from("universal_document_history_tbl").select("*").eq("document_id",docRow.id).order("rev_number",{ascending:false});
+    const { data } = await sb.from("universal_document_history_tbl").select("*").eq("document_id",docRow.id).order("rev_number",{ascending:false}).order("changed_at",{ascending:false});
     setContinueDocHistory(data||[]);
     setContinueLink(docRow.link||"");
   };
@@ -13816,6 +14015,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   };
   const submitContinueDoc = async()=>{
     if(!continueDocPick) return;
+    if(continueDirectionPick!=="Out" && continueDirectionPick!=="In"){ setDocDirMissing(true); alert("Tick Out (we are sending) or In (we are receiving)."); return; }
     if(!continueFile){ alert("Choose the PDF file."); return; }
     if(continueFile.type!=="application/pdf"){ alert("Only PDF files are accepted here."); return; }
     if(!confirmDocumentLink(continueLink, continueDocPick ? ("Document "+continueDocPick.doc_number) : "")) return;
@@ -13823,8 +14023,11 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     if(!continueWhatChanged.trim()){ alert("Say what changed in this version."); return; }
     if(!continueNotes.trim()){ alert("Notes is required for this version too."); return; }
     const expected = computeExpectedNext(continueDocHistory);
+    if(!continueOverrideUnlocked && expected.direction && continueDirectionPick!==expected.direction){
+      alert("By the Out/In sequence this entry should be "+expected.direction+" (the last entry was "+(continueDocHistory[0]&&continueDocHistory[0].direction)+"). Tick "+expected.direction+", or ask a Super Admin to override the sequence."); return;
+    }
     const finalRev = continueOverrideUnlocked ? continueOverrideRev : expected.rev;
-    const finalDirection = continueOverrideUnlocked ? continueOverrideDirection : expected.direction;
+    const finalDirection = continueDirectionPick;
     setDocUploading(true);
     try{
       const path = "quote_"+quoteExportRef+"_"+Date.now()+"_"+continueFile.name.replace(/[^a-zA-Z0-9._-]/g,"_");
@@ -13848,7 +14051,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       await loadQuoteDocuments(quoteExportRef);
       await loadDocumentRequests(quoteExportRef);
       setDocUploadStep("list");
-      setContinueDocPick(null); setContinueFile(null); setContinueLink(""); setContinueStatus(""); setContinueWhatChanged(""); setContinueNotes(""); setContinueOverrideUnlocked(false); setContinueFulfillsRequestId("");
+      setContinueDocPick(null); setContinueFile(null); setContinueLink(""); setContinueStatus(""); setContinueWhatChanged(""); setContinueNotes(""); setContinueOverrideUnlocked(false); setContinueFulfillsRequestId(""); setContinueDirectionPick("");
     } catch(e){ alert(documentSaveErrorText(e, continueDocPick && continueDocPick.doc_number)); }
     finally { setDocUploading(false); }
   };
@@ -13881,6 +14084,29 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     await sb.from("universal_document_history_tbl").update({status:newStatus}).eq("id",historyRow.id);
     await logAudit("UPDATE","universal_document_history_tbl",quoteExportRef,"Status of "+historyRow.doc_number+" Rev"+historyRow.rev_number+"-"+historyRow.direction+" changed to "+newStatus,user?.username||"unknown",null,null);
     setDocHistoryRows(rows=>rows.map(r=>r.id===historyRow.id?{...r,status:newStatus}:r));
+    await loadQuoteDocuments(quoteExportRef);
+  };
+  // 1 Oct (107) — fix a wrongly ticked Out/In on the LATEST entry. A
+  // document's only entry can be flipped freely (logged); flipping a later
+  // one breaks the Out/In alternation, so that needs a Super Admin and a
+  // Deletion Code and flags the document, as the sequence override does.
+  const editHistoryDirection = async(historyRow)=>{
+    const oldDir = historyRow.direction||"";
+    const flipped = oldDir==="Out" ? "In" : "Out";
+    const onlyEntry = docHistoryRows.length<=1;
+    if(!onlyEntry){
+      if(user.role!=="super_admin"){ alert("Only a Super Admin can change Out/In on a later entry — it breaks the Out/In sequence. Ask a Super Admin."); return; }
+      const code = prompt("Changing Rev "+historyRow.rev_number+" from "+oldDir+" to "+flipped+" breaks the Out/In sequence. Enter a Deletion Code to go ahead:");
+      if(code===null) return;
+      const res = await verifyAndConsumeDeletionCode(code, user?.username||"unknown");
+      if(!res.ok){ alert(res.reason); return; }
+    } else if(!confirm("Change Rev "+historyRow.rev_number+" of "+historyRow.doc_number+" from "+(oldDir||"blank")+" to "+flipped+"?")) return;
+    const { error } = await sb.from("universal_document_history_tbl").update({direction:flipped}).eq("id",historyRow.id);
+    if(error){ alert("Couldn't change it: "+error.message); return; }
+    const note = "Out/In of "+historyRow.doc_number+" Rev"+historyRow.rev_number+" corrected from "+(oldDir||"blank")+" to "+flipped+" by "+(user?.username||"unknown");
+    if(!onlyEntry) await sb.from("universal_documents_tbl").update({sequence_flagged:true, sequence_flag_note:note}).eq("id",historyRow.document_id);
+    await logAudit("UPDATE","universal_document_history_tbl",quoteExportRef,note,user?.username||"unknown",{direction:oldDir},{direction:flipped});
+    setDocHistoryRows(rows=>rows.map(r=>r.id===historyRow.id?{...r,direction:flipped}:r));
     await loadQuoteDocuments(quoteExportRef);
   };
   const addDocumentNote = async()=>{
@@ -13919,6 +14145,13 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       setDocHistoryFor(null);
     } catch(e){ alert("Failed: "+(e.message||e)); }
     finally { setDocUploading(false); }
+  };
+  const toggleIncludeInOffer = async(docRow)=>{
+    const next = !docRow.include_in_offer;
+    const { error } = await sb.from("universal_documents_tbl").update({include_in_offer:next}).eq("id",docRow.id);
+    if(error){ alert(/include_in_offer/.test(error.message||"") ? "Run the SQL for this build first (enclosures_and_doc_direction_2026-10-01.sql) \u2014 the tick has nowhere to be saved yet." : "Couldn't save: "+error.message); return; }
+    await logAudit("UPDATE","universal_documents_tbl",quoteExportRef,(next?"Included ":"Left out of ")+"the offer PDF: "+docRow.doc_number,user?.username||"unknown",{include_in_offer:!next},{include_in_offer:next});
+    await loadQuoteDocuments(quoteExportRef);
   };
   const downloadDocument = async(docRow)=>{
     const { data } = await sb.storage.from("quote-documents").createSignedUrl(docRow.file_path,60);
@@ -16696,6 +16929,17 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       const today = new Date().toLocaleDateString("en-GB");
       // Wrapped so the PDF preview can regenerate it live with small overrides
       // (Customer Name, Delivery, Validity) without re-fetching from the DB.
+      // 1 Oct (107) — ENCLOSURES. On a quote (never a Sale Order) the Out
+      // documents ticked "In offer PDF" are merged in as Annexure IV, unless
+      // "Offer only" was picked at Generate. Every attached PDF (these and
+      // the datasheet PDFs) is read once here and reused by the preview's
+      // rebuilds, so page numbers can be worked out before the merge.
+      const enclosuresOn = mode!=="contract" && (priceSummaryChoiceRef.current||{}).enclosures!==false;
+      const offerEnclosures = enclosuresOn ? await fetchOfferEnclosures(quoteExportRef) : [];
+      const storedPdfCache = new Map();
+      const loadCachedPdf = (path,bucket)=>{ const k=bucket+"|"+path; if(!storedPdfCache.has(k)) storedPdfCache.set(k, loadStoredPdf(path,bucket)); return storedPdfCache.get(k); };
+      const enclLoaded = await Promise.all(offerEnclosures.map(e=> e.filePath ? loadCachedPdf(e.filePath,"quote-documents") : Promise.resolve(null)));
+      let mergeProblemsReported = false;
       const buildDoc = async (overrides={})=>{
       const effCustomerName = overrides.customerName!==undefined ? overrides.customerName : customerName;
       const effDelivery = overrides.delivery!==undefined ? overrides.delivery : (terms.delivery_term||"—");
@@ -16767,7 +17011,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           startY: y,
           theme: "grid",
           styles: {font:"times", fontSize:8.5, textColor:dark, cellPadding:{top:3,bottom:3,left:3,right:3}, lineColor:[26,26,26], lineWidth:0.2, valign:"top"},
-          columnStyles: {0:{cellWidth:32,fontStyle:"bold"},1:{cellWidth:60},2:{cellWidth:48,fontStyle:"bold"},3:{cellWidth:46}},
+          columnStyles: {0:{cellWidth:32,fontStyle:"bold",fillColor:PDF_PALE,textColor:PDF_GREEN},1:{cellWidth:60},2:{cellWidth:48,fontStyle:"bold",fillColor:PDF_PALE,textColor:PDF_GREEN},3:{cellWidth:46}},
           margin:{left:12,right:12},
           body: [
             [
@@ -16801,7 +17045,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           startY: boxTop,
           theme: "grid",
           styles: {font:"times", fontSize:8.2, textColor:dark, cellPadding:{top:2.2,bottom:2.2,left:2.5,right:2.5}, lineColor:[26,26,26], lineWidth:0.2, valign:"middle"},
-          columnStyles: {0:{cellWidth:30,fontStyle:"bold"},1:{cellWidth:LEFT_W-30}},
+          columnStyles: {0:{cellWidth:30,fontStyle:"bold",fillColor:PDF_PALE,textColor:PDF_GREEN},1:{cellWidth:LEFT_W-30}},
           margin:{left:12, right:W-12-LEFT_W},
           body: [
             ["Customer Name", String(effCustomerName)],
@@ -16813,7 +17057,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           startY: boxTop,
           theme: "grid",
           styles: {font:"times", fontSize:8.2, textColor:dark, cellPadding:{top:2.2,bottom:2.2,left:2.5,right:2.5}, lineColor:[26,26,26], lineWidth:0.2, valign:"middle"},
-          columnStyles: {0:{cellWidth:28,fontStyle:"bold"},1:{cellWidth:RIGHT_W-28,fontStyle:"bold"}},
+          columnStyles: {0:{cellWidth:28,fontStyle:"bold",fillColor:PDF_PALE,textColor:PDF_GREEN},1:{cellWidth:RIGHT_W-28,fontStyle:"bold"}},
           margin:{left:W-12-RIGHT_W, right:12},
           body: (()=>{
             const rows = [["Quote No.", quoteExportRef],["Quote Date.", today]];
@@ -16893,14 +17137,15 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           ["Validity", effValidity],
           // Same figure the Price Summary adds up to — see grandTotalPrinted.
           ["Gross Amount (Basic Price)", quoteCurrency+" "+money(grandTotalPrinted)],
-          ...(psPro ? [["Net Amount (incl. P&F"+(psTaxes.length?" & GST":"")+")", quoteCurrency+" "+psMoney(psNet)]] : [])
+          ...(psPro ? [["Net Amount (incl. P&F"+(psTaxes.length?" & GST":"")+")", quoteCurrency+" "+psMoney(psNet)]] : []),
+          ...(offerEnclosures.length ? [["Enclosures", "Annexure IV: "+offerEnclosures.map(e=>(e.docNumber||"Document")+" Rev "+e.rev).join(", ")]] : [])
         ];
         doc.autoTable({
           startY:y,
           body: coverLetterBody,
           theme:"grid",
           styles:{font:"times",fontSize:7.6,textColor:dark,cellPadding:4},
-          columnStyles:{0:{cellWidth:45,fontStyle:"bold"},1:{cellWidth:"auto"}},
+          columnStyles:{0:{cellWidth:45,fontStyle:"bold",fillColor:PDF_PALE,textColor:PDF_GREEN},1:{cellWidth:"auto"}},
           margin:{left:12,right:12}
         });
         // Closing block anchored near the bottom margin (not right after
@@ -17028,7 +17273,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
             body,
             theme:"grid",
             styles:{font:"helvetica",fontSize:8,textColor:dark,cellPadding:3,lineColor:[26,26,26],lineWidth:0.2},
-            headStyles:{font:"helvetica",fontStyle:"bold",fillColor:[217,217,217],textColor:dark,halign:"center"},
+            headStyles:{font:"helvetica",fontStyle:"bold",fillColor:PDF_GREEN,textColor:[255,255,255],halign:"center"},
             columnStyles:{0:{cellWidth:14},1:{cellWidth:22},2:{cellWidth:32},3:{cellWidth:44},4:{cellWidth:44},5:{cellWidth:"auto"}},
             // top:14 put continuation pages' header row straight through the
             // doc-control banner, which occupies y=10..30 (by=10 + bh=20).
@@ -17094,7 +17339,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         ],
         theme:"plain",
         styles:{fontSize:8.4,textColor:dark,cellPadding:{top:2.5,bottom:2.5,left:2,right:4}},
-        columnStyles:{0:{cellWidth:50,font:"times",fontStyle:"bold"},1:{cellWidth:"auto",font:"helvetica",fontStyle:"normal"}},
+        columnStyles:{0:{cellWidth:50,font:"times",fontStyle:"bold",fillColor:PDF_PALE,textColor:PDF_GREEN},1:{cellWidth:"auto",font:"helvetica",fontStyle:"normal"}},
         margin:{top:topY(38),left:12,right:12,bottom:botM(16)},
         didDrawPage:()=>letterhead("ANNEXURE - I  COMMERCIAL TERMS")
       });
@@ -17114,7 +17359,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           body:quoteNotes.map(n=>[String(n.sl_no??""),n.note_text||""]),
           theme:"plain",
           styles:{font:"times",fontSize:8.5,textColor:dark,cellPadding:{top:2.5,bottom:2.5,left:2,right:4}},
-          headStyles:{font:"times",fontStyle:"bold"},
+          headStyles:{font:"times",fontStyle:"bold",fillColor:PDF_PALE,textColor:PDF_GREEN},
           columnStyles:{0:{cellWidth:20},1:{cellWidth:"auto"}},
           margin:{top:topY(32),left:12,right:12,bottom:botM(16)},
         });
@@ -17167,7 +17412,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       // grandTotalInr, extraPriceTotal, testingSeparateTotal already computed
       // once, early — shared with the Cover Letter's Total Basic Price so
       // the two documents can never disagree.
-      const summaryHead = ["S.No","Item","Description","Unit price ("+quoteCurrency+")","Qty","Total ("+quoteCurrency+")"];
+      const summaryHead = ["S.No","Item","Description"].concat(["Unit price ("+quoteCurrency+")","Qty","Total ("+quoteCurrency+")"].map(t=>({content:t,styles:{halign:"right"}})));
       const summaryAmountCols = [3,4,5];
       const summaryColumnStyles = {};
       summaryAmountCols.forEach(i=>{ summaryColumnStyles[i] = {halign:"right"}; });
@@ -17192,12 +17437,12 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         // Kept clear of the classic footer bar (H-23 to H-16).
         const gtY = classic ? H-28 : H-14;
         doc.text(psPro ? ("Grand total"+(psTaxes.length?" (incl. GST)":"")+": "+quoteCurrency+" "+psMoney(psNet)) : ("Grand total: "+quoteCurrency+" "+money(grandTotalDisplay)), W-12, gtY, {align:"right"});
-        doc.setDrawColor(200,197,185); doc.setLineWidth(0.3);
+        doc.setDrawColor(...PDF_GREEN); doc.setLineWidth(0.3);
         doc.line(12,gtY-4,W-12,gtY-4);
       };
       if(psPro){
         // Proforma style: one table, green headings, extras and taxes in line.
-        const green=[31,92,64], pale=[232,242,236], white=[255,255,255];
+        const green=PDF_GREEN, pale=PDF_PALE, white=[255,255,255];
         const grp = t=>[{content:t,colSpan:7,styles:{fillColor:pale,textColor:green,fontStyle:"bold",fontSize:7.2}}];
         const sumRow = (label,val,bold)=>[{content:label,colSpan:6,styles:{halign:"right",fontStyle:bold?"bold":"normal"}},{content:val,styles:{halign:"right",fontStyle:bold?"bold":"normal"}}];
         const body=[grp("ITEMS")];
@@ -17258,7 +17503,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           head:[summaryHead],
           body: summaryRows,
           theme:"grid",
-          headStyles:{fillColor:neutral,textColor:dark,fontStyle:"bold",fontSize:8.4,font:"times"},
+          headStyles:{fillColor:PDF_GREEN,textColor:[255,255,255],fontStyle:"bold",fontSize:8.4,font:"times"},
           bodyStyles:{font:"helvetica",fontSize:8,textColor:dark},
           columnStyles:summaryColumnStyles,
           margin:{top:topY(42),left:12,right:12,bottom:botM(22)},
@@ -17268,13 +17513,13 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         if(testingSectionPresent){
           doc.setFontSize(9); doc.setFont("times","bold"); doc.setTextColor(...dark);
           const afterY = doc.lastAutoTable.finalY + 6;
-          doc.text("NDE / Testing", 12, afterY);
+          doc.setTextColor(...PDF_GREEN); doc.text("NDE / Testing", 12, afterY); doc.setTextColor(...dark);
           doc.autoTable({
             startY: afterY+3,
             head: [["S.No","Test",""]],
             body: allTestingRowsForPdf,
             theme:"grid",
-            headStyles:{fillColor:neutral,textColor:dark,fontStyle:"bold",fontSize:8.4,font:"times"},
+            headStyles:{fillColor:PDF_GREEN,textColor:[255,255,255],fontStyle:"bold",fontSize:8.4,font:"times"},
             bodyStyles:{font:"helvetica",fontSize:8,textColor:dark},
             columnStyles:{2:{halign:"right"}},
             margin:{top:topY(42),left:12,right:12,bottom:botM(22)},
@@ -17291,13 +17536,13 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         if(extraPriceForPdf.length){
           doc.setFontSize(9); doc.setFont("times","bold"); doc.setTextColor(...dark);
           const afterExtraY = doc.lastAutoTable.finalY + 6;
-          doc.text("Other options", 12, afterExtraY);
+          doc.setTextColor(...PDF_GREEN); doc.text("Other options", 12, afterExtraY); doc.setTextColor(...dark);
           doc.autoTable({
             startY: afterExtraY+3,
             head: [["S.No","Description",""]],
             body: extraPriceForPdf.map(l=>["—", l.label, money(quoteIsInr?(Number(l.price)||0):((Number(l.price)||0)/quoteFx))]),
             theme:"grid",
-            headStyles:{fillColor:neutral,textColor:dark,fontStyle:"bold",fontSize:8.4,font:"times"},
+            headStyles:{fillColor:PDF_GREEN,textColor:[255,255,255],fontStyle:"bold",fontSize:8.4,font:"times"},
             bodyStyles:{font:"helvetica",fontSize:8,textColor:dark},
             columnStyles:{2:{halign:"right"}},
             margin:{top:topY(42),left:12,right:12,bottom:botM(22)},
@@ -17314,11 +17559,11 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       // page range including the pages that get spliced in at the very end
       // — the Index is drawn before that splice happens, so it can't
       // discover this by just checking doc.internal.getNumberOfPages().
-      const attachedPageCounts = await Promise.all(
-        dsList.filter(i=>i.attachedFilePath).map(i=>getPdfPageCountFromStorage(i.attachedFilePath,"direct-price-excels"))
-      );
-      const totalAttachedPages = attachedPageCounts.reduce((s,n)=>s+n,0);
-      const pdfMergeInsertions = []; // {afterPage, filePath, fileName} — spliced in by mergeAttachedPdfPages() after the whole doc is built
+      const dsLoadedByPath = new Map();
+      await Promise.all(dsList.filter(i=>i.attachedFilePath).map(async i=>{ dsLoadedByPath.set(i.attachedFilePath, await loadCachedPdf(i.attachedFilePath,"direct-price-excels")); }));
+      const totalAttachedPages = dsList.filter(i=>i.attachedFilePath).reduce((s,i)=>s+((dsLoadedByPath.get(i.attachedFilePath)||{}).pages||0),0);
+      const pdfMergeInsertions = []; // {afterPage, loaded, seq, fileName} — spliced in by mergeLoadedPdfPages() after the whole doc is built
+      let mergeSeq = 0;
       doc.addPage();
       const dsStartPage = doc.internal.getNumberOfPages();
       const linesBySlNoForSummary = new Map();
@@ -17348,7 +17593,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
             doc.autoTable({
               startY:cursorY, head:[idHead], body:idBody, theme:"plain",
               styles:{font:"helvetica",fontSize:8.5,textColor:dark,cellPadding:{top:1,right:5,bottom:1,left:5}},
-              headStyles:{fontStyle:"bold",font:"times",fontSize:9},
+              headStyles:{fontStyle:"bold",font:"times",fontSize:9,fillColor:PDF_PALE,textColor:PDF_GREEN},
               margin:{top:topY(32),left:12,right:12,bottom:botM(16)},
               didDrawPage:()=>letterhead("ANNEXURE III - TECHNICAL DATA SHEET")
             });
@@ -17359,25 +17604,25 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           grp.sectionsRows.forEach(sec=>{
             if(!sec.rows.length) return;
             if(sec.title==="Price Data") return;
-            body.push([{content:sec.title,colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10}}]);
+            body.push([{content:sec.title,colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10,fillColor:PDF_PALE,textColor:PDF_GREEN}}]);
             sec.rows.forEach(r=>body.push([r.label, r.value]));
           });
-          if(grp.hasProcess) body.push([{content:"Process data",colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10}}],["Reference","Refer to table attached"]);
-          if(grp.hasDesign) body.push([{content:"Design data",colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10}}],["Reference","Refer to chart attached"]);
+          if(grp.hasProcess) body.push([{content:"Process data",colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10,fillColor:PDF_PALE,textColor:PDF_GREEN}}],["Reference","Refer to table attached"]);
+          if(grp.hasDesign) body.push([{content:"Design data",colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10,fillColor:PDF_PALE,textColor:PDF_GREEN}}],["Reference","Refer to chart attached"]);
           // Options/Testing — union across every member, deduplicated by
           // label/test name, since a merged group's members could each
           // carry their own Options & Testing picks even though the BOM
           // and every other section matched exactly.
           const slOptionsUnion=[]; const seenOpt=new Set();
           grp.members.forEach(m=>(slExtraByItem.get(m.slNo)||[]).forEach(o=>{ if(!seenOpt.has(o.label)){ seenOpt.add(o.label); slOptionsUnion.push(o); } }));
-          if(slOptionsUnion.length){ body.push([{content:"Options",colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10}}]); slOptionsUnion.forEach(o=>body.push([o.label, o.datasheet_value||""])); }
+          if(slOptionsUnion.length){ body.push([{content:"Options",colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10,fillColor:PDF_PALE,textColor:PDF_GREEN}}]); slOptionsUnion.forEach(o=>body.push([o.label, o.datasheet_value||""])); }
           const slTestsUnion=[]; const seenTest=new Set();
           grp.members.forEach(m=>[...(slTestingByItem.get(m.slNo)||[]), ...(globalTestingByItem.get(m.slNo)||[]).map(g=>({test_name:g.test_name}))].forEach(t=>{ if(!seenTest.has(t.test_name)){ seenTest.add(t.test_name); slTestsUnion.push(t); } }));
-          if(slTestsUnion.length){ body.push([{content:"Testing",colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10}}]); slTestsUnion.forEach(t=>body.push([t.test_name+" — Included in scope",""])); }
+          if(slTestsUnion.length){ body.push([{content:"Testing",colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10,fillColor:PDF_PALE,textColor:PDF_GREEN}}]); slTestsUnion.forEach(t=>body.push([t.test_name+" — Included in scope",""])); }
           // PRICE DATA LAST, always. Held back above and pushed here, after
           // Options and Testing.
           if(priceSecGrp && priceSecGrp.rows.length){
-            body.push([{content:priceSecGrp.title,colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10}}]);
+            body.push([{content:priceSecGrp.title,colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10,fillColor:PDF_PALE,textColor:PDF_GREEN}}]);
             priceSecGrp.rows.forEach(r=>body.push([r.label, r.value]));
           }
           doc.autoTable({
@@ -17387,7 +17632,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
             margin:{top:topY(32),left:12,right:12,bottom:botM(16)},
             didDrawPage:()=>letterhead("ANNEXURE III - TECHNICAL DATA SHEET")
           });
-          grp.members.forEach(m=>{ if(m.attachedFilePath) pdfMergeInsertions.push({ afterPage: doc.internal.getNumberOfPages(), filePath:m.attachedFilePath, fileName:m.attachedFileName }); });
+          grp.members.forEach(m=>{ if(m.attachedFilePath) pdfMergeInsertions.push({ afterPage: doc.internal.getNumberOfPages(), loaded:dsLoadedByPath.get(m.attachedFilePath), seq:mergeSeq++, fileName:m.attachedFileName }); });
         });
         // ---- Process Data / Design Data summary tables, grouped by item type, rows merged where every value is identical ----
         ["Process data","Design data"].forEach(secName=>{
@@ -17431,7 +17676,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
             doc.autoTable({
               startY:Math.max(40, topY(34)), head:[head], body:bodyRows, theme:"grid",
               styles:{font:"helvetica",fontSize:7.5,textColor:dark,cellPadding:{top:2,right:4,bottom:2,left:4}},
-              headStyles:{fillColor:[240,239,232],textColor:dark,fontStyle:"bold",font:"times",fontSize:8},
+              headStyles:{fillColor:PDF_GREEN,textColor:[255,255,255],fontStyle:"bold",font:"times",fontSize:8},
               margin:{top:topY(32),left:12,right:12,bottom:botM(16)},
               didDrawPage:()=>letterhead("ANNEXURE III - TECHNICAL DATA SHEET")
             });
@@ -17453,7 +17698,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           inst.sectionsRows.forEach(sec=>{
             if(!sec.rows.length) return;
             if(sec.title==="Price Data") return;
-            body.push([{content:sec.title,colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10}}]);
+            body.push([{content:sec.title,colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10,fillColor:PDF_PALE,textColor:PDF_GREEN}}]);
             sec.rows.forEach(r=>body.push([r.label, r.value]));
           });
           // ORDER RULE (3 Sep): Options, then Testing, then Price Data LAST.
@@ -17461,17 +17706,17 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           // at the very end, so a section added later cannot land after it.
           const slOptions = slExtraByItem.get(inst.slNo)||[];
           if(slOptions.length){
-            body.push([{content:"Options",colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10}}]);
+            body.push([{content:"Options",colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10,fillColor:PDF_PALE,textColor:PDF_GREEN}}]);
             slOptions.forEach(o=>body.push([o.label, o.datasheet_value||""]));
           }
           const slTests = [...(slTestingByItem.get(inst.slNo)||[]), ...(globalTestingByItem.get(inst.slNo)||[]).map(g=>({test_name:g.test_name}))];
           if(slTests.length){
-            body.push([{content:"Testing",colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10}}]);
+            body.push([{content:"Testing",colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10,fillColor:PDF_PALE,textColor:PDF_GREEN}}]);
             slTests.forEach(t=>body.push([t.test_name+" — Included in scope", ""]));
           }
           // PRICE DATA LAST, always.
           if(priceSecInst && priceSecInst.rows.length){
-            body.push([{content:priceSecInst.title,colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10}}]);
+            body.push([{content:priceSecInst.title,colSpan:2,styles:{fontStyle:"bold",font:"times",fontSize:10,fillColor:PDF_PALE,textColor:PDF_GREEN}}]);
             priceSecInst.rows.forEach(r=>body.push([r.label, r.value]));
           }
           doc.autoTable({
@@ -17487,11 +17732,47 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         // pages just land wherever the previous entry left off, via the
         // insertion recorded below.
         if(inst.attachedFilePath){
-          pdfMergeInsertions.push({ afterPage: doc.internal.getNumberOfPages(), filePath: inst.attachedFilePath, fileName: inst.attachedFileName });
+          pdfMergeInsertions.push({ afterPage: doc.internal.getNumberOfPages(), loaded:dsLoadedByPath.get(inst.attachedFilePath), seq:mergeSeq++, fileName: inst.attachedFileName });
         }
       });
       }
       const dsEndPage = doc.internal.getNumberOfPages();
+
+      // ---- Annexure IV — Enclosures (quotes only, 1 Oct 107). One list
+      // page, then each document's own pages spliced in after it. ----
+      let enclStartPage = null;
+      const enclRowsForIndex = [];
+      if(offerEnclosures.length){
+        doc.addPage();
+        enclStartPage = doc.internal.getNumberOfPages();
+        letterhead("ANNEXURE IV - ENCLOSURES");
+        // The list is one page up to ~25 documents; numbering assumes that.
+        const listPages = Math.max(1, Math.ceil(offerEnclosures.length/25));
+        let nextFinal = enclStartPage + totalAttachedPages + listPages;
+        const body = offerEnclosures.map((e,i)=>{
+          const L = enclLoaded[i];
+          const pages = (L && L.pdf) ? L.pages : 0;
+          let where;
+          if(pages){ where = pages===1 ? String(nextFinal) : nextFinal+"-"+(nextFinal+pages-1); nextFinal += pages; }
+          else where = e.filePath ? "Sent separately (file could not be read)" : "Sent separately";
+          enclRowsForIndex.push({ label:(e.docNumber||"Document")+" Rev "+e.rev+(e.title?" \u2014 "+e.title:""), where });
+          return [String(i+1), e.docNumber||"", e.title||e.category||"", String(e.rev), where];
+        });
+        doc.autoTable({
+          startY:topY(38),
+          head:[["S.No","Document No","Title","Rev","Page Nos"]],
+          body, theme:"grid",
+          headStyles:{fillColor:PDF_GREEN,textColor:[255,255,255],fontStyle:"bold",fontSize:8.4,font:"times"},
+          bodyStyles:{font:"helvetica",fontSize:8,textColor:dark},
+          columnStyles:{0:{cellWidth:14,halign:"center"},1:{cellWidth:48},2:{cellWidth:"auto"},3:{cellWidth:12,halign:"center"},4:{cellWidth:34,halign:"center"}},
+          margin:{top:topY(38),left:12,right:12,bottom:botM(16)},
+          didDrawPage:()=>letterhead("ANNEXURE IV - ENCLOSURES")
+        });
+        offerEnclosures.forEach((e,i)=>{ const L=enclLoaded[i]; if(L && L.pdf) pdfMergeInsertions.push({ afterPage: doc.internal.getNumberOfPages(), loaded:L, seq:mergeSeq++, fileName:e.docNumber }); });
+      }
+      // Final page number of native page p, once the attached pages are spliced in.
+      const mergedOk = pdfMergeInsertions.filter(i=>i.loaded && i.loaded.pdf && i.loaded.pages);
+      const finalPageNo = (p)=> p + mergedOk.filter(i=>i.afterPage<p).reduce((s,i)=>s+i.loaded.pages,0);
 
       // ---- Fill in the Index now that every page number is known —
       // includes Cover Page and Revision History, matching physical order ----
@@ -17505,12 +17786,18 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       if(quoteNotes.length) indexRows.push([String(seq++),"Annexure-IB","Notes", notesStartPage===notesEndPage?String(notesStartPage):notesStartPage+"-"+notesEndPage]);
       indexRows.push([String(seq++),"Annexure-II","Price Summary", summaryStartPage===summaryEndPage?String(summaryStartPage):summaryStartPage+"-"+summaryEndPage]);
       indexRows.push([String(seq++),"Annexure-III","Technical Data Sheet", (()=>{ const trueEnd=dsEndPage+totalAttachedPages; return dsStartPage===trueEnd?String(dsStartPage):dsStartPage+"-"+trueEnd; })()]);
+      if(enclStartPage){
+        const encFrom = finalPageNo(enclStartPage);
+        const encTo = finalPageNo(doc.internal.getNumberOfPages()) + mergedOk.filter(i=>i.afterPage===doc.internal.getNumberOfPages()).reduce((s,i)=>s+i.loaded.pages,0);
+        indexRows.push([String(seq++),"Annexure-IV","Enclosures", encFrom===encTo?String(encFrom):encFrom+"-"+encTo]);
+        enclRowsForIndex.forEach(r=>indexRows.push(["","",{content:"   "+r.label,styles:{fontSize:7.4,textColor:[90,90,88]}},{content:r.where,styles:{fontSize:7.4,textColor:[90,90,88]}}]));
+      }
       doc.autoTable({
         startY:topY(38),
         head:[["S.No","Annexures","Description","Page Nos"]],
         body: indexRows,
         theme:"grid",
-        headStyles:{fillColor:neutral,textColor:dark,fontStyle:"bold",fontSize:8.4,font:"times"},
+        headStyles:{fillColor:PDF_GREEN,textColor:[255,255,255],fontStyle:"bold",fontSize:8.4,font:"times"},
         bodyStyles:{font:"helvetica",fontSize:8,textColor:dark},
         columnStyles:{0:{cellWidth:20,halign:"center"},1:{cellWidth:35},2:{cellWidth:"auto"},3:{cellWidth:25,halign:"center"}},
         margin:{top:topY(38),left:12,right:12},
@@ -17519,7 +17806,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
 
       if(classic){
         const pc = doc.internal.getNumberOfPages();
-        for(let p=1;p<=pc;p++){ doc.setPage(p); drawClassicPdfFooter(doc, W, H, issuingCompany, p, pc); }
+        const finalTotal = pc + mergedOk.reduce((s,i)=>s+i.loaded.pages,0);
+        for(let p=1;p<=pc;p++){ doc.setPage(p); drawClassicPdfFooter(doc, W, H, issuingCompany, finalPageNo(p), finalTotal); }
       } else {
         numberQuotePages(doc, W);
       }
@@ -17545,7 +17833,18 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       // point can drift. Re-numbering after a pdf-lib byte-level merge
       // would need footer text drawn via pdf-lib directly rather than
       // jsPDF, which is a larger follow-on change, not done here.
-      return await mergeAttachedPdfPages(doc, pdfMergeInsertions, "direct-price-excels");
+      // 1 Oct (107) — page numbering past an inserted PDF used to drift
+      // (the note that stood here). Native pages are now numbered with the
+      // final count, and each spliced page gets the same footer stamped on
+      // it, so the whole offer numbers straight through.
+      if(!mergeProblemsReported){
+        mergeProblemsReported = true;
+        const problems = [];
+        dsList.filter(i=>i.attachedFilePath).forEach(i=>{ const L=dsLoadedByPath.get(i.attachedFilePath); if(L && L.error) problems.push("Datasheet PDF for Sl No "+i.slNo+" ("+(i.attachedFileName||"file")+"): "+L.error); });
+        offerEnclosures.forEach((e,i)=>{ const L=enclLoaded[i]; if(e.filePath && L && L.error) problems.push("Enclosure "+(e.docNumber||"")+" Rev "+e.rev+": "+L.error); });
+        if(problems.length) alert("The PDF is ready, but these files could not be merged in and are left out:\n\n"+problems.join("\n")+"\n\nA password-protected or damaged PDF is the usual cause. Send it separately, or upload a clean copy and generate again.");
+      }
+      return await mergeLoadedPdfPages(doc, pdfMergeInsertions, { footerText: quoteExportRef, watermark });
       }; // end buildDoc
 
       const doc = await buildDoc({});
@@ -19576,7 +19875,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       const card = (m,title,text)=>h("label",{key:m,style:{display:"flex",gap:10,alignItems:"flex-start",border:"1px solid "+(psAsk.mode===m?"#1f5c40":colors.border),background:psAsk.mode===m?"#e8f2ec":"#fff",borderRadius:7,padding:"10px 12px",cursor:"pointer"}},
         h("input",{type:"radio",name:"ps-mode",checked:psAsk.mode===m,onChange:()=>pick(m),style:{marginTop:3,accentColor:"#1f5c40"}}),
         h("div",null,h("div",{style:{fontWeight:700,fontSize:13.5}},title),h("div",{style:{fontSize:12,color:colors.muted,marginTop:2}},text)));
-      const go = ()=>{ const g = psAsk.opts.find(o=>o.key===psAsk.gstKey)||null; closePriceSummaryAsk({mode:psAsk.mode, gst: pro ? (g?{key:g.key,label:g.label,components:g.components,note:g.key==="none"?"export / SEZ / LUT":""}:null) : null}); };
+      const go = ()=>{ const g = psAsk.opts.find(o=>o.key===psAsk.gstKey)||null; closePriceSummaryAsk({mode:psAsk.mode, gst: pro ? (g?{key:g.key,label:g.label,components:g.components,note:g.key==="none"?"export / SEZ / LUT":""}:null) : null, enclosures: psAsk.enclOn!==false}); };
       return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1400,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"60px 16px",overflow:"auto"}},
         h("div",{role:"dialog","aria-modal":"true",style:{background:"#fff",borderRadius:10,width:520,maxWidth:"100%",boxShadow:"0 10px 40px rgba(0,0,0,0.25)"}},
           h("div",{style:{background:"#1f5c40",color:"#fff",padding:"12px 16px",borderRadius:"10px 10px 0 0"}},
@@ -19593,7 +19892,15 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
                     h("select",{id:"ps-gst",value:psAsk.gstKey||"",onChange:e=>setPsAsk(a=>({...a,gstKey:e.target.value})),style:{...inputStyle,padding:"7px 9px",fontSize:12.5}},
                       psAsk.opts.map(o=>h("option",{key:o.key,value:o.key},o.label))),
                     h("div",{style:{fontSize:11.5,color:colors.muted}},psAsk.why)),
-              !psAsk.hasPf && h("div",{style:{fontSize:11.5,color:"#8a5a10"}},"Packing & Forwarding isn't set in the Commercial Terms, so no P&F line will print."))),
+              !psAsk.hasPf && h("div",{style:{fontSize:11.5,color:"#8a5a10"}},"Packing & Forwarding isn't set in the Commercial Terms, so no P&F line will print.")),
+            (psAsk.encl||[]).length>0 && h("div",{style:{borderTop:"1px solid "+colors.border,paddingTop:10}},
+              h("div",{style:{fontSize:12.5,fontWeight:700,marginBottom:6}},"Enclosures: "+psAsk.encl.length+" document"+(psAsk.encl.length>1?"s":"")+" we are sending"),
+              h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:8}},psAsk.encl.map(e=>(e.docNumber||"Document")+" Rev "+e.rev+(e.filePath?"":" (link only, listed as sent separately)")).join(" \u00b7 ")),
+              h("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
+                [[true,"Merge them into the offer PDF","As Annexure IV, after the datasheets"],[false,"Offer only","Send the documents separately; nothing is listed"]].map(([v,t,sub])=>
+                  h("label",{key:String(v),style:{flex:"1 1 200px",display:"flex",gap:8,alignItems:"flex-start",border:"1px solid "+(psAsk.enclOn===v?"#1f5c40":colors.border),background:psAsk.enclOn===v?"#e8f2ec":"#fff",borderRadius:7,padding:"8px 10px",cursor:"pointer"}},
+                    h("input",{type:"radio",name:"ps-encl",checked:psAsk.enclOn===v,onChange:()=>setPsAsk(a=>({...a,enclOn:v})),style:{marginTop:3,accentColor:"#1f5c40"}}),
+                    h("div",null,h("div",{style:{fontWeight:600,fontSize:12.5}},t),h("div",{style:{fontSize:11,color:colors.muted}},sub))))))),
           h("div",{style:{padding:"12px 16px",borderTop:"1px solid "+colors.border,display:"flex",gap:8,justifyContent:"flex-end"}},
             h("button",{type:"button",onClick:()=>closePriceSummaryAsk(null),style:btnSecondary},"Cancel"),
             h("button",{type:"button",onClick:go,style:{...btnPrimary,background:"#1f5c40",borderColor:"#1f5c40"}},"Generate PDF"))));
@@ -20031,14 +20338,27 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               r.is_mandatory?"Not mandatory":"Make mandatory"),
             !r.fulfilled_document_id && h("button",{onClick:()=>deleteDocumentRequest(r),style:{background:"none",border:"none",cursor:"pointer",color:colors.mutedLight,fontSize:11}},"✕")
           ))),
-          h("div",{style:{display:"flex",gap:6,alignItems:"center"}},
-            h(MasterSelect,{value:newRequestCategory,onChange:setNewRequestCategory,options:docCategoryOptions,table:"doc_category_tbl",valueCol:"value",fieldLabel:"Document Category",placeholder:"Select category to request…",style:{flex:1},refreshOptions:loadDocCategories}),   // 20 Sep: a category added from here now appears without a reload
+          // 1 Oct (107) — one add button. It used to sit beside the master's
+          // own green "+ Add" (which adds a CATEGORY), and the two were
+          // confused. A new category is now the last choice in the list.
+          h("div",{style:{fontSize:10.5,color:colors.muted,marginBottom:3}},"Request a document"),
+          h("div",{style:{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}},
+            h("select",{value:newRequestCategory,
+              onChange:e=>{ const v=e.target.value; if(v==="__new__"){ setShowNewRequestCategory(true); return; } setNewRequestCategory(v); },
+              style:{...inputStyle,flex:"1 1 220px",minWidth:0}},
+              h("option",{value:""},"Pick a document category…"),
+              docCategoryOptions.map(c=>h("option",{key:c,value:c},c)),
+              h("option",{value:"__new__"},"\uFF0B Category not in the list…")
+            ),
             mode==="contract" && h("label",{style:{display:"flex",alignItems:"center",gap:4,fontSize:11,color:colors.muted,whiteSpace:"nowrap"}},
               h("input",{type:"checkbox",checked:newRequestMandatory,onChange:e=>setNewRequestMandatory(e.target.checked)}),"Mandatory"),
-            h("button",{onClick:addDocumentRequest,style:{...btnSmall,fontSize:11}},"+ Add"),
+            h("button",{onClick:addDocumentRequest,disabled:!newRequestCategory,style:{...btnPrimary,fontSize:11.5,padding:"6px 14px",opacity:newRequestCategory?1:0.45,cursor:newRequestCategory?"pointer":"not-allowed"}},"Add request"),
             h("button",{onClick:()=>{ setChecklistPick([]); setChecklistOpen(true); },style:{...btnSmall,fontSize:11},
-              title:"Tick several categories at once from the master"},"Checklist")
-          )
+              title:"Tick several categories at once from the master"},"Pick several\u2026")
+          ),
+          showNewRequestCategory && h(AddToMasterPanel,{table:"doc_category_tbl",valueCol:"value",fieldLabel:"Document Category",
+            onClose:()=>setShowNewRequestCategory(false),
+            onAdded:async(newVal)=>{ await loadDocCategories(); setNewRequestCategory(newVal); }})
         ),
 
         checklistOpen && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1400,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
@@ -20088,7 +20408,11 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
                   ),
                   d.link && h("a",{href:d.link,target:"_blank",rel:"noreferrer",style:{fontSize:10.5,color:"#0c447c"}},d.link)
                 ),
-                h("div",{style:{display:"flex",gap:6}},
+                h("div",{style:{display:"flex",gap:6,alignItems:"center"}},
+                  mode!=="contract" && (d.has_out
+                    ? h("label",{title:"Merge this document's latest Out revision into the quote PDF as an enclosure",style:{display:"flex",alignItems:"center",gap:4,fontSize:11,color:d.include_in_offer?"#1f5c40":colors.muted,whiteSpace:"nowrap",cursor:"pointer"}},
+                        h("input",{type:"checkbox",checked:d.include_in_offer,onChange:()=>toggleIncludeInOffer(d),style:{accentColor:"#1f5c40"}}),"In offer PDF")
+                    : h("span",{title:"Only documents we send (Out) go into the offer PDF",style:{fontSize:10.5,color:colors.mutedLight,whiteSpace:"nowrap"}},"Not in offer (In only)")),
                   d.lives_in_supabase && h("button",{onClick:()=>downloadDocument(d),style:{...btnSmall,fontSize:11}},"View file"),
                   h("button",{onClick:()=>openDocHistory(d),style:{...btnSmall,fontSize:11}},"History")
                 )
@@ -20126,14 +20450,15 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
             const finalDirection = continueOverrideUnlocked ? continueOverrideDirection : expected.direction;
             return h(React.Fragment,null,
               h("div",{style:{background:"#faf9f4",borderRadius:6,padding:"8px 10px",marginBottom:10,fontSize:12}},
-                "Logging: ", h("b",null,"Rev "+finalRev+" — "+finalDirection),
-                !continueOverrideUnlocked && continueDocHistory.length===0 && h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:3}},"First entry for this document — you'll pick the direction below."),
+                "Logging: ", h("b",null,"Rev "+finalRev+(continueDirectionPick?" — "+continueDirectionPick:"")),
+                !continueOverrideUnlocked && continueDocHistory.length>0 && h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:3}},"Last entry: Rev "+continueDocHistory[0].rev_number+" — "+(continueDocHistory[0].direction||"?")+". By the sequence this one is "+expected.direction+"."),
                 continueOverrideUnlocked && h("div",{style:{fontSize:10.5,color:"#a3312a",marginTop:3}},"⚠ Override active — this document will be flagged.")
               ),
-              !continueDocHistory.length && !continueOverrideUnlocked && h("div",{style:{display:"flex",gap:8,marginBottom:10}},
-                h("button",{onClick:()=>setContinueOverrideDirection("Out"),style:{flex:1,padding:"6px",border:"1px solid "+(continueOverrideDirection==="Out"?"#185FA5":colors.border),borderRadius:6,background:"#fff",cursor:"pointer",fontSize:11.5}},"Out"),
-                h("button",{onClick:()=>setContinueOverrideDirection("In"),style:{flex:1,padding:"6px",border:"1px solid "+(continueOverrideDirection==="In"?"#185FA5":colors.border),borderRadius:6,background:"#fff",cursor:"pointer",fontSize:11.5}},"In")
-              ),
+              h(DocDirectionPick,{value:continueDirectionPick,onChange:v=>{ setContinueDirectionPick(v); if(continueOverrideUnlocked && v) setContinueOverrideDirection(v); },
+                label:"This entry (Rev "+finalRev+") is:", missing:docDirMissing && !continueDirectionPick,
+                warn: (!continueOverrideUnlocked && expected.direction && continueDirectionPick && continueDirectionPick!==expected.direction)
+                  ? "The sequence says this entry is "+expected.direction+" (the last one was "+continueDocHistory[0].direction+"). Tick "+expected.direction+", or ask a Super Admin to override the sequence."
+                  : null}),
               // Access-style limit-to-list (21 Sep): type and the list narrows as
               // you go; only a status that exists in the master is accepted.
               // New statuses are added at Admin \u2192 Document Status Master,
@@ -20180,16 +20505,18 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               h("button",{onClick:()=>removeDocDraft(idx),style:{background:"none",border:"none",color:colors.danger,cursor:"pointer",fontSize:11}},"Remove")
             ),
             h("label",{style:{display:"block",fontSize:10.5,color:colors.muted,marginBottom:3}},"Category"),
-            h(MasterSelect,{value:d.category,onChange:v=>updateDocDraft(idx,{category:v}),options:docCategoryOptions,table:"doc_category_tbl",valueCol:"value",fieldLabel:"Document Category",placeholder:"Select category…",style:{marginBottom:8},refreshOptions:loadDocCategories}),
+            h("select",{value:d.category,onChange:e=>{ const v=e.target.value; if(v==="__new__"){ setDocMasterAddFor(idx); return; } updateDocDraft(idx,{category:v}); },style:{...inputStyle,width:"100%",marginBottom:8}},
+              h("option",{value:""},"Pick a document category…"),
+              (docCategoryOptions.includes(d.category)||!d.category?docCategoryOptions:[d.category,...docCategoryOptions]).map(c=>h("option",{key:c,value:c},c)),
+              h("option",{value:"__new__"},"\uFF0B Category not in the list…")),
+            docMasterAddFor===idx && h(AddToMasterPanel,{table:"doc_category_tbl",valueCol:"value",fieldLabel:"Document Category",
+              onClose:()=>setDocMasterAddFor(null),
+              onAdded:async(newVal)=>{ await loadDocCategories(); updateDocDraft(idx,{category:newVal}); }}),
             h("label",{style:{display:"block",fontSize:10.5,color:colors.muted,marginBottom:3}},"Doc number"),
             h("input",{value:d.docNumber,onChange:e=>updateDocDraft(idx,{docNumber:e.target.value}),style:{...inputStyle,width:"100%",marginBottom:8}}),
             h("label",{style:{display:"block",fontSize:10.5,color:colors.muted,marginBottom:3}},"Title / description"),
             h("input",{value:d.title,onChange:e=>updateDocDraft(idx,{title:e.target.value}),placeholder:"e.g. GA drawing — strainer assembly",style:{...inputStyle,width:"100%",marginBottom:8}}),
-            h("label",{style:{display:"block",fontSize:10.5,color:colors.muted,marginBottom:3}},"This first entry — Rev 0 — is it Out or In?"),
-            h("div",{style:{display:"flex",gap:8,marginBottom:8}},
-              h("button",{type:"button",onClick:()=>updateDocDraft(idx,{direction:"Out"}),style:{flex:1,padding:"6px",border:"1px solid "+(d.direction==="Out"?"#185FA5":colors.border),borderRadius:6,background:"#fff",cursor:"pointer",fontSize:11.5}},"Out — we're sending"),
-              h("button",{type:"button",onClick:()=>updateDocDraft(idx,{direction:"In"}),style:{flex:1,padding:"6px",border:"1px solid "+(d.direction==="In"?"#185FA5":colors.border),borderRadius:6,background:"#fff",cursor:"pointer",fontSize:11.5}},"In — came back to us")
-            ),
+            h(DocDirectionPick,{value:d.direction,onChange:v=>updateDocDraft(idx,{direction:v}),label:"This document (Rev 0) is:",missing:docDirMissing && !d.direction}),
             h("label",{style:{display:"block",fontSize:10.5,color:colors.muted,marginBottom:3}},"Status"),
             h(LimitToListCombo,{value:d.status,onChange:v=>updateDocDraft(idx,{status:v}),
               options:docStatusOptions.map(docStatusName).filter(Boolean),
@@ -20229,7 +20556,9 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           h("div",{style:{marginBottom:12}}, docHistoryRows.map(h2=>h("div",{key:h2.id,style:{fontSize:11.5,padding:"6px 0",borderBottom:"1px solid #eceae0"}},
             h("div",{style:{display:"flex",alignItems:"center",gap:6,marginBottom:2}},
               h("span",{style:{fontWeight:600}},"Rev "+h2.rev_number),
-              h2.direction && h("span",{style:{fontSize:9.5,padding:"1px 6px",borderRadius:9,background:h2.direction==="Out"?"#fff4d6":"#e6f1fb",color:h2.direction==="Out"?"#854f0b":"#0c447c"}},h2.direction),
+              h2.direction && h("span",{style:{fontSize:9.5,padding:"1px 6px",borderRadius:9,background:h2.direction==="Out"?"#fff4d6":"#e6f1fb",color:h2.direction==="Out"?"#854f0b":"#0c447c"}},h2.direction==="Out"?"Out: we sent":"In: we received"),
+              docHistoryRows[0] && docHistoryRows[0].id===h2.id && h("button",{onClick:()=>editHistoryDirection(h2),title:"Ticked the wrong one? Switch Out / In on this entry",
+                style:{border:"none",background:"none",color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:10.5,padding:"0 2px"}},"Edit Out/In"),
               h("select",{value:h2.status||"",onChange:e=>changeHistoryStatus(h2,e.target.value),style:{...docStatusColor(h2.status),fontSize:9.5,padding:"1px 4px",borderRadius:9,border:"none"}},
                 h("option",{value:""},"— status —"),
                 docStatusOptions.map(s=>h("option",{key:docStatusName(s),value:docStatusName(s)},docStatusName(s)))
@@ -21183,7 +21512,7 @@ async function fetchDocumentHistory(entityIds){
   if(!ids.length) return [];
   const { data: parents } = await sb.from("universal_documents_tbl").select("*").in("entity_id",ids);
   if(!parents || !parents.length) return [];
-  const { data: history } = await sb.from("universal_document_history_tbl").select("*").in("document_id",parents.map(p=>p.id)).order("rev_number",{ascending:false});
+  const { data: history } = await sb.from("universal_document_history_tbl").select("*").in("document_id",parents.map(p=>p.id)).order("rev_number",{ascending:false}).order("changed_at",{ascending:false});
   const byDoc = new Map();
   (history||[]).forEach(hh=>{ if(!byDoc.has(hh.document_id)) byDoc.set(hh.document_id,[]); byDoc.get(hh.document_id).push(hh); });
   return parents.map(p=>({
@@ -21270,7 +21599,7 @@ async function purgeQuoteDocumentsIfLeavingDraft(referenceNumber, performedBy){
   const { data: parents } = await sb.from("universal_documents_tbl").select("id,doc_number").eq("entity_type","quote").eq("entity_id",referenceNumber).eq("is_archived",false);
   if(!parents?.length) return;
   const ids = parents.map(p=>p.id);
-  const { data: history } = await sb.from("universal_document_history_tbl").select("*").in("document_id",ids).order("rev_number",{ascending:false});
+  const { data: history } = await sb.from("universal_document_history_tbl").select("*").in("document_id",ids).order("rev_number",{ascending:false}).order("changed_at",{ascending:false});
   const latestByDoc = new Map();
   (history||[]).forEach(h=>{ if(!latestByDoc.has(h.document_id)) latestByDoc.set(h.document_id,h); });
   const toPurge = Array.from(latestByDoc.values()).filter(h=>h.lives_in_supabase && h.file_path);
@@ -21369,7 +21698,7 @@ async function carryForwardDocuments(sourceEntityType, sourceEntityId, targetEnt
   const docParents = selectedDocIds ? (docParentsAll||[]).filter(p=>selectedDocIds.includes(p.id)) : (docParentsAll||[]);
   if(!docParents.length) return;
   const oldIds = docParents.map(p=>p.id);
-  const { data: oldHistory } = await sb.from("universal_document_history_tbl").select("*").in("document_id",oldIds).order("rev_number",{ascending:false});
+  const { data: oldHistory } = await sb.from("universal_document_history_tbl").select("*").in("document_id",oldIds).order("rev_number",{ascending:false}).order("changed_at",{ascending:false});
   const latestByOldDoc = new Map();
   (oldHistory||[]).forEach(h=>{ if(!latestByOldDoc.has(h.document_id)) latestByOldDoc.set(h.document_id,h); });
   for(const p of docParents){
@@ -25605,6 +25934,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"1 Oct 2026 (107)", summary:"Documents, Out/In and datasheet editing. DOCUMENTS REQUESTED: one Add request button (greyed until a category is picked); a new category is the last choice in the list (+ Category not in the list…), so the master's own + Add no longer sits beside it; Checklist renamed Pick several…. The upload form's category works the same way. OUT / IN: two large tick boxes, We are sending (Out) and We are receiving (In), blank to start and required; ticking one locks the other and Edit clears both. Continuing a document asks fresh too; a tick that disagrees with the Out/In sequence blocks the save unless a Super Admin overrides. A wrong tick already saved can be fixed from History with Edit Out/In on the latest entry (free on a document's only entry, Super Admin + Deletion Code otherwise, flagged). History reads now order by revision then time, so Rev 0 Out and Rev 0 In are no longer taken in random order. DATASHEET: every line has Edit, including Material Data; a Material Data edit is stored on that datasheet only (field_values.__mocEdits), shows Edited \u00b7 was <original> with Reset, prints on the quote PDF and is logged in revision changes; the BOM and price list are not touched. Sl No and Model stay automatic. ENCLOSURES (quotes only): each document's newest Out revision, ticked In offer PDF (default on), not superseded / rejected / void / cancelled / withdrawn, is merged in as Annexure IV after the datasheets, with a list page, Index rows per document and an Enclosures line on the cover letter; link-only documents are listed as sent separately. Generate asks Merge enclosures or Offer only. Every attached PDF (enclosures and datasheet PDFs) is read once, so page numbers run straight through: native pages are numbered with the final count and each merged page gets the same footer (and DRAFT mark) stamped on. A PDF that can't be read is left out and named in one message. NEEDS SQL: enclosures_and_doc_direction_2026-10-01.sql (adds include_in_offer)." },
+  { date:"30 Sep 2026 (106)", summary:"One green scheme for the whole quote and Sale Order PDF, matching the price summary: every table heading is dark green with white text (Index, Price Summary, NDE / Testing, Other options, revision history, datasheet grids); label columns and section rows are pale green with green text (cover boxes, cover letter, Commercial Terms, Notes, datasheet sections); the title band under the letterhead and the footer bar are pale green, titles and the footer company name green. Annexure II basic summary: amount headings right-aligned, green rule over the grand total." },
   { date:"30 Sep 2026 (105)", summary:"Offer figures without commas, and aligned tax summary. Every figure in the offer PDF (price summary, cover letter Gross and Net, datasheet Price Data) prints without thousands separators, e.g. 26444, because the comma is read differently from country to country; a PO price on a Sale Order keeps its two decimals (5075.50). The app's own screens keep their commas. Price summary: amount headings (Unit price, Qty, Total, Taxable value, each GST column) are right-aligned over their figures, and the tax summary by HSN/SAC runs the full page width so its amounts end under the grand total." },
   { date:"30 Sep 2026 (104)", summary:"Price summary with extras and taxes. GENERATE PDF now asks how Annexure II should print, with the quote's last choice pre-selected: As now (basic prices, unchanged), or With extras and taxes (proforma style). PROFORMA: one table with green headings — Items (with HSN from the Item master), Other options, NDE / Testing (SAC 9983), Sub total, Packing & forwarding on basic price (taxable), Freight and Insurance terms from the Commercial Terms, Total before tax, one line per GST component (from GST Structures: CGST + SGST or IGST, picked from the customer's state against your GSTIN state, or No GST for export / SEZ / LUT; a foreign-currency offer prints GST not applicable), Grand total incl. GST, amount in words, and a tax summary by HSN/SAC. Prices follow the whole-number rule; GST is rounded to the rupee. COVER LETTER: Gross Amount (Basic Price) always; Net Amount (incl. P&F & GST) too when the proforma style is chosen. The choice is saved on the quote (run price_summary_proforma SQL once in each company to remember it)." },
   { date:"30 Sep 2026 (103)", summary:"Valve finder: the Actuator question no longer disappears. The form used to open a model as soon as the other answers left only one, before Actuator type was asked. Actuator type is now a required question for Valves (valve_finder_actuator_required SQL), so the form waits for it, and each list now shows every answer the item has; answers not available with the other choices are greyed with \"none with the other answers\", and picking one shows which answer to change (e.g. Pneumatic at a size that only comes gear operated). Gear operated is one of the actuator answers." },
@@ -26647,7 +26978,18 @@ function buildAutoDescription(masterRow, lines, itemName, sizeText){
 // returns structured {key,label,value} rows for Material Data instead of
 // a joined description string. One row per parameter that actually found
 // a match; multiple matching lines combine their values with " / ".
-function buildMocMaterialDataRows(mocRow, lines, mocChoices){
+// 1 Oct (107) — a Material Data line typed over on one datasheet. Stored in
+// that datasheet's field_values.__mocEdits keyed by the line's label; the
+// BOM, the price list and every other datasheet are untouched.
+function buildMocMaterialDataRows(mocRow, lines, mocChoices, mocEdits){
+  const rows = buildMocMaterialDataRowsRaw(mocRow, lines, mocChoices);
+  const ed = mocEdits || {};
+  if(!Object.keys(ed).length) return rows;
+  return rows.map(r=> Object.prototype.hasOwnProperty.call(ed, r.label)
+    ? { ...r, value:String(ed[r.label]), edited:true, original:r.value, needsChoice:false }
+    : r);
+}
+function buildMocMaterialDataRowsRaw(mocRow, lines, mocChoices){
   // 28 Sep (92) — a Pricelist line has no BOM to match: its Material Data
   // was settled when it was added (price list values, gaps typed by the
   // user) and saved on the line as material_values. Rows follow the item's
@@ -40329,7 +40671,7 @@ function DocumentRegisterReport(){
       (ests||[]).forEach(e=>{ if(e.reference_number && !custBy.has(e.reference_number)) custBy.set(e.reference_number, e.customer_name||""); });
       (sos||[]).forEach(o=>{ if(o.contract_number) custBy.set(o.contract_number, o.customer_name||""); });
       const { data: parents } = await sb.from("universal_documents_tbl").select("*").order("created_at",{ascending:false});
-      const { data: history } = await sb.from("universal_document_history_tbl").select("*").order("rev_number",{ascending:false});
+      const { data: history } = await sb.from("universal_document_history_tbl").select("*").order("rev_number",{ascending:false}).order("changed_at",{ascending:false});
       const byDoc = new Map();
       (history||[]).forEach(hh=>{ if(!byDoc.has(hh.document_id)) byDoc.set(hh.document_id,[]); byDoc.get(hh.document_id).push(hh); });
       const reqBy = new Map();
