@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-01T06:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-01T10:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -706,7 +706,7 @@ const MASTER_TABLES = [
   // grew only through type-to-add on the Documents panel, so nobody could
   // see or tidy it. is_critical is the flag the delivery-date trigger reads:
   // "the date the LAST critical-category document reached Code 2".
-  { key: "doc_category_tbl", label: "Document Categories", columns: ["value","hold_level"], addLabel:"New document category", freeText:["value"], constOptions:{hold_level:HOLD_LEVELS}, nullableCols:["hold_level"], groupBy:["hold_level"], editAllEnabled:true, exportEnabled:true },
+  { key: "doc_category_tbl", label: "Document Categories", columns: ["value","number_prefix","per_sl_no","for_production_default","hold_level"], colLabels:{number_prefix:"Number prefix",per_sl_no:"One per Sl No",for_production_default:"For production by default"}, addLabel:"New document category", freeText:["value","number_prefix"], boolCols:["per_sl_no","for_production_default"], constOptions:{hold_level:HOLD_LEVELS}, nullableCols:["hold_level","number_prefix"], groupBy:["hold_level"], editAllEnabled:true, exportEnabled:true },
   { key: "job_attribute_tbl", label: "Job attributes", columns: ["attribute","sort_order"], addLabel:"New attribute", freeText:["attribute","sort_order"] },
   { key: "family_tbl", label: "Families", columns: ["family"], addLabel:"New family", freeText:["family"], exportEnabled:true },
   // 29 Sep (96) — Family sits above Item (Valves, Strainers, Tanks…). Pick
@@ -10913,6 +10913,791 @@ function DatasheetMasterEditor({ onGoToTab, user }){
 // called it, adds a row to the given single-column master table, and hands
 // the new value back via onAdded — the caller re-selects it, nothing the
 // user was filling in elsewhere gets lost or navigated away from.
+// ---- DOCUMENTS BOX, TABBED (1 Oct 2026, build 110) -----------------------
+// One tab per document, grouped under its category with the Sl No shown, a
+// status dot, a dashed tab for anything required but not yet sent, and a +
+// tab to add. The selected document shows its revision trail with the next
+// entry pre-filled. Link mandatory, PDF optional. Used by quotes and Sale
+// Orders alike. Three Document Category settings drive it: number prefix,
+// one requirement per Sl No, and For production by default.
+const DOC_PREFIX_DEFAULT = {"G.A Drawing":"DWG","Order Acceptance":"OA","Purchase Order":"PO","ITP / QAP":"ITP","PMI Procedure":"PMI","R.T. Procedure":"RT","U.T. Procedure":"UT","M.P.T Procedure":"MPT","IGT Procedure":"IGT","Painting Procedure":"PAINT","Other Documents":"DOC","Pickling & Passivation Procedure":"PICK","Hydrotest Procedure":"HYDRO","Catalog / Brochure":"CAT","P.T.R":"PTR","G.S.T Details":"GST","Statutory Details":"STAT","Packing Procedure":"PACKPROC","Packing List":"PACKLIST","Quote":"QTE"};
+function docCategoryRow(cats, name){
+  const k = String(name||"").trim().toLowerCase();
+  return (cats||[]).find(c=>String(c.value||"").trim().toLowerCase()===k) || null;
+}
+function docNumberPrefix(cats, name){
+  const c = docCategoryRow(cats, name);
+  return (c && String(c.number_prefix||"").trim()) || DOC_PREFIX_DEFAULT[name] || "DOC";
+}
+// Code 1 / Code 2 / cleared statuses: these hand over to production cleanly.
+function docIsCleared(status){
+  const s = String(status||"");
+  return /code ?1|code ?2|all cleared|for info|internal info|no action/i.test(s) && !/code ?3/i.test(s);
+}
+// The posts that may change a document's For-production flag and hand over.
+async function myPostKeys(user){
+  try{
+    const { data: emp } = await sb.from("employee_tbl").select("employee_name").eq("app_user_id",user?.id||"").limit(1).maybeSingle();
+    const me = emp && emp.employee_name;
+    if(!me) return { me:"", keys:[] };
+    const { data } = await sb.from("post_holder_tbl").select("post_key").eq("employee_name",me);
+    return { me, keys:(data||[]).map(r=>r.post_key) };
+  }catch(e){ return { me:"", keys:[] }; }
+}
+function canSetForProduction(user, keys){
+  return user?.role==="super_admin" || (keys||[]).includes("doc_controller") || (keys||[]).includes("technical_head");
+}
+function canHandOverDocs(user, keys){
+  return user?.role==="super_admin" || (keys||[]).includes("doc_controller");
+}
+// A later revision of a document already handed over to production marks
+// those hand-overs superseded and re-flags the work order to the Technical
+// Head, who sees that the newer revision has to be reissued.
+async function supersedeHandovers(documentId, newRev, username){
+  try{
+    const { data: rows, error } = await sb.from("work_order_doc_handover_tbl").select("*").eq("document_id",documentId).is("superseded_at",null).is("reissued_at",null);
+    if(error) return 0;
+    const hit = (rows||[]).filter(r=>Number(r.rev_number) < Number(newRev));
+    if(!hit.length) return 0;
+    await sb.from("work_order_doc_handover_tbl").update({ superseded_by_rev:newRev, superseded_at:new Date().toISOString() }).in("id",hit.map(r=>r.id));
+    for(const woId of Array.from(new Set(hit.map(r=>r.work_order_id)))){
+      const { data: ack } = await sb.from("work_order_ack_tbl").select("id").eq("work_order_id",woId).eq("post_key","technical_head").limit(1).maybeSingle();
+      if(ack) await sb.from("work_order_ack_tbl").update({ acknowledged_at:null, acknowledged_by:null }).eq("id",ack.id);
+      else await sb.from("work_order_ack_tbl").insert({ work_order_id:woId, post_key:"technical_head" });
+    }
+    await logAudit("UPDATE","work_order_doc_handover_tbl",hit[0].contract_number,
+      (hit[0].doc_number||"Document")+" Rev "+newRev+" logged; handed over at Rev "+hit.map(r=>r.rev_number).join("/")+" on "+Array.from(new Set(hit.map(r=>r.wo_number))).join(", ")+" — reissue needed",username||"unknown",null,null);
+    return hit.length;
+  }catch(e){ console.error("Hand-over supersession check failed", e); return 0; }
+}
+// Inserts with the new columns, and again without them if this database
+// has not had the build 110 SQL yet, so nothing stops working meanwhile.
+async function insertTolerant(table, row, newCols, selectOne){
+  let q = sb.from(table).insert(row); if(selectOne) q = q.select().single();
+  let res = await q;
+  if(res.error && newCols.some(c=>String(res.error.message||"").includes(c))){
+    const slim = {...row}; newCols.forEach(c=>delete slim[c]);
+    q = sb.from(table).insert(slim); if(selectOne) q = q.select().single();
+    res = await q;
+  }
+  return res;
+}
+async function uploadDocFile(entityRef, file){
+  if(!file) return null;
+  if(file.type!=="application/pdf" && !/\.pdf$/i.test(file.name||"")) throw new Error("\""+file.name+"\" isn't a PDF. Only PDF files are accepted.");
+  const path = "quote_"+entityRef+"_"+Date.now()+"_"+String(file.name).replace(/[^a-zA-Z0-9._-]/g,"_");
+  const { error } = await sb.storage.from("quote-documents").upload(path,file);
+  if(error) throw error;
+  return path;
+}
+
+function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth, onChanged, onClose }){
+  const isContract = mode==="contract";
+  const [loading,setLoading] = useState(true);
+  const [cats,setCats] = useState([]);
+  const [statuses,setStatuses] = useState([]);
+  const [slNos,setSlNos] = useState([]);
+  const [reqs,setReqs] = useState([]);
+  const [docs,setDocs] = useState([]);
+  const [postKeys,setPostKeys] = useState([]);
+  const [sel,setSel] = useState(null);           // "d<id>" | "r<id>" | "+"
+  const [busy,setBusy] = useState(false);
+  const [dirMissing,setDirMissing] = useState(false);
+
+  const load = useCallback(async(keepSel)=>{
+    if(!entityRef) return;
+    if(isContract) await ensurePoDocumentRequirement(entityRef, user?.username);
+    const [{data:c},st,{data:sl},r,d,pk] = await Promise.all([
+      sb.from("doc_category_tbl").select("*"),
+      loadDocStatuses(),
+      sb.from("estimates").select("item_sl_no,item").eq("reference_number",entityRef).order("item_sl_no"),
+      fetchDocumentRequirements(entityRef),
+      fetchDocumentHistory(entityRef),
+      myPostKeys(user)
+    ]);
+    setCats((c||[]).slice().sort((a,b)=>String(a.value||"").localeCompare(String(b.value||""))));
+    setStatuses(st||[]);
+    const seen = new Set(); setSlNos((sl||[]).filter(x=>{ const k=String(x.item_sl_no); if(seen.has(k)) return false; seen.add(k); return true; }));
+    setReqs(r||[]);
+    setDocs((d||[]).filter(x=>!x.is_archived));
+    setPostKeys(pk.keys||[]);
+    setLoading(false);
+    if(!keepSel){
+      const open = (r||[]).filter(q=>!q.fulfilled_document_id);
+      const firstMand = open.find(q=>q.is_mandatory);
+      const firstDoc = (d||[]).filter(x=>!x.is_archived)[0];
+      setSel(firstMand ? "r"+firstMand.id : firstDoc ? "d"+firstDoc.id : open[0] ? "r"+open[0].id : "+");
+    }
+  },[entityRef, isContract, user?.username, user?.id]);
+  useEffect(()=>{ load(false); },[load]);
+  const refresh = async()=>{ await load(true); if(onChanged) await onChanged(); };
+
+  const statusBucket = (label)=> (statuses.find(s=>docStatusName(s)===label)||{}).action_type;
+  const dotColor = (label)=>{ if(!label) return "#b9b6aa"; const b=statusBucket(label); return b==="our_action" ? "#a3312a" : b==="third_party_action" ? "#c98a1b" : "#1f5c40"; };
+  const chipStyle = (label)=>{ const b=statusBucket(label); return b==="our_action" ? {background:"#fdecea",color:"#a3312a"} : b==="third_party_action" ? {background:"#fff4d6",color:"#854f0b"} : label ? {background:"#eaf9f4",color:"#085041"} : {background:"#f1efe8",color:colors.muted}; };
+  const statusNames = statuses.map(docStatusName).filter(Boolean);
+  const catNames = cats.map(c=>c.value).filter(Boolean);
+  const perSl = (cat)=> !!(docCategoryRow(cats,cat)||{}).per_sl_no;
+  const prodDefault = (cat)=> !!(docCategoryRow(cats,cat)||{}).for_production_default;
+  const slLabel = (n)=> n==null || n==="" ? "" : "Sl "+n;
+  const slItem = (n)=> (slNos.find(s=>String(s.item_sl_no)===String(n))||{}).item || "";
+  const mayFlagProduction = canSetForProduction(user, postKeys);
+  const outstandingMand = outstandingMandatory(reqs);
+
+  // ---- the tabs ----
+  const openReqs = reqs.filter(r=>!r.fulfilled_document_id);
+  const tabItems = [
+    ...docs.map(d=>({ kind:"doc", key:"d"+d.id, category:d.category||"Other Documents", sl:d.item_sl_no, label:d.doc_number, latest:(d.revisions||[])[0]||null, doc:d,
+      mandatory: reqs.some(r=>r.fulfilled_document_id===d.id && r.is_mandatory) })),
+    ...openReqs.map(r=>({ kind:"req", key:"r"+r.id, category:r.category||"Other Documents", sl:r.item_sl_no, label:(r.item_sl_no!=null?"Sl "+r.item_sl_no:"Not sent"), req:r, mandatory:!!r.is_mandatory }))
+  ];
+  const groups = (()=>{
+    const m = new Map();
+    tabItems.forEach(t=>{ if(!m.has(t.category)) m.set(t.category,[]); m.get(t.category).push(t); });
+    const names = Array.from(m.keys()).sort((a,b)=> (a===PO_DOC_CATEGORY?-1:b===PO_DOC_CATEGORY?1:a.localeCompare(b)));
+    return names.map(n=>({ name:n, items:m.get(n).sort((a,b)=> (Number(a.sl??-1)-Number(b.sl??-1)) || (a.kind===b.kind?0:a.kind==="doc"?-1:1) || String(a.label).localeCompare(String(b.label))) }));
+  })();
+  const current = sel==="+" ? null : tabItems.find(t=>t.key===sel) || null;
+
+  // ---- document number: suggested from the category prefix, checked as typed ----
+  const suggestNumber = async(category)=>{
+    const base = docNumberPrefix(cats,category)+"-"+entityRef;
+    try{
+      const { data } = await sb.from("universal_documents_tbl").select("doc_number").ilike("doc_number",base+"-%");
+      const max = (data||[]).reduce((mx,r)=>{ const m=String(r.doc_number||"").match(/-(\d+)$/); return m?Math.max(mx,Number(m[1])):mx; },0);
+      return base+"-"+String(max+1).padStart(3,"0");
+    }catch(e){ return base+"-001"; }
+  };
+  const [numCheck,setNumCheck] = useState({ value:"", state:"" , where:"" });
+  const checkNumber = useCallback((value)=>{
+    const v = String(value||"").trim();
+    if(!v){ setNumCheck({value:"",state:"",where:""}); return; }
+    setNumCheck({ value:v, state:"checking", where:"" });
+    const t = setTimeout(async()=>{
+      const { data } = await sb.from("universal_documents_tbl").select("entity_id,doc_number").ilike("doc_number",v.replace(/[%_]/g,"\\$&")).limit(1);
+      setNumCheck(cur=> cur.value!==v ? cur : (data&&data.length ? { value:v, state:"taken", where:data[0].entity_id } : { value:v, state:"free", where:"" }));
+    },350);
+    return ()=>clearTimeout(t);
+  },[]);
+  const numHint = (value)=>{
+    const v = String(value||"").trim();
+    if(!v || numCheck.value!==v || !numCheck.state) return null;
+    if(numCheck.state==="checking") return h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:3}},"Checking…");
+    if(numCheck.state==="taken") return h("div",{style:{fontSize:10.5,color:"#a3312a",marginTop:3}},"✗ "+v+" is already used"+(numCheck.where?" on "+numCheck.where:"")+". Pick another number.");
+    return h("div",{style:{fontSize:10.5,color:"#1f5c40",marginTop:3}},"✓ Number is free");
+  };
+
+  // ---- + tab: add a requirement, or a requirement with Rev 0 ----
+  const blankAdd = { cat:"", sl:"", how:"rev0", num:"", title:"", dir:"", status:"", link:"", file:null, mand:false };
+  const [add,setAdd] = useState(blankAdd);
+  const [newCatOpen,setNewCatOpen] = useState(false);
+  const pickAddCategory = async(cat)=>{
+    if(cat==="__new__"){ setNewCatOpen(true); return; }
+    const num = cat ? await suggestNumber(cat) : "";
+    setAdd(a=>({ ...a, cat, sl: perSl(cat) ? (a.how==="req" ? "__all__" : (slNos[0]?String(slNos[0].item_sl_no):"")) : "", num }));
+    checkNumber(num);
+  };
+  const saveAdd = async()=>{
+    if(!add.cat){ alert("Pick a category."); return; }
+    const whole = add.sl==="" ; const all = add.sl==="__all__";
+    if(add.how==="rev0"){
+      if(all){ alert("Rev 0 is one document — pick the Sl No it belongs to."); return; }
+      if(perSl(add.cat) && whole){ alert(add.cat+" is kept per Sl No. Pick the Sl No."); return; }
+      if(!String(add.num).trim()){ alert("Give the document a number."); return; }
+      if(numCheck.value===String(add.num).trim() && numCheck.state==="taken"){ alert(String(add.num).trim()+" is already used. Pick another number."); return; }
+      if(add.dir!=="Out" && add.dir!=="In"){ setDirMissing(true); alert("Tick Out (we are sending) or In (we are receiving)."); return; }
+      if(!add.status){ alert("Pick a status."); return; }
+      if(!confirmDocumentLink(add.link, "Document "+String(add.num).trim())) return;
+    }
+    const doIt = async()=>{
+      setBusy(true);
+      try{
+        const targetSls = all ? slNos.map(s=>s.item_sl_no) : [whole ? null : Number(add.sl)];
+        const have = new Set(reqs.map(r=>String(r.category||"").trim().toLowerCase()+"|"+(r.item_sl_no??"")));
+        const reqRows = targetSls.filter(n=>!have.has(String(add.cat).trim().toLowerCase()+"|"+(n??""))).map(n=>({
+          entity_type: isContract?"contract":"quote", entity_id:entityRef, category:add.cat, item_sl_no:n,
+          is_mandatory: isContract && add.mand, source: isContract?"Sale Order":"Customer request", requested_by:user?.username||"unknown" }));
+        if(add.how==="req" && !reqRows.length){ alert("That requirement is already on the list."); setBusy(false); return; }
+        let reqId = null;
+        if(add.how==="rev0"){
+          // Use the open requirement for this category / Sl No if one exists.
+          const existing = reqs.find(r=>!r.fulfilled_document_id && String(r.category).trim().toLowerCase()===String(add.cat).trim().toLowerCase() && String(r.item_sl_no??"")===String(targetSls[0]??""));
+          if(existing) reqId = existing.id;
+        }
+        for(const row of reqRows){
+          if(add.how==="rev0" && reqId) break;
+          const res = await insertTolerant("document_requests_tbl", row, ["item_sl_no"], true);
+          if(res.error) throw res.error;
+          if(add.how==="rev0") reqId = res.data.id;
+        }
+        if(isContract && add.mand && reqRows.length) await logAudit("INSERT","document_requests_tbl",entityRef,"Mandatory document added: "+add.cat+(targetSls.length>1?" ("+targetSls.length+" Sl Nos)":""),user?.username||"unknown",null,null);
+        let newKey = null;
+        if(add.how==="rev0"){
+          const path = await uploadDocFile(entityRef, add.file);
+          const docNumber = String(add.num).trim();
+          const ins = await insertTolerant("universal_documents_tbl",{
+            doc_number:docNumber, doc_name:String(add.title||"").trim(), category:add.cat,
+            entity_type: isContract?"contract":"quote", entity_id:entityRef, is_mandatory:false, is_archived:false,
+            item_sl_no: targetSls[0], for_production: prodDefault(add.cat), created_by:user?.username||"unknown"
+          }, ["item_sl_no","for_production"], true);
+          if(ins.error) throw ins.error;
+          const { error: hErr } = await sb.from("universal_document_history_tbl").insert({
+            document_id:ins.data.id, doc_number:docNumber, rev_number:0, direction:add.dir, status:add.status,
+            link:String(add.link).trim(), file_path:path, lives_in_supabase:!!path, reason:"Initial entry", changed_by:user?.username||"unknown" });
+          if(hErr) throw hErr;
+          if(reqId) await sb.from("document_requests_tbl").update({fulfilled_document_id:ins.data.id}).eq("id",reqId);
+          await logAudit("INSERT","universal_documents_tbl",entityRef,"Logged "+docNumber+" ("+add.cat+(targetSls[0]!=null?", Sl No "+targetSls[0]:"")+") — Rev0-"+add.dir,user?.username||"unknown",null,null);
+          newKey = "d"+ins.data.id;
+        }
+        setAdd(blankAdd); setDirMissing(false);
+        await refresh();
+        if(newKey) setSel(newKey);
+      }catch(e){ alert(documentSaveErrorText(e, add.num)); }
+      finally{ setBusy(false); }
+    };
+    if(isContract && add.mand) withMandatoryAuth(doIt); else await doIt();
+  };
+
+  // ---- requirement tab: log Rev 0 against it ----
+  const blankRq = { num:"", title:"", dir:"", status:"", link:"", file:null };
+  const [rq,setRq] = useState(blankRq);
+  useEffect(()=>{
+    let cancelled=false;
+    if(current && current.kind==="req"){
+      (async()=>{ const num = await suggestNumber(current.category); if(!cancelled){ setRq({ ...blankRq, num }); checkNumber(num); } })();
+    }
+    setDirMissing(false);
+    return ()=>{ cancelled=true; };
+  },[sel, cats.length]);   // eslint-disable-line
+  const saveRq = async()=>{
+    const r = current && current.req; if(!r) return;
+    const docNumber = String(rq.num).trim();
+    if(!docNumber){ alert("Give the document a number."); return; }
+    if(numCheck.value===docNumber && numCheck.state==="taken"){ alert(docNumber+" is already used. Pick another number."); return; }
+    if(rq.dir!=="Out" && rq.dir!=="In"){ setDirMissing(true); alert("Tick Out (we are sending) or In (we are receiving)."); return; }
+    if(!rq.status){ alert("Pick a status."); return; }
+    if(!confirmDocumentLink(rq.link, "Document "+docNumber)) return;
+    setBusy(true);
+    try{
+      const path = await uploadDocFile(entityRef, rq.file);
+      const ins = await insertTolerant("universal_documents_tbl",{
+        doc_number:docNumber, doc_name:String(rq.title||"").trim(), category:r.category,
+        entity_type: isContract?"contract":"quote", entity_id:entityRef, is_mandatory:false, is_archived:false,
+        item_sl_no: r.item_sl_no??null, for_production: prodDefault(r.category), created_by:user?.username||"unknown"
+      }, ["item_sl_no","for_production"], true);
+      if(ins.error) throw ins.error;
+      const { error: hErr } = await sb.from("universal_document_history_tbl").insert({
+        document_id:ins.data.id, doc_number:docNumber, rev_number:0, direction:rq.dir, status:rq.status,
+        link:String(rq.link).trim(), file_path:path, lives_in_supabase:!!path, reason:"Initial entry", changed_by:user?.username||"unknown" });
+      if(hErr) throw hErr;
+      await sb.from("document_requests_tbl").update({fulfilled_document_id:ins.data.id}).eq("id",r.id);
+      await logAudit("INSERT","universal_documents_tbl",entityRef,"Logged "+docNumber+" against the "+r.category+" requirement — Rev0-"+rq.dir,user?.username||"unknown",null,null);
+      setRq(blankRq);
+      await refresh();
+      setSel("d"+ins.data.id);
+    }catch(e){ alert(documentSaveErrorText(e, docNumber)); }
+    finally{ setBusy(false); }
+  };
+  const toggleMandatory = (r)=>{
+    withMandatoryAuth(async()=>{
+      const make = !r.is_mandatory;
+      const { error } = await sb.from("document_requests_tbl").update({ is_mandatory:make, source: make?"Sale Order":(r.source||"Customer request") }).eq("id",r.id);
+      if(error){ alert("Failed: "+error.message); return; }
+      await logAudit("UPDATE","document_requests_tbl",entityRef,(make?"Marked mandatory: ":"No longer mandatory: ")+r.category+(r.item_sl_no!=null?" (Sl No "+r.item_sl_no+")":""),user?.username||"unknown",null,null);
+      await refresh();
+    });
+  };
+  const removeRequirement = async(r)=>{
+    if(!confirm((r.is_mandatory?"Remove the MANDATORY requirement \"":"Remove the requirement \"")+r.category+(r.item_sl_no!=null?" · Sl "+r.item_sl_no:"")+"\"?")) return;
+    const run = async()=>{
+      await sb.from("document_requests_tbl").delete().eq("id",r.id);
+      if(r.is_mandatory) await logAudit("DELETE","document_requests_tbl",entityRef,"Mandatory document removed: "+r.category,user?.username||"unknown",null,null);
+      setSel(null); await load(false); if(onChanged) await onChanged();
+    };
+    if(r.is_mandatory) withMandatoryAuth(run); else await run();
+  };
+
+  // ---- document tab: next entry pre-filled, status, Out/In fix, flags, notes ----
+  const blankNx = { dir:"", status:"", link:"", file:null, what:"", notes:"", fulfil:"" };
+  const [nx,setNx] = useState(blankNx);
+  const [override,setOverride] = useState(null);   // {rev} once a Super Admin has unlocked the sequence
+  const [notes,setNotes] = useState([]);
+  const [noteText,setNoteText] = useState("");
+  useEffect(()=>{
+    setOverride(null);
+    if(current && current.kind==="doc"){
+      const last = (current.doc.revisions||[])[0];
+      setNx({ ...blankNx, link: last ? (last.link||"") : "" });
+      sb.from("universal_document_notes_tbl").select("*").eq("document_id",current.doc.id).order("created_at",{ascending:false}).then(({data})=>setNotes(data||[]));
+    } else setNotes([]);
+  },[sel, docs.length]);   // eslint-disable-line
+  const expectedNext = (revs)=>{
+    if(!revs || !revs.length) return { rev:0, direction:null };
+    const last = revs[0];
+    return last.direction==="Out" ? { rev:last.rev_number, direction:"In" } : { rev:(Number(last.rev_number)||0)+1, direction:"Out" };
+  };
+  const unlockSequence = async(doc)=>{
+    if(user?.role!=="super_admin"){ alert("Only a Super Admin can override the Out/In sequence."); return; }
+    const code = prompt("Enter a Deletion Code to override the document sequence:");
+    if(code===null) return;
+    const res = await verifyAndConsumeDeletionCode(code, user?.username||"unknown");
+    if(!res.ok){ alert(res.reason); return; }
+    setOverride({ rev: expectedNext(doc.revisions).rev });
+  };
+  const saveNext = async()=>{
+    const d = current && current.doc; if(!d) return;
+    const exp = expectedNext(d.revisions);
+    const rev = override ? Number(override.rev) : exp.rev;
+    if(nx.dir!=="Out" && nx.dir!=="In"){ setDirMissing(true); alert("Tick Out (we are sending) or In (we are receiving)."); return; }
+    if(!override && exp.direction && nx.dir!==exp.direction){ alert("By the Out/In sequence this entry is "+exp.direction+" (the last one was "+((d.revisions||[])[0]||{}).direction+"). Tick "+exp.direction+", or ask a Super Admin to override the sequence."); return; }
+    if(!nx.status){ alert("Pick a status."); return; }
+    if(!confirmDocumentLink(nx.link, "Document "+d.doc_number)) return;
+    if(!String(nx.what).trim()){ alert("Say what changed in this entry."); return; }
+    if(!String(nx.notes).trim()){ alert("Notes is required for this entry too."); return; }
+    setBusy(true);
+    try{
+      const path = await uploadDocFile(entityRef, nx.file);
+      const { error } = await sb.from("universal_document_history_tbl").insert({
+        document_id:d.id, doc_number:d.doc_number, rev_number:rev, direction:nx.dir, status:nx.status,
+        link:String(nx.link).trim(), file_path:path, lives_in_supabase:!!path, reason:String(nx.what).trim(), notes:String(nx.notes).trim(), changed_by:user?.username||"unknown" });
+      if(error) throw error;
+      if(nx.fulfil) await sb.from("document_requests_tbl").update({fulfilled_document_id:d.id}).eq("id",nx.fulfil);
+      if(override){
+        const note = "Sequence overridden by Super Admin "+(user?.username||"unknown")+" — logged Rev"+rev+"-"+nx.dir+" instead of the expected Rev"+exp.rev+"-"+exp.direction+".";
+        await sb.from("universal_documents_tbl").update({sequence_flagged:true, sequence_flag_note:note}).eq("id",d.id);
+        await logAudit("UPDATE","universal_documents_tbl",entityRef,note,user?.username||"unknown",null,null);
+      } else {
+        await logAudit("UPDATE","universal_documents_tbl",entityRef,"New entry on "+d.doc_number+" — Rev"+rev+"-"+nx.dir+": "+String(nx.what).trim(),user?.username||"unknown",null,null);
+      }
+      const superseded = await supersedeHandovers(d.id, rev, user?.username);
+      setNx(blankNx); setOverride(null); setDirMissing(false);
+      await refresh();
+      if(superseded) alert(d.doc_number+" was handed over to production at an earlier revision. The work order now shows Rev "+rev+" as current, and the Technical Head has been flagged to reissue it.");
+    }catch(e){ alert(documentSaveErrorText(e, d.doc_number)); }
+    finally{ setBusy(false); }
+  };
+  const changeStatus = async(row, value)=>{
+    const { error } = await sb.from("universal_document_history_tbl").update({status:value}).eq("id",row.id);
+    if(error){ alert("Couldn't change the status: "+error.message); return; }
+    await logAudit("UPDATE","universal_document_history_tbl",entityRef,"Status of "+row.doc_number+" Rev"+row.rev_number+"-"+row.direction+" changed to "+value,user?.username||"unknown",null,null);
+    await refresh();
+  };
+  const fixDirection = async(d, row)=>{
+    const oldDir = row.direction||"";
+    const flipped = oldDir==="Out" ? "In" : "Out";
+    const only = (d.revisions||[]).length<=1;
+    if(!only){
+      if(user?.role!=="super_admin"){ alert("Only a Super Admin can change Out/In on a later entry — it breaks the Out/In sequence."); return; }
+      const code = prompt("Changing Rev "+row.rev_number+" from "+oldDir+" to "+flipped+" breaks the Out/In sequence. Enter a Deletion Code to go ahead:");
+      if(code===null) return;
+      const res = await verifyAndConsumeDeletionCode(code, user?.username||"unknown");
+      if(!res.ok){ alert(res.reason); return; }
+    } else if(!confirm("Change Rev "+row.rev_number+" of "+d.doc_number+" from "+(oldDir||"blank")+" to "+flipped+"?")) return;
+    const { error } = await sb.from("universal_document_history_tbl").update({direction:flipped}).eq("id",row.id);
+    if(error){ alert("Couldn't change it: "+error.message); return; }
+    const note = "Out/In of "+d.doc_number+" Rev"+row.rev_number+" corrected from "+(oldDir||"blank")+" to "+flipped+" by "+(user?.username||"unknown");
+    if(!only) await sb.from("universal_documents_tbl").update({sequence_flagged:true, sequence_flag_note:note}).eq("id",d.id);
+    await logAudit("UPDATE","universal_document_history_tbl",entityRef,note,user?.username||"unknown",{direction:oldDir},{direction:flipped});
+    await refresh();
+  };
+  const setForProduction = async(d, value)=>{
+    if(!mayFlagProduction){ alert("Only the Document Controller or the Technical Head can change this."); return; }
+    const { error } = await sb.from("universal_documents_tbl").update({for_production:value}).eq("id",d.id);
+    if(error){ alert(/for_production/.test(error.message||"") ? "Run the build 110 SQL first (documents_tabs_handover_2026-10-01.sql)." : "Couldn't save: "+error.message); return; }
+    await logAudit("UPDATE","universal_documents_tbl",entityRef,d.doc_number+(value?" marked":" no longer marked")+" For production",user?.username||"unknown",{for_production:!value},{for_production:value});
+    await refresh();
+  };
+  const setInOffer = async(d, value)=>{
+    const { error } = await sb.from("universal_documents_tbl").update({include_in_offer:value}).eq("id",d.id);
+    if(error){ alert(/include_in_offer/.test(error.message||"") ? "Run the build 107 SQL first (enclosures_and_doc_direction_2026-10-01.sql)." : "Couldn't save: "+error.message); return; }
+    await logAudit("UPDATE","universal_documents_tbl",entityRef,(value?"Included in ":"Left out of ")+"the offer PDF: "+d.doc_number,user?.username||"unknown",null,null);
+    await refresh();
+  };
+  const viewFile = async(row)=>{
+    const { data } = await sb.storage.from("quote-documents").createSignedUrl(row.file_path,60);
+    if(data?.signedUrl) window.open(data.signedUrl,"_blank"); else alert("The file is no longer in storage. Use the link.");
+  };
+  const addNote = async(d)=>{
+    if(!String(noteText).trim()) return;
+    const { data, error } = await sb.from("universal_document_notes_tbl").insert({ document_id:d.id, note_text:String(noteText).trim(), created_by:user?.username||"unknown" }).select().single();
+    if(error){ alert("Couldn't add the note: "+error.message); return; }
+    setNotes(n=>[data,...n]); setNoteText("");
+  };
+
+  // ---- Pick several (checklist) ----
+  const [clOpen,setClOpen] = useState(false);
+  const [clPick,setClPick] = useState([]);
+  const saveChecklist = async()=>{
+    if(!clPick.length){ setClOpen(false); return; }
+    setBusy(true);
+    try{
+      const have = new Set(reqs.map(r=>String(r.category||"").trim().toLowerCase()+"|"+(r.item_sl_no??"")));
+      const rows = [];
+      clPick.forEach(c=>{
+        const targets = perSl(c) && slNos.length ? slNos.map(s=>s.item_sl_no) : [null];
+        targets.forEach(n=>{ if(!have.has(String(c).trim().toLowerCase()+"|"+(n??""))) rows.push({ entity_type:isContract?"contract":"quote", entity_id:entityRef, category:c, item_sl_no:n,
+          is_mandatory:false, source:isContract?"Sale Order":"Quote checklist", requested_by:user?.username||"unknown" }); });
+      });
+      for(const row of rows){ const res = await insertTolerant("document_requests_tbl", row, ["item_sl_no"], false); if(res.error) throw res.error; }
+      setClOpen(false); setClPick([]);
+      await refresh();
+    }catch(e){ alert("Failed: "+(e.message||e)); }
+    finally{ setBusy(false); }
+  };
+
+  // ---- small pieces ----
+  const lbl = (t, req)=>h("div",{style:{fontSize:10.5,color:colors.muted,margin:"8px 0 3px"}},t, req?h("span",{style:{color:"#a3312a",marginLeft:4}},"*"):null);
+  const fld = {...inputStyle,padding:"7px 9px",fontSize:12.5};
+  const statusCombo = (value, onChange)=>h(LimitToListCombo,{value, onChange, options:statusNames, placeholder:"Type to find a status…",
+    invalidMessage:v=>"“"+v+"” is not in the Document Status master. Pick one from the list, or add it at Admin → Document Status Master.", style:fld});
+  const linkInput = (value, onChange)=>h(React.Fragment,null,
+    h("input",{value, onChange:e=>onChange(e.target.value), placeholder:"https://drive.google.com/…", style:fld}),
+    value && !checkDocumentLink(value).ok && h("div",{style:{fontSize:10,color:checkDocumentLink(value).block?colors.danger:"#854f0b",marginTop:3}},
+      checkDocumentLink(value).block ? checkDocumentLink(value).message : (/onedrive|1drv|sharepoint/i.test(value) ? "OneDrive link — stops opening after the move to Google Drive." : "Not a Google Drive link — you'll be asked to confirm.")));
+  const fileInput = (onChange)=>h("input",{type:"file",accept:"application/pdf",onChange:e=>onChange(e.target.files[0]||null),style:{fontSize:12}});
+  const twoCol = (...kids)=>h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:"0 14px"}},...kids);
+
+  const renderTabStrip = ()=>h("div",{style:{display:"flex",flexWrap:"wrap",gap:"10px 18px",alignItems:"flex-end",borderBottom:"2px solid #1f5c40",paddingBottom:8,marginBottom:12}},
+    groups.map(g=>h("div",{key:g.name},
+      h("div",{style:{fontSize:9.5,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.04em",color:colors.muted,marginBottom:4}},g.name),
+      h("div",{style:{display:"flex",gap:4,flexWrap:"wrap"}}, g.items.map(t=>{
+        const on = sel===t.key;
+        const st = t.kind==="doc" ? (t.latest||{}).status : null;
+        return h("button",{key:t.key,onClick:()=>setSel(t.key),title:t.kind==="req"?"Required, not sent yet":(t.doc.doc_name||t.label)+(st?" — "+st:""),
+          style:{display:"inline-flex",alignItems:"center",gap:6,padding:"5px 10px",fontSize:11.5,borderRadius:6,cursor:"pointer",whiteSpace:"nowrap",
+            border:(t.kind==="req"?"1.5px dashed ":"1px solid ")+(on?"#1f5c40":t.mandatory&&t.kind==="req"?"#a3312a":colors.border),
+            background:on?"#1f5c40":t.kind==="req"?"#fff":"#faf9f4", color:on?"#fff":t.kind==="req"?colors.muted:colors.text, fontWeight:on?600:400}},
+          t.kind==="doc" ? h("span",{style:{width:8,height:8,borderRadius:4,background:dotColor(st),flexShrink:0,boxShadow:on?"0 0 0 1.5px #fff":"none"}}) : null,
+          t.kind==="doc" ? t.label : "Not sent",
+          t.sl!=null && t.sl!=="" ? h("span",{style:{fontSize:10,opacity:0.8}},"Sl "+t.sl) : null,
+          t.mandatory ? h("span",{title:"Mandatory",style:{color:on?"#ffd7d2":"#a3312a",fontWeight:700}},"*") : null);
+      })))),
+    h("div",null,
+      h("div",{style:{fontSize:9.5,color:"transparent",marginBottom:4}},"."),
+      h("button",{onClick:()=>{ setSel("+"); setAdd(blankAdd); },title:"Add a document or a requirement",
+        style:{padding:"5px 12px",fontSize:13,fontWeight:700,borderRadius:6,cursor:"pointer",border:"1px solid "+(sel==="+"?"#1f5c40":colors.border),background:sel==="+"?"#1f5c40":"#fff",color:sel==="+"?"#fff":"#1f5c40"}},"+")));
+
+  const renderAdd = ()=>{
+    const cat = add.cat; const ps = cat && perSl(cat);
+    return h("div",null,
+      h("div",{style:{fontSize:14,fontWeight:700,marginBottom:2}},"Add a document"),
+      h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:6}},"Pick the category; the number is suggested from its prefix and checked as you type."),
+      twoCol(
+        h("div",null, lbl("Category",true),
+          h("select",{value:cat,onChange:e=>pickAddCategory(e.target.value),style:fld},
+            h("option",{value:""},"Pick a document category…"),
+            catNames.map(c=>h("option",{key:c,value:c},c)),
+            h("option",{value:"__new__"},"＋ Category not in the list…"))),
+        h("div",null, lbl(ps?"Sl No (kept per Sl No)":"Sl No", ps),
+          h("select",{value:add.sl,onChange:e=>setAdd(a=>({...a,sl:e.target.value})),style:fld,disabled:!cat},
+            !ps && h("option",{value:""},"Whole order"),
+            ps && add.how==="req" && h("option",{value:"__all__"},"Every Sl No (one requirement each)"),
+            slNos.map(s=>h("option",{key:s.item_sl_no,value:String(s.item_sl_no)},"Sl "+s.item_sl_no+(s.item?" — "+s.item:""))))))
+      ,
+      h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",margin:"12px 0 4px"}},
+        [["req","Requirement only","Required, not sent yet — shows as a dashed tab"],["rev0","Requirement and Rev 0 now","Log the first entry with its link"]].map(([v,t,s])=>
+          h("label",{key:v,style:{flex:"1 1 220px",display:"flex",gap:8,alignItems:"flex-start",border:"1px solid "+(add.how===v?"#1f5c40":colors.border),background:add.how===v?"#e8f2ec":"#fff",borderRadius:7,padding:"8px 10px",cursor:"pointer"}},
+            h("input",{type:"radio",name:"docbox-how",checked:add.how===v,onChange:()=>setAdd(a=>({...a,how:v, sl: v==="req" && a.cat && perSl(a.cat) ? "__all__" : (a.sl==="__all__" ? (slNos[0]?String(slNos[0].item_sl_no):"") : a.sl)})),style:{marginTop:3,accentColor:"#1f5c40"}}),
+            h("div",null,h("div",{style:{fontWeight:600,fontSize:12.5}},t),h("div",{style:{fontSize:11,color:colors.muted}},s))))),
+      isContract && h("label",{style:{display:"flex",gap:6,alignItems:"center",fontSize:12,margin:"8px 0",color:colors.muted}},
+        h("input",{type:"checkbox",checked:add.mand,onChange:e=>setAdd(a=>({...a,mand:e.target.checked}))}),"Mandatory on this order (needs the authorization code)"),
+      add.how==="rev0" && h("div",{style:{borderTop:"1px solid "+colors.border,marginTop:8,paddingTop:4}},
+        twoCol(
+          h("div",null, lbl("Document number",true), h("input",{value:add.num,onChange:e=>{ setAdd(a=>({...a,num:e.target.value})); checkNumber(e.target.value); },style:fld}), numHint(add.num)),
+          h("div",null, lbl("Title / description"), h("input",{value:add.title,onChange:e=>setAdd(a=>({...a,title:e.target.value})),placeholder:"e.g. GA drawing — strainer assembly",style:fld}))),
+        h("div",{style:{marginTop:10}}, h(DocDirectionPick,{value:add.dir,onChange:v=>setAdd(a=>({...a,dir:v})),label:"This document (Rev 0) is:",missing:dirMissing&&!add.dir})),
+        twoCol(
+          h("div",null, lbl("Status",true), statusCombo(add.status, v=>setAdd(a=>({...a,status:v})))),
+          h("div",null, lbl("Google Drive link",true), linkInput(add.link, v=>setAdd(a=>({...a,link:v}))))),
+        lbl("PDF file (optional)"), fileInput(f=>setAdd(a=>({...a,file:f})))),
+      h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}},
+        h("button",{onClick:saveAdd,disabled:busy||!cat,style:{...btnPrimary,background:"#1f5c40",padding:"8px 16px",fontSize:12.5,opacity:(busy||!cat)?0.5:1}},busy?"Saving…":(add.how==="req"?"Add requirement":"Add and log Rev 0"))),
+      newCatOpen && h(AddToMasterPanel,{table:"doc_category_tbl",valueCol:"value",fieldLabel:"Document Category",
+        onClose:()=>setNewCatOpen(false),
+        onAdded:async(v)=>{ const {data:c}=await sb.from("doc_category_tbl").select("*"); setCats((c||[]).slice().sort((a,b)=>String(a.value||"").localeCompare(String(b.value||"")))); const num=await suggestNumber(v); setAdd(a=>({...a,cat:v,num})); checkNumber(num); }})
+    );
+  };
+
+  const renderReq = (t)=>{
+    const r = t.req;
+    return h("div",null,
+      h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:4}},
+        h("div",{style:{fontSize:14,fontWeight:700}},r.category+(r.item_sl_no!=null?" · Sl "+r.item_sl_no:"")),
+        h("span",{style:{fontSize:10.5,padding:"1px 8px",borderRadius:9,background:"#fdecea",color:"#a3312a"}},"Not sent yet"),
+        r.is_mandatory && h("span",{style:{fontSize:10.5,padding:"1px 8px",borderRadius:9,background:"#fff4d6",color:"#854f0b",fontWeight:700}},"Mandatory"),
+        r.source && h("span",{style:{fontSize:10.5,color:colors.mutedLight}},r.source)),
+      r.item_sl_no!=null && slItem(r.item_sl_no) && h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:4}},"Sl "+r.item_sl_no+" — "+slItem(r.item_sl_no)),
+      h("div",{style:{display:"flex",gap:12,marginBottom:10}},
+        isContract && h("button",{onClick:()=>toggleMandatory(r),style:{border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:11.5}},r.is_mandatory?"Not mandatory":"Make mandatory"),
+        h("button",{onClick:()=>removeRequirement(r),style:{border:"none",background:"none",padding:0,color:colors.danger,textDecoration:"underline",cursor:"pointer",fontSize:11.5}},"Remove requirement")),
+      h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,padding:"10px 14px",background:"#fcfcf9"}},
+        h("div",{style:{fontSize:12.5,fontWeight:700}},"Log Rev 0 now"),
+        twoCol(
+          h("div",null, lbl("Document number",true), h("input",{value:rq.num,onChange:e=>{ setRq(x=>({...x,num:e.target.value})); checkNumber(e.target.value); },style:fld}), numHint(rq.num)),
+          h("div",null, lbl("Title / description"), h("input",{value:rq.title,onChange:e=>setRq(x=>({...x,title:e.target.value})),style:fld}))),
+        h("div",{style:{marginTop:10}}, h(DocDirectionPick,{value:rq.dir,onChange:v=>setRq(x=>({...x,dir:v})),label:"This document (Rev 0) is:",missing:dirMissing&&!rq.dir})),
+        twoCol(
+          h("div",null, lbl("Status",true), statusCombo(rq.status, v=>setRq(x=>({...x,status:v})))),
+          h("div",null, lbl("Google Drive link",true), linkInput(rq.link, v=>setRq(x=>({...x,link:v}))))),
+        lbl("PDF file (optional)"), fileInput(f=>setRq(x=>({...x,file:f}))),
+        h("div",{style:{display:"flex",justifyContent:"flex-end",marginTop:12}},
+          h("button",{onClick:saveRq,disabled:busy,style:{...btnPrimary,background:"#1f5c40",padding:"8px 16px",fontSize:12.5,opacity:busy?0.5:1}},busy?"Saving…":"Log Rev 0")))
+    );
+  };
+
+  const renderDoc = (t)=>{
+    const d = t.doc; const revs = d.revisions||[]; const last = revs[0]||null;
+    const exp = expectedNext(revs);
+    const rev = override ? override.rev : exp.rev;
+    const linked = reqs.filter(r=>r.fulfilled_document_id===d.id);
+    const openSame = openReqs.filter(r=>String(r.category||"").trim().toLowerCase()===String(d.category||"").trim().toLowerCase());
+    const fp = d.for_production==null ? prodDefault(d.category) : !!d.for_production;
+    const hasOut = revs.some(x=>x.direction==="Out");
+    const cell = {padding:"6px 8px",borderTop:"1px solid #eceae0",verticalAlign:"top",fontSize:11.5};
+    return h("div",null,
+      h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},
+        h("div",{style:{fontSize:14,fontWeight:700}},d.doc_number+(d.doc_name?" — "+d.doc_name:"")),
+        last && last.status && h("span",{style:{fontSize:10.5,padding:"1px 8px",borderRadius:9,...chipStyle(last.status)}},last.status)),
+      h("div",{style:{fontSize:11.5,color:colors.muted,margin:"3px 0 8px"}},
+        [d.category, d.item_sl_no!=null ? "Sl "+d.item_sl_no+(slItem(d.item_sl_no)?" — "+slItem(d.item_sl_no):"") : "Whole order",
+         last ? "Latest: Rev "+last.rev_number+" "+(last.direction==="Out"?"Out (we sent)":last.direction==="In"?"In (we received)":"") : "No entries yet"].join("  ·  ")),
+      d.sequence_flagged && h("div",{style:{background:"#fdecea",color:"#a3312a",borderRadius:6,padding:"6px 10px",fontSize:11.5,marginBottom:8}},"⚠ "+(d.sequence_flag_note||"Sequence was overridden for this document.")),
+      h("div",{style:{display:"flex",gap:16,flexWrap:"wrap",alignItems:"center",marginBottom:10}},
+        h("label",{title:mayFlagProduction?"Goes to the shop floor with the work order":"Only the Document Controller or the Technical Head can change this",
+          style:{display:"flex",gap:6,alignItems:"center",fontSize:12,color:fp?"#1f5c40":colors.muted,cursor:mayFlagProduction?"pointer":"not-allowed"}},
+          h("input",{type:"checkbox",checked:fp,disabled:!mayFlagProduction,onChange:e=>setForProduction(d,e.target.checked),style:{accentColor:"#1f5c40"}}),
+          "For production", d.for_production==null ? h("span",{style:{fontSize:10,color:colors.mutedLight}},"(category default)") : null),
+        !isContract && (hasOut
+          ? h("label",{style:{display:"flex",gap:6,alignItems:"center",fontSize:12,color:d.include_in_offer!==false?"#1f5c40":colors.muted,cursor:"pointer"}},
+              h("input",{type:"checkbox",checked:d.include_in_offer!==false,onChange:e=>setInOffer(d,e.target.checked),style:{accentColor:"#1f5c40"}}),"In offer PDF")
+          : h("span",{style:{fontSize:11,color:colors.mutedLight}},"Not in offer PDF (nothing sent Out)")),
+        linked.map(r=>h("span",{key:r.id,style:{fontSize:11,color:colors.muted}},
+          "Fulfils: "+r.category+(r.item_sl_no!=null?" Sl "+r.item_sl_no:""),
+          r.is_mandatory ? h("span",{style:{marginLeft:5,fontSize:10,padding:"1px 6px",borderRadius:9,background:"#fff4d6",color:"#854f0b",fontWeight:700}},"Mandatory") : null,
+          isContract ? h("button",{onClick:()=>toggleMandatory(r),style:{marginLeft:6,border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:11}},r.is_mandatory?"Not mandatory":"Make mandatory") : null))),
+      h("div",{style:{fontSize:12,fontWeight:700,margin:"6px 0 4px"}},"Revision trail"),
+      h("div",{style:{overflowX:"auto",border:"1px solid "+colors.border,borderRadius:6}},
+        h("table",{style:{borderCollapse:"collapse",width:"100%"}},
+          h("thead",null,h("tr",{style:{background:"#faf9f4"}},["Rev","Out / In","Status","When · who","What changed","Link / file"].map(x=>h("th",{key:x,style:{textAlign:"left",padding:"6px 8px",fontSize:10.5,color:colors.muted,fontWeight:600}},x)))),
+          h("tbody",null,
+            revs.length===0 ? h("tr",null,h("td",{colSpan:6,style:{...cell,color:colors.mutedLight}},"No entries yet.")) :
+            revs.map((x,i)=>h("tr",{key:x.id},
+              h("td",{style:{...cell,fontWeight:600}},"Rev "+x.rev_number),
+              h("td",{style:cell},
+                h("span",{style:{fontSize:10,padding:"1px 7px",borderRadius:9,background:x.direction==="Out"?"#fff4d6":"#e6f1fb",color:x.direction==="Out"?"#854f0b":"#0c447c"}},x.direction==="Out"?"Out: we sent":x.direction==="In"?"In: we received":"—"),
+                i===0 && h("div",null,h("button",{onClick:()=>fixDirection(d,x),title:"Ticked the wrong one? Switch Out / In on this entry",style:{border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:10.5}},"Edit Out/In"))),
+              h("td",{style:cell},
+                h("select",{value:x.status||"",onChange:e=>changeStatus(x,e.target.value),style:{...chipStyle(x.status),fontSize:10.5,padding:"2px 4px",borderRadius:9,border:"none",maxWidth:200}},
+                  h("option",{value:""},"— status —"),
+                  statusNames.map(s=>h("option",{key:s,value:s},s)))),
+              h("td",{style:{...cell,whiteSpace:"nowrap",color:colors.muted}},(x.changed_at||"").slice(0,10)+(x.changed_by?" · "+x.changed_by:"")),
+              h("td",{style:cell},(x.what_changed||x.reason||""),x.notes?h("div",{style:{color:colors.mutedLight,fontSize:10.5}},"Notes: "+x.notes):null),
+              h("td",{style:{...cell,whiteSpace:"nowrap"}},
+                x.link ? h("a",{href:x.link,target:"_blank",rel:"noreferrer",style:{color:"#0c447c",fontSize:11}},"Open link") : h("span",{style:{color:colors.mutedLight}},"no link"),
+                x.lives_in_supabase && x.file_path ? h("button",{onClick:()=>viewFile(x),style:{marginLeft:8,border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:11}},"View file") : null)))))),
+      h("div",{style:{border:"1px solid #cfe3d7",background:"#f4faf6",borderRadius:8,padding:"10px 14px",marginTop:12}},
+        h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}},
+          h("div",{style:{fontSize:12.5,fontWeight:700}},"Next entry: Rev "+rev+(exp.direction&&!override?" — the sequence says "+exp.direction:"")),
+          override ? h("span",{style:{fontSize:11,color:"#a3312a"}},"⚠ Override active — this document will be flagged.",
+              h("input",{type:"number",min:0,value:override.rev,onChange:e=>setOverride({rev:Math.max(0,Number(e.target.value)||0)}),style:{...fld,width:70,marginLeft:8,padding:"3px 6px"}}))
+            : user?.role==="super_admin" && h("button",{onClick:()=>unlockSequence(d),style:{...btnSmall,fontSize:10.5}},"Override sequence (code)")),
+        h("div",{style:{marginTop:8}}, h(DocDirectionPick,{value:nx.dir,onChange:v=>setNx(x=>({...x,dir:v})),label:"This entry (Rev "+rev+") is:",missing:dirMissing&&!nx.dir,
+          warn:(!override && exp.direction && nx.dir && nx.dir!==exp.direction) ? "The sequence says this entry is "+exp.direction+" (the last one was "+(last&&last.direction)+"). Tick "+exp.direction+", or ask a Super Admin to override the sequence." : null})),
+        twoCol(
+          h("div",null, lbl("Status",true), statusCombo(nx.status, v=>setNx(x=>({...x,status:v})))),
+          h("div",null, lbl("Google Drive link",true), linkInput(nx.link, v=>setNx(x=>({...x,link:v}))))),
+        twoCol(
+          h("div",null, lbl("What changed",true), h("input",{value:nx.what,onChange:e=>setNx(x=>({...x,what:e.target.value})),placeholder:"e.g. Updated nozzle orientation",style:fld})),
+          h("div",null, lbl("Notes",true), h("input",{value:nx.notes,onChange:e=>setNx(x=>({...x,notes:e.target.value})),style:fld}))),
+        twoCol(
+          h("div",null, lbl("PDF file (optional)"), fileInput(f=>setNx(x=>({...x,file:f})))),
+          openSame.length>0 ? h("div",null, lbl("Fulfils an open requirement?"),
+            h("select",{value:nx.fulfil,onChange:e=>setNx(x=>({...x,fulfil:e.target.value})),style:fld},
+              h("option",{value:""},"No"),
+              openSame.map(r=>h("option",{key:r.id,value:r.id},r.category+(r.item_sl_no!=null?" · Sl "+r.item_sl_no:""))))) : h("div",null)),
+        h("div",{style:{display:"flex",justifyContent:"flex-end",marginTop:12}},
+          h("button",{onClick:saveNext,disabled:busy,style:{...btnPrimary,background:"#1f5c40",padding:"8px 16px",fontSize:12.5,opacity:busy?0.5:1}},busy?"Saving…":("Log Rev "+rev+(nx.dir?" — "+nx.dir:""))))),
+      h("div",{style:{marginTop:14}},
+        h("div",{style:{fontSize:12,fontWeight:700,marginBottom:6}},"Notes on this document"),
+        notes.length===0 ? h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:8}},"No notes yet.") :
+        h("div",{style:{maxHeight:140,overflowY:"auto",marginBottom:8}}, notes.map(n=>h("div",{key:n.id,style:{fontSize:11.5,padding:"5px 0",borderBottom:"1px solid #eceae0"}},
+          h("span",{style:{color:colors.muted,fontSize:10.5,marginRight:8}},(n.created_at||"").slice(0,16).replace("T"," ")+" — "+(n.created_by||"—")), n.note_text))),
+        h("div",{style:{display:"flex",gap:6}},
+          h("input",{value:noteText,onChange:e=>setNoteText(e.target.value),placeholder:"Add a note…",style:{...fld,flex:1}}),
+          h("button",{onClick:()=>addNote(d),style:{...btnSmall,fontSize:11.5}},"+ Add note")))
+    );
+  };
+
+  return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
+    h("div",{style:{background:"#fff",borderRadius:12,width:"100%",maxWidth:1000,height:"90vh",display:"flex",flexDirection:"column"}},
+      h("div",{style:{padding:"14px 20px 8px",borderBottom:"1px solid "+colors.border}},
+        h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}},
+          h("div",null,
+            h("div",{style:{fontWeight:700,fontSize:15}},"Documents — "+entityRef),
+            h("div",{style:{fontSize:11,color:colors.mutedLight}},isContract
+              ? "One tab per document. The link is the permanent record; a PDF is optional."
+              : "One tab per document. The link is the permanent record; a PDF is optional and is removed once this quote leaves Draft.")),
+          h("div",{style:{display:"flex",gap:8,alignItems:"center"}},
+            h("button",{onClick:()=>{ setClPick([]); setClOpen(true); },style:{...btnSmall,fontSize:11.5},title:"Tick several categories at once"},"Pick several…"),
+            h("button",{onClick:onClose,style:{background:"none",border:"none",fontSize:16,cursor:"pointer",color:colors.mutedLight}},"✕"))),
+        isContract && outstandingMand.length>0 && h("div",{style:{background:"#fdecea",border:"1px solid #f0997b",borderRadius:6,padding:"6px 10px",marginTop:8,fontSize:11,color:"#a3312a"}},
+          h("b",null,outstandingMand.length+" mandatory document"+(outstandingMand.length>1?"s":"")+" outstanding. "),
+          outstandingMand.some(isPoDocRequirement) ? "The Order Acceptance PDF is blocked until the PO is attached; the rest block contract approval." : "Contract approval is blocked until these are attached."),
+        h("div",{style:{display:"flex",gap:14,fontSize:10.5,color:colors.muted,marginTop:8,flexWrap:"wrap"}},
+          [["#a3312a","Our action"],["#c98a1b","With the client"],["#1f5c40","Cleared"]].map(([c,t])=>h("span",{key:t,style:{display:"inline-flex",alignItems:"center",gap:5}},h("span",{style:{width:8,height:8,borderRadius:4,background:c}}),t)),
+          h("span",{style:{display:"inline-flex",alignItems:"center",gap:5}},h("span",{style:{width:14,height:10,border:"1.5px dashed "+colors.muted,borderRadius:3}}),"Required, not sent"),
+          h("span",null,h("b",{style:{color:"#a3312a"}},"*")," Mandatory"))),
+      h("div",{style:{flex:1,overflowY:"auto",padding:"12px 20px"}},
+        loading ? h("div",{style:{fontSize:12,color:colors.mutedLight}},"Loading…") : h(React.Fragment,null,
+          renderTabStrip(),
+          !tabItems.length && sel!=="+" && h("div",{style:{fontSize:12,color:colors.mutedLight}},"No documents or requirements yet. Use + to add one."),
+          sel==="+" ? renderAdd() : current ? (current.kind==="doc" ? renderDoc(current) : renderReq(current)) : null)),
+      h("div",{style:{padding:"10px 20px",borderTop:"1px solid "+colors.border,display:"flex",justifyContent:"flex-end"}},
+        h("button",{onClick:onClose,style:btnSecondary},"Close")),
+      clOpen && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
+        h("div",{style:{background:"#fff",borderRadius:10,padding:"18px 22px",width:480,maxWidth:"94vw",maxHeight:"80vh",overflowY:"auto"}},
+          h("div",{style:{fontWeight:700,fontSize:14,marginBottom:4}},"Pick several — "+entityRef),
+          h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:10}},"Each ticked category becomes a requirement (a dashed tab). Categories kept per Sl No get one requirement for every Sl No."),
+          catNames.map(c=>{
+            const already = reqs.some(r=>String(r.category||"").trim().toLowerCase()===String(c).trim().toLowerCase()) || docs.some(d=>String(d.category||"").trim().toLowerCase()===String(c).trim().toLowerCase());
+            return h("label",{key:c,style:{display:"flex",gap:8,alignItems:"center",padding:"4px 0",fontSize:12,opacity:already?0.5:1}},
+              h("input",{type:"checkbox",disabled:already,checked:already||clPick.includes(c),onChange:e=>setClPick(p=>e.target.checked?[...p,c]:p.filter(x=>x!==c))}),
+              h("span",{style:{flex:1}},c),
+              perSl(c) && h("span",{style:{fontSize:10,color:colors.mutedLight}},"per Sl No"),
+              already && h("span",{style:{fontSize:10,color:colors.mutedLight}},"already there"));
+          }),
+          h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}},
+            h("button",{onClick:()=>{ setClOpen(false); setClPick([]); },style:btnSecondary},"Cancel"),
+            h("button",{onClick:saveChecklist,disabled:busy,style:{...btnPrimary,opacity:busy?0.6:1}},busy?"Saving…":"Add "+(clPick.length||"")+" to the list"))))
+    )
+  );
+}
+
+// ---- WORK ORDER HAND-OVER (1 Oct 2026, build 110) ------------------------
+// The documents flagged For production go to the shop floor with the work
+// order, pinned at the revision current at hand-over. The Document
+// Controller clicks Hand over. Code 1 / Code 2 documents are pre-ticked;
+// anything still with the client is offered with a warning that follows
+// its category's Hold level. A later revision marks the hand-over
+// superseded (see supersedeHandovers) until the new one is handed over.
+function WorkOrderDocsModal({ contractNumber, user, onClose }){
+  const [loading,setLoading] = useState(true);
+  const [wos,setWos] = useState([]);
+  const [woSl,setWoSl] = useState([]);
+  const [docs,setDocs] = useState([]);
+  const [cats,setCats] = useState([]);
+  const [hand,setHand] = useState([]);
+  const [handErr,setHandErr] = useState("");
+  const [keys,setKeys] = useState([]);
+  const [pickFor,setPickFor] = useState(null);     // work order id
+  const [picks,setPicks] = useState({});           // document id -> true
+  const [busy,setBusy] = useState(false);
+  const load = useCallback(async()=>{
+    const [{data:w},{data:sl},d,{data:c},hres,pk] = await Promise.all([
+      sb.from("work_order_tbl").select("*").eq("contract_number",contractNumber).order("seq"),
+      sb.from("work_order_sl_no_tbl").select("*").eq("contract_number",contractNumber),
+      fetchDocumentHistory(contractNumber),
+      sb.from("doc_category_tbl").select("*"),
+      sb.from("work_order_doc_handover_tbl").select("*").eq("contract_number",contractNumber).order("handed_over_at"),
+      myPostKeys(user)
+    ]);
+    setWos(w||[]); setWoSl(sl||[]); setDocs((d||[]).filter(x=>!x.is_archived)); setCats(c||[]);
+    setHand(hres.error ? [] : (hres.data||[]));
+    setHandErr(hres.error ? "The hand-over table isn't in this database yet. Run documents_tabs_handover_2026-10-01.sql." : "");
+    setKeys(pk.keys||[]); setLoading(false);
+  },[contractNumber, user?.id]);
+  useEffect(()=>{ load(); },[load]);
+  const mayHand = canHandOverDocs(user, keys);
+  const forProd = (d)=> d.for_production==null ? !!(docCategoryRow(cats,d.category)||{}).for_production_default : !!d.for_production;
+  const holdOf = (d)=> (docCategoryRow(cats,d.category)||{}).hold_level || "";
+  const slOf = (woId)=> woSl.filter(r=>r.work_order_id===woId).map(r=>r.item_sl_no);
+  const eligible = (wo)=>{ const sls = slOf(wo.id).map(String); return docs.filter(d=>forProd(d) && (d.revisions||[]).length && (d.item_sl_no==null || sls.includes(String(d.item_sl_no)))); };
+  const activeRow = (woId, docId)=> hand.filter(r=>r.work_order_id===woId && r.document_id===docId && !r.reissued_at).slice(-1)[0] || null;
+  const latest = (d)=> (d.revisions||[])[0] || null;
+  const openPicker = (wo)=>{
+    const pre = {};
+    eligible(wo).forEach(d=>{ const a = activeRow(wo.id,d.id), L = latest(d); if(a && Number(a.rev_number)>=Number(L.rev_number)) return; if(docIsCleared(L.status)) pre[d.id]=true; });
+    setPicks(pre); setPickFor(wo.id);
+  };
+  const handOver = async(wo)=>{
+    const chosen = eligible(wo).filter(d=>picks[d.id]);
+    if(!chosen.length){ alert("Tick at least one document."); return; }
+    const notCleared = chosen.filter(d=>!docIsCleared(latest(d).status));
+    if(notCleared.some(d=>holdOf(d)==="Full Hold") && !confirm("These are still with the client and their category is Full Hold:\n\n"+notCleared.filter(d=>holdOf(d)==="Full Hold").map(d=>d.doc_number+" Rev "+latest(d).rev_number+" — "+(latest(d).status||"no status")).join("\n")+"\n\nHand them over anyway?")) return;
+    setBusy(true);
+    try{
+      const now = new Date().toISOString();
+      for(const d of chosen){
+        const L = latest(d);
+        const linkRow = (d.revisions||[]).find(x=>Number(x.rev_number)===Number(L.rev_number) && x.link) || L;
+        const prev = activeRow(wo.id, d.id);
+        const { error } = await sb.from("work_order_doc_handover_tbl").insert({
+          work_order_id:wo.id, wo_number:wo.wo_number, contract_number:contractNumber, document_id:d.id, doc_number:d.doc_number,
+          rev_number:L.rev_number, status_at_handover:L.status||null, link:linkRow.link||null, handed_over_by:user?.username||"unknown" });
+        if(error) throw error;
+        if(prev) await sb.from("work_order_doc_handover_tbl").update({ reissued_at:now, reissued_by:user?.username||"unknown" }).eq("id",prev.id);
+      }
+      await logAudit("INSERT","work_order_doc_handover_tbl",wo.wo_number,"Handed over to production: "+chosen.map(d=>d.doc_number+" Rev "+latest(d).rev_number).join(", "),user?.username||"unknown",null,null);
+      setPickFor(null); setPicks({});
+      await load();
+    }catch(e){ alert("Hand-over failed: "+(e.message||e)); }
+    finally{ setBusy(false); }
+  };
+  const cell = {padding:"6px 8px",borderTop:"1px solid #eceae0",fontSize:11.5,verticalAlign:"top"};
+  return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
+    h("div",{style:{background:"#fff",borderRadius:12,width:"100%",maxWidth:900,maxHeight:"88vh",display:"flex",flexDirection:"column"}},
+      h("div",{style:{padding:"14px 20px",borderBottom:"1px solid "+colors.border}},
+        h("div",{style:{fontWeight:700,fontSize:15}},"Work orders — documents for production — "+contractNumber),
+        h("div",{style:{fontSize:11.5,color:colors.muted}},"Documents marked For production go with the work order, pinned at the revision current when handed over. "+
+          (mayHand ? "You hand over as Document Controller." : "The Document Controller hands over; you can see what was handed over."))),
+      h("div",{style:{flex:1,overflowY:"auto",padding:"12px 20px"}},
+        loading ? h("div",{style:{fontSize:12,color:colors.mutedLight}},"Loading…") :
+        handErr ? h("div",{style:{fontSize:12,color:"#a3312a"}},handErr) :
+        !wos.length ? h("div",{style:{fontSize:12,color:colors.mutedLight}},"No work orders on this contract yet.") :
+        wos.map(wo=>{
+          const el = eligible(wo);
+          const rows = el.map(d=>({ d, L:latest(d), a:activeRow(wo.id,d.id) }));
+          const stale = rows.filter(r=>r.a && Number(r.L.rev_number)>Number(r.a.rev_number));
+          const notYet = rows.filter(r=>!r.a);
+          return h("div",{key:wo.id,style:{border:"1px solid "+(stale.length?"#f0997b":colors.border),borderRadius:8,marginBottom:14,overflow:"hidden"}},
+            h("div",{style:{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",padding:"8px 12px",background:stale.length?"#fdecea":"#faf9f4"}},
+              h("b",{style:{fontSize:13}},wo.wo_number),
+              h("span",{style:{fontSize:11.5,color:colors.muted}},"Sl No "+slOf(wo.id).join(", ")),
+              stale.length>0 && h("span",{style:{fontSize:10.5,padding:"1px 8px",borderRadius:9,background:"#a3312a",color:"#fff",fontWeight:700}},"Superseded — "+stale.length+" to reissue"),
+              notYet.length>0 && h("span",{style:{fontSize:10.5,padding:"1px 8px",borderRadius:9,background:"#fff4d6",color:"#854f0b"}},notYet.length+" not handed over"),
+              h("span",{style:{flex:1}}),
+              mayHand && (notYet.length>0 || stale.length>0) && h("button",{onClick:()=>openPicker(wo),style:{...btnSmall,fontSize:11.5,background:"#1f5c40",color:"#fff",border:"none"}},stale.length?"Reissue / hand over…":"Hand over to production…")),
+            !rows.length ? h("div",{style:{padding:"10px 12px",fontSize:11.5,color:colors.mutedLight}},"No documents marked For production for these Sl Nos yet.") :
+            h("table",{style:{width:"100%",borderCollapse:"collapse"}},
+              h("thead",null,h("tr",null,["Document","Sl No","Handed over","Current","Status now",""].map(x=>h("th",{key:x,style:{textAlign:"left",padding:"5px 8px",fontSize:10.5,color:colors.muted,fontWeight:600}},x)))),
+              h("tbody",null, rows.map(({d,L,a})=>{
+                const isStale = a && Number(L.rev_number)>Number(a.rev_number);
+                return h("tr",{key:d.id,style:{background:isStale?"#fdf2f0":"transparent"}},
+                  h("td",{style:cell},h("b",null,d.doc_number),d.doc_name?h("div",{style:{color:colors.muted,fontSize:10.5}},d.doc_name):null),
+                  h("td",{style:cell},d.item_sl_no!=null?"Sl "+d.item_sl_no:"Whole order"),
+                  h("td",{style:cell}, a ? h(React.Fragment,null,"Rev "+a.rev_number,h("div",{style:{color:colors.mutedLight,fontSize:10.5}},(a.handed_over_at||"").slice(0,10)+" · "+(a.handed_over_by||""))) : h("span",{style:{color:"#854f0b"}},"Not yet")),
+                  h("td",{style:cell},"Rev "+L.rev_number, isStale ? h("div",{style:{color:"#a3312a",fontWeight:700,fontSize:10.5}},"Rev "+L.rev_number+" now current — reissue") : null),
+                  h("td",{style:cell},L.status||"—", !docIsCleared(L.status) ? h("div",{style:{fontSize:10.5,color:"#854f0b"}},"Still with the client"+(holdOf(d)?" · "+holdOf(d):"")) : null),
+                  h("td",{style:cell}, (a&&a.link)||L.link ? h("a",{href:(a&&!isStale&&a.link)||L.link,target:"_blank",rel:"noreferrer",style:{color:"#0c447c",fontSize:11}},"Open") : null));
+              }))),
+            pickFor===wo.id && h("div",{style:{borderTop:"1px solid "+colors.border,padding:"10px 12px",background:"#f4faf6"}},
+              h("div",{style:{fontSize:12,fontWeight:700,marginBottom:6}},"Hand over to production — "+wo.wo_number),
+              rows.filter(r=>!r.a || Number(r.L.rev_number)>Number(r.a.rev_number)).map(({d,L,a})=>{
+                const cleared = docIsCleared(L.status);
+                return h("label",{key:d.id,style:{display:"flex",gap:8,alignItems:"flex-start",padding:"4px 0",fontSize:12}},
+                  h("input",{type:"checkbox",checked:!!picks[d.id],onChange:e=>setPicks(p=>({...p,[d.id]:e.target.checked})),style:{marginTop:2,accentColor:"#1f5c40"}}),
+                  h("span",{style:{flex:1}},h("b",null,d.doc_number+" Rev "+L.rev_number),a?" (replaces Rev "+a.rev_number+")":"", " — "+(L.status||"no status"),
+                    !cleared ? h("div",{style:{fontSize:10.5,color:holdOf(d)==="Full Hold"?"#a3312a":"#854f0b"}},
+                      holdOf(d)==="Full Hold" ? "Still with the client — Full Hold: production should wait for this." : "Still with the client — can go ahead with a warning"+(holdOf(d)?" ("+holdOf(d)+")":"")+".") : null));
+              }),
+              h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:8}},
+                h("button",{onClick:()=>{ setPickFor(null); setPicks({}); },style:btnSecondary},"Cancel"),
+                h("button",{onClick:()=>handOver(wo),disabled:busy,style:{...btnPrimary,background:"#1f5c40",opacity:busy?0.6:1}},busy?"Handing over…":"Hand over"))));
+        })),
+      h("div",{style:{padding:"10px 20px",borderTop:"1px solid "+colors.border,display:"flex",justifyContent:"flex-end"}},
+        h("button",{onClick:onClose,style:btnSecondary},"Close"))));
+}
+
 // 1 Oct (107) — Out / In for a document entry. Two tick boxes, both blank
 // to start, one required. Ticking one locks the other; Edit clears both.
 // "warn" shows under the boxes (e.g. the Out/In sequence disagrees).
@@ -11460,6 +12245,7 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
   const [contractSlNos,setContractSlNos] = useState([]);
   const [woPick,setWoPick] = useState([]);          // Sl Nos ticked for a new work order
   const [woOpen,setWoOpen] = useState(false);
+  const [woDocsOpen,setWoDocsOpen] = useState(false);   // 1 Oct (110)
   // Order basis (22 Sep): an order started on an LOI shows it, with the
   // days the PO has been awaited, until the PO is attached.
   const [basis,setBasis] = useState(null);           // {order_basis, basis_number, basis_date}
@@ -12065,8 +12851,11 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
       // Work orders. Raised automatically on release; anything added to
       // the order afterwards needs one of its own, so what is still
       // unissued is stated rather than left to be noticed.
-      workOrders.length>0 && h("span",{style:{fontSize:10.5,color:colors.muted},title:workOrders.map(w=>w.wo_number).join(", ")},
-        workOrders.length+" work order"+(workOrders.length>1?"s":"")),
+      // 1 Oct (110) — opens the work orders with their documents for production.
+      workOrders.length>0 && h("button",{onClick:()=>setWoDocsOpen(true),title:workOrders.map(w=>w.wo_number).join(", ")+" — documents for production",
+        style:{fontSize:10.5,color:"#0c447c",background:"none",border:"none",padding:0,textDecoration:"underline",cursor:"pointer"}},
+        workOrders.length+" work order"+(workOrders.length>1?"s":"")+" · documents"),
+      woDocsOpen && h(WorkOrderDocsModal,{contractNumber:contractInfo.contract_number,user,onClose:()=>setWoDocsOpen(false)}),
       unissuedSlNos.length>0 && h("span",{style:{fontSize:10.5,padding:"2px 8px",borderRadius:9,background:"#fdecea",color:"#a3312a"},
         title:"Sl No "+unissuedSlNos.map(e=>e.item_sl_no).join(", ")},
         unissuedSlNos.length+" Sl No"+(unissuedSlNos.length>1?"s":"")+" not on any work order"),
@@ -20304,299 +21093,11 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         })
       )
     ),
-    showDocumentsPanel && h("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.55)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}},
-      h("div",{style:{background:"#fff",borderRadius:12,width:"100%",maxWidth:640,maxHeight:"85vh",overflow:"auto",padding:"20px 24px"}},
-        h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}},
-          h("div",{style:{fontWeight:700,fontSize:15}},"Documents — "+quoteExportRef),
-          h("button",{onClick:()=>setShowDocumentsPanel(false),style:{background:"none",border:"none",fontSize:16,cursor:"pointer",color:colors.mutedLight}},"✕")
-        ),
-        h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:16}},(mode==="contract"
-          ? "Drawings, procedures, ITP \u2014 PDF only, each with its Google Drive link. The link is the permanent record; keep the file itself in Drive."
-          : "Drawings, procedures, ITP \u2014 PDF only, each with its Google Drive link. The uploaded file here is temporary and is removed once this quote leaves Draft; the link is what stays.")),
-
-        // Documents Requested by Customer (25 Aug) — purely informational,
-        // shown regardless of docUploadStep so it's always visible
-        // alongside the actual documents list.
-        h("div",{style:{background:"#faf9f4",borderRadius:8,padding:"10px 12px",marginBottom:16}},
-          h("div",{style:{fontSize:11.5,fontWeight:700,marginBottom:8}}, mode==="contract" ? "Documents required on this order" : "Documents requested by customer"),
-          // 20 Sep — on a Sale Order the outstanding mandatory ones are
-          // called out first, because they are what stops the order
-          // moving. Nothing here blocks ADDING a document, ever.
-          mode==="contract" && outstandingMandatoryDocs.length>0 && h("div",{style:{background:"#fdecea",border:"1px solid #f0997b",borderRadius:6,padding:"7px 10px",marginBottom:8}},
-            h("div",{style:{fontSize:11,color:"#a3312a",fontWeight:700,marginBottom:2}},
-              outstandingMandatoryDocs.length+" mandatory document"+(outstandingMandatoryDocs.length>1?"s":"")+" outstanding"),
-            h("div",{style:{fontSize:10.5,color:"#a3312a"}},
-              outstandingMandatoryDocs.some(isPoDocRequirement)
-                ? "The Order Acceptance PDF is blocked until the PO is attached. The rest block contract approval."
-                : "Contract approval is blocked until these are attached.")
-          ),
-          documentRequests.length===0 ? h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:8}},"Nothing on file yet.") :
-          h("div",{style:{marginBottom:8}}, documentRequests.map(r=>h("div",{key:r.id,style:{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:"1px solid #eceae0"}},
-            r.fulfilled_document_id
-              ? h("span",{style:{fontSize:10,padding:"1px 7px",borderRadius:9,background:"#eaf9f4",color:"#085041"}},"Sent")
-              : h("span",{style:{fontSize:10,padding:"1px 7px",borderRadius:9,background:"#fdecea",color:"#a3312a"},title:"Nothing has been linked to this requirement yet. This is not a document status."},"Not yet sent"),
-            r.is_mandatory && h("span",{style:{fontSize:10,padding:"1px 7px",borderRadius:9,background:"#fff4d6",color:"#854f0b",fontWeight:700}},"Mandatory"),
-            h("span",{style:{fontSize:12,flex:1}},r.category,
-              r.source ? h("span",{style:{fontSize:10,color:colors.mutedLight,marginLeft:6}},r.source) : null),
-            // Marking mandatory, or clearing it, needs the authorization
-            // code (Admins straight through) — an obligation must not
-            // appear or vanish without a record.
-            mode==="contract" && !r.fulfilled_document_id && h("button",{onClick:()=>setRequirementMandatory(r,!r.is_mandatory),
-              style:{background:"none",border:"none",cursor:"pointer",color:colors.muted,fontSize:10.5,textDecoration:"underline",whiteSpace:"nowrap"}},
-              r.is_mandatory?"Not mandatory":"Make mandatory"),
-            !r.fulfilled_document_id && h("button",{onClick:()=>deleteDocumentRequest(r),style:{background:"none",border:"none",cursor:"pointer",color:colors.mutedLight,fontSize:11}},"✕")
-          ))),
-          // 1 Oct (107) — one add button. It used to sit beside the master's
-          // own green "+ Add" (which adds a CATEGORY), and the two were
-          // confused. A new category is now the last choice in the list.
-          h("div",{style:{fontSize:10.5,color:colors.muted,marginBottom:3}},"Request a document"),
-          h("div",{style:{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}},
-            h("select",{value:newRequestCategory,
-              onChange:e=>{ const v=e.target.value; if(v==="__new__"){ setShowNewRequestCategory(true); return; } setNewRequestCategory(v); },
-              style:{...inputStyle,flex:"1 1 220px",minWidth:0}},
-              h("option",{value:""},"Pick a document category…"),
-              docCategoryOptions.map(c=>h("option",{key:c,value:c},c)),
-              h("option",{value:"__new__"},"\uFF0B Category not in the list…")
-            ),
-            mode==="contract" && h("label",{style:{display:"flex",alignItems:"center",gap:4,fontSize:11,color:colors.muted,whiteSpace:"nowrap"}},
-              h("input",{type:"checkbox",checked:newRequestMandatory,onChange:e=>setNewRequestMandatory(e.target.checked)}),"Mandatory"),
-            h("button",{onClick:addDocumentRequest,disabled:!newRequestCategory,style:{...btnPrimary,fontSize:11.5,padding:"6px 14px",opacity:newRequestCategory?1:0.45,cursor:newRequestCategory?"pointer":"not-allowed"}},"Add request"),
-            h("button",{onClick:()=>{ setChecklistPick([]); setChecklistOpen(true); },style:{...btnSmall,fontSize:11},
-              title:"Tick several categories at once from the master"},"Pick several\u2026")
-          ),
-          showNewRequestCategory && h(AddToMasterPanel,{table:"doc_category_tbl",valueCol:"value",fieldLabel:"Document Category",
-            onClose:()=>setShowNewRequestCategory(false),
-            onAdded:async(newVal)=>{ await loadDocCategories(); setNewRequestCategory(newVal); }})
-        ),
-
-        checklistOpen && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1400,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
-          h("div",{style:{background:"#fff",borderRadius:10,padding:"20px 24px",width:480,maxWidth:"94vw",maxHeight:"80vh",overflowY:"auto"}},
-            h("div",{style:{fontWeight:700,fontSize:14,marginBottom:4}},"Document checklist — "+quoteExportRef),
-            h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:12}},
-              mode==="contract"
-                ? "Tick what this order needs. Nothing here is mandatory yet — mark that separately on the list."
-                : "Tick what the customer has asked for. Nothing blocks at quote stage, and what you tick carries into the Sale Order when the order lands."),
-            docCategoryOptions.map(cat=>{
-              const already = documentRequests.some(r=>String(r.category||"").trim().toLowerCase()===String(cat).trim().toLowerCase());
-              return h("label",{key:cat,style:{display:"flex",gap:8,alignItems:"center",padding:"4px 0",fontSize:12,opacity:already?0.5:1}},
-                h("input",{type:"checkbox",disabled:already,
-                  checked: already || checklistPick.includes(cat),
-                  onChange:e=>setChecklistPick(pk=>e.target.checked?[...pk,cat]:pk.filter(c=>c!==cat))}),
-                h("span",{style:{flex:1}},cat),
-                already ? h("span",{style:{fontSize:10,color:colors.mutedLight}},"already on the list") : null
-              );
-            }),
-            h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}},
-              h("button",{onClick:()=>{ setChecklistOpen(false); setChecklistPick([]); },style:btnSecondary},"Cancel"),
-              h("button",{onClick:saveChecklist,disabled:checklistBusy,style:{...btnPrimary,opacity:checklistBusy?0.6:1}},
-                checklistBusy?"Saving…":("Add "+(checklistPick.length||"")+" to the list"))
-            )
-          )
-        ),
-
-        docUploadStep==="list" && h(React.Fragment,null,
-          docCategoryOptions.map(cat=>{
-            const rows = quoteDocuments.filter(d=>!d.is_archived && d.category===cat);
-            if(!rows.length) return null;
-            return h("div",{key:cat,style:{marginBottom:14}},
-              h("div",{style:{fontSize:10,fontWeight:700,color:colors.muted,textTransform:"uppercase",letterSpacing:"0.03em",marginBottom:6}},cat),
-              rows.map(d=>h("div",{key:d.id,style:{border:"1px solid "+colors.border,borderRadius:8,padding:"9px 12px",marginBottom:6,display:"flex",justifyContent:"space-between",alignItems:"center"}},
-                h("div",null,
-                  h("div",{style:{display:"flex",alignItems:"center",gap:6,marginBottom:2}},
-                    h("span",{style:{fontSize:12.5,fontWeight:600}},d.doc_number+(d.title?" — "+d.title:"")),
-                    d.direction && h("span",{style:{fontSize:9.5,padding:"1px 6px",borderRadius:9,background:d.direction==="Out"?"#fff4d6":"#e6f1fb",color:d.direction==="Out"?"#854f0b":"#0c447c"}},d.direction),
-                    d.status && h("span",{style:{fontSize:9.5,padding:"1px 6px",borderRadius:9,...docStatusColor(d.status)}},d.status),
-                    d.sequence_flagged && h("span",{style:{fontSize:9.5,padding:"1px 6px",borderRadius:9,background:"#fdecea",color:"#a3312a"}},"⚠ Sequence flagged")
-                  ),
-                  h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:2}},
-                    "Rev "+d.rev_number+" · Uploaded "+(d.uploaded_at||"").slice(0,10)+" by "+(d.uploaded_by||"—")+" · ",
-                    d.lives_in_supabase
-                      ? h("span",{style:{color:"#0f6e3f"}},"file still in Supabase")
-                      : h("span",{style:{color:colors.mutedLight}},"file purged — link only")
-                  ),
-                  d.link && h("a",{href:d.link,target:"_blank",rel:"noreferrer",style:{fontSize:10.5,color:"#0c447c"}},d.link)
-                ),
-                h("div",{style:{display:"flex",gap:6,alignItems:"center"}},
-                  mode!=="contract" && (d.has_out
-                    ? h("label",{title:"Merge this document's latest Out revision into the quote PDF as an enclosure",style:{display:"flex",alignItems:"center",gap:4,fontSize:11,color:d.include_in_offer?"#1f5c40":colors.muted,whiteSpace:"nowrap",cursor:"pointer"}},
-                        h("input",{type:"checkbox",checked:d.include_in_offer,onChange:()=>toggleIncludeInOffer(d),style:{accentColor:"#1f5c40"}}),"In offer PDF")
-                    : h("span",{title:"Only documents we send (Out) go into the offer PDF",style:{fontSize:10.5,color:colors.mutedLight,whiteSpace:"nowrap"}},"Not in offer (In only)")),
-                  d.lives_in_supabase && h("button",{onClick:()=>downloadDocument(d),style:{...btnSmall,fontSize:11}},"View file"),
-                  h("button",{onClick:()=>openDocHistory(d),style:{...btnSmall,fontSize:11}},"History")
-                )
-              ))
-            );
-          }),
-          quoteDocuments.filter(d=>!d.is_archived).length===0 && h("div",{style:{fontSize:12,color:colors.mutedLight,marginBottom:14}},"No documents uploaded yet."),
-          h("button",{onClick:startDocUpload,style:{...btnPrimary,width:"100%"}},"+ Log document")
-        ),
-
-        docUploadStep==="choice" && h(React.Fragment,null,
-          h("div",{style:{fontSize:13,fontWeight:600,marginBottom:10}},"New document, or continuing one that already exists?"),
-          h("div",{style:{display:"flex",gap:8,marginBottom:14}},
-            h("button",{onClick:()=>{setDocUploadStep("mode"); setDocUploadMode(""); setDocDrafts([]);},style:{flex:1,padding:"12px",border:"1px solid "+colors.border,borderRadius:8,background:"#fff",cursor:"pointer"}},"New document"),
-            h("button",{onClick:()=>{setDocUploadStep("continue"); setContinueDocPick(null); setContinueDocHistory([]);},style:{flex:1,padding:"12px",border:"1px solid "+colors.border,borderRadius:8,background:"#faf9f4",cursor:"pointer"}},"Continuing an existing document")
-          ),
-          h("button",{onClick:()=>setDocUploadStep("list"),style:btnSecondary},"Cancel")
-        ),
-
-        docUploadStep==="continue" && h(React.Fragment,null,
-          h("div",{style:{fontSize:13,fontWeight:600,marginBottom:10}},"Which document?"),
-          // 20 Sep — an empty combo used to appear here when there was
-          // nothing to continue, which reads as a loading failure. Say
-          // so instead, and offer the way out.
-          quoteDocuments.filter(d=>!d.is_archived).length===0
-            ? h("div",{style:{background:"#faf9f4",borderRadius:6,padding:"12px 14px",marginBottom:12,fontSize:12,color:colors.muted}},
-                "No documents on this ",(mode==="contract"?"order":"quote")," yet, so there is nothing to continue. Add the first revision as a new document.")
-            : h("select",{value:continueDocPick?.id||"",onChange:e=>pickContinueDoc(e.target.value),style:{...inputStyle,width:"100%",marginBottom:12}},
-                h("option",{value:""},"Select a document…"),
-                quoteDocuments.filter(d=>!d.is_archived).map(d=>h("option",{key:d.id,value:d.id},d.doc_number+(d.title?" — "+d.title:"")))
-              ),
-          continueDocPick && (()=>{
-            const expected = computeExpectedNext(continueDocHistory);
-            const finalRev = continueOverrideUnlocked ? continueOverrideRev : expected.rev;
-            const finalDirection = continueOverrideUnlocked ? continueOverrideDirection : expected.direction;
-            return h(React.Fragment,null,
-              h("div",{style:{background:"#faf9f4",borderRadius:6,padding:"8px 10px",marginBottom:10,fontSize:12}},
-                "Logging: ", h("b",null,"Rev "+finalRev+(continueDirectionPick?" — "+continueDirectionPick:"")),
-                !continueOverrideUnlocked && continueDocHistory.length>0 && h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:3}},"Last entry: Rev "+continueDocHistory[0].rev_number+" — "+(continueDocHistory[0].direction||"?")+". By the sequence this one is "+expected.direction+"."),
-                continueOverrideUnlocked && h("div",{style:{fontSize:10.5,color:"#a3312a",marginTop:3}},"⚠ Override active — this document will be flagged.")
-              ),
-              h(DocDirectionPick,{value:continueDirectionPick,onChange:v=>{ setContinueDirectionPick(v); if(continueOverrideUnlocked && v) setContinueOverrideDirection(v); },
-                label:"This entry (Rev "+finalRev+") is:", missing:docDirMissing && !continueDirectionPick,
-                warn: (!continueOverrideUnlocked && expected.direction && continueDirectionPick && continueDirectionPick!==expected.direction)
-                  ? "The sequence says this entry is "+expected.direction+" (the last one was "+continueDocHistory[0].direction+"). Tick "+expected.direction+", or ask a Super Admin to override the sequence."
-                  : null}),
-              // Access-style limit-to-list (21 Sep): type and the list narrows as
-              // you go; only a status that exists in the master is accepted.
-              // New statuses are added at Admin \u2192 Document Status Master,
-              // where whose-move and clears-the-clock are set with them.
-              h(LimitToListCombo,{value:continueStatus,onChange:setContinueStatus,
-                options:docStatusOptions.map(docStatusName).filter(Boolean),
-                placeholder:"Type to find a status\u2026",
-                invalidMessage:v=>"\u201c"+v+"\u201d is not in the Document Status master. Pick one from the list, or add it at Admin \u2192 Document Status Master.",
-                style:{...inputStyle,width:"100%",marginBottom:8}}),
-              documentRequests.filter(r=>!r.fulfilled_document_id).length>0 && h(React.Fragment,null,
-                h("label",{style:{display:"block",fontSize:10.5,color:colors.muted,marginBottom:3}},"Does this fulfill a customer's requested document?"),
-                h("select",{value:continueFulfillsRequestId,onChange:e=>setContinueFulfillsRequestId(e.target.value),style:{...inputStyle,width:"100%",marginBottom:8}},
-                  h("option",{value:""},"No — this is an additional document"),
-                  documentRequests.filter(r=>!r.fulfilled_document_id).map(r=>h("option",{key:r.id,value:r.id},r.category))
-                )
-              ),
-              h("input",{type:"file",accept:"application/pdf",onChange:e=>setContinueFile(e.target.files[0]||null),style:{width:"100%",marginBottom:8}}),
-              h("input",{value:continueLink,onChange:e=>setContinueLink(e.target.value),placeholder:"Google Drive link \u2014 https://drive.google.com/\u2026",style:{...inputStyle,width:"100%",marginBottom:8}}),
-              h("input",{value:continueWhatChanged,onChange:e=>setContinueWhatChanged(e.target.value),placeholder:"What changed? e.g. Updated nozzle orientation",style:{...inputStyle,width:"100%",marginBottom:8}}),
-              h("input",{value:continueNotes,onChange:e=>setContinueNotes(e.target.value),placeholder:"Notes (required)",style:{...inputStyle,width:"100%",marginBottom:10}}),
-              !continueOverrideUnlocked && user.role==="super_admin" && h("button",{onClick:requestSequenceOverride,style:{...btnSmall,fontSize:10.5,marginBottom:10}},"Override sequence (requires code)"),
-              h("div",{style:{display:"flex",gap:8}},
-                h("button",{onClick:submitContinueDoc,disabled:docUploading,style:{...btnPrimary,flex:1,opacity:docUploading?0.6:1}},docUploading?"Uploading…":"Log this entry"),
-                h("button",{onClick:()=>setDocUploadStep("list"),disabled:docUploading,style:btnSecondary},"Cancel")
-              )
-            );
-          })(),
-          !continueDocPick && h("button",{onClick:()=>setDocUploadStep("list"),style:btnSecondary},"Cancel")
-        ),
-
-        docUploadStep==="mode" && h(React.Fragment,null,
-          h("div",{style:{fontSize:13,fontWeight:600,marginBottom:10}},"Is this one combined PDF, or several separate documents?"),
-          h("div",{style:{display:"flex",gap:8,marginBottom:14}},
-            h("button",{onClick:()=>pickDocMode("combined"),style:{flex:1,padding:"12px",border:"1px solid "+colors.border,borderRadius:8,background:"#fff",cursor:"pointer"}},"One combined PDF"),
-            h("button",{onClick:()=>pickDocMode("separate"),style:{flex:1,padding:"12px",border:"1px solid "+colors.border,borderRadius:8,background:"#faf9f4",cursor:"pointer"}},"Several separate documents")
-          ),
-          h("button",{onClick:()=>setDocUploadStep("list"),style:btnSecondary},"Cancel")
-        ),
-
-        docUploadStep==="form" && h(React.Fragment,null,
-          docDrafts.map((d,idx)=>h("div",{key:idx,style:{border:"1px solid "+colors.border,borderRadius:8,padding:"12px",marginBottom:10}},
-            docDrafts.length>1 && h("div",{style:{display:"flex",justifyContent:"space-between",marginBottom:8}},
-              h("div",{style:{fontSize:11.5,fontWeight:600,color:colors.muted}},"Document "+(idx+1)),
-              h("button",{onClick:()=>removeDocDraft(idx),style:{background:"none",border:"none",color:colors.danger,cursor:"pointer",fontSize:11}},"Remove")
-            ),
-            h("label",{style:{display:"block",fontSize:10.5,color:colors.muted,marginBottom:3}},"Category"),
-            h("select",{value:d.category,onChange:e=>{ const v=e.target.value; if(v==="__new__"){ setDocMasterAddFor(idx); return; } updateDocDraft(idx,{category:v}); },style:{...inputStyle,width:"100%",marginBottom:8}},
-              h("option",{value:""},"Pick a document category…"),
-              (docCategoryOptions.includes(d.category)||!d.category?docCategoryOptions:[d.category,...docCategoryOptions]).map(c=>h("option",{key:c,value:c},c)),
-              h("option",{value:"__new__"},"\uFF0B Category not in the list…")),
-            docMasterAddFor===idx && h(AddToMasterPanel,{table:"doc_category_tbl",valueCol:"value",fieldLabel:"Document Category",
-              onClose:()=>setDocMasterAddFor(null),
-              onAdded:async(newVal)=>{ await loadDocCategories(); updateDocDraft(idx,{category:newVal}); }}),
-            h("label",{style:{display:"block",fontSize:10.5,color:colors.muted,marginBottom:3}},"Doc number"),
-            h("input",{value:d.docNumber,onChange:e=>updateDocDraft(idx,{docNumber:e.target.value}),style:{...inputStyle,width:"100%",marginBottom:8}}),
-            h("label",{style:{display:"block",fontSize:10.5,color:colors.muted,marginBottom:3}},"Title / description"),
-            h("input",{value:d.title,onChange:e=>updateDocDraft(idx,{title:e.target.value}),placeholder:"e.g. GA drawing — strainer assembly",style:{...inputStyle,width:"100%",marginBottom:8}}),
-            h(DocDirectionPick,{value:d.direction,onChange:v=>updateDocDraft(idx,{direction:v}),label:"This document (Rev 0) is:",missing:docDirMissing && !d.direction}),
-            h("label",{style:{display:"block",fontSize:10.5,color:colors.muted,marginBottom:3}},"Status"),
-            h(LimitToListCombo,{value:d.status,onChange:v=>updateDocDraft(idx,{status:v}),
-              options:docStatusOptions.map(docStatusName).filter(Boolean),
-              placeholder:"Type to find a status\u2026",
-              invalidMessage:v=>"\u201c"+v+"\u201d is not in the Document Status master. Pick one from the list, or add it at Admin \u2192 Document Status Master.",
-              style:{...inputStyle,width:"100%",marginBottom:8}}),
-            documentRequests.filter(r=>!r.fulfilled_document_id).length>0 && h(React.Fragment,null,
-              h("label",{style:{display:"block",fontSize:10.5,color:colors.muted,marginBottom:3}},"Does this fulfill a customer's requested document?"),
-              h("select",{value:d.fulfillsRequestId,onChange:e=>updateDocDraft(idx,{fulfillsRequestId:e.target.value}),style:{...inputStyle,width:"100%",marginBottom:8}},
-                h("option",{value:""},"No — this is an additional document"),
-                documentRequests.filter(r=>!r.fulfilled_document_id).map(r=>h("option",{key:r.id,value:r.id},r.category))
-              )
-            ),
-            h("label",{style:{display:"block",fontSize:10.5,color:colors.muted,marginBottom:3}},"Google Drive link ",h("span",{style:{color:colors.danger}},"*required")),
-            h("input",{value:d.link,onChange:e=>updateDocDraft(idx,{link:e.target.value}),placeholder:"https://drive.google.com/…",style:{...inputStyle,width:"100%",marginBottom:4}}),
-            d.link && !checkDocumentLink(d.link).ok && h("div",{style:{fontSize:9.5,color:checkDocumentLink(d.link).block?colors.danger:"#854f0b",marginBottom:4}},
-              checkDocumentLink(d.link).block ? checkDocumentLink(d.link).message
-                : (/onedrive|1drv|sharepoint/i.test(d.link) ? "OneDrive link \u2014 stops opening after the move to Google Drive." : "Not a Google Drive link \u2014 you'll be asked to confirm.")),
-            h("div",{style:{fontSize:9.5,color:colors.mutedLight,marginBottom:8}},(mode==="contract" ? "The link is the permanent record of this document." : "The uploaded PDF here is temporary — it's removed once this quote leaves Draft. This link is what stays.")),
-            h("label",{style:{display:"block",fontSize:10.5,color:colors.muted,marginBottom:3}},"PDF file"),
-            h("input",{type:"file",accept:"application/pdf",onChange:e=>updateDocDraft(idx,{file:e.target.files[0]||null}),style:{width:"100%"}})
-          )),
-          docUploadMode==="separate" && h("button",{onClick:addAnotherDocDraft,style:{...btnSmall,width:"100%",marginBottom:12}},"+ Add another document"),
-          h("div",{style:{display:"flex",gap:8}},
-            h("button",{onClick:submitDocUpload,disabled:docUploading,style:{...btnPrimary,flex:1,opacity:docUploading?0.6:1}},docUploading?"Uploading…":"Upload"),
-            h("button",{onClick:()=>setDocUploadStep("list"),disabled:docUploading,style:btnSecondary},"Cancel")
-          )
-        ),
-
-        docHistoryFor && h("div",{style:{marginTop:16,borderTop:"1px solid "+colors.border,paddingTop:14}},
-          h("div",{style:{display:"flex",justifyContent:"space-between",marginBottom:8}},
-            h("div",{style:{fontSize:13,fontWeight:600}},"History — "+docHistoryFor.doc_number),
-            h("button",{onClick:()=>setDocHistoryFor(null),style:{background:"none",border:"none",cursor:"pointer",color:colors.mutedLight}},"✕")
-          ),
-          docHistoryFor.sequence_flagged && h("div",{style:{background:"#fdecea",color:"#a3312a",borderRadius:6,padding:"7px 10px",fontSize:11.5,marginBottom:10}},"⚠ "+(docHistoryFor.sequence_flag_note||"Sequence was overridden for this document.")),
-          docHistoryRows.length===0 ? h("div",{style:{fontSize:11.5,color:colors.mutedLight,marginBottom:12}},"No prior versions — this is the original upload.") :
-          h("div",{style:{marginBottom:12}}, docHistoryRows.map(h2=>h("div",{key:h2.id,style:{fontSize:11.5,padding:"6px 0",borderBottom:"1px solid #eceae0"}},
-            h("div",{style:{display:"flex",alignItems:"center",gap:6,marginBottom:2}},
-              h("span",{style:{fontWeight:600}},"Rev "+h2.rev_number),
-              h2.direction && h("span",{style:{fontSize:9.5,padding:"1px 6px",borderRadius:9,background:h2.direction==="Out"?"#fff4d6":"#e6f1fb",color:h2.direction==="Out"?"#854f0b":"#0c447c"}},h2.direction==="Out"?"Out: we sent":"In: we received"),
-              docHistoryRows[0] && docHistoryRows[0].id===h2.id && h("button",{onClick:()=>editHistoryDirection(h2),title:"Ticked the wrong one? Switch Out / In on this entry",
-                style:{border:"none",background:"none",color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:10.5,padding:"0 2px"}},"Edit Out/In"),
-              h("select",{value:h2.status||"",onChange:e=>changeHistoryStatus(h2,e.target.value),style:{...docStatusColor(h2.status),fontSize:9.5,padding:"1px 4px",borderRadius:9,border:"none"}},
-                h("option",{value:""},"— status —"),
-                docStatusOptions.map(s=>h("option",{key:docStatusName(s),value:docStatusName(s)},docStatusName(s)))
-              )
-            ),
-            h("span",{style:{color:colors.muted}},(h2.changed_at||"").slice(0,10)+" — "+(h2.changed_by||"—")+": "),
-            h2.what_changed || h2.reason,
-            h2.notes && h("div",{style:{color:colors.mutedLight,marginTop:2}},"Notes: "+h2.notes)
-          ))),
-          h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:10}},"To log the next version, close this and use \"+ Log document\" → \"Continuing an existing document\" — that path enforces the Out/In sequence, this one no longer takes new uploads."),
-
-          // Document-level Notes (25 Aug) — a separate, timestamped,
-          // append-only log distinct from the per-revision Notes above.
-          // General commentary about the document as a whole, not tied
-          // to any one version.
-          h("div",{style:{marginTop:18,borderTop:"1px solid "+colors.border,paddingTop:14}},
-            h("div",{style:{fontSize:11.5,fontWeight:600,marginBottom:8}},"Notes on this document"),
-            docNotesList.length===0 ? h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:10}},"No notes yet.") :
-            h("div",{style:{marginBottom:10,maxHeight:160,overflowY:"auto"}}, docNotesList.map(n=>h("div",{key:n.id,style:{fontSize:11.5,padding:"6px 0",borderBottom:"1px solid #eceae0"}},
-              h("div",{style:{color:colors.muted,fontSize:10.5}},(n.created_at||"").slice(0,16).replace("T"," ")+" — "+(n.created_by||"—")),
-              h("div",null,n.note_text)
-            ))),
-            h("div",{style:{display:"flex",gap:6}},
-              h("input",{value:newDocNoteText,onChange:e=>setNewDocNoteText(e.target.value),placeholder:"Add a note…",style:{...inputStyle,flex:1,padding:"6px 8px",fontSize:12}}),
-              h("button",{onClick:addDocumentNote,disabled:addingDocNote,style:{...btnSmall,opacity:addingDocNote?0.6:1}},addingDocNote?"Adding…":"+ Add note")
-            )
-          )
-        )
-      )
-    ),
+    // 1 Oct (110) — the Documents box is tabbed: one tab per document,
+    // dashed tabs for requirements not yet sent, + to add. See DocumentsBox.
+    showDocumentsPanel && h(DocumentsBox,{mode, entityRef:quoteExportRef, user, isAdminOrAbove, withMandatoryAuth,
+      onChanged:async()=>{ await loadQuoteDocuments(quoteExportRef); await loadDocumentRequests(quoteExportRef); },
+      onClose:async()=>{ setShowDocumentsPanel(false); await loadQuoteDocuments(quoteExportRef); await loadDocumentRequests(quoteExportRef); }}),
     showCommercialTerms && h("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.55)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}},
       h("div",{style:{background:"#fff",borderRadius:8,padding:"20px 24px",width:640,maxWidth:"100%",maxHeight:"85vh",overflow:"auto"}},
         h("div",{style:{fontWeight:700,fontSize:14,marginBottom:2}},"Commercial Terms — "+quoteExportRef),
@@ -21436,12 +21937,14 @@ async function carryRequirementsToContract(quoteRef, contractNumber, username){
   try{
     const [{ data: fromQuote }, { data: already }] = await Promise.all([
       sb.from("document_requests_tbl").select("*").eq("entity_id",quoteRef),
-      sb.from("document_requests_tbl").select("category").eq("entity_id",contractNumber)
+      sb.from("document_requests_tbl").select("*").eq("entity_id",contractNumber)
     ]);
-    const have = new Set((already||[]).map(r=>String(r.category||"").trim().toLowerCase()));
+    // 1 Oct (110) — a requirement is its category AND its Sl No.
+    const keyOf = r=>String(r.category||"").trim().toLowerCase()+"|"+(r.item_sl_no??"");
+    const have = new Set((already||[]).map(keyOf));
     const rows = (fromQuote||[])
-      .filter(r=>!have.has(String(r.category||"").trim().toLowerCase()))
-      .map(r=>({
+      .filter(r=>!have.has(keyOf(r)))
+      .map(r=>({ ...(r.item_sl_no!=null?{item_sl_no:r.item_sl_no}:{}),
         entity_type:"contract", entity_id:contractNumber, category:r.category,
         is_mandatory:false, source:"Carried from quote", carried_from:quoteRef,
         fulfilled_document_id:r.fulfilled_document_id||null,
@@ -21527,6 +22030,8 @@ async function fetchDocumentHistory(entityIds){
     id:p.id, entity_id:p.entity_id, entity_type:p.entity_type, category:p.category,
     doc_number:p.doc_number, doc_name:p.doc_name, is_archived:p.is_archived,
     created_at:p.created_at, created_by:p.created_by,
+    item_sl_no:p.item_sl_no??null, for_production:p.for_production??null, include_in_offer:p.include_in_offer,
+    sequence_flagged:!!p.sequence_flagged, sequence_flag_note:p.sequence_flag_note||null,
     revisions:(byDoc.get(p.id)||[])
   }));
 }
@@ -24964,6 +25469,10 @@ const MANUAL_SECTIONS = [
         "blocks": [
           {
             "type": "p",
+            "text": "Three more settings per category (1 Oct): NUMBER PREFIX (DWG, ITP, PO\u2026) from which document numbers are suggested; ONE PER SL NO, for item-specific documents such as GA drawings, which then get one requirement per Sl No; and FOR PRODUCTION BY DEFAULT, the starting value of each document's For production tick."
+          },
+          {
+            "type": "p",
             "text": "The list of document categories the Documents panel offers, with a CRITICAL flag on each. Admin \u2192 Document Categories, beside Document Status Master."
           },
           {
@@ -24994,6 +25503,43 @@ const MANUAL_SECTIONS = [
           {
             "type": "p",
             "text": "The level sits on the CATEGORY, not the individual document, because it follows the document type. A GA drawing holds up production on every job; a packing list never does."
+          }
+        ]
+      },
+      {
+        "key": "documents_tabs",
+        "title": "Documents box, and hand-over to production",
+        "tag": "Quotes / Sale Orders",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "Documents (on a quote or a Sale Order) opens one box with ONE TAB PER DOCUMENT, grouped under its category. A tab shows the document number, its Sl No where it has one, a dot for its latest status (red: our action, amber: with the client, green: cleared) and a * if it is mandatory."
+          },
+          {
+            "type": "p",
+            "text": "A DASHED tab is a requirement that has nothing sent against it yet. Open it to log Rev 0 straight against it, make it mandatory (Sale Orders, needs the authorization code) or remove it."
+          },
+          {
+            "type": "steps",
+            "items": [
+              "+ (last tab): pick the category and Sl No, then Requirement only (a dashed tab) or Requirement and Rev 0 now.",
+              "The document number is suggested from the category's prefix (DWG-, ITP-\u2026) and checked as you type; a number already used anywhere is refused.",
+              "Categories kept PER SL NO (e.g. GA drawings) can add one requirement for every Sl No in one go. Pick several\u2026 does the same for many categories at once.",
+              "The link is mandatory everywhere; the PDF is optional.",
+              "On a document's tab: the revision trail (status changeable on any row, Edit Out/In on the latest), then the NEXT ENTRY pre-filled with the revision the Out/In sequence expects and the last link. Tick Out or In fresh each time."
+            ]
+          },
+          {
+            "type": "p",
+            "text": "FOR PRODUCTION: each document carries this tick, starting from its category's default. Only the Document Controller and the Technical Head (and a Super Admin) can change it. On quotes, IN OFFER PDF sits beside it."
+          },
+          {
+            "type": "p",
+            "text": "HAND-OVER: on the Sale Order, the work order count (\"2 work orders \u00b7 documents\") opens each work order with the For-production documents for its Sl Nos. The Document Controller clicks Hand over to production; Code 1 / Code 2 documents are pre-ticked, anything still with the client is offered with a warning that follows its Hold level, and the hand-over is pinned at the revision current at that moment."
+          },
+          {
+            "type": "tip",
+            "text": "When a handed-over document gets a later revision, the work order shows \"Rev n now current \u2014 reissue\", the work order is flagged again to the Technical Head, and Pending Actions asks the Document Controller to reissue. Handing the new revision over clears it."
           }
         ]
       },
@@ -25942,6 +26488,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"1 Oct 2026 (110)", summary:"Tabbed Documents box and hand-over to production (the 21 Sep design). DOCUMENTS BOX (DocumentsBox, quotes and Sale Orders): one tab per document grouped under its category, Sl No on the tab, a status dot from the Document Status master bucket, * for mandatory, a DASHED tab for each requirement with nothing sent against it, and a + tab. + adds a requirement only, or a requirement with Rev 0; the document number is suggested from the category prefix and checked live against every document number. A requirement tab logs Rev 0 straight against it, toggles mandatory (authorization code) or removes it. A document tab shows the revision trail (status changeable per row, Edit Out/In on the latest) and the NEXT ENTRY pre-filled with the revision the Out/In sequence expects and the last link; Super Admin override kept. Link mandatory, PDF optional everywhere. Pick several\u2026 adds requirements for many categories, one per Sl No for categories kept per Sl No. CATEGORY MASTER: number_prefix, per_sl_no, for_production_default. FOR PRODUCTION on each document (default from its category), changeable only by the Document Controller, the Technical Head or a Super Admin; In offer PDF beside it on quotes. Requirements carry item_sl_no and carry to the Sale Order by category + Sl No. HAND-OVER: the work order count on the Sale Order opens WorkOrderDocsModal; the Document Controller (or a Super Admin) hands over the For-production documents for each work order's Sl Nos, pinned at the current revision (work_order_doc_handover_tbl); Code 1 / Code 2 pre-ticked, others offered with a Hold-level warning (Full Hold asks to confirm). A later revision marks the hand-over superseded, re-flags the work order to the Technical Head (work_order_ack_tbl) and adds a Reissue item for the Document Controller to Pending Actions; handing the new revision over clears it. NEEDS SQL: documents_tabs_handover_2026-10-01.sql. Manual: new article Documents box, and hand-over to production." },
+  { date:"1 Oct 2026 (109)", summary:"Log Follow-ups: the Which date are you logging? box now always has a Cancel. Before a date is chosen it leaves the screen (back to the overdue list when opened from there, otherwise Home); once a date is set it just closes the box, as before." },
   { date:"1 Oct 2026 (108)", summary:"App-estimated trim prices, kept under the vendor who quoted the SS410 (13 Cr) trim. Most gate, globe, check, control, safety and sluice valves are listed only with SS410 trim. levaflow_trim_estimates SQL adds, for that same vendor, the valve with SS304 (x1.08), SS304L (x1.10), SS316 (x1.15), SS316L (x1.18), Bronze (x1.10) and Ni-Al bronze (x1.30) trim from the vendor's SS410 list price, its discount kept. Never overwrites: nothing is added where the vendor already lists that trim or its equivalent (SS304 = CF8 / F304, SS304L = CF3, SS316 = CF8M / F316, SS316L = CF3M, Bronze = Gunmetal), and an estimate is removed if the vendor later lists it. Descriptions and the Trim detail that said only 13 Cr / 13% Cr now read 13 Cr (SS410); the trim code 13CR reads 13% Cr (SS410). 823 SS410 prices give 4938 estimates in Levaflow; Flometriq gets 4230 models at average x 1.25 (two-part SQL). FLAG: each estimate's note starts Estimated by the app and its details carry Price basis; isEstimatedPrice reads either. Shown as Estimated by app on Valve Price (beside the price, and an Estimated column in the export), on the Price List screen (Browse rates beside the vendor; the vendor summary lists a vendor's app estimates as a separate line), and on the vendor picker of a quote line; the line's price reference starts Estimated by app. New trim codes SS304L and NAB read SS 304L and Ni-Al bronze and are on the template Codes sheet. Undo SQL for each company removes only the estimates." },
   { date:"1 Oct 2026 (107)", summary:"Documents, Out/In and datasheet editing. DOCUMENTS REQUESTED: one Add request button (greyed until a category is picked); a new category is the last choice in the list (+ Category not in the list…), so the master's own + Add no longer sits beside it; Checklist renamed Pick several…. The upload form's category works the same way. OUT / IN: two large tick boxes, We are sending (Out) and We are receiving (In), blank to start and required; ticking one locks the other and Edit clears both. Continuing a document asks fresh too; a tick that disagrees with the Out/In sequence blocks the save unless a Super Admin overrides. A wrong tick already saved can be fixed from History with Edit Out/In on the latest entry (free on a document's only entry, Super Admin + Deletion Code otherwise, flagged). History reads now order by revision then time, so Rev 0 Out and Rev 0 In are no longer taken in random order. DATASHEET: every line has Edit, including Material Data; a Material Data edit is stored on that datasheet only (field_values.__mocEdits), shows Edited \u00b7 was <original> with Reset, prints on the quote PDF and is logged in revision changes; the BOM and price list are not touched. Sl No and Model stay automatic. ENCLOSURES (quotes only): each document's newest Out revision, ticked In offer PDF (default on), not superseded / rejected / void / cancelled / withdrawn, is merged in as Annexure IV after the datasheets, with a list page, Index rows per document and an Enclosures line on the cover letter; link-only documents are listed as sent separately. Generate asks Merge enclosures or Offer only. Every attached PDF (enclosures and datasheet PDFs) is read once, so page numbers run straight through: native pages are numbered with the final count and each merged page gets the same footer (and DRAFT mark) stamped on. A PDF that can't be read is left out and named in one message. NEEDS SQL: enclosures_and_doc_direction_2026-10-01.sql (adds include_in_offer)." },
   { date:"30 Sep 2026 (106)", summary:"One green scheme for the whole quote and Sale Order PDF, matching the price summary: every table heading is dark green with white text (Index, Price Summary, NDE / Testing, Other options, revision history, datasheet grids); label columns and section rows are pale green with green text (cover boxes, cover letter, Commercial Terms, Notes, datasheet sections); the title band under the letterhead and the footer bar are pale green, titles and the footer company name green. Annexure II basic summary: amount headings right-aligned, green rule over the grand total." },
@@ -27762,7 +28310,10 @@ function WorkOrderFlagPrompt({ user, onDone }){
       if(!acks || !acks.length){ setRows([]); return; }
       const { data: wos } = await sb.from("work_order_tbl").select("*").in("id",acks.map(a=>a.work_order_id));
       const byId = new Map((wos||[]).map(w=>[w.id,w]));
-      setRows(acks.map(a=>({ ...a, wo:byId.get(a.work_order_id) })).filter(r=>r.wo));
+      // 1 Oct (110) — documents handed over at a revision since superseded.
+      let stale = [];
+      try{ const { data: hs, error: hErr } = await sb.from("work_order_doc_handover_tbl").select("*").in("work_order_id",acks.map(a=>a.work_order_id)).not("superseded_at","is",null).is("reissued_at",null); if(!hErr) stale = hs||[]; }catch(e){}
+      setRows(acks.map(a=>({ ...a, wo:byId.get(a.work_order_id), stale:stale.filter(s2=>s2.work_order_id===a.work_order_id) })).filter(r=>r.wo));
     }catch(e){ console.error("Work order flags failed", e); setRows([]); }
   },[user?.id]);
   useEffect(()=>{ load(); },[load]);
@@ -27786,7 +28337,8 @@ function WorkOrderFlagPrompt({ user, onDone }){
           h("th",{style:{padding:"6px 8px",fontSize:10.5}},"")
         )),
         h("tbody",null, rows.map(r=>h("tr",{key:r.id,style:{borderTop:"1px solid #f0eee6"}},
-          h("td",{style:{padding:"6px 8px",fontWeight:600}},r.wo.wo_number),
+          h("td",{style:{padding:"6px 8px",fontWeight:600}},r.wo.wo_number,
+            (r.stale||[]).length ? h("div",{style:{fontWeight:400,fontSize:10.5,color:"#a3312a"}},"Revised since hand-over: "+r.stale.map(x=>(x.doc_number||"")+" Rev "+x.rev_number+" \u2192 Rev "+x.superseded_by_rev).join(", ")+" \u2014 reissue") : null),
           h("td",{style:{padding:"6px 8px",color:colors.muted}},r.wo.contract_number),
           h("td",{style:{padding:"6px 8px",color:colors.mutedLight,fontSize:11}},postPersonShort(r.post_key)),
           h("td",{style:{padding:"6px 8px",textAlign:"right"}},
@@ -28149,7 +28701,7 @@ function QuoteStatusOwnerAlerts({ user, onDone }){
 // already existed). Marking Outcome = Won reuses the exact same
 // WonLostOutcomeModal the Quotes screen and Funnel board already use —
 // same PO Number/Date/Value capture, not a separate path.
-function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdue }){
+function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdue, onClose }){
   const blankRow = ()=>({
     _key: Math.random().toString(36).slice(2),
     companyName:"", mode:"Phone", chaseWhat:"Offer", chaseReference:"", referenceOptions:[],
@@ -28925,7 +29477,10 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
         h("input",{type:"date",value:datePromptValue,max:new Date().toISOString().slice(0,10),onChange:e=>{setDatePromptValue(e.target.value); setDatePromptError("");},style:{...boxStyle({width:"100%"}),fontSize:13,height:32}}),
         datePromptError && h("p",{style:{fontSize:11,color:"#a3312a",margin:"6px 0 0"}},"⚠ "+datePromptError),
         h("div",{style:{display:"flex",gap:8,marginTop:14}},
-          entryDate && h("button",{onClick:()=>setShowDatePrompt(false),disabled:loadingDate,style:{flex:1,fontFamily:F,fontSize:12,padding:7,background:"#fff",border:"1px solid #ccc",borderRadius:4,cursor:"pointer"}},"Cancel"),
+          // 1 Oct (109) — Cancel is always offered. With a date already
+          // chosen it just closes the box; before any date it leaves the
+          // screen (back to the overdue list in that flow, else Home).
+          h("button",{onClick:()=>{ if(entryDate){ setShowDatePrompt(false); return; } setDatePromptError(""); if(isOverdueFlow) cancelOverdueFlow(); else if(onClose) onClose(); },disabled:loadingDate,style:{flex:1,fontFamily:F,fontSize:12,padding:7,background:"#fff",border:"1px solid #ccc",borderRadius:4,cursor:"pointer"}},"Cancel"),
           h("button",{onClick:confirmDatePrompt,disabled:loadingDate,style:{flex:1,fontFamily:F,fontSize:12,padding:7,background:T.accent,color:"#fff",border:"none",borderRadius:4,cursor:"pointer",opacity:loadingDate?0.6:1}},loadingDate?"Loading…":"Enter date")
         )
       )
@@ -39141,7 +39696,7 @@ function App() {
     tab==="reports_quote_status"?h(QuoteStatusReport,null):
     tab==="reports_quote_status_review"?h(QuoteStatusReview,{user}):
     tab==="my_worklist"?h(MyWorklistScreen,{user}):
-    tab==="followup_entry"?h(ContinuousFollowupEntry,{user,sessionCompany,prefill:followupPrefill,onBackToOverdue:handleBackToOverdue}):
+    tab==="followup_entry"?h(ContinuousFollowupEntry,{user,sessionCompany,prefill:followupPrefill,onBackToOverdue:handleBackToOverdue,onClose:()=>setTab("home")}):
     tab==="reports_won_by_owner"?h(WonByOwnerReport,null):
     tab==="reports_overdue_calls"?h(OverdueCallsReport,null):
     tab==="reports_overdue_followups"?h(SalesOverdueCallsScreen,{user,onGoLog:(prefillData)=>handleGoLogFromOverdue(prefillData,"admin")}):
@@ -40561,7 +41116,24 @@ function PendingActionsScreen({ user }){
     const myName = (emp&&emp.employee_name)||"";
     setMe(myName);
     setIsSalesHead((sh||[]).some(r=>r.employee_name===myName));
-    setRows(data||[]);
+    // 1 Oct (110) — documents handed over to production at a revision that
+    // has since been superseded: owed by the Document Controller (reissue).
+    // Read here rather than in v_pending_actions; no hold on these.
+    let extra = [];
+    try{
+      const { data: hs, error: hErr } = await sb.from("work_order_doc_handover_tbl").select("*").not("superseded_at","is",null).is("reissued_at",null);
+      if(!hErr && hs && hs.length){
+        const { data: dc } = await sb.from("post_holder_tbl").select("employee_name").eq("post_key","doc_controller");
+        const people = (dc||[]).map(r=>r.employee_name).filter(Boolean);
+        hs.forEach(x=>{
+          const days = x.superseded_at ? Math.floor((Date.now()-new Date(x.superseded_at).getTime())/86400000) : null;
+          const base = { what:"Reissue to production: "+(x.doc_number||"document")+" Rev "+x.superseded_by_rev+" (handed over at Rev "+x.rev_number+") on "+(x.wo_number||"the work order"),
+            entity_key:x.contract_number, owed_by_role:"doc_controller", days_waiting:days, urgency: days!=null && days>3 ? "overdue" : "due", client_side:true, source:"wo_doc_reissue" };
+          if(people.length) people.forEach(p=>extra.push({...base, owed_by_person:p})); else extra.push({...base, owed_by_person:""});
+        });
+      }
+    }catch(e){ console.error("Hand-over reissue items not read", e); }
+    setRows([...(data||[]), ...extra]);
     setLoading(false);
   },[user?.username]);
   useEffect(()=>{ load(); },[load]);
@@ -40639,7 +41211,8 @@ function PendingActionsScreen({ user }){
               h("span",{style:{fontSize:10.5,borderRadius:9,padding:"2px 8px",
                 background:tone(r.urgency).bg,color:tone(r.urgency).fg}},r.urgency)),
             h("td",{style:{padding:"8px 6px",textAlign:"right"}},
-              r.on_hold ? h("button",{onClick:()=>releaseHold(r),style:btnSmall},"Release")
+              r.client_side ? null
+              : r.on_hold ? h("button",{onClick:()=>releaseHold(r),style:btnSmall},"Release")
                         : h("button",{onClick:()=>{setHoldFor(r); setHoldWhy(""); setErr("");},style:btnSmall},"Hold")))))),
     holdFor ? h("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.5)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:20}},
       h("div",{style:{background:"#fff",borderRadius:8,padding:"18px 22px",width:480,maxWidth:"100%"}},
