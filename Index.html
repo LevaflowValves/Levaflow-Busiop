@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-01T18:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-02T04:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -189,8 +189,12 @@ function WonLostOutcomeModal({ referenceNumber, newStatus, user, onDone, onCance
         updated_at: new Date().toISOString()
       };
       const { data: existing } = await sb.from("quote_outcomes").select("id").eq("reference_number",referenceNumber).maybeSingle();
-      if(existing) await sb.from("quote_outcomes").update(payload).eq("id",existing.id);
-      else await sb.from("quote_outcomes").insert(payload);
+      // 1 Oct (113) — checked: a refused write used to vanish and the
+      // reason was simply never stored.
+      const { error: outErr } = existing
+        ? await sb.from("quote_outcomes").update(payload).eq("id",existing.id)
+        : await sb.from("quote_outcomes").insert(payload);
+      if(outErr){ alert(saveFailedText("The "+newStatus+" details for "+referenceNumber, outErr)); return; }
       if(newStatus==="Won" && credit.chosen){
         // Written as its own update, deliberately: if the credit columns
         // are not in the database yet, the win itself still saves and the
@@ -222,7 +226,10 @@ function WonLostOutcomeModal({ referenceNumber, newStatus, user, onDone, onCance
       // through whatever the real caller's source (and, since 31 Aug,
       // possibly-backdated changedAt) actually was.
       const result = await applyOutcomeStatus(referenceNumber,newStatus,user?.username||"unknown",source||"status change",needsReason?draft.lost_reason:null,changedAt);
-      if(result && result.blocked){ return; }
+      // 1 Oct (113) — stopped: the reason above is kept, the box closes
+      // (the alert already said why). Refused: say so, and stay open.
+      if(result && result.blocked){ onCancel(); return; }
+      if(result && result.error){ alert(saveFailedText("The stage change for "+referenceNumber, result.error)); return; }
       await logAudit("UPDATE","quote_outcomes",referenceNumber,"Captured "+newStatus+" outcome details for Quote# "+referenceNumber,user?.username||"unknown",null,payload);
       onDone(newStatus);
     } finally { setSaving(false); }
@@ -286,7 +293,7 @@ function WonLostOutcomeModal({ referenceNumber, newStatus, user, onDone, onCance
         // why the PO prompt read as compulsory: the only visible way past
         // it was to fill it in. It now says what it is about to do.
         h("button",{onClick:()=>{
-          if(!confirm("Leave "+referenceNumber+" at its current status?\n\n"+newStatus+" will NOT be applied. The follow-up entry itself is already saved."+(newStatus==="Won"?"\n\nTo set Won without the PO, close this and use \"Set Won without PO\" instead — the PO can be added later.":""))) return;
+          if(!confirm("Leave "+referenceNumber+" at its current status?\n\n"+newStatus+" will NOT be applied. "+(source==="Quotes Report" ? "You go back to the follow-up, with what you typed, to pick another stage." : "The follow-up entry itself is already saved.")+(newStatus==="Won"?"\n\nTo set Won without the PO, close this and use \"Set Won without PO\" instead — the PO can be added later.":""))) return;
           onCancel();
         },disabled:saving,style:{...btnSecondary,flex:1}},"Cancel")
       )
@@ -437,6 +444,38 @@ function canSeeValvePrice(user){ return !IS_LEVAFLOW_SITE || (user && (user.role
 if(APP_SETTINGS.appTitle){ try{ document.title = String(APP_SETTINGS.appTitle); }catch(e){} }
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
+// ---- DATES: dd/mm/yyyy EVERYWHERE (2 Oct, build 114) ------------------
+// Every date the app SHOWS goes through these, so it reads 02/10/2026 on
+// every screen, report, PDF and export whatever the computer's region
+// setting is. (Date boxes with a calendar are the one exception: the
+// browser draws those from the computer's own setting.)
+// toISODate accepts a Date, "2026-10-02", a full timestamp, or a typed
+// "02/10/2026" / "02-10-2026", and returns "2026-10-02" or "" — the form
+// dates are compared and sorted in.
+function toISODate(v){
+  if(v==null || v==="" || v==="—") return "";
+  if(v instanceof Date) return isNaN(v) ? "" : v.getFullYear()+"-"+String(v.getMonth()+1).padStart(2,"0")+"-"+String(v.getDate()).padStart(2,"0");
+  const s = String(v).trim();
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if(m) return m[1]+"-"+m[2].padStart(2,"0")+"-"+m[3].padStart(2,"0");
+  m = s.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})$/);
+  if(m) return m[3]+"-"+m[2].padStart(2,"0")+"-"+m[1].padStart(2,"0");
+  const d = new Date(s);           // a timestamp: its LOCAL calendar day
+  return isNaN(d) ? "" : toISODate(d);
+}
+function fmtDMY(v){
+  const iso = toISODate(v);
+  if(!iso) return (v==null || v==="") ? "" : String(v);
+  const [y,mo,d] = iso.split("-");
+  return d+"/"+mo+"/"+y;
+}
+function fmtDMYTime(v){
+  if(v==null || v==="") return "";
+  const d = v instanceof Date ? v : new Date(v);
+  if(isNaN(d)) return String(v);
+  return fmtDMY(d)+" "+String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0");
+}
+
 /* ---- COMPANY BRANDING ---- */
 // A key present in settings.js wins even when empty (""): Levaflow can state
 // "no website yet" without Flometriq's showing through.
@@ -558,11 +597,11 @@ function stageKind(name){ return stageInfo(name).kind||"open"; }
 // is written as a Log Follow-ups entry, so it becomes the quote's Last
 // interaction and sits in its history like any logged call. "where" names
 // the screen, so the trail can say where a move came from.
-async function logStageMoveFollowup({ referenceNumber, customerName, stage, date, note, nextFollowup, username, where }){
+async function logStageMoveFollowup({ referenceNumber, customerName, stage, date, note, nextFollowup, username, where, mode }){
   const { error } = await sb.from("activity_log_tbl").insert({
     company_name: customerName||"",
     activity_date: date || new Date().toISOString().slice(0,10),
-    activity_type: "Others",
+    activity_type: mode || "Others",
     chase_what: "Offer",
     chase_reference: referenceNumber,
     contacted_whom: "",
@@ -1287,7 +1326,7 @@ const btnSmall = { padding:"5px 10px", fontSize:12, cursor:"pointer", borderRadi
 // no web app can. Render it as the first child of a `position:relative`
 // container that should be covered.
 function Watermark({ user }){
-  const label = (user?.username||"")+"  ·  "+new Date().toLocaleString("en-IN");
+  const label = (user?.username||"")+"  ·  "+fmtDMYTime(new Date());
   const svg = "data:image/svg+xml,"+encodeURIComponent(
     "<svg xmlns='http://www.w3.org/2000/svg' width='340' height='170'>"+
     "<text x='10' y='90' transform='rotate(-28 10 90)' font-family='Segoe UI, Arial, sans-serif' font-size='13' fill='rgba(28,31,26,0.07)'>"+label+"</text>"+
@@ -1353,13 +1392,13 @@ function buildDocHeaderRows(mode, contractInfo, openRef){
   if(mode==="contract"){
     return [
       ["Contract Number", contractInfo?.contract_number || openRef?.reference_number || ""],
-      ["Date", new Date().toLocaleDateString("en-GB")],
+      ["Date", fmtDMY(new Date())],
       ["Client Name", clientName],
     ];
   }
   return [
     ["Quote Number", openRef?.reference_number || ""],
-    ["Quote Date", openRef?.quote_date ? new Date(openRef.quote_date).toLocaleDateString("en-GB") : ""],
+    ["Quote Date", openRef?.quote_date ? fmtDMY(openRef.quote_date) : ""],
     ["Client Name", clientName],
   ];
 }
@@ -1633,7 +1672,7 @@ function generatePDF({ title, refNumber, description, createdBy, createdAt, head
   } else if(refNumber) lbl("Ref No", refNumber);
   if(description) lbl("Description", description);
   if(createdBy) lbl("Prepared by", createdBy);
-  lbl("Date", new Date(createdAt||Date.now()).toLocaleDateString("en-IN", {day:"2-digit",month:"short",year:"numeric"}));
+  lbl("Date", fmtDMY(createdAt||Date.now()));
 
   // Table
   doc.autoTable({
@@ -1903,7 +1942,7 @@ function NotificationBell({ user }){
       items.length===0 ? h("div",{style:{padding:"14px 12px",fontSize:11.5,color:colors.mutedLight}},"Nothing yet.") :
       items.map(it=>h("div",{key:it.id,onClick:()=>!it.is_read&&markRead(it.id),style:{padding:"8px 12px",borderBottom:"1px solid #f0efe8",fontSize:11.5,cursor:it.is_read?"default":"pointer",background:it.is_read?"#fff":"#faf9f4"}},
         h("div",null,it.message),
-        h("div",{style:{fontSize:10,color:colors.mutedLight,marginTop:2}},new Date(it.created_at).toLocaleString())
+        h("div",{style:{fontSize:10,color:colors.mutedLight,marginTop:2}},fmtDMYTime(it.created_at))
       ))
     )
   );
@@ -3478,7 +3517,7 @@ function MaterialRatesGlobalRestore({ user, onClose, onRestored }){
       try{
         const { error } = await sb.from("material_rates").update({ rate:c.targetRate, rate_effective_date:today }).eq("id",c.row.id);
         if(error) throw error;
-        const dateLabel = new Date(c.asOfEntry.rate_date||c.asOfEntry.changed_at).toLocaleDateString();
+        const dateLabel = fmtDMY(c.asOfEntry.rate_date||c.asOfEntry.changed_at);
         const { error:histErr } = await sb.from("rate_history").insert({
           material_spec:c.row.material_spec, material_grade:c.row.material_grade,
           old_rate:c.row.rate, new_rate:c.targetRate, changed_by:user?.username||"unknown",
@@ -3645,7 +3684,7 @@ function QuoteStageTrack({ referenceNumber, customerName, current, changedAt, ch
     const { data } = await sb.from("estimates").select("quote_status,status_changed_at,status_changed_by").eq("reference_number",referenceNumber).limit(1).maybeSingle();
     setCheckedAt(new Date());
     if(data && (data.quote_status||"Draft")!==(currentRef.current||"Draft")){
-      setNotice("Moved to "+data.quote_status+(data.status_changed_by?" by "+data.status_changed_by:"")+(data.status_changed_at?", "+new Date(data.status_changed_at).toLocaleString():"")+" \u2014 updated here.");
+      setNotice("Moved to "+data.quote_status+(data.status_changed_by?" by "+data.status_changed_by:"")+(data.status_changed_at?", "+fmtDMYTime(data.status_changed_at):"")+" \u2014 updated here.");
       onMoved && onMoved(data.quote_status, { at:data.status_changed_at, by:data.status_changed_by });
       loadTrail();
     }
@@ -3711,7 +3750,7 @@ function QuoteStageTrack({ referenceNumber, customerName, current, changedAt, ch
     h("div",{style:{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap"}},
       h("span",{style:{fontSize:12.5,fontWeight:700}},"Stage"),
       h("span",{style:{fontSize:11.5,color:colors.muted}},
-        (current||"Draft")+(changedAt?" \u00b7 since "+new Date(changedAt).toLocaleDateString():"")+(changedBy?" \u00b7 by "+changedBy:"")),
+        (current||"Draft")+(changedAt?" \u00b7 since "+fmtDMY(changedAt):"")+(changedBy?" \u00b7 by "+changedBy:"")),
       !ready && h("span",{style:{fontSize:11,color:"#7a5000"}},"Complete the quote to move its stage"),
       h("span",{style:{marginLeft:"auto",fontSize:10.5,color:colors.mutedLight}},checkedAt?"checked for changes "+checkedAt.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}):"")
     ),
@@ -4250,7 +4289,7 @@ function MasterEditor({ tableKey, user }) {
   // clearly-annotated entry on top, same as the earlier "restore" design.
   const [restoringId,setRestoringId]=useState(null);
   const restoreRate = async(hrow)=>{
-    const oldDateLabel = new Date(hrow.rate_date||hrow.changed_at).toLocaleDateString();
+    const oldDateLabel = fmtDMY(hrow.rate_date||hrow.changed_at);
     if(!confirm("Restore rate to "+fmt(Number(hrow.new_rate)||0)+" (originally effective "+oldDateLabel+")? This becomes the current rate immediately.")) return;
     setRestoringId(hrow.id);
     try{
@@ -4311,7 +4350,7 @@ function MasterEditor({ tableKey, user }) {
         h("td",{style:{padding:"7px 9px",width:220}},row.material_grade),
         h("td",{style:{padding:"7px 9px",textAlign:"right"}},
           h("div",null,fmt(Number(row.rate)||0)),
-          row.rate_effective_date&&h("div",{style:{fontSize:10,color:colors.mutedLight}},"as of "+row.rate_effective_date),
+          row.rate_effective_date&&h("div",{style:{fontSize:10,color:colors.mutedLight}},"as of "+fmtDMY(row.rate_effective_date)),
           h("span",{onClick:()=>openRateHistory(row),style:{fontSize:10,color:"#1c8c75",textDecoration:"underline",cursor:"pointer"}},"History")
         ),
         h("td",{style:{padding:"7px 9px"}},row.uom),
@@ -5152,7 +5191,7 @@ function MasterEditor({ tableKey, user }) {
                 h("td",{style:{padding:"6px 8px"}},fmt(Number(hrow.old_rate)||0)),
                 h("td",{style:{padding:"6px 8px",fontWeight:700}},fmt(Number(hrow.new_rate)||0)),
                 h("td",{style:{padding:"6px 8px",color:colors.muted}},
-                  new Date(hrow.rate_date||hrow.changed_at).toLocaleDateString(),
+                  fmtDMY(hrow.rate_date||hrow.changed_at),
                   hrow.note && h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:2}},hrow.note)
                 ),
                 h("td",{style:{padding:"6px 8px",color:colors.muted}},hrow.changed_by),
@@ -5723,7 +5762,7 @@ function vendorFlag(setup, vendorName){
   const today = new Date().toISOString().slice(0,10);
   const expired = v.approval_valid_till && String(v.approval_valid_till).slice(0,10) < today;
   const tone = st==="Approved" ? (expired?"amber":"green") : st==="Blocked" ? "red" : "amber";
-  const note = expired ? "Approval ran out on "+new Date(v.approval_valid_till).toLocaleDateString("en-GB")+" — renew it on the vendor's page." :
+  const note = expired ? "Approval ran out on "+fmtDMY(v.approval_valid_till)+" — renew it on the vendor's page." :
                st==="Approved" ? "" : st==="Blocked" ? "Blocked vendor — you can still pick it; the line will carry this flag." :
                st==="Not set" ? "Approval status not set on the vendor's page." : st+" — you can still pick it; the line will carry this flag.";
   return { status: expired ? "Approval expired" : st, tone, note, v };
@@ -6403,7 +6442,7 @@ function PriceListMaster({ user }){
           h("td",{style:{padding:"5px 8px"}},s.vendor,s.est && h("span",{style:{fontSize:9.5,fontWeight:600,padding:"1px 6px",borderRadius:9,background:"#fff4d6",color:"#854f0b",marginLeft:6}},"Estimated by app")),h("td",{style:{padding:"5px 8px"}},s.pricelist_no||"—"),h("td",{style:{padding:"5px 8px"}},s.wef||"—"),
           h("td",{style:{padding:"5px 8px"}},Array.from(s.uplift).map(u=>u?("+"+u+"%"):"none").join(", ")),
           h("td",{style:{padding:"5px 8px",textAlign:"right"}},s.count.toLocaleString("en-IN")),
-          h("td",{style:{padding:"5px 8px",color:colors.muted}},(s.last?new Date(s.last).toLocaleDateString("en-GB"):"—")+(s.by?" · "+s.by:""))
+          h("td",{style:{padding:"5px 8px",color:colors.muted}},(s.last?fmtDMY(s.last):"—")+(s.by?" · "+s.by:""))
         )))
       )
     ),
@@ -6434,6 +6473,9 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
   const [plQty,setPlQty]=useState("1"); const [plUom,setPlUom]=useState("Nos"); const [plDesc,setPlDesc]=useState("");
   const [plMocLabels,setPlMocLabels]=useState(null); // null = loading; [] = this item has no Datasheet MOC rule
   const [plMissing,setPlMissing]=useState({}); // typed values for materials the price list doesn't give
+  // 2 Oct (114) — set when Add to estimate is pressed with materials still
+  // blank, so those boxes are outlined red until filled.
+  const [plGapFlag,setPlGapFlag]=useState("");
   const [plAdded,setPlAdded]=useState(""); // confirmation after "+ Add to estimate"
   // A model picked under BOM that has no BOM yet (e.g. a price-list model):
   // say so instead of opening an empty BOM. noBomPl = its price-list row, if any.
@@ -6772,7 +6814,12 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     if(!(sf>0)){ alert("Enter a Sales factor greater than 0."); return; }
     if(plMocLabels===null){ alert("Still loading this item's datasheet materials — try again in a moment."); return; }
     const gaps = plMaterialRows.filter(m=>!m.fromList && !String(plMissing[m.label]||"").trim());
-    if(gaps.length){ alert("Fill in the materials the price list doesn't give: "+gaps.map(g=>g.label).join(", ")+"."); return; }
+    if(gaps.length){
+      setPlGapFlag(plKey(r));
+      alert("This line can't go into the estimate yet.\n\nFill these materials (outlined in red under Datasheet \u00b7 Material Data):\n\n\u2022 "+gaps.map(g=>g.label).join("\n\u2022 "));
+      setTimeout(()=>{ const el = document.querySelector('[data-pl-gap="1"]'); if(el){ el.scrollIntoView({block:"center"}); el.focus(); } },50);
+      return;
+    }
     const cost = pricelistCost(r);
     const material_values = {...(r.attrs||{})};
     plMaterialRows.forEach(m=>{ material_values[m.label] = m.fromList || String(plMissing[m.label]).trim(); });
@@ -7231,7 +7278,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     const W = doc.internal.pageSize.getWidth();
     const pageH = doc.internal.pageSize.getHeight();
     const dark = [28,31,26];
-    const today = new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"});
+    const today = fmtDMY(new Date());
 
     // Same 10-column layout as the Quotes BOM PDF, minus Total Qty (there's no
     // separate order-quantity multiplier yet at this pre-save stage).
@@ -7347,7 +7394,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
   };
 
   const exportSummaryPDF = async()=>{
-    const today = new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"});
+    const today = fmtDMY(new Date());
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ orientation:"landscape", unit:"mm", format:"a4" });
     const W = doc.internal.pageSize.getWidth();
@@ -7425,7 +7472,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
   };
 
   const exportCuttingPlanPDF = async()=>{
-    const today = new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"});
+    const today = fmtDMY(new Date());
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ orientation:"landscape", unit:"mm", format:"a4" });
     const W = doc.internal.pageSize.getWidth();
@@ -8078,7 +8125,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
       h("div",{style:{fontSize:13,color:"#854f0b",fontWeight:600}},
         "Unfinished quote "+resumeOffer.ref+(resumeOffer.header&&resumeOffer.header.customerName?" for "+resumeOffer.header.customerName:"")),
       h("div",{style:{fontSize:11.5,color:"#854f0b"}},
-        "started "+(resumeOffer.savedAt?new Date(resumeOffer.savedAt).toLocaleString():"earlier")+
+        "started "+(resumeOffer.savedAt?fmtDMYTime(resumeOffer.savedAt):"earlier")+
         ((resumeOffer.cart&&resumeOffer.cart.length)?" \u00b7 "+resumeOffer.cart.length+" line(s) in the cart":" \u00b7 nothing in the cart yet")),
       h("div",{style:{marginLeft:"auto",display:"flex",gap:8}},
         h("button",{onClick:discardDraft,style:{...btnSecondary,fontSize:12}},"Discard"),
@@ -8443,7 +8490,8 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
                 plMaterialRows.map(m=>h("tr",{key:m.label,style:{borderTop:"1px solid #f0eee5"}},
                   h("td",{style:{padding:"4px 6px",width:150}},m.label),
                   h("td",{style:{padding:"4px 6px"}}, m.fromList ? h("span",null,h("span",{style:{color:"#0f6e3f",marginRight:5}},"✓"),m.fromList)
-                    : h("input",{value:plMissing[m.label]||"",onChange:e=>{ const v=e.target.value; setPlMissing(x=>({...x,[m.label]:v})); },placeholder:"Not in the price list. Type it",style:{...inputStyle,padding:"4px 7px",fontSize:12,borderColor:"#f0d58a",background:"#fffdf5"}})))),
+                    : h("input",{"data-pl-gap":(plGapFlag===plKey(r) && !String(plMissing[m.label]||"").trim())?"1":"0",value:plMissing[m.label]||"",onChange:e=>{ const v=e.target.value; setPlMissing(x=>({...x,[m.label]:v})); },placeholder:"Not in the price list. Type it",style:{...inputStyle,padding:"4px 7px",fontSize:12,
+                        ...((plGapFlag===plKey(r) && !String(plMissing[m.label]||"").trim()) ? {border:"1.5px solid #a3312a",background:"#fdf3f2"} : {borderColor:"#f0d58a",background:"#fffdf5"})}})))),
                 specRows.map(k=>h("tr",{key:"s-"+k,style:{borderTop:"1px solid #f0eee5",color:colors.muted}},h("td",{style:{padding:"4px 6px"}},k),h("td",{style:{padding:"4px 6px"}},String(r.attrs[k]))))
               ))
             ),
@@ -8468,8 +8516,11 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
               h("div",{style:{flex:1,minWidth:130}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Sales price (INR, per item)"),h("input",{readOnly:true,value:sfOk?fmt2(computeSalesPrice(cost,sfN)):"—",style:{...inputStyle,padding:"8px 10px",fontSize:13,background:"#f6f5f0"}}))
             ),
             h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:12,lineHeight:1.45}},"Qty is the number of items ordered; cost and sales prices are per item. The cost is locked to the price list; change the sales factor to change the price. No Excel reference, code or validation is needed."),
-            h("button",{onClick:addPricelistLineToCart,disabled:!sfOk||plMocLabels===null||gaps.length>0,title:!vendorChosen?"Pick whose price to use under Cost from first":gaps.length?"Fill the yellow Material Data rows first":"",
-              style:{...btnPrimary,fontSize:12,padding:"8px 16px",opacity:(!sfOk||plMocLabels===null||gaps.length>0)?0.5:1}},"+ Add to estimate")
+            // 2 Oct (114) — never greyed out: pressing it with something
+            // missing says exactly what, and outlines the boxes to fill.
+            h("button",{onClick:addPricelistLineToCart,title:!vendorChosen?"Pick whose price to use under Cost from first":gaps.length?gaps.length+" material"+(gaps.length>1?"s":"")+" still to fill":"",
+              style:{...btnPrimary,fontSize:12,padding:"8px 16px",opacity:(!sfOk||plMocLabels===null||gaps.length>0)?0.75:1}},"+ Add to estimate"),
+            (gaps.length>0 && plGapFlag===plKey(r)) && h("div",{style:{fontSize:11.5,color:"#a3312a",marginTop:6}},"Still to fill: "+gaps.map(g=>g.label).join(", ")+".")
           );
         })()) :
       !selectedModel?h("div",{style:{color:colors.mutedLight,fontSize:14,marginTop:60,textAlign:"center"}},"Select a model from the left to build its estimate."):
@@ -8692,7 +8743,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
               refDesc&&h("div",{style:{fontSize:11,color:"#8ab8ad",fontStyle:"italic",marginTop:1}},refDesc)
             ),
             h("div",{style:{textAlign:"right"}},
-              h("div",{style:{fontSize:10,color:"#9a9d8f"}},new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})),
+              h("div",{style:{fontSize:10,color:"#9a9d8f"}},fmtDMY(new Date())),
               h("div",{style:{fontSize:10,color:"#9a9d8f",marginTop:2}},"Prepared by: "+user.username),
               h("div",{style:{fontSize:10,color:"#9a9d8f",marginTop:2}},summaryRows.length+" groups · "+computedLines.length+" lines")
             )
@@ -8744,7 +8795,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
               refDesc&&h("div",{style:{fontSize:11,color:"#8ab8ad",fontStyle:"italic",marginTop:1}},refDesc)
             ),
             h("div",{style:{textAlign:"right"}},
-              h("div",{style:{fontSize:10,color:"#9a9d8f"}},new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})),
+              h("div",{style:{fontSize:10,color:"#9a9d8f"}},fmtDMY(new Date())),
               h("div",{style:{fontSize:10,color:"#9a9d8f",marginTop:2}},"Prepared by: "+user.username),
               h("div",{style:{fontSize:10,color:"#9a9d8f",marginTop:2}},cuttingPlanRows.length+" groups · "+computedLines.length+" lines")
             )
@@ -9942,7 +9993,7 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
   };
 
   const markReviewed = async()=>{
-    if(hasUnresolvedMoc){ alert("Resolve the pending grade selection(s) in Material Data first."); return; }
+    if(hasUnresolvedMoc){ alert("Pick a grade for these materials under Material Data first:\n\n\u2022 "+template.sections.flatMap(s=> s.bomSection ? getSectionRows(s).filter(r=>r.needsChoice).map(r=>r.label) : []).join("\n\u2022 ")); return; }
     setReviewBusy(true);
     try{
       if(isDirty || !review.exists) await saveAll();
@@ -9960,7 +10011,7 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
     rows.push(["", template.docTitle, "", ""]);
     rows.push([]);
     rows.push(["Client", openRef.description||"", "Our Ref Num", openRef.reference_number]);
-    rows.push(["Ref Number", openRef.reference_number, "Date", new Date().toLocaleDateString("en-GB")]);
+    rows.push(["Ref Number", openRef.reference_number, "Date", fmtDMY(new Date())]);
     rows.push([]);
     template.sections.forEach(section=>{
       rows.push([section.bomSection?"Material Data":section.title, section.no, "", ""]);
@@ -9980,7 +10031,7 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
 
   const exportPDF = async()=>{
     try {
-    const today = new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"});
+    const today = fmtDMY(new Date());
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({orientation:"portrait",unit:"mm",format:"a4"});
     const W = doc.internal.pageSize.getWidth();
@@ -10059,6 +10110,18 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
     return false;
   })();
   const hasUnresolvedMoc = template.sections.some(s=> s.bomSection && getSectionRows(s).some(r=>r.needsChoice));
+  // 2 Oct (114) — closing names exactly which materials still need a grade
+  // and outlines them, instead of a general "resolve the pending" line.
+  const unresolvedMocLabels = template.sections.flatMap(s=> s.bomSection ? getSectionRows(s).filter(r=>r.needsChoice).map(r=>r.label) : []);
+  const tryCloseDatasheet = ()=>{
+    if(hasUnresolvedMoc){
+      setCloseBlockedMsg("Pick a grade for "+unresolvedMocLabels.join(", ")+" (outlined in red under Material Data) before closing \u2014 the datasheet needs one grade per material.");
+      setTimeout(()=>{ const el = document.querySelector('[data-moc-pending="1"]'); if(el) el.scrollIntoView({block:"center"}); },50);
+      return;
+    }
+    if(isDirty && confirm("This datasheet has changes that are not saved.\n\nOK = go back and save them\nCancel = close without saving")){ setCloseBlockedMsg("Save your changes, then close."); return; }
+    setCloseBlockedMsg(""); onClose();
+  };
 
   return h("div",{style:{position:"fixed",inset:0,background:"rgba(20,20,20,0.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:80,padding:16}},
     h("div",{style:{background:"#fff",borderRadius:8,width:900,maxWidth:"96vw",maxHeight:"92vh",display:"flex",flexDirection:"column"}},
@@ -10067,11 +10130,7 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
           h("div",{style:{fontWeight:700,fontSize:14}},"Datasheet — "+openRef.reference_number+" · Sl No "+openRef.item_sl_no),
           h("div",{style:{fontSize:11,opacity:0.75}},template.docTitle)
         ),
-        h("button",{onClick:()=>{
-          if(hasUnresolvedMoc){ setCloseBlockedMsg("Resolve the pending grade selection(s) in Material Data before closing."); return; }
-          if(isDirty){ setCloseBlockedMsg("Save your changes before closing."); return; }
-          setCloseBlockedMsg(""); onClose();
-        },style:{background:"none",border:"none",color:"#fff",cursor:"pointer",fontSize:16}},"✕")
+        h("button",{onClick:tryCloseDatasheet,style:{background:"none",border:"none",color:"#fff",cursor:"pointer",fontSize:16}},"✕")
       ),
       closeBlockedMsg && h("div",{style:{background:"#fff4d6",color:"#854f0b",padding:"8px 20px",fontSize:12}},closeBlockedMsg),
       loading ? h("div",{style:{padding:24,fontSize:13,color:colors.mutedLight}},"Loading…") :
@@ -10122,7 +10181,7 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
                         row.isMoc && h("div",{style:{fontSize:10.5,color:colors.mutedLight,width:"100%"}},"Changes this datasheet only. The BOM and the price list stay as they are.")
                       )
                   : row.needsChoice
-                    ? h(React.Fragment,null,
+                    ? h("div",{"data-moc-pending":"1",style:closeBlockedMsg && hasUnresolvedMoc ? {outline:"1.5px solid #a3312a",borderRadius:4,padding:2,background:"#fdf3f2"} : null},
                         h(MocGradeRow,{
                           row,
                           onPickSingle:(val)=>{ const updated={...(values.__mocChoices||{}),[row.label]:{mode:"single",value:val}}; setField("__mocChoices",updated); autoSaveMocChoice(updated); },
@@ -12795,8 +12854,8 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
       h("input",{type:"text",value:delReason,onChange:e=>setDelReason(e.target.value),placeholder:"Why the date is being set before the documents clear",
         style:{display:"block",width:"100%",padding:"5px 7px",fontSize:12,border:"1px solid "+colors.border,borderRadius:4}})),
     delView && delView.delivery_date ? h("div",{style:{fontSize:11.5,marginBottom:8}},
-      "Currently: ",h("b",null,delView.delivery_date)," \u00b7 ",delView.delivery_state.toLowerCase(),
-      delView.clock_starts ? (" \u00b7 clock started "+delView.clock_starts) : " \u00b7 clock has not started") : null,
+      "Currently: ",h("b",null,fmtDMY(delView.delivery_date))," \u00b7 ",delView.delivery_state.toLowerCase(),
+      delView.clock_starts ? (" \u00b7 clock started "+fmtDMY(delView.clock_starts)) : " \u00b7 clock has not started") : null,
     delErr ? h("div",{style:{fontSize:11.5,color:colors.danger,marginBottom:8}},delErr) : null,
     h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end"}},
       h("button",{disabled:delBusy,onClick:()=>saveDelivery(false),style:btnPrimary},delBusy?"Saving\u2026":"Save"),
@@ -16856,7 +16915,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     generatePDF({title:"Estimate",extraHeaderRows:buildDocHeaderRows(mode,contractInfo,openRef),description:openRef.description,createdBy:openRef.created_by,createdAt:openRef.created_at,headers,rows,footerRows:[[...Array(11).fill(""),"Total",fmtR(totalCost),"",fmtR(totalSales)]],filename:"estimate_"+openRef.reference_number+"_sl"+openRef.item_sl_no+".pdf"});
   };
   const exportSummaryPDFSaved=()=>{
-    const today=new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"});
+    const today=fmtDMY(new Date());
     const { jsPDF }=window.jspdf;
     const doc=new jsPDF({orientation:"landscape",unit:"mm",format:"a4"});
     const W=doc.internal.pageSize.getWidth();
@@ -16924,7 +16983,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     XLSX.writeFile(wb,"cutting_plan_"+openRef.reference_number+"_sl"+openRef.item_sl_no+".xlsx");
   };
   const exportCuttingPlanPDF=()=>{
-    const today=new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"});
+    const today=fmtDMY(new Date());
     const { jsPDF }=window.jspdf;
     const doc=new jsPDF({orientation:"landscape",unit:"mm",format:"a4"});
     const W=doc.internal.pageSize.getWidth();
@@ -17813,7 +17872,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       // never silently defaulted to whatever the Quote happened to have.
       const signatoryName = mode==="contract" ? (contractInfo?.signatory_name||"") : (first.signatory_name || "");
       const signatoryDesignation = mode==="contract" ? (contractInfo?.signatory_designation||"") : (first.signatory_designation || "");
-      const today = new Date().toLocaleDateString("en-GB");
+      const today = fmtDMY(new Date());
       // Wrapped so the PDF preview can regenerate it live with small overrides
       // (Customer Name, Delivery, Validity) without re-fetching from the DB.
       // 1 Oct (107) — ENCLOSURES. On a quote (never a Sale Order) the Out
@@ -17983,10 +18042,10 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       y += isContract ? 0 : (classic ? 6 : ((revMatch && !isContract)?22:28));
       doc.setFont("times","normal"); doc.text("Dear Sir,",12,y); y+=8;
       const enquiryNo = first.enquiry_number || "";
-      const enquiryDt = first.enquiry_date ? new Date(first.enquiry_date).toLocaleDateString("en-GB") : "";
+      const enquiryDt = first.enquiry_date ? fmtDMY(first.enquiry_date) : "";
       if(isContract){
         const poNo = first.po_number || "—";
-        const poDt = first.po_date ? new Date(first.po_date).toLocaleDateString("en-GB") : "";
+        const poDt = first.po_date ? fmtDMY(first.po_date) : "";
         doc.setFont("times","bold"); doc.text("Ref:",12,y); doc.setFont("times","normal");
         doc.text("P.O. Number: "+poNo+(poDt?" dated "+poDt:""),24,y); y+=8;
         doc.setFont("times","bold"); doc.text("Sub:",12,y); doc.setFont("times","normal");
@@ -18084,7 +18143,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               const row0 = (r0&&r0[0])||{};
               revGroups.push({
                 label:"R00",
-                date: row0.created_at ? new Date(row0.created_at).toLocaleDateString("en-GB") : "—",
+                date: row0.created_at ? fmtDMY(row0.created_at) : "—",
                 rows:[{field:null, original:"—", revised:"Initial issue — Quotation prepared and issued", by:row0.created_by||"—"}]
               });
             } else {
@@ -18099,8 +18158,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               // document. BOM history stays fully visible on the in-app Revision
               // History screen, which has its own labels for it.
               const custChanges = (changes||[]).filter(r=>r.area!=="bom");
-              const dateStr = auditRow ? new Date(auditRow.performed_at).toLocaleDateString("en-GB")
-                : ((custChanges[0]) ? new Date(custChanges[0].changed_at).toLocaleDateString("en-GB") : "—");
+              const dateStr = auditRow ? fmtDMY(auditRow.performed_at)
+                : ((custChanges[0]) ? fmtDMY(custChanges[0].changed_at) : "—");
               revGroups.push({
                 label:"R"+String(sib.revNum).padStart(2,"0"),
                 date: dateStr,
@@ -19408,8 +19467,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         !headerEditOpen
           ? h("div",{style:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:"4px 20px",fontSize:12}},
               h("div",null,h("span",{style:{color:colors.muted}},"Enquiry number: "),h("span",{style:!quoteHeaderRow.enquiry_number?{color:colors.danger}:{}},quoteHeaderRow.enquiry_number||"— not set")),
-              h("div",null,h("span",{style:{color:colors.muted}},"Enquiry date: "),quoteHeaderRow.enquiry_date||"—"),
-              h("div",null,h("span",{style:{color:colors.muted}},"Quote date: "),quoteHeaderRow.quote_date||"—"),
+              h("div",null,h("span",{style:{color:colors.muted}},"Enquiry date: "),(fmtDMY(quoteHeaderRow.enquiry_date)||"—")),
+              h("div",null,h("span",{style:{color:colors.muted}},"Quote date: "),(fmtDMY(quoteHeaderRow.quote_date)||"—")),
               h("div",null,h("span",{style:{color:colors.muted}},"Currency: "),quoteHeaderRow.currency||"INR"),
               h("div",null,h("span",{style:{color:colors.muted}},"Conversion rate: "),quoteHeaderRow.conversion_rate||1),
               h("div",null,h("span",{style:{color:colors.muted}},"Customer: "),h("span",{style:!quoteHeaderRow.customer_name?{color:colors.danger}:{}},quoteHeaderRow.customer_name||"— not set")),
@@ -19730,7 +19789,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               h("div",{style:{minWidth:0}},
                 h("div",{style:{fontWeight:600,fontSize:13}},r.reference_number+"  ·  Sl "+r.item_sl_no),
                 r.description&&h("div",{style:{fontSize:11,opacity:0.8}},r.description),
-                h("div",{style:{fontSize:10.5,opacity:0.6,marginTop:2}},(r.created_by||"")+" · "+new Date(r.created_at).toLocaleDateString()),
+                h("div",{style:{fontSize:10.5,opacity:0.6,marginTop:2}},(r.created_by||"")+" · "+fmtDMY(r.created_at)),
                 r.datasheet_skipped && h("span",{style:{display:"inline-block",marginTop:4,fontSize:10,fontWeight:600,padding:"1px 7px",borderRadius:4,background:active?"rgba(255,255,255,0.2)":"#fff4d6",color:active?"#fac775":"#854f0b"}},"Datasheet skipped")
               ),
               isAdmin && h("button",{
@@ -19847,7 +19906,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
                   !linkedPackageInfo && linkedProjectTag && h("span",{style:{fontSize:12,fontWeight:600,padding:"2px 9px",borderRadius:20,background:"#f0efe8",color:colors.muted}},"Major Project: "+linkedProjectTag+" (not linked to a specific package)"),
                   bomExceptions.length>0 && h("span",{
                     style:{fontSize:12,fontWeight:600,padding:"2px 9px",borderRadius:20,background:"#fff4d6",color:"#854f0b",cursor:"pointer"},
-                    title:bomExceptions.map(ex=>(ex.shape||ex.component||"line")+" ("+(ex.grade||"no grade")+") — removed by "+(ex.deleted_by||"unknown")+" "+new Date(ex.deleted_at).toLocaleDateString()).join("\n")
+                    title:bomExceptions.map(ex=>(ex.shape||ex.component||"line")+" ("+(ex.grade||"no grade")+") — removed by "+(ex.deleted_by||"unknown")+" "+fmtDMY(ex.deleted_at)).join("\n")
                   },"⚠ "+bomExceptions.length+" BOM exception"+(bomExceptions.length>1?"s":""))
                 ),
                 h("div",{style:{display:"flex",alignItems:"center",gap:8,marginTop:4}},
@@ -20007,7 +20066,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
                 ),
                 h("div",{style:{display:"flex",alignItems:"flex-start",gap:14}},
                   h("div",{style:{textAlign:"right"}},
-                    h("div",{style:{fontSize:10,color:"rgba(255,255,255,0.45)"}},new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})),
+                    h("div",{style:{fontSize:10,color:"rgba(255,255,255,0.45)"}},fmtDMY(new Date())),
                     h("div",{style:{fontSize:10,color:"rgba(255,255,255,0.45)",marginTop:2}},savedSummaryRows.length+" groups · "+openLines.length+" lines")
                   ),
                   h("button",{onClick:()=>setFullScreenSummary(f=>!f),style:{background:"rgba(255,255,255,0.12)",border:"1px solid rgba(255,255,255,0.25)",color:"#fff",fontSize:11,padding:"4px 10px",borderRadius:6,cursor:"pointer",whiteSpace:"nowrap"}}, fullScreenSummary?"Esc · Close full screen":"⛶ Full screen")
@@ -20063,7 +20122,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
                 ),
                 h("div",{style:{display:"flex",alignItems:"flex-start",gap:14}},
                   h("div",{style:{textAlign:"right"}},
-                    h("div",{style:{fontSize:10,color:"rgba(255,255,255,0.45)"}},new Date().toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})),
+                    h("div",{style:{fontSize:10,color:"rgba(255,255,255,0.45)"}},fmtDMY(new Date())),
                     h("div",{style:{fontSize:10,color:"rgba(255,255,255,0.45)",marginTop:2}},cuttingPlanRows.length+" groups · "+openLines.length+" lines")
                   ),
                   h("button",{onClick:()=>setFullScreenCuttingPlan(f=>!f),style:{background:"rgba(255,255,255,0.12)",border:"1px solid rgba(255,255,255,0.25)",color:"#fff",fontSize:11,padding:"4px 10px",borderRadius:6,cursor:"pointer",whiteSpace:"nowrap"}}, fullScreenCuttingPlan?"Esc · Close full screen":"⛶ Full screen")
@@ -21175,8 +21234,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           const loggedLate = a.activity_date && a.activity_date!==(a.created_at||"").slice(0,10);
           return h("div",{key:a.id,style:{borderLeft:"2px solid "+colors.border,paddingLeft:10,marginBottom:10}},
             h("div",{style:{fontSize:12}},
-              h("span",{style:{fontWeight:600}},a.activity_type)," · "+(a.company_name||"—")+" · "+(a.activity_date?new Date(a.activity_date).toLocaleDateString():"—")+" · "+(a.logged_by||"—"),
-              loggedLate && h("span",{style:{fontSize:10,color:"#854f0b",marginLeft:6}},"(logged "+new Date(a.created_at).toLocaleDateString()+")")
+              h("span",{style:{fontWeight:600}},a.activity_type)," · "+(a.company_name||"—")+" · "+(a.activity_date?fmtDMY(a.activity_date):"—")+" · "+(a.logged_by||"—"),
+              loggedLate && h("span",{style:{fontSize:10,color:"#854f0b",marginLeft:6}},"(logged "+fmtDMY(a.created_at)+")")
             ),
             a.notes && h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:2}},a.notes)
           );
@@ -21485,7 +21544,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           : h("div",null, internalNotes.map(n=>h("div",{key:n.id,style:{padding:"9px 0",borderBottom:"1px solid "+colors.border}},
               h("div",{style:{fontSize:12.5,lineHeight:1.55,whiteSpace:"pre-wrap",marginBottom:4}},n.note_text),
               h("div",{style:{display:"flex",alignItems:"center",gap:8}},
-                h("span",{style:{fontSize:10.5,color:colors.mutedLight}},(n.created_by||"unknown")+" \u00b7 "+(n.created_at?new Date(n.created_at).toLocaleString():"")),
+                h("span",{style:{fontSize:10.5,color:colors.mutedLight}},(n.created_by||"unknown")+" \u00b7 "+(n.created_at?fmtDMYTime(n.created_at):"")),
                 h("button",{onClick:()=>deleteInternalNote(n),style:{...btnSmall,fontSize:10.5,color:colors.danger}},"Remove")
               )
             ))),
@@ -21772,13 +21831,22 @@ async function verifyAndConsumeGatedPin(actionType, enteredPin, username, entity
   return {ok:true};
 }
 async function updateQuoteStatusForQuote(referenceNumber, newStatus, changedBy, source, reason, changedAt){
-  if(newStatus!=="Draft"){
+  // 1 Oct (113) — a quote that is closing as lost or parked (Lost,
+  // Deferred) is never asked about Extra Price or testing: neither
+  // matters once the offer is dead, and the question was stopping the
+  // move. Won and the open stages still ask, once per quote.
+  const closingWithoutWin = ["lost","parked"].includes(stageKind(newStatus));
+  if(newStatus!=="Draft" && !closingWithoutWin){
     const [{count},{data:declined}] = await Promise.all([
       sb.from("quote_extra_price_tbl").select("id",{count:"exact",head:true}).eq("reference_number",referenceNumber),
       sb.from("quote_extra_price_declined_tbl").select("reference_number").eq("reference_number",referenceNumber).maybeSingle()
     ]);
     if(!(count||0) && !declined){
-      if(confirm("Does "+referenceNumber+" have any Extra Price Additions?\n\nOK = add some now (stage change will be cancelled — open Extra Price from the quote and try again after)\nCancel = none needed")){
+      // 1 Oct (113) — reworded so OK means carry on. Before, OK meant
+      // "stop", and it cancelled the stage change silently while the
+      // follow-up still said Saved.
+      if(!confirm(referenceNumber+" has no Extra Price Additions.\n\nOK = none needed, move it to "+newStatus+" now\nCancel = stop; I will add Extra Price on the quote first (the stage will NOT change)")){
+        alert(referenceNumber+" stays at its current stage.\n\nOpen the quote, add the Extra Price, then change the stage to "+newStatus+" again."+(source==="Follow-up log"?"\n\nThe follow-up entry itself is saved.":""));
         return { blocked:true, reason:"extra_price_needed" };
       } else {
         await sb.from("quote_extra_price_declined_tbl").upsert({reference_number:referenceNumber,declined_by:changedBy,declined_at:new Date().toISOString()},{onConflict:"reference_number"});
@@ -21838,7 +21906,7 @@ async function updateQuoteStatusForQuote(referenceNumber, newStatus, changedBy, 
           if(actingName!==ownerName){
             await sb.from("notifications_tbl").insert({
               employee_name: ownerName,
-              message: (changedBy||"Someone")+" changed "+referenceNumber+"'s stage to "+newStatus+" on "+new Date(now).toLocaleString()+" — you're the owner of "+customerName+", in case you weren't aware.",
+              message: (changedBy||"Someone")+" changed "+referenceNumber+"'s stage to "+newStatus+" on "+fmtDMYTime(now)+" — you're the owner of "+customerName+", in case you weren't aware.",
               related_company: customerName,
               notif_type: "quote_status_change"
             });
@@ -23527,7 +23595,7 @@ function MyWorklistScreen({ user }){
             h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}},
               h("div",null,
                 h("div",{style:{fontWeight:700,fontSize:13}},a.company_name),
-                h("div",{style:{fontSize:11,color:colors.muted,marginTop:2}},(overdue?"Overdue — was due ":"Due ")+a.next_followup_date+(a.notes?" — "+a.notes:"")),
+                h("div",{style:{fontSize:11,color:colors.muted,marginTop:2}},(overdue?"Overdue — was due ":"Due ")+fmtDMY(a.next_followup_date)+(a.notes?" — "+a.notes:"")),
                 deal && h("div",{style:{fontSize:11,color:colors.muted,marginTop:2}},deal.reference_number+" · "+deal.quote_status+" · INR "+fmtR(deal.value))
               ),
               h("button",{onClick:()=>openLog(a.company_name),style:{...btnSmall,fontSize:10,padding:"4px 10px"}},"Log now")
@@ -23550,10 +23618,10 @@ function MyWorklistScreen({ user }){
           h("div",{key:a.id,style:{border:"1px solid "+colors.border,borderRadius:6,padding:"8px 10px",marginBottom:6}},
             h("div",{style:{display:"flex",justifyContent:"space-between"}},
               h("div",{style:{fontSize:12}},h("span",{style:{fontWeight:700,marginRight:6}},a.activity_type),a.outcome&&h("span",{style:{color:colors.muted}},a.outcome)),
-              h("div",{style:{fontSize:10.5,color:colors.mutedLight}},new Date(a.created_at).toLocaleDateString())
+              h("div",{style:{fontSize:10.5,color:colors.mutedLight}},fmtDMY(a.created_at))
             ),
             a.notes && h("div",{style:{fontSize:12,marginTop:3}},a.notes),
-            a.next_followup_date && h("div",{style:{fontSize:10.5,color:colors.danger,marginTop:3}},"Next follow-up: "+a.next_followup_date)
+            a.next_followup_date && h("div",{style:{fontSize:10.5,color:colors.danger,marginTop:3}},"Next follow-up: "+fmtDMY(a.next_followup_date))
           )
         ),
         activities.filter(a=>a.company_name===selectedCompany).length===0 && h("div",{style:{fontSize:12,color:colors.mutedLight}},"No activity logged yet.")
@@ -23565,7 +23633,7 @@ function MyWorklistScreen({ user }){
         h("div",{key:a.id,style:{border:"1px solid "+colors.border,borderRadius:6,padding:"8px 10px",marginBottom:6}},
           h("div",{style:{display:"flex",justifyContent:"space-between"}},
             h("div",{style:{fontSize:12}},h("span",{style:{fontWeight:700,marginRight:6}},a.company_name),h("span",{style:{color:colors.muted}},a.activity_type+(a.outcome?" — "+a.outcome:""))),
-            h("div",{style:{fontSize:10.5,color:colors.mutedLight}},new Date(a.created_at).toLocaleDateString())
+            h("div",{style:{fontSize:10.5,color:colors.mutedLight}},fmtDMY(a.created_at))
           ),
           a.notes && h("div",{style:{fontSize:12,marginTop:3}},a.notes)
         )
@@ -24181,10 +24249,10 @@ function CustomersScreen({ user }){
               h("span",{style:{fontWeight:700,marginRight:6}},a.activity_type),
               a.outcome && h("span",{style:{color:colors.muted}},a.outcome)
             ),
-            h("div",{style:{fontSize:10.5,color:colors.mutedLight}},a.logged_by+" — "+new Date(a.created_at).toLocaleDateString())
+            h("div",{style:{fontSize:10.5,color:colors.mutedLight}},a.logged_by+" — "+fmtDMY(a.created_at))
           ),
           a.notes && h("div",{style:{fontSize:12,color:colors.text,marginTop:3}},a.notes),
-          a.next_followup_date && h("div",{style:{fontSize:10.5,color:colors.danger,marginTop:3}},"Next follow-up: "+a.next_followup_date)
+          a.next_followup_date && h("div",{style:{fontSize:10.5,color:colors.danger,marginTop:3}},"Next follow-up: "+fmtDMY(a.next_followup_date))
         ))
       )
     ),
@@ -24529,7 +24597,7 @@ const MANUAL_SECTIONS = [
           },
           {
             "type": "p",
-            "text": "Most quotes have none, so there's no empty form waiting to be filled in every time. Instead, a Yes/No prompt only appears at two moments \u2014 clicking \"Generate Quote PDF\", and moving Quote Status out of Draft \u2014 and only if the quote still has zero Extra Price lines. Answering \"No\" is remembered, so it won't ask again for that quote."
+            "text": "Most quotes have none, so there's no empty form waiting to be filled in every time. Instead, a prompt only appears at two moments \u2014 clicking \"Generate Quote PDF\", and moving the Stage out of Draft to an open stage or Won \u2014 and only if the quote still has zero Extra Price lines. On a stage change, OK means none needed and the stage moves; Cancel stops the change, the stage stays where it was, and a message says so (on Log Follow-ups the follow-up entry itself is still saved). Answering none needed is remembered, so it won't ask again for that quote. Moving a quote to Lost or Deferred never asks: extras and testing do not matter for a quote that is closing."
           },
           {
             "type": "tip",
@@ -24823,6 +24891,10 @@ const MANUAL_SECTIONS = [
         "title": "Quotes Report",
         "tag": "CRM \u2192 Funnel \u2192 Quotes Report",
         "blocks": [
+          {
+            "type": "warn",
+            "text": "Changed 2 October 2026 (build 114) \u2014 this replaces what follows where they differ. LOG FOLLOW-UP: each row has a Log follow-up button (the old + is gone); clicking the Stage opens the same box. Every field is required: the date the follow-up actually happened (never assumed to be today), Mode (In Person, Phone, Email, Others \u2014 the Log Follow-ups list), Stage (No change is a choice), Next follow-up (not asked when the Stage is Won, Lost or Deferred) and a Note. Closing it half-filled names what is missing, with OK to go back or Cancel to quit without saving. Won, Lost and Deferred open the PO or reason box next; cancelling that box returns to the follow-up with what was typed. Legacy quotes work exactly the same. SORT: Apply filters always asks how to sort \u2014 quote date oldest or newest first, next follow-up soonest first, or customer A to Z \u2014 with the last choice pre-selected; the list opens oldest first. Live and legacy quotes are sorted together. DATES: the date range uses real dates; a quote with no date is left out whenever a date range is set. VALUE: two columns, Value (INR) and Value (USD). The quote's own currency is in bold; the other column is converted at the USD rate typed in the filter (shown grey), and is blank when no rate is set. The value filter is one range in INR or USD (the drop-down); choosing the currency asks for today's USD rate, blank to start. Quotes in the other currency are checked at that rate; with no rate they are left out, and the count beside the total says how many. Live quote values are worked out in the background as soon as the report opens. LEGACY VALUES (Admin / Super Admin): Options \u203a Download value sheet gives India - INR, Others - USD and Country not set sheets; fill the values and use Options \u203a Upload filled sheet. Blank rows are skipped, never cleared. Needs legacy_quote_values SQL once per company. HISTORY: a legacy quote's history starts with its imported note, shown as the oldest entry and marked Imported."
+          },
           {
             "type": "p",
             "text": "A filterable, boxed green-themed list (matching Log Follow-ups' look, 31 Aug) of every quote \u2014 Reference Date range, Reference No/Quote No, Customer, Project Reference, City/State/Country/Region (limit-to-list, cascading), Status, Stage, and Follow-up Status (Overdue/Due today/Upcoming/None, computed from THIS quote's own latest Log Follow-ups entry \u2014 not the customer's, so two open quotes for the same customer no longer show identical follow-up data)."
@@ -25649,6 +25721,25 @@ const MANUAL_SECTIONS = [
           {
             "type": "p",
             "text": "REVIEWED: a new datasheet starts as \"From template \u2014 not reviewed yet\". After checking it, press Mark as reviewed; the datasheet and the Sl No card then show who reviewed it and when. Datasheets saved before 1 Oct count as reviewed."
+          }
+        ]
+      },
+      {
+        "key": "dates_and_missing_fields",
+        "title": "Dates, and when something is missing",
+        "tag": "Everywhere",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "Since build 114 every date the app shows \u2014 on screens, reports, PDFs and exports \u2014 reads dd/mm/yyyy (02/10/2026), whatever the computer's region setting. The one exception is a date box with a calendar, which the browser draws from the computer's own setting; set Windows to English (India) or English (UK) so those boxes are day-first too."
+          },
+          {
+            "type": "p",
+            "text": "Log Follow-ups: the last column is now called Stage (it was Outcome). On an Offer row it is the quote's Stage."
+          },
+          {
+            "type": "p",
+            "text": "Estimator \u203a Pricelist: + Add to estimate is never greyed out. Pressed with materials still blank, it lists them and outlines their boxes in red under Datasheet \u00b7 Material Data. Closing a datasheet with a material that still needs a grade names that material and outlines it; closing with unsaved changes offers to go back and save or close without saving."
           }
         ]
       },
@@ -26597,6 +26688,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"2 Oct 2026 (114)", summary:"Dates, Quotes Report follow-ups, sorting, INR/USD values, legacy values and missing-field prompts. DATES: fmtDMY / fmtDMYTime / toISODate \u2014 every displayed date (70 toLocaleDateString/toLocaleString date calls plus raw date cells on Quotes Report, Follow-up History, Review, Overdue lists, PO/GRN registers, quote header) reads dd/mm/yyyy regardless of region; month-only labels unchanged; calendar date boxes remain browser-drawn. QUOTES REPORT: one Log follow-up dialog (button on every row; the Stage cell opens it too) replaces the Stage editor and the + Next Follow-up box \u2014 date of follow-up, Mode, Stage (with No change), Next follow-up (not for won/lost/parked), Note, all required; half-filled close names what is missing and offers quit without saving; closed stages hand to the reason/PO box, whose Cancel returns to the follow-up. logStageMoveFollowup takes mode. Sort prompt on every Apply (date oldest/newest, next follow-up, customer), remembered; default oldest first; live and legacy sorted together. Date filter compares real dates and drops undated quotes when a range is set. Value (INR) and Value (USD) columns: own currency bold, the other converted at the USD rate typed in the filter (blank without a rate). Value filter: one range, INR or USD drop-down; choosing it prompts for the USD rate (blank to start, kept for the session); quotes in the other currency are compared at that rate, left out and counted without one. Missing live values worked out in the background on load. Legacy value sheet: Options \u203a Download / Upload (admins), sheets India - INR, Others - USD, Country not set; NEEDS SQL legacy_quote_values_2026-10-02.sql (quote_value, quote_currency). Follow-up History shows a legacy quote's imported note as its first entry. LOG FOLLOW-UPS: Outcome renamed Stage. PRICELIST: Add to estimate never disabled; lists and outlines missing materials. DATASHEET close names and outlines materials still needing a grade; unsaved changes offer close without saving." },
+  { date:"1 Oct 2026 (113)", summary:"Stage changes from Log Follow-ups (and Lost / Deferred everywhere) now go through. CAUSE: moving a quote out of Draft asked \"Does it have any Extra Price Additions?\" with OK meaning STOP; OK cancelled the stage change silently while Log Follow-ups still said Saved, and in the Lost / Deferred reason box the change quietly never landed. FIXES: Lost and Deferred (any stage of kind lost or parked) never ask about Extra Price or testing. The question is reworded so OK = none needed, move the stage; Cancel = stop, with a message on every screen saying the stage did not change (Log Follow-ups adds that the entry itself is saved). The reason box checks its own save and the stage change, shows any failure, and closes when the change is stopped. Log Follow-ups Save shows any unexpected error instead of doing nothing. No SQL." },
   { date:"1 Oct 2026 (112)", summary:"Datasheets: show-only-when rules and a reviewed flag. RULES (datasheetContext / datasheetFieldNotApplicable): the End connection, Operation and Construction are read from the datasheet itself, else from the price-list line (its materials, then the END and OPERATOR parts of its model code). Thread standard / NPT / BSP fields only on screwed ends; Flange standard / face / drilling only on flanged, wafer or lugged; socket-weld fields only on socket weld; air supply / air filter / solenoid only on pneumatic; fail position / limit switch / positioner / signal / torque only on powered actuators; actuator or gearbox make only on powered or gear operation; power / timer / alarm fields only on timer or level-sensing traps, not float or thermodynamic. A field that does not apply is not asked in Fill remaining details, not counted, not shown, and not printed on the datasheet PDF, Excel or the quote PDF; its value is kept, and the section notes \"Not applicable (Lever): Air supply pressure\". REVIEWED: datasheets.reviewed_by / reviewed_at. The datasheet shows From template / Saved \u2014 not reviewed yet with a Mark as reviewed button (saves first if needed), or Reviewed by X and date. The Sl No card reads Datasheet from template \u2014 not reviewed yet / Datasheet saved \u2014 not reviewed yet / \u2713 Datasheet reviewed by X. Datasheets saved before today count as reviewed. NEEDS SQL: datasheet_review_flag_2026-10-01.sql." },
   { date:"1 Oct 2026 (111)", summary:"Valve Price is admin-only on the Levaflow site (its prices are vendor costs); on Flometriq everyone keeps it. The site is recognised from its own settings.js (instanceLabel / appTitle / companyName containing Levaflow), so one Index.html still serves both. Non-admins at Levaflow no longer see the ribbon tab, and the screen refuses if reached another way." },
   { date:"1 Oct 2026 (110)", summary:"Tabbed Documents box and hand-over to production (the 21 Sep design). DOCUMENTS BOX (DocumentsBox, quotes and Sale Orders): one tab per document grouped under its category, Sl No on the tab, a status dot from the Document Status master bucket, * for mandatory, a DASHED tab for each requirement with nothing sent against it, and a + tab. + adds a requirement only, or a requirement with Rev 0; the document number is suggested from the category prefix and checked live against every document number. A requirement tab logs Rev 0 straight against it, toggles mandatory (authorization code) or removes it. A document tab shows the revision trail (status changeable per row, Edit Out/In on the latest) and the NEXT ENTRY pre-filled with the revision the Out/In sequence expects and the last link; Super Admin override kept. Link mandatory, PDF optional everywhere. Pick several\u2026 adds requirements for many categories, one per Sl No for categories kept per Sl No. CATEGORY MASTER: number_prefix, per_sl_no, for_production_default. FOR PRODUCTION on each document (default from its category), changeable only by the Document Controller, the Technical Head or a Super Admin; In offer PDF beside it on quotes. Requirements carry item_sl_no and carry to the Sale Order by category + Sl No. HAND-OVER: the work order count on the Sale Order opens WorkOrderDocsModal; the Document Controller (or a Super Admin) hands over the For-production documents for each work order's Sl Nos, pinned at the current revision (work_order_doc_handover_tbl); Code 1 / Code 2 pre-ticked, others offered with a Hold-level warning (Full Hold asks to confirm). A later revision marks the hand-over superseded, re-flags the work order to the Technical Head (work_order_ack_tbl) and adds a Reissue item for the Document Controller to Pending Actions; handing the new revision over clears it. NEEDS SQL: documents_tabs_handover_2026-10-01.sql. Manual: new article Documents box, and hand-over to production." },
@@ -28191,7 +28284,7 @@ function AuthorizationCodesScreen({ user }){
           h("td",{style:{padding:"6px 10px",fontFamily:"monospace"}},c.code),
           h("td",{style:{padding:"6px 10px",fontWeight:600,color:c.code_type==="delete"?colors.danger:colors.text}},c.code_type),
           h("td",{style:{padding:"6px 10px"}},c.generated_by),
-          h("td",{style:{padding:"6px 10px",color:colors.muted}},new Date(c.generated_at).toLocaleString()),
+          h("td",{style:{padding:"6px 10px",color:colors.muted}},fmtDMYTime(c.generated_at)),
           h("td",{style:{padding:"6px 10px",color:st.color,fontWeight:600}},st.label),
           h("td",{style:{padding:"6px 10px",color:colors.muted}},c.used_by||"—")
         );}))
@@ -28219,7 +28312,7 @@ function DeleteActivityReportScreen({ user }){
   useEffect(()=>{ load(); },[load]);
 
   const downloadExcel = ()=>{
-    const data = rows.map(r=>({When:new Date(r.performed_at).toLocaleString(),Table:r.table_name,"Deleted by":r.performed_by,Details:r.record_summary}));
+    const data = rows.map(r=>({When:fmtDMYTime(r.performed_at),Table:r.table_name,"Deleted by":r.performed_by,Details:r.record_summary}));
     const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb,ws,"Deletes");
@@ -28232,7 +28325,7 @@ function DeleteActivityReportScreen({ user }){
     doc.autoTable({
       startY:20,
       head:[["When","Table","Deleted by","Details"]],
-      body: rows.map(r=>[new Date(r.performed_at).toLocaleString(),r.table_name,r.performed_by,r.record_summary||"—"]),
+      body: rows.map(r=>[fmtDMYTime(r.performed_at),r.table_name,r.performed_by,r.record_summary||"—"]),
       styles:{fontSize:8},
       headStyles:{fillColor:[28,31,26]}
     });
@@ -28261,7 +28354,7 @@ function DeleteActivityReportScreen({ user }){
       )),
       h("tbody",null,
         rows.map((r,i)=>h("tr",{key:i,style:{borderTop:"1px solid #eceae0"}},
-          h("td",{style:{padding:"7px 9px",whiteSpace:"nowrap",verticalAlign:"top"}},new Date(r.performed_at).toLocaleString()),
+          h("td",{style:{padding:"7px 9px",whiteSpace:"nowrap",verticalAlign:"top"}},fmtDMYTime(r.performed_at)),
           h("td",{style:{padding:"7px 9px",verticalAlign:"top"}},r.table_name),
           h("td",{style:{padding:"7px 9px",verticalAlign:"top",fontWeight:600}},r.performed_by||"—"),
           h("td",{style:{padding:"7px 9px",verticalAlign:"top",color:colors.muted}},r.record_summary||"—")
@@ -28288,7 +28381,7 @@ function SignatoryOverrideNoticesPopup({ notices, onAcknowledgeOne, onAcknowledg
         notices.map(n=>h("div",{key:n.id,style:{border:"1px solid "+colors.border,borderRadius:6,padding:"10px 12px",marginBottom:8}},
           h("div",{style:{fontSize:12.5,fontWeight:600,marginBottom:3}},n.reference_number+" · Sl No "+n.item_sl_no),
           h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:6}},
-            "Changed by "+n.changed_by+" — "+new Date(n.created_at).toLocaleString()
+            "Changed by "+n.changed_by+" — "+fmtDMYTime(n.created_at)
           ),
           h("div",{style:{fontSize:12}},
             h("span",{style:{color:colors.mutedLight}},"From: "),(n.previous_signatory_name||"—")+(n.previous_signatory_designation?" ("+n.previous_signatory_designation+")":""),
@@ -28393,7 +28486,7 @@ function LoiPoAwaitedPrompt({ onDone, onOpenContract }){
         h("tbody",null, rows.map(r=>h("tr",{key:r.id,style:{borderTop:"1px solid #f0eee6"}},
           h("td",{style:{padding:"6px 8px",fontWeight:600}},r.contract_number),
           h("td",{style:{padding:"6px 8px",color:colors.muted}},r.customer_name||"\u2014"),
-          h("td",{style:{padding:"6px 8px",color:colors.muted,fontSize:11}},(r.basis_number||"\u2014")+(r.basis_date?" \u00b7 "+r.basis_date:"")),
+          h("td",{style:{padding:"6px 8px",color:colors.muted,fontSize:11}},(r.basis_number||"\u2014")+(r.basis_date?" \u00b7 "+fmtDMY(r.basis_date):"")),
           h("td",{style:{padding:"6px 8px",fontWeight:600,color:(r.days||0)>=14?"#a3312a":(r.days||0)>=7?"#854f0b":colors.text}},r.days==null?"\u2014":r.days+" days"),
           h("td",{style:{padding:"6px 8px",textAlign:"right"}},
             h("button",{onClick:()=>{ onDone(); onOpenContract && onOpenContract(r); },style:{...btnSmall,fontSize:10.5}},"Open"))
@@ -29045,7 +29138,7 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
     if(error) alert("Couldn't save that change: "+error.message);
   };
   const exportReviewExcel = ()=>{
-    const rowsOut = [["Date","Customer","Mode","Chase What","Reference","Contacted Whom","Discussed What","Next Follow up","Outcome","Notes","Owner"]];
+    const rowsOut = [["Date","Customer","Mode","Chase What","Reference","Contacted Whom","Discussed What","Next Follow up","Stage","Notes","Owner"]];
     reviewRows.forEach(r=>rowsOut.push([r.activity_date,r.company_name,r.activity_type,r.chase_what,r.chase_reference||"",r.contacted_whom||"",r.discussed_what||"",r.next_followup_date||"",r.outcome||"",r.notes||"",r.logged_by||""]));
     const ws = XLSX.utils.aoa_to_sheet(rowsOut);
     const wb = XLSX.utils.book_new();
@@ -29058,7 +29151,7 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
     doc.text("Follow-ups: "+reviewFrom+" to "+reviewTo,14,14);
     doc.autoTable({
       startY:20,
-      head:[["Date","Customer","Mode","Chase","Reference","Contact","Discussed What","Next FU","Outcome","Owner"]],
+      head:[["Date","Customer","Mode","Chase","Reference","Contact","Discussed What","Next FU","Stage","Owner"]],
       body:reviewRows.map(r=>[r.activity_date,r.company_name,r.activity_type,r.chase_what,r.chase_reference||"",r.contacted_whom||"",r.discussed_what||"",r.next_followup_date||"",r.outcome||"",r.logged_by||""]),
       styles:{fontSize:8}
     });
@@ -29253,7 +29346,7 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
       if((r.chaseWhat==="Offer"||r.chaseWhat==="Order"||r.chaseWhat==="Projects") && !r.chaseReference){ alert("Pick a Reference for every Offer/Order/Projects row."); return; }
       if(!r.discussedWhat.trim()){ alert("Say what was discussed on every row."); return; }
       if(!(r.notes||"").trim()){ alert("Every row needs a Note (footer panel — click into the row, then fill in Notes below)."); return; }
-      if(!r.nextFollowupDate && nextFollowupRequired(r)){ alert("Every row needs a Next Followup Date, unless the Outcome closes the quote ("+(QUOTE_STAGE_CACHE.filter(r=>isClosedStage(r.status)).map(r=>r.status).join(", ")||"Won, Lost, Deferred")+")."); return; }
+      if(!r.nextFollowupDate && nextFollowupRequired(r)){ alert("Every row needs a Next Followup Date, unless the Stage closes the quote ("+(QUOTE_STAGE_CACHE.filter(r=>isClosedStage(r.status)).map(r=>r.status).join(", ")||"Won, Lost, Deferred")+")."); return; }
     }
     setSaving(true);
     try{
@@ -29285,6 +29378,11 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
       }
       if(queue.length){ setWonLostQueue(queue.slice(1)); setOutcomeTarget(queue[0]); }
       else { finishSaveFlow(); }
+    } catch(e){
+      // 1 Oct (113) — an unexpected failure used to leave the screen as it
+      // was with no message, which read as "Save does nothing".
+      console.error("Log Follow-ups save failed", e);
+      alert("Save did not finish:\n\n"+((e&&e.message)||e)+"\n\nRows already saved stay saved. Check the entries and press Save again.");
     } finally { setSaving(false); }
   };
   const advanceWonLostQueue = ()=>{
@@ -29363,7 +29461,7 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
     // "+ Add new" (30 Aug) — same visibility rule as any other
     // admin-only control in this app, isAdminOrAbove already computed.
     isAdminOrAbove && h("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:10,fontSize:11}},
-      h("button",{onClick:generateProjectOutcomeAddCode,disabled:genOutcomeCodeBusy,style:{fontFamily:F,fontSize:10.5,padding:"4px 10px",background:"#fff",border:"1px solid "+T.accent,color:T.accent,borderRadius:4,cursor:"pointer"}},genOutcomeCodeBusy?"Generating…":"Generate code — add Project outcome value"),
+      h("button",{onClick:generateProjectOutcomeAddCode,disabled:genOutcomeCodeBusy,style:{fontFamily:F,fontSize:10.5,padding:"4px 10px",background:"#fff",border:"1px solid "+T.accent,color:T.accent,borderRadius:4,cursor:"pointer"}},genOutcomeCodeBusy?"Generating…":"Generate code — add Project stage value"),
       justGenOutcomeCode && h("span",{style:{fontWeight:700,color:T.ink}},"Code: "+justGenOutcomeCode),
       genOutcomeCodeMsg && h("span",{style:{color:"#a3312a"}},genOutcomeCodeMsg)
     ),
@@ -29391,7 +29489,7 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
         h("colgroup",null, COLW.map((w,i)=>h("col",{key:i,style:{width:w}}))),
         h("thead",null,
           h("tr",{style:{background:"#eef6f3",height:43}},
-            ["Customer","Mode","Chase What","Reference","Contacted Whom","Discussed What","Next Follow up","Outcome",""].map(hdr=>
+            ["Customer","Mode","Chase What","Reference","Contacted Whom","Discussed What","Next Follow up","Stage",""].map(hdr=>
               h("th",{key:hdr,style:{padding:"4px 6px",textAlign:"left",borderBottom:"1px solid "+T.border,borderRight:"1px solid #e2ede9"}},hdr))
           )
         ),
@@ -29512,7 +29610,7 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
             // used elsewhere in this app (BOM Entry Form, Estimator's
             // BOM table).
             h("thead",{style:{position:"sticky",top:0,zIndex:2}},h("tr",{style:{background:"#eef6f3",height:43}},
-              ["Date","Customer","Mode","Chase What","Reference","Contacted Whom","Discussed What","Next Follow up","Outcome",""].map(c=>
+              ["Date","Customer","Mode","Chase What","Reference","Contacted Whom","Discussed What","Next Follow up","Stage",""].map(c=>
                 h("th",{key:c,style:{padding:"4px 6px",textAlign:"left",borderBottom:"1px solid "+T.border,borderRight:"1px solid #e2ede9",background:"#eef6f3"}},c))
             )),
             h("tbody",null,
@@ -29535,7 +29633,7 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
                   const td = {padding:"2px 4px",border:"1px solid #e2ede9",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"};
                   rowsOut.push(h("tr",{key:e.id,style:{background:rowBg,height:33}},
                     h("td",{style:{...td,color:T.muted}},
-                      new Date(e.activity_date+"T00:00:00").toLocaleDateString("en-GB",{day:"2-digit",month:"2-digit"}),
+                      fmtDMY(e.activity_date+"T00:00:00"),
                       isLateEntry(e) && h("span",{style:{marginLeft:4,fontSize:8.5,padding:"1px 5px",borderRadius:6,background:"#fdecea",color:"#a3312a"}},"late")
                     ),
                     h("td",{style:td,onFocus:onFocusReview,tabIndex:-1},e.company_name),
@@ -29756,7 +29854,7 @@ function MonthlyArchivePrompt({ user, onDone }){
     doc.autoTable({
       startY:20,
       head:[["When","Table","Deleted by","Details"]],
-      body: rows.map(r=>[new Date(r.performed_at).toLocaleString(),r.table_name,r.performed_by,r.record_summary||"—"]),
+      body: rows.map(r=>[fmtDMYTime(r.performed_at),r.table_name,r.performed_by,r.record_summary||"—"]),
       styles:{fontSize:8},
       headStyles:{fillColor:[28,31,26]}
     });
@@ -29893,7 +29991,7 @@ function StatusChangeHistoryReport(){
   useEffect(()=>{ load(); },[]);
 
   const downloadExcel = ()=>{
-    const data = rows.map(r=>({Quote:r.recordId,From:r.from,To:r.to,By:r.by,When:new Date(r.when).toLocaleString()}));
+    const data = rows.map(r=>({Quote:r.recordId,From:r.from,To:r.to,By:r.by,When:fmtDMYTime(r.when)}));
     const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb,ws,"Stage changes");
@@ -29924,7 +30022,7 @@ function StatusChangeHistoryReport(){
           h("td",{style:{padding:"7px 9px"}},r.from),
           h("td",{style:{padding:"7px 9px"}},r.to),
           h("td",{style:{padding:"7px 9px",fontWeight:600}},r.by),
-          h("td",{style:{padding:"7px 9px",color:colors.muted}},new Date(r.when).toLocaleString())
+          h("td",{style:{padding:"7px 9px",color:colors.muted}},fmtDMYTime(r.when))
         )),
         rows.length===0 && h("tr",null,h("td",{colSpan:5,style:{padding:14,fontSize:12,color:colors.mutedLight}},"No stage changes in this range."))
       )
@@ -31144,7 +31242,7 @@ function MajorProjectPackageDetail({ pkg, project, user, onBack, onEdit, onCreat
       ),
       h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:6,padding:"8px 14px"}},
         h("div",{style:{fontSize:10,color:colors.mutedLight}},"Next follow-up"),
-        h("div",{style:{fontSize:13,fontWeight:700}},pkg.next_followup_date||"—")
+        h("div",{style:{fontSize:13,fontWeight:700}},fmtDMY(pkg.next_followup_date)||"—")
       )
     ),
     h(PackageAllocationsSection,{pkg,project,user,onCreateQuoteFromAllocation,onOpenQuote}),
@@ -31397,8 +31495,8 @@ function PackageActivitySection({ pkg, project, user }){
       const loggedLate = a.activity_date && a.activity_date!==(a.created_at||"").slice(0,10);
       return h("div",{key:a.id,style:{borderLeft:"2px solid "+colors.border,paddingLeft:10,marginBottom:10}},
         h("div",{style:{fontSize:12}},
-          h("span",{style:{fontWeight:600}},a.activity_type)," · "+(a.company_name||"—")+" · "+(a.activity_date?new Date(a.activity_date).toLocaleDateString():"—")+" · "+(a.logged_by||"—"),
-          loggedLate && h("span",{style:{fontSize:10,color:"#854f0b",marginLeft:6}},"(logged "+new Date(a.created_at).toLocaleDateString()+")")
+          h("span",{style:{fontWeight:600}},a.activity_type)," · "+(a.company_name||"—")+" · "+(a.activity_date?fmtDMY(a.activity_date):"—")+" · "+(a.logged_by||"—"),
+          loggedLate && h("span",{style:{fontSize:10,color:"#854f0b",marginLeft:6}},"(logged "+fmtDMY(a.created_at)+")")
         ),
         a.notes && h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:2}},a.notes)
       );
@@ -32171,7 +32269,7 @@ function EnquiriesListScreen({ user, onGoToTab, onOpenQuote, onCreateQuoteFromEn
                   h("input",{type:"date",value:dueDraft,onChange:e=>setDueDraft(e.target.value),style:{fontSize:11.5,padding:"3px 5px"}}),
                   h("button",{onClick:()=>saveDueDate(enq),style:{...btnSmall,fontSize:10.5,padding:"3px 7px"}},"Save")
                 )
-              : h("span",{style:{cursor:enq.due_date?"pointer":"default"},onClick:()=>{ if(enq.due_date){ setEditingDueFor(enq.id); setDueDraft(enq.due_date); } }},enq.due_date||"—")
+              : h("span",{style:{cursor:enq.due_date?"pointer":"default"},onClick:()=>{ if(enq.due_date){ setEditingDueFor(enq.id); setDueDraft(enq.due_date); } }},fmtDMY(enq.due_date)||"—")
           ),
           h("td",{style:{padding:"7px 4px"}},statusBadge(enq)),
           h("td",{style:{padding:"7px 4px",textAlign:"right"}},
@@ -32539,131 +32637,100 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
     const { data: myEmp } = await sb.from("employee_tbl").select("employee_name").eq("app_user_id",user.id).limit(1).maybeSingle();
     return myEmp?.employee_name===ownerName;
   };
-  const openEditor = (row)=>{
-    setEditFor(row);
-    setEditStatusValue(row.status);
-    setEditNatureValue(row.nature);
-    setEditDate(new Date().toISOString().slice(0,10));
-    setEditNote(""); setEditNext("");
+  // ---- LOG FOLLOW-UP from the report (2 Oct, build 114) ---------------
+  // One dialog for everything done from a row: the "Log follow-up" button
+  // and a click on the Stage both open it. Every field is required — the
+  // date the call actually happened (never assumed to be today), the Mode
+  // (same list as Log Follow-ups), the Stage ("No change" is a choice),
+  // the next follow-up date (not needed when the Stage closes the quote)
+  // and a note. Closing it half-filled says what is still missing and
+  // offers to quit without saving. Works the same for legacy quotes.
+  const FU_MODES = ["In Person","Phone","Email","Others"];
+  const FU_NO_CHANGE = "__no_change__";
+  const [fu,setFu] = useState(null);        // {row, date, mode, stage, next, note}
+  const [fuTried,setFuTried] = useState(false);
+  const [fuBusy,setFuBusy] = useState(false);
+  const openFollowup = (row)=>{ setFu({ row, date:"", mode:"", stage:"", next:"", note:"" }); setFuTried(false); };
+  const openEditor = openFollowup;            // the Stage cell opens the same dialog
+  const openNextFollowup = openFollowup;
+  const fuStageCloses = (f)=> f && f.stage && f.stage!==FU_NO_CHANGE && isClosedStage(f.stage);
+  const fuMissing = (f)=>{
+    if(!f) return [];
+    const m = [];
+    if(!f.date) m.push("Date of follow-up");
+    if(!f.mode) m.push("Mode");
+    if(!f.stage) m.push("Stage");
+    if(!f.next && !fuStageCloses(f)) m.push("Next follow-up");
+    if(!(f.note||"").trim()) m.push("Note");
+    return m;
   };
-  const confirmEdit = async()=>{
-    const row = editFor;
-    const newStatus = editStatusValue;
-    const newNature = editNatureValue;
-    // Noon, not midnight, so a date picked in any reasonable timezone
-    // doesn't silently roll back to the previous calendar day once
-    // converted to UTC for storage. Shared by both Status and Nature —
-    // whichever of the two actually changed uses this same date, so
-    // editing both together never produces two different dates.
-    const changedAtIso = new Date(editDate+"T12:00:00").toISOString();
-    if(newStatus!==row.status){
-      if(!editNote.trim()){ alert("A note is required \u2014 what happened?"); return; }
-      if(!isClosedStage(newStatus) && !editNext){ alert("Set the next follow-up date."); return; }
+  const fuTouched = (f)=> !!(f && (f.date||f.mode||f.stage||f.next||(f.note||"").trim()));
+  const closeFollowup = ()=>{
+    if(fuBusy) return;
+    if(fuTouched(fu)){
+      const miss = fuMissing(fu);
+      const msg = miss.length
+        ? "This follow-up is not saved.\n\nStill missing: "+miss.join(", ")+".\n\nOK = go back and fill "+(miss.length>1?"them":"it")+"\nCancel = quit without saving"
+        : "This follow-up is filled in but not saved.\n\nOK = go back and save it\nCancel = quit without saving";
+      if(confirm(msg)){ setFuTried(true); return; }
     }
+    setFu(null);
+  };
+  const saveFollowup = async()=>{
+    const f = fu; if(!f) return;
+    const miss = fuMissing(f);
+    const today = toISODate(new Date());
+    if(miss.length){ setFuTried(true); alert("Fill these before saving:\n\n• "+miss.join("\n• ")); return; }
+    if(f.date > today){ setFuTried(true); alert("The date of the follow-up can't be in the future."); return; }
+    if(f.next && f.next < f.date){ alert("The next follow-up can't be before the date of this follow-up."); return; }
+    const row = f.row;
+    const changing = f.stage!==FU_NO_CHANGE && f.stage!==row.status;
+    const changedAtIso = new Date(f.date+"T12:00:00").toISOString();
     const proceed = async()=>{
-      setEditFor(null);
-      // 22 Sep — each save's result is checked, and a successful one
-      // updates its row on screen straight away, before the reload.
-      if(newNature!==row.nature){
-        const r = await applyOutcomeNature(row.reference_number, newNature, user.username, changedAtIso);
-        if(r && r.error){ alert(saveFailedText("Stage for "+row.reference_number, r.error)); load(); return; }
-        patchRow(row.reference_number, { nature:newNature });
-      }
-      if(newStatus!==row.status){
-        if(CLOSED_OUTCOMES_QR.includes(newStatus)){
-          pendingReportNoteRef.current = { ref:row.reference_number, customer:row.customer_name, date:editDate, note:editNote.trim() };
-          setOutcomeTarget({ referenceNumber: row.reference_number, newStatus, changedAt: changedAtIso });
+      setFuBusy(true);
+      try{
+        if(!changing){
+          const { error } = await sb.from("activity_log_tbl").insert({
+            company_name: row.customer_name, activity_date: f.date, activity_type: f.mode,
+            chase_what: "Offer", chase_reference: row.reference_number, contacted_whom: "",
+            discussed_what: "Follow-up logged from Quotes Report", outcome: null,
+            next_followup_date: f.next||null, notes: f.note.trim(), logged_by: user.username,
+          });
+          if(error){ alert(saveFailedText("The follow-up for "+row.reference_number, error)); return; }
+          setFu(null);
+          patchRow(row.reference_number, { next_followup: f.next||"—",
+            last_interaction:{ date:f.date, type:f.mode, by:user.username, whom:"", text:f.note.trim() } });
+          load(); return;
+        }
+        if(isClosedStage(f.stage)){
+          // Won / Lost / Deferred: the reason (or PO) box takes over; the
+          // follow-up is written once that is saved.
+          pendingReportNoteRef.current = { ref:row.reference_number, customer:row.customer_name, date:f.date, note:f.note.trim(), mode:f.mode, form:f };
+          setFu(null);
+          setOutcomeTarget({ referenceNumber: row.reference_number, newStatus: f.stage, changedAt: changedAtIso });
           return;
         }
-        const r = await applyOutcomeStatus(row.reference_number, newStatus, user.username, "Quotes Report", null, changedAtIso);
-        if(r && r.error){ alert(saveFailedText("Status for "+row.reference_number, r.error)); load(); return; }
-        if(r && r.blocked){ load(); return; }   // the user chose to add Extra Price first — nothing changed, knowingly
-        if(r && r.notFound){ alert(row.reference_number+" wasn't found \u2014 it may have been deleted. The list will reload."); load(); return; }
-        await logStageMoveFollowup({ referenceNumber:row.reference_number, customerName:row.customer_name, stage:newStatus, date:editDate, note:editNote.trim(), nextFollowup:editNext, username:user.username, where:"Quotes Report" });
-        patchRow(row.reference_number, { status:newStatus, next_followup:editNext, last_interaction:{ date:editDate, type:"Others", by:user.username, whom:"", text:editNote.trim() } });
-      }
-      load();
+        const r = await applyOutcomeStatus(row.reference_number, f.stage, user.username, "Quotes Report", null, changedAtIso);
+        if(r && r.error){ alert(saveFailedText("The stage for "+row.reference_number, r.error)); return; }
+        if(r && r.blocked) return;   // the box stays open: pick No change, or add the Extra Price first
+        if(r && r.notFound){ alert(row.reference_number+" wasn't found — it may have been deleted. The list will reload."); setFu(null); load(); return; }
+        const lg = await logStageMoveFollowup({ referenceNumber:row.reference_number, customerName:row.customer_name, stage:f.stage, date:f.date,
+          note:f.note.trim(), nextFollowup:f.next, username:user.username, where:"Quotes Report", mode:f.mode });
+        if(lg && lg.error) alert("The stage was changed to "+f.stage+", but the follow-up entry could not be saved:\n\n"+(lg.error.message||lg.error));
+        setFu(null);
+        patchRow(row.reference_number, { status:f.stage, next_followup:f.next||"—",
+          last_interaction:{ date:f.date, type:f.mode, by:user.username, whom:"", text:f.note.trim() } });
+        load();
+      } finally { setFuBusy(false); }
     };
     const allowed = await canEditFreely(row.customer_name);
     if(!allowed){ setAuthGate({ requiredType:"edit", action: proceed }); return; }
     await proceed();
   };
-  const openNextFollowup = (row)=>{
-    setNextFollowupFor(row);
-    setNfDate("");
-    setNfNotes("");
-  };
-  const openStageEditor = (row)=>{
-    setStageEditFor(row);
-    setStageOutcome("");
-    setStageNotes("");
-    setStageNextDate("");
-  };
-  const saveStageEdit = async()=>{
-    const row = stageEditFor;
-    if(!stageNotes.trim()){ alert("A short note is required — what's this update about?"); return; }
-    const doSave = async()=>{
-      setStageBusy(true);
-      try{
-        await sb.from("activity_log_tbl").insert({
-          company_name: row.customer_name,
-          activity_date: new Date().toISOString().slice(0,10),
-          activity_type: "Others",
-          chase_what: "Offer",
-          chase_reference: row.reference_number,
-          contacted_whom: "",
-          discussed_what: "Follow-up Stage updated from Quotes Report",
-          outcome: stageOutcome||null,
-          next_followup_date: stageNextDate||null,
-          notes: stageNotes,
-          logged_by: user.username,
-        }).then(res=>{ if(res.error) throw res.error; });
-        setStageEditFor(null);
-        patchRow(row.reference_number, {
-          followup_stage: [stageOutcome, stageNotes].filter(x=>x&&x.trim()).join(" - ") || row.followup_stage,
-          ...(stageNextDate ? { next_followup: stageNextDate } : {})
-        });
-        load();
-      } catch(e){ alert(saveFailedText("The follow-up for "+row.reference_number, e));
-      } finally { setStageBusy(false); }
-    };
-    const allowed = await canEditFreely(row.customer_name);
-    if(!allowed){ setAuthGate({ requiredType:"edit", action: doSave }); return; }
-    await doSave();
-  };
-  const saveNextFollowup = async()=>{
-    const row = nextFollowupFor;
-    if(!nfDate){ alert("Pick a Next Follow-up date."); return; }
-    if(!nfNotes.trim()){ alert("A short note is required — what's this follow-up about?"); return; }
-    const doSave = async()=>{
-      setNfBusy(true);
-      try{
-        await sb.from("activity_log_tbl").insert({
-          company_name: row.customer_name,
-          activity_date: new Date().toISOString().slice(0,10),
-          activity_type: "Others",
-          chase_what: "Offer",
-          chase_reference: row.reference_number,
-          contacted_whom: "",
-          discussed_what: "Follow-up date set from Quotes Report",
-          next_followup_date: nfDate,
-          notes: nfNotes,
-          logged_by: user.username,
-        }).then(res=>{ if(res.error) throw res.error; });
-        setNextFollowupFor(null);
-        patchRow(row.reference_number, { next_followup: nfDate });
-        load();
-      } catch(e){ alert(saveFailedText("The next follow-up for "+row.reference_number, e));
-      } finally { setNfBusy(false); }
-    };
-    const allowed = await canEditFreely(row.customer_name);
-    if(!allowed){ setAuthGate({ requiredType:"edit", action: doSave }); return; }
-    await doSave();
-  };
   const [filters,setFilters] = useState(saved ? saved.filters : {
     dateFrom:"", dateTo:"", refLike:"", customerLike:"", cityLike:"", stateLike:"", countryLike:"",
     zone:"", status:"", nature:"", followUp:"", projectLike:"",
-    valueCcy:"INR", valueMin:"", valueMax:"", usdRate:"",
+    valueCcy:"INR", valueMin:"", valueMax:"",
     ...(initialFilters||{})
   });
   const setF = (k,v)=> setFilters(f=>({...f,[k]:v}));
@@ -32673,7 +32740,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
   const [applied,setApplied] = useState(()=> saved ? saved.applied : ({
     dateFrom:"", dateTo:"", refLike:"", customerLike:"", cityLike:"", stateLike:"", countryLike:"",
     zone:"", status:"", nature:"", followUp:"", projectLike:"",
-    valueCcy:"INR", valueMin:"", valueMax:"", usdRate:"", ...(initialFilters||{})
+    valueCcy:"INR", valueMin:"", valueMax:"", ...(initialFilters||{})
   }));
   const filtersRef = useRef(filters);
   useEffect(()=>{ filtersRef.current = filters; },[filters]);
@@ -32723,14 +32790,23 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
       else if(reportRef.current && reportRef.current.requestFullscreen) reportRef.current.requestFullscreen();
     }catch(e){ console.error("Full screen not available", e); }
   };
-  const applyFilters = ()=> setTimeout(async()=>{
-    const next = {...filtersRef.current};
-    const keep = rows.filter(r=>passesNonValueFilters(r, next));
-    const needs = keep.filter(r=>!r.is_legacy && (r.value_inr==null || r.value_stale)).map(r=>r.reference_number);
-    if(needs.length){
-      setValueJob({done:0,total:needs.length});
+  // Sort order (2 Oct, 114). Asked every time Apply filters is pressed,
+  // with the last choice pre-selected; the list opens oldest first.
+  const SORTS = [["date_asc","Quote date — oldest first"],["date_desc","Quote date — newest first"],
+    ["next_asc","Next follow-up — soonest first"],["cust_asc","Customer name — A to Z"]];
+  const [sortOrder,setSortOrderState] = useState(()=>{ try{ return localStorage.getItem("flometriq_qr_sort")||"date_asc"; }catch(e){ return "date_asc"; } });
+  const setSortOrder = (v)=>{ setSortOrderState(v); try{ localStorage.setItem("flometriq_qr_sort",v); }catch(e){} };
+  const [sortAsk,setSortAsk] = useState(null);   // the order being picked, while the box is open
+  // Missing or out-of-date quote values are worked out in the background
+  // as soon as the report has loaded, so a live quote never sits at "—"
+  // waiting for someone to open it. Legacy quotes take their value from
+  // the value sheet instead.
+  const refreshMissingValues = async(list)=>{
+    const needs = list.filter(r=>!r.is_legacy && (r.value_inr==null || r.value_stale)).map(r=>r.reference_number);
+    if(!needs.length) return;
+    setValueJob({done:0,total:needs.length});
+    try{
       await refreshQuoteValues(needs, user, (done,total)=>setValueJob({done,total}));
-      // Read back just the refreshed values and patch those rows.
       let fresh = [];
       for(let k=0;k<needs.length;k+=150){
         const { data } = await sb.from("quote_value_snapshot_tbl").select("*").in("reference_number",needs.slice(k,k+150));
@@ -32740,15 +32816,127 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
       setRows(rs=>rs.map(r=>{ const f=fBy.get(r.reference_number); if(!f) return r;
         return {...r, value_inr:Number(f.total_value)||0, value_ccy:Number(f.total_value_in_currency ?? f.total_value)||0,
           currency:f.currency||r.currency, value_stale:!!f.is_stale}; }));
-      setValueJob(null);
-    }
+    } finally { setValueJob(null); }
+  };
+  const valueRunRef = useRef(false);
+  // ---- LEGACY VALUE SHEET (2 Oct, 114) ---------------------------------
+  // Download: every legacy quote, Indian customers on one sheet (value in
+  // INR), everyone else on another (value in USD), and a third sheet for
+  // quotes with no country on record, where the currency is typed too.
+  // Upload: the same file back; each quote's value is stored in its own
+  // currency. Rows left blank are skipped, never cleared.
+  const isAdminQR = user.role==="admin" || user.role==="super_admin";
+  const [legacyJob,setLegacyJob] = useState(null);
+  const legacyFileRef = useRef(null);
+  const LV_SHEETS = { india:"India - INR", other:"Others - USD", none:"Country not set" };
+  const downloadLegacyValueSheet = async()=>{
+    setOptionsOpen(false);
+    const list = await fetchPaged(()=>sb.from("legacy_quotes_tbl").select("*").order("reference_date",{ascending:true}));
+    if(!list.length){ alert("There are no legacy quotes in this company's database."); return; }
+    const base = (l)=>[l.reference_number, fmtDMY(l.reference_date), l.customer_name||"", l.country||"", l.quote_status||""];
+    const india = [["Reference No","Reference Date","Customer","Country","Stage","Quote Value INR"]];
+    const other = [["Reference No","Reference Date","Customer","Country","Stage","Quote Value USD"]];
+    const none  = [["Reference No","Reference Date","Customer","Country","Stage","Currency (INR or USD)","Quote Value"]];
+    list.forEach(l=>{
+      const c = String(l.country||"").trim().toLowerCase();
+      const v = (l.quote_value!=null && l.quote_value!=="") ? Number(l.quote_value) : "";
+      if(!c) none.push(base(l).concat([l.quote_currency||"", v]));
+      else if(c==="india") india.push(base(l).concat([(l.quote_currency||"INR")==="INR" ? v : ""]));
+      else other.push(base(l).concat([(l.quote_currency||"USD")==="USD" ? v : ""]));
+    });
+    const wb = XLSX.utils.book_new();
+    [[LV_SHEETS.india,india],[LV_SHEETS.other,other],[LV_SHEETS.none,none]].forEach(([n,rowsX])=>{
+      if(rowsX.length<2 && n===LV_SHEETS.none) return;
+      const ws = XLSX.utils.aoa_to_sheet(rowsX);
+      ws["!cols"] = [{wch:14},{wch:13},{wch:38},{wch:16},{wch:14},{wch:20},{wch:14}];
+      XLSX.utils.book_append_sheet(wb, ws, n);
+    });
+    XLSX.writeFile(wb, "legacy_quote_values_"+toISODate(new Date())+".xlsx");
+  };
+  const uploadLegacyValueSheet = async(file)=>{
+    if(!file) return;
+    try{
+      const wb = XLSX.read(await file.arrayBuffer(), {type:"array"});
+      const updates = []; const problems = [];
+      const num = (v)=>{ if(v==null || String(v).trim()==="") return null; const n = Number(String(v).replace(/[^0-9.\-]/g,"")); return isNaN(n) ? NaN : n; };
+      wb.SheetNames.forEach(sn=>{
+        const aoa = XLSX.utils.sheet_to_json(wb.Sheets[sn], {header:1, defval:""});
+        const head = (aoa[0]||[]).map(x=>String(x).trim().toLowerCase());
+        const iRef = head.indexOf("reference no");
+        const iInr = head.indexOf("quote value inr"), iUsd = head.indexOf("quote value usd");
+        const iCcy = head.findIndex(x=>x.startsWith("currency")), iVal = head.indexOf("quote value");
+        if(iRef<0) return;
+        aoa.slice(1).forEach((row,k)=>{
+          const ref = String(row[iRef]||"").trim(); if(!ref) return;
+          let ccy, v;
+          if(iInr>=0){ ccy="INR"; v=num(row[iInr]); }
+          else if(iUsd>=0){ ccy="USD"; v=num(row[iUsd]); }
+          else if(iVal>=0){ ccy=String(row[iCcy]||"").trim().toUpperCase(); v=num(row[iVal]);
+            if(v!=null && ccy!=="INR" && ccy!=="USD"){ problems.push(sn+" row "+(k+2)+" ("+ref+"): currency must be INR or USD"); return; } }
+          else return;
+          if(v==null) return;               // left blank: skipped, not cleared
+          if(isNaN(v) || v<0){ problems.push(sn+" row "+(k+2)+" ("+ref+"): \""+row[iInr>=0?iInr:iUsd>=0?iUsd:iVal]+"\" is not an amount"); return; }
+          updates.push({ref, ccy, v});
+        });
+      });
+      if(!updates.length){ alert("No values found to save."+(problems.length?"\n\n"+problems.slice(0,15).join("\n"):"")); return; }
+      if(!confirm("Save "+updates.length+" legacy quote value(s)?"+(problems.length?"\n\n"+problems.length+" row(s) will be skipped:\n"+problems.slice(0,10).join("\n"):""))) return;
+      let done = 0; const notFound = []; let failed = null;
+      setLegacyJob({done:0,total:updates.length});
+      for(const u of updates){
+        const { data, error } = await sb.from("legacy_quotes_tbl").update({ quote_value:u.v, quote_currency:u.ccy }).eq("reference_number",u.ref).select("id");
+        if(error){ failed = error; break; }
+        if(!data || !data.length) notFound.push(u.ref);
+        done++; setLegacyJob({done,total:updates.length});
+      }
+      setLegacyJob(null);
+      await logAudit("UPDATE","legacy_quotes_tbl","value sheet","Legacy quote values uploaded from a sheet: "+(done-notFound.length)+" saved",user.username,null,null);
+      if(failed){ alert(saveFailedText("Legacy values", failed)+(/quote_value|quote_currency/.test(String(failed.message||""))?"\n\nRun legacy_quote_values SQL first.":"")); }
+      else alert((done-notFound.length)+" legacy value(s) saved."+(notFound.length?"\n\nNot found ("+notFound.length+"): "+notFound.slice(0,20).join(", "):"")+(problems.length?"\n\nSkipped ("+problems.length+"):\n"+problems.slice(0,10).join("\n"):""));
+      load();
+    } catch(e){ setLegacyJob(null); alert("Couldn't read that file: "+(e.message||e)); }
+    finally { if(legacyFileRef.current) legacyFileRef.current.value=""; }
+  };
+  const applyFilters = ()=> setTimeout(()=>setSortAsk(sortOrder),0);
+  // ---- VALUE (2 Oct, 114 rev) ------------------------------------------
+  // One range, in INR or USD (the drop-down). Choosing the currency asks
+  // for today's USD rate (blank to start). That rate converts every quote
+  // into the other currency — for the second value column, and so a quote
+  // in the other currency can be checked against the range. Without a
+  // rate, only quotes already in the chosen currency can be placed.
+  const [usdRate,setUsdRateState] = useState(()=>{ try{ return sessionStorage.getItem("flometriq_qr_usd_rate")||""; }catch(e){ return ""; } });
+  const setUsdRate = (v)=>{ setUsdRateState(v); try{ sessionStorage.setItem("flometriq_qr_usd_rate",v); }catch(e){} };
+  const rateNum = Number(usdRate)>0 ? Number(usdRate) : null;
+  const askUsdRate = (ccy)=>{
+    const typed = prompt("Value filter in "+ccy+".\n\n1 USD = how many INR today? Used to convert quotes into the other currency.\nLeave blank to skip converting.", usdRate||"");
+    if(typed===null) return;
+    const v = String(typed).replace(/[^0-9.]/g,"");
+    if(v!=="" && !(Number(v)>0)){ alert("That isn't a rate, so it wasn't used."); return; }
+    setUsdRate(v);
+  };
+  // A quote's value in INR and in USD: its own currency as recorded, the
+  // other converted at the rate typed here.
+  const valuesOf = (r)=>{
+    const ccy = r.currency || (r.is_legacy ? null : "INR");
+    const own = r.value_ccy!=null ? r.value_ccy : (ccy==="INR" ? r.value_inr : null);
+    if(own==null || !ccy) return { ccy, inr:null, usd:null };
+    if(ccy==="INR") return { ccy, inr:own, usd: rateNum ? own/rateNum : null };
+    if(ccy==="USD") return { ccy, usd:own, inr: rateNum ? own*rateNum : null };
+    // Any other currency: its rupee value, and USD from that.
+    const inr = r.value_inr;
+    return { ccy, inr, usd: (inr!=null && rateNum) ? inr/rateNum : null, other:own };
+  };
+  const runApply = async(order)=>{
+    setSortAsk(null); setSortOrder(order);
+    const next = {...filtersRef.current};
     setApplied(next);
-  },0);
+  };
   const FILTER_LABELS = { dateFrom:"From", dateTo:"To", refLike:"Reference", customerLike:"Customer", projectLike:"Project",
-    countryLike:"Country", stateLike:"State", cityLike:"City", zone:"Region", status:"Stage", followUp:"Follow-up", valueMin:"Value \u2265", valueMax:"Value \u2264", valueCcy:"Value in", usdRate:"USD rate" };
+    countryLike:"Country", stateLike:"State", cityLike:"City", zone:"Region", status:"Stage", followUp:"Follow-up", valueMin:"Value \u2265", valueMax:"Value \u2264", valueCcy:"Value in" };
   const pendingKeys = Object.keys(FILTER_LABELS).filter(k=>(filters[k]||"")!==(applied[k]||""));
-  const valueRangeOn = applied.valueMin!=="" || applied.valueMax!=="";
-  const chipKeys = Object.keys(FILTER_LABELS).filter(k=>applied[k] && ((k!=="valueCcy" && k!=="usdRate") || valueRangeOn));
+  const VALUE_KEYS = ["valueCcy","valueMin","valueMax"];
+  const valueRangeOn = String(applied.valueMin||"")!=="" || String(applied.valueMax||"")!=="";
+  const chipKeys = Object.keys(FILTER_LABELS).filter(k=>applied[k] && (k!=="valueCcy" || valueRangeOn));
   const clearFilters = ()=>{
     const blank = { ...Object.fromEntries(Object.keys(FILTER_LABELS).map(k=>[k,""])), valueCcy:"INR" };
     setFilters(f=>({...f,...blank})); setApplied(a=>({...a,...blank}));
@@ -32759,15 +32947,17 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
   // quote, so an INR quote and a USD quote can be compared at all. The
   // rate defaults to the most recent USD quote's own rate.
   const defaultUsdRate = (()=>{ const r = rows.find(x=>x.currency==="USD" && x.fx_to_inr>1); return r ? r.fx_to_inr : null; })();
-  const usdRateInUse = Number(applied.usdRate) || defaultUsdRate || null;
-  const valueIn = (r, ccy)=>{
-    if(r.value_inr==null) return null;
-    if(ccy==="USD"){
-      if(r.currency==="USD" && r.value_ccy!=null) return r.value_ccy;
-      return usdRateInUse ? r.value_inr/usdRateInUse : null;
-    }
-    return r.value_inr;
+  // The range is in the chosen currency; a quote in the other currency is
+  // checked at the rate typed (and left out when there is none).
+  const rangeCheck = (r, ap)=>{
+    const vals = valuesOf(r);
+    const v = (ap.valueCcy||"INR")==="USD" ? vals.usd : vals.inr;
+    if(v==null) return false;
+    if(String(ap.valueMin||"")!=="" && v < Number(ap.valueMin)) return false;
+    if(String(ap.valueMax||"")!=="" && v > Number(ap.valueMax)) return false;
+    return true;
   };
+
   // Country->State->City (29 Aug fix) — pulls from the real master
   // tables (WORLD_COUNTRIES, state_zone_tbl, city_tbl), same as the
   // Customer form, not just whatever happens to already exist in this
@@ -32878,7 +33068,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
         const act = latestActByRef.get(h.reference_number);
         return {
           reference_number: h.reference_number,
-          reference_date: (h.quote_date||h.created_at||"").slice(0,10),
+          reference_date: toISODate(h.quote_date||h.created_at),   // "" when none; shown dd/mm/yyyy
           customer_name: h.customer_name||"—",
           region: co.zone||"—",
           city: co.billing_city||"—",
@@ -32905,7 +33095,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
         const act = latestActByRef.get(l.reference_number);
         return {
           reference_number: l.reference_number,
-          reference_date: l.reference_date||"—",
+          reference_date: toISODate(l.reference_date),
           customer_name: l.customer_name||"—",
           region: l.region||"—",
           city: l.city||"—",
@@ -32920,15 +33110,23 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
           last_interaction: act ? { date:(act.activity_date||act.created_at||"").slice(0,10), type:act.activity_type||"", by:act.logged_by||"",
             whom:act.contacted_whom||"", text:(act.notes&&String(act.notes).trim()) ? act.notes : (act.discussed_what||"") }   /* 22 Sep: the notes — what was said; the stage has its own column */
             : (l.followup_note ? { date:"", type:"Imported", by:"", whom:"", text:l.followup_note } : null),
-          value_inr: null, value_ccy: null, currency: "INR", fx_to_inr: null,
+          // 2 Oct (114) — a legacy quote's value, once filled in from the
+          // value sheet, in its own currency (INR or USD).
+          value_ccy: (l.quote_value!=null && l.quote_value!=="") ? Number(l.quote_value) : null,
+          currency: l.quote_currency || null,
+          value_inr: (l.quote_value!=null && l.quote_value!=="" && (l.quote_currency||"INR")==="INR") ? Number(l.quote_value) : null,
+          fx_to_inr: null,
           next_followup: act?.next_followup_date||l.next_followup_date||"—",
           last_updated: lastUpdated(l),
           is_legacy: true,
         };
       });
 
-      setRows(merged.concat(legacyMerged));
+      const all = merged.concat(legacyMerged);
+      setRows(all);
       setLoadedAt(new Date());
+      // Background: work out any missing or out-of-date values (114).
+      if(!valueRunRef.current){ valueRunRef.current = true; setTimeout(()=>refreshMissingValues(all).finally(()=>{ valueRunRef.current = false; }),0); }
     } finally { setLoading(false); }
   },[]);
   useEffect(()=>{ load(); },[load]);   // on a restored report this refreshes quietly behind the rows already shown
@@ -32950,8 +33148,13 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
 
   // Every filter except the value range, against a given filter set.
   function passesNonValueFilters(r, applied){
-    if(applied.dateFrom && r.reference_date < applied.dateFrom) return false;
-    if(applied.dateTo && r.reference_date > applied.dateTo) return false;
+    // 2 Oct (114) — real dates on both sides; a quote with no date is left
+    // out whenever a date range is set, rather than slipping through.
+    if(applied.dateFrom || applied.dateTo){
+      if(!r.reference_date) return false;
+      if(applied.dateFrom && r.reference_date < toISODate(applied.dateFrom)) return false;
+      if(applied.dateTo && r.reference_date > toISODate(applied.dateTo)) return false;
+    }
     if(applied.refLike && !r.reference_number.toLowerCase().includes(applied.refLike.toLowerCase())) return false;
     if(applied.customerLike && !r.customer_name.toLowerCase().includes(applied.customerLike.toLowerCase())) return false;
     if(applied.cityLike && !r.city.toLowerCase().includes(applied.cityLike.toLowerCase())) return false;
@@ -32963,15 +33166,19 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
     if(applied.projectLike && !(r.project_reference||"").toLowerCase().includes(applied.projectLike.toLowerCase())) return false;
     return true;
   }
+  const sortKey = (r)=>{
+    if(sortOrder==="next_asc") return (r.next_followup && r.next_followup!=="\u2014") ? toISODate(r.next_followup) : "9999-99-99";
+    if(sortOrder==="cust_asc") return String(r.customer_name||"").toLowerCase();
+    return r.reference_date || (sortOrder==="date_desc" ? "0000-00-00" : "9999-99-99");
+  };
   const filtered = rows.filter(r=>{
     if(!passesNonValueFilters(r, applied)) return false;
-    if(applied.valueMin!=="" || applied.valueMax!==""){
-      const v = valueIn(r, applied.valueCcy||"INR");
-      if(v==null) return false;   // no value yet — can't be placed in a range
-      if(applied.valueMin!=="" && v < Number(applied.valueMin)) return false;
-      if(applied.valueMax!=="" && v > Number(applied.valueMax)) return false;
-    }
+    if(valueRangeOn && !rangeCheck(r, applied)) return false;
     return true;
+  }).sort((a,b)=>{
+    const ka = sortKey(a), kb = sortKey(b);
+    const c = ka<kb ? -1 : ka>kb ? 1 : String(a.reference_number).localeCompare(String(b.reference_number));
+    return sortOrder==="date_desc" ? -c : c;
   });
 
   // Grouped view (22 Sep). INR first, then USD, then any other currency as
@@ -32979,7 +33186,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
   // gives a wrong total. Legacy quotes have no currency on record yet and
   // sit in their own group rather than being guessed.
   const CCY_ORDER = ["INR","USD"];
-  const ccyOf = (r)=> r.is_legacy ? "Currency unknown" : (r.currency||"INR");
+  const ccyOf = (r)=> r.is_legacy ? (r.currency||"Currency unknown") : (r.currency||"INR");
   const displayRows = (()=>{
     if(grouping!=="ccy") return filtered.map((r,i)=>({ ...r, __n:i+1 }));
     const by = new Map();
@@ -33013,8 +33220,12 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
       g.__grp==="head" ? g.ccy : "Total "+g.ccy),
     h("td",{colSpan:6,style:{padding:"8px 10px",fontSize:12,background:g.__grp==="head"?"#e6f1fb":"#faf9f4",color:g.__grp==="head"?"#0c447c":colors.muted}},
       g.__grp==="head" ? (g.count+" quote"+(g.count===1?"":"s")+(g.noValue?" \u00b7 "+g.noValue+" with no value yet":"")) : ""),
+    // The group's total sits under its own column: INR under Value (INR),
+    // everything else under Value (USD).
+    g.ccy!=="INR" && h("td",{style:{background:g.__grp==="head"?"#e6f1fb":"#faf9f4"}}),
     h("td",{style:{padding:"8px 10px",textAlign:"right",fontWeight:700,whiteSpace:"nowrap",background:g.__grp==="head"?"#e6f1fb":"#faf9f4",color:g.__grp==="head"?"#0c447c":colors.text}},
       g.ccy==="Currency unknown" ? "\u2014" : fmtMoney(g.ccy,g.total)),
+    g.ccy==="INR" && h("td",{style:{background:g.__grp==="head"?"#e6f1fb":"#faf9f4"}}),
     h("td",{colSpan:4,style:{background:g.__grp==="head"?"#e6f1fb":"#faf9f4"}})
   );
 
@@ -33044,7 +33255,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
   h("div",{style:{padding:"20px 24px",fontSize:14}},
     h("div",{style:{background:"#fff",border:"1px solid #cfe3dd",borderLeft:"4px solid #0f7a5c",borderRadius:6,padding:"12px 16px",marginBottom:14}},
       h("div",{style:{fontWeight:700,fontSize:16,color:"#124c3d"}},"Quotes Report"),
-      h("div",{style:{fontSize:11.5,color:"#8a9d97",marginTop:2}},"Click the Stage to change it; + beside Next Follow-up to set one")
+      h("div",{style:{fontSize:11.5,color:"#8a9d97",marginTop:2}},"Log follow-up on a row records a call, email or visit and moves its Stage; clicking the Stage opens the same box.")
     ),
     h("div",{onKeyDown:e=>{ if(e.key==="Enter") applyFilters(); },style:{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:12,marginBottom:16,background:"#faf9f4",padding:14,borderRadius:8}},
       fld("Reference Date >=", h("input",{type:"date",value:filters.dateFrom,onChange:e=>setF("dateFrom",e.target.value),style:{...inputStyle,padding:"6px 8px",fontSize:12}}),"dateFrom"),
@@ -33069,43 +33280,47 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
       fld("Follow-up Status", h("select",{value:filters.followUp,onChange:e=>setF("followUp",e.target.value),style:{...inputStyle,padding:"6px 8px",fontSize:12}},
         h("option",{value:""},"All"),["Overdue","Due today","Upcoming","None"].map(s=>h("option",{key:s,value:s},s))
       ),"followUp"),
-      // Quote value range (22 Sep). INR compares every quote's rupee value;
-      // USD converts at one rate for all quotes so they can be compared —
-      // defaulting to the latest USD quote's rate, editable.
+      // Quote value (2 Oct, 114 rev): one range in INR or USD; choosing the
+      // currency asks for the USD rate.
       h("div",{style:{gridColumn:"span 2"}},
-        h("label",{style:{display:"block",fontSize:10.5,color:["valueCcy","valueMin","valueMax","usdRate"].some(k=>pendingKeys.includes(k))?"#854f0b":colors.muted,marginBottom:3}},"Quote value"),
+        h("label",{style:{display:"block",fontSize:10.5,color:VALUE_KEYS.some(k=>pendingKeys.includes(k))?"#854f0b":colors.muted,marginBottom:3}},"Quote value"),
         h("div",{style:{display:"flex",gap:6,alignItems:"center",
-          outline:["valueCcy","valueMin","valueMax","usdRate"].some(k=>pendingKeys.includes(k))?"1.5px solid #ef9f27":"none",borderRadius:6}},
-          h("select",{value:filters.valueCcy||"INR",onChange:e=>setF("valueCcy",e.target.value),style:{...inputStyle,padding:"6px 8px",fontSize:12,width:70}},
+          outline:VALUE_KEYS.some(k=>pendingKeys.includes(k))?"1.5px solid #ef9f27":"none",borderRadius:6}},
+          h("select",{value:filters.valueCcy||"INR",onChange:e=>{ const c=e.target.value; setF("valueCcy",c); askUsdRate(c); },style:{...inputStyle,padding:"6px 8px",fontSize:12,width:70}},
             h("option",{value:"INR"},"INR"),h("option",{value:"USD"},"USD")),
           h("input",{value:filters.valueMin,onChange:e=>setF("valueMin",e.target.value.replace(/[^0-9.]/g,"")),placeholder:"more than",style:{...inputStyle,padding:"6px 8px",fontSize:12}}),
           h("span",{style:{fontSize:11,color:colors.mutedLight}},"to"),
           h("input",{value:filters.valueMax,onChange:e=>setF("valueMax",e.target.value.replace(/[^0-9.]/g,"")),placeholder:"less than",style:{...inputStyle,padding:"6px 8px",fontSize:12}})
         ),
-        (filters.valueCcy==="USD") && h("div",{style:{display:"flex",gap:6,alignItems:"center",marginTop:4}},
+        h("div",{style:{display:"flex",gap:6,alignItems:"center",marginTop:4}},
           h("span",{style:{fontSize:10.5,color:colors.muted}},"1 USD ="),
-          h("input",{value:filters.usdRate,onChange:e=>setF("usdRate",e.target.value.replace(/[^0-9.]/g,"")),placeholder:defaultUsdRate?String(defaultUsdRate):"rate",style:{...inputStyle,padding:"4px 6px",fontSize:11.5,width:80}}),
-          h("span",{style:{fontSize:10.5,color:colors.mutedLight}},"INR"+(defaultUsdRate&&!filters.usdRate?" (latest USD quote)":""))
-        )
+          h("input",{value:usdRate,onChange:e=>setUsdRate(e.target.value.replace(/[^0-9.]/g,"")),placeholder:"rate",style:{...inputStyle,padding:"4px 6px",fontSize:11.5,width:80}}),
+          h("span",{style:{fontSize:10.5,color:colors.mutedLight}},rateNum ? "INR \u00b7 converts the other column" : "INR \u00b7 no rate: no conversion"))
       )
     ),
     // Apply bar (22 Sep). The list below only changes when Apply filters
     // or Enter is pressed; boxes changed since then are outlined amber.
     h("div",{style:{display:"flex",alignItems:"center",gap:10,margin:"-6px 0 14px"}},
-      valueJob ? h("span",{style:{fontSize:11.5,color:"#0c447c"}},"Updating quote values "+valueJob.done+" of "+valueJob.total+"\u2026")
+      valueJob ? h("span",{style:{fontSize:11.5,color:"#0c447c"}},"Working out quote values in the background: "+valueJob.done+" of "+valueJob.total+"\u2026")
       : pendingKeys.length>0
         ? h("span",{style:{fontSize:11.5,color:"#854f0b"}},pendingKeys.length+" filter"+(pendingKeys.length>1?"s":"")+" changed \u2014 press Apply filters (or Enter) to update the list")
         : h("span",{style:{fontSize:11.5,color:colors.mutedLight}},"The list below matches these filters."),
       h("div",{style:{marginLeft:"auto",display:"flex",gap:8}},
         h("button",{onClick:clearFilters,style:{...btnSecondary,fontSize:12}},"Clear"),
-        h("button",{onClick:applyFilters,disabled:!!valueJob,style:{...btnPrimary,fontSize:12,padding:"8px 16px",opacity:valueJob?0.6:1}},
+        h("button",{onClick:applyFilters,style:{...btnPrimary,fontSize:12,padding:"8px 16px"}},
           pendingKeys.length ? "Apply filters ("+pendingKeys.length+")" : "Apply filters"))
     ),
     // What is actually in force, with Refresh and how old the list is.
     h("div",{style:{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:10}},
       h("span",{style:{fontSize:13,fontWeight:700}},filtered.length+" quote"+(filtered.length===1?"":"s")),
-      valueRangeOn && h("span",{style:{fontSize:11,color:"#854f0b"},title:"Quotes that have never been opened since values began being recorded have no value yet, so they can't be placed in a range."},
-        "\u00b7 "+rows.filter(r=>r.value_inr==null).length+" without a value left out"),
+      valueRangeOn && (()=>{
+        const noVal = rows.filter(r=>r.value_ccy==null && r.value_inr==null).length;
+        const want = applied.valueCcy||"INR";
+        const noRate = rateNum ? 0 : rows.filter(r=>{ const v=valuesOf(r); return (want==="USD"?v.usd:v.inr)==null && (v.inr!=null||v.usd!=null); }).length;
+        return h("span",{style:{fontSize:11,color:"#854f0b"},title:"Legacy quotes get their value from the legacy value sheet. Quotes in the other currency need the USD rate to be compared."},
+          "\u00b7 left out: "+noVal+" without a value"+(noRate?", "+noRate+" in "+(want==="USD"?"INR":"USD")+" (no USD rate typed)":""));
+      })(),
+      h("span",{style:{fontSize:11,color:colors.mutedLight}},"\u00b7 sorted by "+((SORTS.find(x=>x[0]===sortOrder)||SORTS[0])[1]).toLowerCase()),
       chipKeys.length>0 && h("span",{style:{fontSize:11.5,color:colors.muted}},"filtered by"),
       chipKeys.map(k=>h("span",{key:k,
         style:{fontSize:11,padding:"3px 4px 3px 10px",borderRadius:12,background:"#e6f1fb",color:"#0c447c",display:"inline-flex",alignItems:"center",gap:4}},
@@ -33120,9 +33335,15 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
         optionsOpen && h("div",{style:{position:"absolute",right:0,top:"calc(100% + 4px)",zIndex:20,background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 14px",width:230,boxShadow:"0 6px 18px rgba(0,0,0,0.12)"}},
           h("div",{style:{fontSize:11,color:colors.muted,marginBottom:6}},"Group rows"),
           [["none","No grouping"],["ccy","By currency (INR, USD\u2026)"]].map(([v,l])=>h("label",{key:v,style:{display:"flex",gap:8,alignItems:"center",fontSize:12.5,padding:"4px 0",cursor:"pointer"}},
-            h("input",{type:"radio",name:"qr-grouping",checked:grouping===v,onChange:()=>{ setGrouping(v); setOptionsOpen(false); }}), l))
+            h("input",{type:"radio",name:"qr-grouping",checked:grouping===v,onChange:()=>{ setGrouping(v); setOptionsOpen(false); }}), l)),
+          isAdminQR && h("div",{style:{borderTop:"1px solid "+colors.border,marginTop:8,paddingTop:8}},
+            h("div",{style:{fontSize:11,color:colors.muted,marginBottom:6}},"Legacy quote values"),
+            h("button",{onClick:downloadLegacyValueSheet,style:{...btnSecondary,fontSize:11.5,width:"100%",marginBottom:6}},"Download value sheet"),
+            h("button",{onClick:()=>{ setOptionsOpen(false); legacyFileRef.current && legacyFileRef.current.click(); },style:{...btnSecondary,fontSize:11.5,width:"100%"}},"Upload filled sheet"))
         )
       ),
+      h("input",{ref:legacyFileRef,type:"file",accept:".xlsx,.xls",style:{display:"none"},onChange:e=>uploadLegacyValueSheet(e.target.files[0])}),
+      legacyJob && h("span",{style:{fontSize:11.5,color:"#0c447c"}},"Saving legacy values "+legacyJob.done+" of "+legacyJob.total+"\u2026"),
       h("button",{onClick:toggleFull,style:{...btnSecondary,fontSize:12,padding:"6px 12px"}},isFull?"Exit full screen":"\u26f6 Full screen")
     ),
     grouping==="ccy" && filtered.length>0 && h("div",{style:{fontSize:11.5,color:colors.muted,margin:"-4px 0 8px"}},
@@ -33132,7 +33353,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
       maxHeight: isFull ? "calc(100vh - 150px)" : "calc(100vh - 260px)", minHeight:240}},
       h("table",{className:"qr-table",style:{borderCollapse:"separate",borderSpacing:0,width:"100%",fontSize:14}},
         h("thead",null,h("tr",{style:{background:"#eef6f3",textAlign:"left"}},
-          ["S.No","Reference No","Reference Date","Customer Name","Region","City","State","Stage","Value","Project Reference","Last interaction","Next Follow-up",""].map((c,ci)=>
+          ["S.No","Reference No","Reference Date","Customer Name","Region","City","State","Stage","Value (INR)","Value (USD)","Project Reference","Last interaction","Next Follow-up",""].map((c,ci)=>
             h("th",{key:c,style:{padding:"9px 10px",borderBottom:"2px solid #0f7a5c",whiteSpace:"nowrap",fontSize:11.5,color:"#4c6a61",
               position:"sticky",top:0,zIndex:ci<2?4:3,background:"#eef6f3",
               ...(ci===0?{left:0,width:52,minWidth:52}:ci===1?{left:52,minWidth:170,borderRight:"1px solid #cfe3dd"}:{})}},c))
@@ -33147,23 +33368,35 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
               ? h(React.Fragment,null, r.reference_number, h("span",{style:{marginLeft:6,fontSize:9.5,padding:"1px 6px",borderRadius:8,background:"#f0eee6",color:colors.mutedLight}},"Legacy"))
               : h("a",{href:"#",onClick:e=>{e.preventDefault(); onOpenQuote(r.reference_number,1);},style:{color:"#0c447c",textDecoration:"underline",cursor:"pointer"}},r.reference_number)
           ),
-          h("td",{style:{padding:"10px"}},r.reference_date),
+          h("td",{style:{padding:"10px",whiteSpace:"nowrap"}},fmtDMY(r.reference_date)||"\u2014"),
           h("td",{style:{padding:"10px"}},r.customer_name),
           h("td",{style:{padding:"10px"}},r.region),
           h("td",{style:{padding:"10px"}},r.city),
           h("td",{style:{padding:"10px"}},r.state),
           h("td",{style:{padding:"10px"}},
             h("span",{onClick:()=>openEditor(r),title:"Click to change the Stage",style:{cursor:"pointer",fontSize:12,padding:"3px 10px",borderRadius:10,background:"#eaf9f4",color:"#085041",fontWeight:600}},r.status+" ✎"),
-            r.last_updated && h("div",{style:{fontSize:9,color:colors.mutedLight,marginTop:3}},"Updated "+new Date(r.last_updated.at).toLocaleDateString()+(r.last_updated.by?" by "+r.last_updated.by:""))
+            r.last_updated && h("div",{style:{fontSize:9,color:colors.mutedLight,marginTop:3}},"Updated "+fmtDMY(r.last_updated.at)+(r.last_updated.by?" by "+r.last_updated.by:""))
           ),
-          // Value (22 Sep): the quote's own currency, rupees underneath
-          // when different. Blank until the quote has been opened once.
-          h("td",{style:{padding:"10px",whiteSpace:"nowrap",textAlign:"right"}},
-            r.value_inr==null ? h("span",{style:{color:colors.mutedLight}},"\u2014")
-              : h(React.Fragment,null,
-                  h("div",{style:{fontWeight:600},title:r.value_stale?"Changed since this value was worked out \u2014 Apply filters updates it":""},
-                    (r.currency||"INR")+" "+Math.round(r.value_ccy).toLocaleString("en-IN")+(r.value_stale?" *":"")),
-                  r.currency && r.currency!=="INR" && h("div",{style:{fontSize:10.5,color:colors.mutedLight}},"INR "+Math.round(r.value_inr).toLocaleString("en-IN")))),
+          // Value (2 Oct, 114 rev): INR and USD side by side. The quote's own
+          // currency is bold; the other column is converted at the rate typed
+          // in the filter (grey), blank when no rate is set.
+          (()=>{
+            const vals = valuesOf(r);
+            const mark = r.value_stale ? " *" : "";
+            const blank = h("span",{style:{color:colors.mutedLight}},"\u2014");
+            const cell = (k,content)=> h("td",{key:k,style:{padding:"10px",whiteSpace:"nowrap",textAlign:"right"},title:r.value_stale?"Changed since this value was worked out \u2014 it is being updated":""},content);
+            if(vals.inr==null && vals.usd==null && vals.other==null)
+              return [cell("vi", valueJob && !r.is_legacy ? h("span",{style:{color:colors.mutedLight,fontSize:11}},"working out\u2026") : blank), cell("vu",blank)];
+            const own = (txt)=> h("span",{style:{fontWeight:600}},txt+mark);
+            const conv = (txt)=> h("span",{style:{color:colors.mutedLight},title:"Converted at 1 USD = "+usdRate+" INR"},txt);
+            const inrTxt = vals.inr!=null ? Math.round(vals.inr).toLocaleString("en-IN") : null;
+            const usdTxt = vals.usd!=null ? Math.round(vals.usd).toLocaleString("en-US") : null;
+            if(vals.ccy==="INR") return [cell("vi",own(inrTxt)), cell("vu",usdTxt?conv(usdTxt):blank)];
+            if(vals.ccy==="USD") return [cell("vi",inrTxt?conv(inrTxt):blank), cell("vu",own(usdTxt))];
+            return [cell("vi",inrTxt?h("span",null,inrTxt):blank), cell("vu",h(React.Fragment,null,
+              h("div",{style:{fontWeight:600}},vals.ccy+" "+Math.round(vals.other).toLocaleString("en-US")+mark),
+              usdTxt && h("div",{style:{fontSize:10.5,color:colors.mutedLight}},"USD "+usdTxt)))];
+          })(),
           h("td",{style:{padding:"10px"}},r.project_reference),
           // Last interaction (22 Sep) replaces Follow-up Stage: what was
           // actually last done on this quote, when, how and by whom.
@@ -33171,15 +33404,14 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
             !r.last_interaction ? h("span",{style:{color:colors.mutedLight}},"No interaction logged")
               : h("div",{title:r.last_interaction.text||""},
                   h("div",{style:{fontSize:11,color:colors.muted}},
-                    [r.last_interaction.date, r.last_interaction.type, r.last_interaction.by, r.last_interaction.whom ? "with "+r.last_interaction.whom : ""].filter(Boolean).join(" \u00b7 ")),
+                    [fmtDMY(r.last_interaction.date), r.last_interaction.type, r.last_interaction.by, r.last_interaction.whom ? "with "+r.last_interaction.whom : ""].filter(Boolean).join(" \u00b7 ")),
                   h("div",{style:{fontSize:12.5,overflow:"hidden",textOverflow:"ellipsis",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}},
                     r.last_interaction.text||"\u2014"))
           ),
-          h("td",{style:{padding:"10px"}},
-            r.next_followup, " ",
-            h("span",{onClick:()=>openNextFollowup(r),title:"Set/append a Next Follow-up date",style:{cursor:"pointer",fontSize:12,color:colors.accent,fontWeight:700}},"+")
-          ),
-          h("td",{style:{padding:"10px",display:"flex",gap:6}}, (!r.is_legacy && h("button",{onClick:()=>onOpenQuote(r.reference_number,1),style:{...btnSmall,fontSize:11,padding:"4px 10px"}},"Open")),
+          h("td",{style:{padding:"10px",whiteSpace:"nowrap"}}, fmtDMY(r.next_followup)||"\u2014"),
+          h("td",{style:{padding:"10px",display:"flex",gap:6,whiteSpace:"nowrap"}},
+            h("button",{onClick:()=>openFollowup(r),title:"Log a call, email or visit on this quote, and move its Stage if it changed",style:{...btnSmall,fontSize:11,padding:"4px 10px",background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c"}},"Log follow-up"),
+            (!r.is_legacy && h("button",{onClick:()=>onOpenQuote(r.reference_number,1),style:{...btnSmall,fontSize:11,padding:"4px 10px"}},"Open")),
             h("button",{onClick:()=>setHistoryPopupFor(r),style:{...btnSmall,fontSize:11,padding:"4px 10px"}},"History")
           )
         )))
@@ -33202,77 +33434,53 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
       )
     )
   ),
-  // Unified Status + Stage(Nature) editor (31 Aug) — one shared date,
-  // so editing both together never produces two different "changed on"
-  // dates. Won/Lost/Deferred/Went Cold hand off to the existing
-  // WonLostOutcomeModal for the reason capture, same as everywhere
-  // else — this dialog just closes and lets that one take over; the
-  // Stage/Nature half (if also changed) has already been saved by then.
-  editFor && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center"}},
-    h("div",{style:{background:"#fff",borderRadius:8,padding:"20px 24px",width:380,maxWidth:"90%"}},
-      h("div",{style:{fontWeight:700,fontSize:14,marginBottom:14}},"Edit — "+editFor.reference_number),
-      h("label",{style:{display:"block",fontSize:11,color:colors.muted,marginBottom:3}},"Stage"),
-      h("select",{value:editStatusValue,onChange:e=>setEditStatusValue(e.target.value),style:{...inputStyle,marginBottom:12}},
-        // A quote still in a stage that's since been removed shows it, marked,
-        // so the box reads true until someone picks a current one.
-        (statusOptions.includes(editStatusValue)||!editStatusValue ? [] : [h("option",{key:"__old",value:editStatusValue},editStatusValue+" (no longer used)")]),
-        statusOptions.map(s=>h("option",{key:s,value:s},s))
-      ),
-      h("label",{style:{display:"block",fontSize:11,color:colors.muted,marginBottom:3}},"Date this actually changed"),
-      h("input",{type:"date",value:editDate,onChange:e=>setEditDate(e.target.value),style:{...inputStyle,marginBottom:12}}),
-      editStatusValue!==editFor.status && !isClosedStage(editStatusValue) && h(React.Fragment,null,
-        h("label",{style:{display:"block",fontSize:11,color:colors.muted,marginBottom:3}},"Next follow-up"),
-        h("input",{type:"date",value:editNext,onChange:e=>setEditNext(e.target.value),style:{...inputStyle,marginBottom:12}})),
-      editStatusValue!==editFor.status && h(React.Fragment,null,
-        h("label",{style:{display:"block",fontSize:11,color:colors.muted,marginBottom:3}},"Note \u2014 what happened"),
-        h("textarea",{rows:2,value:editNote,onChange:e=>setEditNote(e.target.value),style:{...inputStyle,marginBottom:6,resize:"vertical"}}),
-        h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginBottom:12}},"Saved as a follow-up too \u2014 it becomes the quote's Last interaction.")),
-      h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8}},
-        h("button",{onClick:()=>setEditFor(null),style:btnSecondary},"Cancel"),
-        h("button",{onClick:confirmEdit,style:btnPrimary},"Save")
-      )
+  // Sort prompt (2 Oct, 114) — every Apply filters asks how to order the list.
+  sortAsk && h("div",{onKeyDown:e=>{ if(e.key==="Enter"){ e.preventDefault(); runApply(sortAsk); } if(e.key==="Escape") setSortAsk(null); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1250,display:"flex",alignItems:"center",justifyContent:"center"}},
+    h("div",{style:{background:"#fff",borderRadius:8,padding:"18px 22px",width:340,maxWidth:"92%"}},
+      h("div",{style:{fontWeight:700,fontSize:14,marginBottom:10}},"Sort the list by"),
+      SORTS.map(([v,l],i)=>h("label",{key:v,style:{display:"flex",gap:8,alignItems:"center",fontSize:13,padding:"5px 0",cursor:"pointer"}},
+        h("input",{type:"radio",name:"qr-sort",autoFocus:v===sortAsk,checked:sortAsk===v,onChange:()=>setSortAsk(v)}), l)),
+      h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:12}},
+        h("button",{onClick:()=>runApply(sortAsk),style:btnPrimary},"Apply filters"),
+        h("button",{onClick:()=>setSortAsk(null),style:btnSecondary},"Cancel"))
     )
   ),
-  // "+ Next Follow-up" (31 Aug) — writes a real Log Follow-ups entry;
-  // see the state comment above for why. Notes required, same rule as
-  // Log Entries itself.
-  nextFollowupFor && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center"}},
-    h("div",{style:{background:"#fff",borderRadius:8,padding:"20px 24px",width:400,maxWidth:"90%"}},
-      h("div",{style:{fontWeight:700,fontSize:14,marginBottom:4}},"Next Follow-up — "+nextFollowupFor.reference_number),
-      h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:14}},"This creates a real Log Follow-ups entry, same as logging it from CRM \u2192 Daily."),
-      h("label",{style:{display:"block",fontSize:11,color:colors.muted,marginBottom:3}},"Next Follow-up date"),
-      h("input",{type:"date",value:nfDate,onChange:e=>setNfDate(e.target.value),style:{...inputStyle,marginBottom:12}}),
-      h("label",{style:{display:"block",fontSize:11,color:colors.muted,marginBottom:3}},"Notes (required)"),
-      h("textarea",{rows:3,value:nfNotes,onChange:e=>setNfNotes(e.target.value),style:{...inputStyle,marginBottom:16,resize:"vertical"}}),
-      h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8}},
-        h("button",{onClick:()=>setNextFollowupFor(null),style:btnSecondary},"Cancel"),
-        h("button",{onClick:saveNextFollowup,disabled:nfBusy,style:btnPrimary},nfBusy?"Saving…":"Save")
-      )
-    )
-  ),
-  // Follow-up Stage editor (31 Aug) — logs a real Log Follow-ups entry
-  // (Outcome + required Notes, optional Next Follow-up alongside) rather
-  // than writing a field directly — see the state comment above for why
-  // that matters. Outcome list matches the Offer funnel, since every
-  // reference on this screen is a Quote.
-  stageEditFor && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center"}},
-    h("div",{style:{background:"#fff",borderRadius:8,padding:"20px 24px",width:400,maxWidth:"90%"}},
-      h("div",{style:{fontWeight:700,fontSize:14,marginBottom:4}},"Follow-up Stage — "+stageEditFor.reference_number),
-      h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:14}},"This creates a real Log Follow-ups entry, same as logging it from CRM \u2192 Daily."),
-      h("label",{style:{display:"block",fontSize:11,color:colors.muted,marginBottom:3}},"Outcome (optional)"),
-      h("select",{value:stageOutcome,onChange:e=>setStageOutcome(e.target.value),style:{...inputStyle,marginBottom:12}},
-        h("option",{value:""},"— no change —"), statusOptions.map(s=>h("option",{key:s,value:s},s))
-      ),
-      h("label",{style:{display:"block",fontSize:11,color:colors.muted,marginBottom:3}},"Notes (required)"),
-      h("textarea",{rows:3,value:stageNotes,onChange:e=>setStageNotes(e.target.value),style:{...inputStyle,marginBottom:12,resize:"vertical"}}),
-      h("label",{style:{display:"block",fontSize:11,color:colors.muted,marginBottom:3}},"Next Follow-up date (optional)"),
-      h("input",{type:"date",value:stageNextDate,onChange:e=>setStageNextDate(e.target.value),style:{...inputStyle,marginBottom:16}}),
-      h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8}},
-        h("button",{onClick:()=>setStageEditFor(null),style:btnSecondary},"Cancel"),
-        h("button",{onClick:saveStageEdit,disabled:stageBusy,style:btnPrimary},stageBusy?"Saving…":"Save")
-      )
-    )
-  ),
+  // Log follow-up dialog (2 Oct, 114) — see openFollowup above.
+  fu && (()=>{
+    const miss = fuTried ? fuMissing(fu) : [];
+    const bad = (label)=> miss.includes(label);
+    const lab = (t, label)=> h("label",{style:{display:"block",fontSize:11,color:bad(label)?"#a3312a":colors.muted,fontWeight:bad(label)?700:400,marginBottom:3}},t+(bad(label)?" — required":""));
+    const box = (label, extra)=> ({...inputStyle, width:"100%", boxSizing:"border-box", marginBottom:10, ...(bad(label)?{border:"1.5px solid #a3312a",background:"#fdf3f2"}:{}), ...(extra||{})});
+    const set = (k,v)=> setFu(x=>({...x,[k]:v}));
+    const closes = fuStageCloses(fu);
+    return h("div",{onKeyDown:e=>{ if(e.key==="Escape") closeFollowup(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center"}},
+      h("div",{style:{background:"#fff",borderRadius:8,padding:"18px 22px",width:430,maxWidth:"92%",maxHeight:"92vh",overflow:"auto"}},
+        h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4}},
+          h("div",{style:{fontWeight:700,fontSize:14}},"Log follow-up — "+fu.row.reference_number+(fu.row.is_legacy?" (legacy)":"")),
+          h("button",{onClick:closeFollowup,title:"Close",style:{border:"none",background:"transparent",fontSize:18,cursor:"pointer",color:colors.muted,lineHeight:1}},"×")),
+        h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:12}},fu.row.customer_name+" · now at "+fu.row.status+". Saved as a Log Follow-ups entry; every field is required."),
+        lab("Date of follow-up","Date of follow-up"),
+        h("input",{type:"date",value:fu.date,max:toISODate(new Date()),onChange:e=>set("date",e.target.value),style:box("Date of follow-up")}),
+        lab("Mode","Mode"),
+        h("select",{value:fu.mode,onChange:e=>set("mode",e.target.value),style:box("Mode")},
+          h("option",{value:""},"Select…"), FU_MODES.map(m=>h("option",{key:m,value:m},m))),
+        lab("Stage","Stage"),
+        h("select",{value:fu.stage,onChange:e=>set("stage",e.target.value),style:box("Stage")},
+          h("option",{value:""},"Select…"),
+          h("option",{value:FU_NO_CHANGE},"No change (stays "+fu.row.status+")"),
+          statusOptions.filter(st=>st!==fu.row.status).map(st=>h("option",{key:st,value:st},st))),
+        closes
+          ? h("div",{style:{fontSize:11,color:colors.muted,marginBottom:10}},fu.stage+" closes the quote, so no next follow-up is needed. "+(fu.stage==="Won"?"The PO box opens next.":"The reason box opens next."))
+          : h(React.Fragment,null, lab("Next follow-up","Next follow-up"),
+              h("input",{type:"date",value:fu.next,min:fu.date||undefined,onChange:e=>set("next",e.target.value),style:box("Next follow-up")})),
+        lab("Note — what was discussed","Note"),
+        h("textarea",{rows:3,value:fu.note,onChange:e=>set("note",e.target.value),style:box("Note",{resize:"vertical"})}),
+        miss.length>0 && h("div",{style:{fontSize:11.5,color:"#a3312a",margin:"2px 0 10px"}},"Still missing: "+miss.join(", ")+"."),
+        h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:4}},
+          h("button",{onClick:saveFollowup,disabled:fuBusy,style:{...btnPrimary,opacity:fuBusy?0.6:1}},fuBusy?"Saving…":"Save"),
+          h("button",{onClick:closeFollowup,disabled:fuBusy,style:btnSecondary},"Close"))
+      ));
+  })(),
   authGate && h(AuthCodeGate,{ requiredType:authGate.requiredType, user, onClose:()=>setAuthGate(null), onAuthorized:authGate.action }),
   outcomeTarget && h(WonLostOutcomeModal,{
     referenceNumber:outcomeTarget.referenceNumber, newStatus:outcomeTarget.newStatus, user,
@@ -33280,11 +33488,15 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
     onDone:async(newStatus)=>{
       const p = pendingReportNoteRef.current; pendingReportNoteRef.current = null;
       if(p && p.ref===outcomeTarget.referenceNumber){
-        await logStageMoveFollowup({ referenceNumber:p.ref, customerName:p.customer, stage:newStatus||outcomeTarget.newStatus, date:p.date, note:p.note, nextFollowup:null, username:user.username, where:"Quotes Report" });
+        const lg = await logStageMoveFollowup({ referenceNumber:p.ref, customerName:p.customer, stage:newStatus||outcomeTarget.newStatus, date:p.date, note:p.note, nextFollowup:null, username:user.username, where:"Quotes Report", mode:p.mode });
+        if(lg && lg.error) alert("The stage was changed, but the follow-up entry could not be saved:\n\n"+(lg.error.message||lg.error));
       }
       setOutcomeTarget(null); load();
     },
-    onCancel:()=>{ pendingReportNoteRef.current = null; setOutcomeTarget(null); }
+    // 2 Oct (114) — cancelling the reason box returns to the follow-up,
+    // with everything typed still there, rather than losing it.
+    onCancel:()=>{ const p = pendingReportNoteRef.current; pendingReportNoteRef.current = null; setOutcomeTarget(null);
+      if(p && p.form){ setFu({ ...p.form, stage:"" }); setFuTried(true); } }
   })
   );
 }
@@ -33304,7 +33516,17 @@ function FollowupHistoryScreen({ scope, value, user, onBack }){
       let q = sb.from("activity_log_tbl").select("*").order("created_at",{ascending:false});
       q = scope==="customer" ? q.eq("company_name",value) : q.eq("chase_reference",value);
       const { data } = await q;
-      setRows(data||[]);
+      // 2 Oct (114) — a legacy quote's history starts from the note that
+      // came with the import. It is shown as the first (oldest) entry,
+      // marked Imported; every follow-up logged since builds on it.
+      let lq = sb.from("legacy_quotes_tbl").select("reference_number,reference_date,customer_name,followup_note");
+      lq = scope==="customer" ? lq.eq("customer_name",value) : lq.eq("reference_number",value);
+      const { data: legacy } = await lq;
+      const imported = (legacy||[]).filter(l=>l.followup_note && String(l.followup_note).trim()).map(l=>({
+        id:"imported-"+l.reference_number, _imported:true, activity_date:l.reference_date||"", activity_type:"Imported",
+        chase_what:"Offer", chase_reference:l.reference_number, discussed_what:"Note brought in with legacy quote "+l.reference_number,
+        outcome:"", notes:l.followup_note, logged_by:"Import" }));
+      setRows((data||[]).concat(imported));
     } finally { setLoading(false); }
   },[scope,value]);
   useEffect(()=>{ load(); },[load]);
@@ -33329,18 +33551,19 @@ function FollowupHistoryScreen({ scope, value, user, onBack }){
     h("div",{style:{overflowX:"auto"}},
       h("table",{style:{borderCollapse:"collapse",width:"100%",fontSize:12.5,background:"#fff",border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden"}},
         h("thead",null,h("tr",{style:{background:colors.bg,textAlign:"left"}},
-          ["Date","Mode","Chase What","Discussed What","Outcome","Notes","Logged by",""].map(c=>
+          ["Date","Mode","Chase What","Discussed What","Stage","Notes","Logged by",""].map(c=>
             h("th",{key:c,style:{padding:"7px 9px",borderBottom:"2px solid "+colors.dark,whiteSpace:"nowrap"}},c))
         )),
         h("tbody",null, rows.map(r=>h("tr",{key:r.id,style:{borderTop:"1px solid "+colors.border}},
-          h("td",{style:{padding:"6px 9px",whiteSpace:"nowrap"}},r.activity_date||"—"),
+          h("td",{style:{padding:"6px 9px",whiteSpace:"nowrap"}},fmtDMY(r.activity_date)||"—"),
           h("td",{style:{padding:"6px 9px"}},r.activity_type||"—"),
           h("td",{style:{padding:"6px 9px"}},r.chase_what||"—"),
           h("td",{style:{padding:"6px 9px",maxWidth:280}},r.discussed_what||"—"),
           h("td",{style:{padding:"6px 9px"}},r.outcome||"—"),
           h("td",{style:{padding:"6px 9px",maxWidth:220}},r.notes||"—"),
           h("td",{style:{padding:"6px 9px",color:colors.muted}},r.logged_by||"—"),
-          h("td",{style:{padding:"6px 9px"}},h("button",{onClick:()=>deleteRow(r),style:{...btnSmall,fontSize:10.5,padding:"3px 9px",color:"#a3312a",borderColor:"#a3312a"}},"Delete"))
+          h("td",{style:{padding:"6px 9px"}}, r._imported ? h("span",{style:{fontSize:10.5,color:colors.mutedLight}},"Imported") :
+            h("button",{onClick:()=>deleteRow(r),style:{...btnSmall,fontSize:10.5,padding:"3px 9px",color:"#a3312a",borderColor:"#a3312a"}},"Delete"))
         ))),
         rows.length===0 && h("tr",null,h("td",{colSpan:8,style:{padding:14,fontSize:12,color:colors.mutedLight}},"No follow-ups logged."))
       )
@@ -33778,7 +34001,7 @@ function CrmFunnelKanban({ user }){
   };
 
   const fmtInr = (n)=> "INR "+fmtR(n);
-  const fmtMoved = (c)=> c.status_changed_by ? ("Moved by "+c.status_changed_by+" on "+new Date(c.status_changed_at).toLocaleDateString()) : "Not moved yet";
+  const fmtMoved = (c)=> c.status_changed_by ? ("Moved by "+c.status_changed_by+" on "+fmtDMY(c.status_changed_at)) : "Not moved yet";
 
   const setF = (k,v)=> setFilters(f=>({...f,[k]:v}));
   const filteredCards = cards.filter(c=>{
@@ -33999,7 +34222,7 @@ function QuoteStatusReport(){
           h("td",{style:{padding:"7px 9px"}},r.item_sl_no),
           h("td",{style:{padding:"7px 9px"}},r.customer_name),
           h("td",{style:{padding:"7px 9px",color:colors.muted}},r.description),
-          h("td",{style:{padding:"7px 9px"}},r.quote_date),
+          h("td",{style:{padding:"7px 9px"}},fmtDMY(r.quote_date)),
           h("td",{style:{padding:"7px 9px",textAlign:"right"}},"INR "+fmtR(r.totalValue))
         )),
         rows.length===0 && h("tr",null,h("td",{colSpan:6,style:{padding:14,fontSize:12,color:colors.mutedLight}},"No Sl Nos at this stage.")),
@@ -34232,7 +34455,7 @@ function MissedEntriesReport({ user }){
           pageRows.map(r=>h("tr",{key:r.id,style:{borderTop:"1px solid #eceae0"}},
             h("td",{style:{padding:"7px 9px",fontWeight:600}},r.reference_number||r.company_name),
             h("td",{style:{padding:"7px 9px"}},r.activity_type),
-            h("td",{style:{padding:"7px 9px",color:colors.muted}},r.activity_date),
+            h("td",{style:{padding:"7px 9px",color:colors.muted}},fmtDMY(r.activity_date)),
             h("td",{style:{padding:"7px 9px",color:colors.muted}},(r.created_at||"").slice(0,10)),
             h("td",{style:{padding:"7px 9px",color:r.daysLate>0?"#854f0b":colors.text,fontWeight:700}},r.daysLate),
             h("td",{style:{padding:"7px 9px",color:colors.muted}},r.logged_by||"—")
@@ -34327,7 +34550,7 @@ function OverdueCallsReport(){
           pageRows.map(r=>h("tr",{key:r.id,style:{borderTop:"1px solid #eceae0"}},
             h("td",{style:{padding:"7px 9px",fontWeight:600}},r.company_name),
             h("td",{style:{padding:"7px 9px",color:colors.muted}},r.owner||"—"),
-            h("td",{style:{padding:"7px 9px",color:colors.muted}},r.next_followup_date),
+            h("td",{style:{padding:"7px 9px",color:colors.muted}},fmtDMY(r.next_followup_date)),
             h("td",{style:{padding:"7px 9px",color:colors.danger,fontWeight:700}},r.daysOverdue+" days"),
             h("td",{style:{padding:"7px 9px",color:colors.muted}},r.outcome||r.notes||"—")
           )),
@@ -35213,7 +35436,7 @@ function AbandonedQuotesCleanupScreen({ user, onChanged }){
             h("td",{style:{padding:"8px 4px"}},h("input",{type:"checkbox",checked:selected.has(r.reference_number),onChange:()=>toggleOne(r.reference_number)})),
             h("td",{style:{padding:"8px 4px",fontWeight:600}},r.reference_number),
             h("td",{style:{padding:"8px 4px"}},r.customer_name||"—"),
-            h("td",{style:{padding:"8px 4px",color:"#8a8577"}},(r.abandoned_by||"unknown")+", "+(r.abandoned_at?new Date(r.abandoned_at).toLocaleDateString():"—")),
+            h("td",{style:{padding:"8px 4px",color:"#8a8577"}},(r.abandoned_by||"unknown")+", "+(r.abandoned_at?fmtDMY(r.abandoned_at):"—")),
             h("td",{style:{padding:"8px 4px",textAlign:"right",display:"flex",gap:6,justifyContent:"flex-end"}},
               h("button",{onClick:()=>doClearFlagOne(r.reference_number),disabled:busy,style:{fontSize:11.5,padding:"5px 10px",border:"1px solid #0f6e3f",color:"#0f6e3f",background:"#fff",borderRadius:5,cursor:busy?"default":"pointer"}},"Clear flag"),
               h("button",{onClick:()=>gateAndDeleteOne(r.reference_number),disabled:busy,style:{fontSize:11.5,padding:"5px 10px",border:"1px solid #a3312a",color:"#a3312a",background:"#fff",borderRadius:5,cursor:busy?"default":"pointer"}},"Delete")
@@ -35438,7 +35661,7 @@ function DataBackupScreen({ user }){
   return h("div",{style:{padding:"20px 24px",maxWidth:640,cursor:running?"wait":"default"}},
     h("div",{style:{fontWeight:700,fontSize:16,marginBottom:4}},"Data Backup"),
     h("div",{style:{fontSize:11.5,color:colors.mutedLight,marginBottom:14,lineHeight:1.6}},"Downloads every table's current data as one Excel file, one sheet per table. Nothing scheduled — click whenever you want a snapshot. This is a data-only snapshot, not a restore point — see the note below before relying on it."),
-    lastBackup && h("div",{style:{fontSize:11,color:colors.muted,marginBottom:14}},"Last backup: "+new Date(lastBackup.performed_at).toLocaleString()+" by "+lastBackup.performed_by),
+    lastBackup && h("div",{style:{fontSize:11,color:colors.muted,marginBottom:14}},"Last backup: "+fmtDMYTime(lastBackup.performed_at)+" by "+lastBackup.performed_by),
     h("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:14,fontSize:11.5,color:colors.muted}},
       h("span",null,"Keep this many days of activity/login/calc history in each backup:"),
       h("input",{type:"number",min:1,value:backupDays,disabled:running,onChange:e=>setBackupDaysPersisted(Math.max(1,Number(e.target.value)||1)),style:{...inputStyle,width:70,padding:"4px 7px",fontSize:12}}),
@@ -35529,7 +35752,7 @@ function DeletionCodesScreen({ user }){
         h("tbody",null,codes.map(c=>{ const st=statusOf(c); return h("tr",{key:c.id,style:{borderTop:"1px solid #f0efe8"}},
           h("td",{style:{padding:"6px 10px",fontFamily:"monospace"}},c.code),
           h("td",{style:{padding:"6px 10px"}},c.generated_by),
-          h("td",{style:{padding:"6px 10px",color:colors.muted}},new Date(c.generated_at).toLocaleString()),
+          h("td",{style:{padding:"6px 10px",color:colors.muted}},fmtDMYTime(c.generated_at)),
           h("td",{style:{padding:"6px 10px",color:st.color,fontWeight:600}},st.label),
           h("td",{style:{padding:"6px 10px",color:colors.muted}},c.used_by||"—")
         );}))
@@ -35974,7 +36197,7 @@ function LoginHistoryViewer() {
         h("tbody",null,filtered.map(r=>h("tr",{key:r.id,style:{borderBottom:"1px solid #eceae0",background:r.status==="failed"?"#fdecea":"transparent"}},
           h("td",{style:{padding:"8px 10px",fontWeight:600}},r.username),
           h("td",{style:{padding:"8px 10px",color:r.status==="failed"?colors.danger:"#2d7a4f",fontWeight:600}},r.status),
-          h("td",{style:{padding:"8px 10px"}},new Date(r.logged_in_at).toLocaleString("en-IN")),
+          h("td",{style:{padding:"8px 10px"}},fmtDMYTime(r.logged_in_at)),
           h("td",{style:{padding:"8px 10px",fontSize:11,color:colors.muted,maxWidth:300,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},r.user_agent||"")
         )))
       )
@@ -36041,7 +36264,7 @@ function QuoteHistoryPanel({ referenceNumber, onClose }){
           h("th",{style:{padding:"7px 9px",fontSize:10.5}},"Details")
         )),
         h("tbody",null,rows.map((r,i)=>h("tr",{key:i,style:{borderTop:"1px solid #eceae0"}},
-          h("td",{style:{padding:"7px 9px",whiteSpace:"nowrap",verticalAlign:"top"}},new Date(r.performed_at).toLocaleString()),
+          h("td",{style:{padding:"7px 9px",whiteSpace:"nowrap",verticalAlign:"top"}},fmtDMYTime(r.performed_at)),
           h("td",{style:{padding:"7px 9px",verticalAlign:"top"}},h("span",{style:{fontSize:10.5,fontWeight:600,padding:"2px 7px",borderRadius:8,background:r.action==="EXPORT"?"#e1f5ee":r.action==="SAVE"||r.action==="INSERT"?"#eaf3fc":r.action==="DELETE"?"#fdecea":"#faf6ea",color:r.action==="EXPORT"?"#085041":r.action==="SAVE"||r.action==="INSERT"?"#0b4c8c":r.action==="DELETE"?"#a3312a":"#8a6d1f"}},r.action)),
           h("td",{style:{padding:"7px 9px",verticalAlign:"top",fontWeight:600}},r.performed_by||"—"),
           h("td",{style:{padding:"7px 9px",verticalAlign:"top",color:colors.muted}},r.record_summary||"—")
@@ -36088,7 +36311,7 @@ function AuditLogViewer() {
           h("td",{style:{padding:"8px 10px"}},r.table_name),
           h("td",{style:{padding:"8px 10px",maxWidth:320,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},r.record_summary||r.record_id||""),
           h("td",{style:{padding:"8px 10px",fontWeight:600}},r.performed_by),
-          h("td",{style:{padding:"8px 10px",fontSize:11,color:colors.muted}},new Date(r.performed_at).toLocaleString("en-IN"))
+          h("td",{style:{padding:"8px 10px",fontSize:11,color:colors.muted}},fmtDMYTime(r.performed_at))
         )))
       )
     )
@@ -36618,7 +36841,7 @@ function CalcHistoryViewer({ user }) {
           h("td",{style:{padding:"8px 10px",textAlign:"right"}},r.results?.t_req_disp||r.results?.t_req),
           h("td",{style:{padding:"8px 10px",textAlign:"right",fontWeight:700}},r.results?.t_min_disp||r.results?.t_min),
           h("td",{style:{padding:"8px 10px",textAlign:"right"}},r.results?.MAWP_disp||r.results?.MAWP),
-          h("td",{style:{padding:"8px 10px",fontSize:11,color:colors.muted}},new Date(r.performed_at).toLocaleDateString("en-IN"))
+          h("td",{style:{padding:"8px 10px",fontSize:11,color:colors.muted}},fmtDMY(r.performed_at))
         )))
       )
     )
@@ -37168,7 +37391,7 @@ function BoltingCalcHistoryViewer({ user }){
         h("div",null,r.flange_label),
         h("div",null,r.bolt_type==="stud"?"Stud":"Hex bolt"),
         h("div",null,r.bolt_size+" x "+r.bolt_length+"mm"),
-        h("div",{style:{color:colors.muted}},new Date(r.created_at).toLocaleDateString("en-IN",{day:"2-digit",month:"short"})),
+        h("div",{style:{color:colors.muted}},fmtDMY(r.created_at)),
         h("div",{style:{display:"flex",gap:10,justifyContent:"flex-end"}},
           h("i",{className:"ti ti-file-type-pdf",onClick:()=>exportRowPDF(r),style:{cursor:"pointer",color:colors.muted,fontSize:15},title:"Export PDF"}),
           h("i",{className:"ti ti-trash",onClick:()=>del(r.id),style:{cursor:"pointer",color:"#b8472f",fontSize:15},title:"Delete"})
@@ -37419,7 +37642,7 @@ function IssueTracker({ user }){
             h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:4}},"History"),
             (history||[]).map(hh=>h("div",{key:hh.id,style:{fontSize:11.5,color:colors.muted,padding:"2px 0"}},
               (hh.from_status?hh.from_status+" \u2192 ":"")+hh.to_status+
-              " \u00b7 "+(hh.changed_by||"")+" \u00b7 "+(hh.changed_at?new Date(hh.changed_at).toLocaleString():"")+
+              " \u00b7 "+(hh.changed_by||"")+" \u00b7 "+(hh.changed_at?fmtDMYTime(hh.changed_at):"")+
               (hh.note?(" \u2014 "+hh.note):""))),
             isSuper ? h("div",{style:{marginTop:10,display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}},
               h("input",{value:note,onChange:e=>setNote(e.target.value),placeholder:"Note (optional)",
@@ -38482,7 +38705,7 @@ async function splitNewVsAddedQuotes(estRows, rangeStart, rangeEnd){
 }
 
 const timesheetRangeLabel = (from,to)=>{
-  const fmt = d=>new Date(d+"T12:00:00").toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"});
+  const fmt = d=>fmtDMY(d+"T12:00:00");
   return from===to ? fmt(from) : "From "+fmt(from)+" to "+fmt(to);
 };
 
@@ -39028,7 +39251,7 @@ function MaterialRatesReport({ user }){
   const exportExcel = async()=>{
     const exportRows = await fetchExportRows();
     const headerRow = ["Material spec","Grade","Shape","Current rate","UOM","Days since update","Last updated","Created by"];
-    const dataRows = exportRows.map(r=>[r.material_spec,r.material_grade,r.material_shape,r2(r.rate),r.uom,r.daysOld,r._date.toLocaleDateString()+(r._estimated?" (estimated)":""),r.created_by||"—"]);
+    const dataRows = exportRows.map(r=>[r.material_spec,r.material_grade,r.material_shape,r2(r.rate),r.uom,r.daysOld,fmtDMY(r._date)+(r._estimated?" (estimated)":""),r.created_by||"—"]);
     const ws = XLSX.utils.aoa_to_sheet([headerRow,...dataRows]);
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Material rates");
     XLSX.writeFile(wb, "material_rates_"+view+".xlsx");
@@ -39037,7 +39260,7 @@ function MaterialRatesReport({ user }){
     const exportRows = await fetchExportRows();
     generatePDF({ title:"Material rates — "+view, refNumber:shapeSel||specSel||gradeSel?("Shape: "+(shapeSel||"any")+"  Spec: "+(specSel||"any")+"  Grade: "+(gradeSel||"any")):"", description:"", createdBy:user.username, createdAt:Date.now(),
       headers:["Material spec","Grade","Shape","Rate","UOM","Days old","Last updated","Created by"],
-      rows:exportRows.map(r=>[r.material_spec,r.material_grade,r.material_shape,fmtR(r.rate),r.uom,String(r.daysOld),r._date.toLocaleDateString()+(r._estimated?" (est.)":""),r.created_by||"—"]),
+      rows:exportRows.map(r=>[r.material_spec,r.material_grade,r.material_shape,fmtR(r.rate),r.uom,String(r.daysOld),fmtDMY(r._date)+(r._estimated?" (est.)":""),r.created_by||"—"]),
       filename:"material_rates_"+view+".pdf" });
   };
 
@@ -39086,12 +39309,12 @@ function MaterialRatesReport({ user }){
             h("td",{style:{padding:"6px 9px"}},r.uom),
             h("td",{style:{padding:"6px 9px",color:r._date.getTime()<cutoff?"#b8472f":colors.muted,fontWeight:r._date.getTime()<cutoff?600:400}},r.daysOld),
             h("td",{style:{padding:"6px 9px",color:colors.muted}},
-              r._date.toLocaleDateString(),
+              fmtDMY(r._date),
               r._estimated && h("div",{style:{fontSize:9.5,color:"#c9a04a",fontStyle:"italic"}},"estimated — no original date on record")
             ),
             h("td",{style:{padding:"6px 9px",color:r.created_by?colors.text:colors.mutedLight}},r.created_by||"—"),
             h("td",{style:{padding:"6px 9px"}},h("input",{value:(editing[r.id]&&editing[r.id].newRate)||"",onChange:e=>setEditing(ed=>({...ed,[r.id]:{newRate:e.target.value}})),placeholder:"New rate",style:{...inputStyle,width:100,padding:"5px 7px",fontSize:12}})),
-            h("td",{style:{padding:"6px 9px",color:colors.muted,fontSize:11}}, editing[r.id]&&editing[r.id].newRate ? new Date().toLocaleDateString() : "—"),
+            h("td",{style:{padding:"6px 9px",color:colors.muted,fontSize:11}}, editing[r.id]&&editing[r.id].newRate ? fmtDMY(new Date()) : "—"),
             h("td",{style:{padding:"6px 9px"}}, editing[r.id]&&editing[r.id].newRate ? h("button",{onClick:()=>applyNewRate(r),style:{...btnSmall,color:"#085041"}},"Save") : null)
           ))
         )
@@ -39185,7 +39408,7 @@ function MastersAuditReport({ user }){
 
   const exportExcel = ()=>{
     const headerRow = ["Table","Record","Summary","By","When","Action"];
-    const dataRows = filtered.map(r=>[r.table_name,r.record_id,r.record_summary,r.performed_by,new Date(r.created_at).toLocaleString(),r.action]);
+    const dataRows = filtered.map(r=>[r.table_name,r.record_id,r.record_summary,r.performed_by,fmtDMYTime(r.created_at),r.action]);
     const ws = XLSX.utils.aoa_to_sheet([headerRow,...dataRows]);
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, mode==="created"?"Masters created":"Masters deleted");
     XLSX.writeFile(wb, "masters_audit_"+mode+".xlsx");
@@ -39193,7 +39416,7 @@ function MastersAuditReport({ user }){
   const exportPDF = ()=>{
     generatePDF({ title:"Masters audit — "+(mode==="created"?"built":"deleted"), refNumber:"", description:"", createdBy:user.username, createdAt:Date.now(),
       headers:["Table","Record","Summary","By","When"],
-      rows:filtered.map(r=>[r.table_name,String(r.record_id),r.record_summary||"",r.performed_by,new Date(r.created_at).toLocaleString()]),
+      rows:filtered.map(r=>[r.table_name,String(r.record_id),r.record_summary||"",r.performed_by,fmtDMYTime(r.created_at)]),
       filename:"masters_audit_"+mode+".pdf" });
   };
 
@@ -39217,7 +39440,7 @@ function MastersAuditReport({ user }){
             h("td",{style:{padding:"6px 9px",color:colors.muted}},r.record_id),
             h("td",{style:{padding:"6px 9px"}},r.record_summary),
             h("td",{style:{padding:"6px 9px"}},r.performed_by),
-            h("td",{style:{padding:"6px 9px",color:colors.muted}},new Date(r.created_at).toLocaleString())
+            h("td",{style:{padding:"6px 9px",color:colors.muted}},fmtDMYTime(r.created_at))
           ))
         )
       )
@@ -39271,7 +39494,7 @@ function OverdueCallsPrompt({ user, onDone }){
           const overdue = a.next_followup_date < today;
           return h("div",{key:a.id,style:{borderLeft:"3px solid "+(isFollowUp?colors.dark:colors.mutedLight),border:"1px solid "+colors.border,borderRadius:"0 6px 6px 0",padding:"8px 10px",background:isFollowUp?"#faf9f4":"#fff"}},
             h("div",{style:{fontWeight:700,fontSize:12.5}},a.company_name),
-            h("div",{style:{fontSize:11,color:overdue?colors.danger:colors.muted,marginTop:2}},(overdue?"Overdue — was due ":"Due ")+a.next_followup_date+(a.notes?" — "+a.notes:""))
+            h("div",{style:{fontSize:11,color:overdue?colors.danger:colors.muted,marginTop:2}},(overdue?"Overdue — was due ":"Due ")+fmtDMY(a.next_followup_date)+(a.notes?" — "+a.notes:""))
           );
         })
       ),
@@ -40252,7 +40475,7 @@ function PoRegisterScreen({ user }){
           return h("tr",{key:p.id,onClick:()=>openPo(p),style:{cursor:"pointer",borderTop:"1px solid "+colors.border}},
             h("td",{style:{padding:"7px 8px",color:colors.accent,fontSize:13,verticalAlign:"top"}},p.po_no),
             h("td",{style:{padding:"7px 8px",fontSize:13,verticalAlign:"top"}},p.vendor_name),
-            h("td",{style:{padding:"7px 8px",fontSize:13,verticalAlign:"top"}},p.po_date),
+            h("td",{style:{padding:"7px 8px",fontSize:13,verticalAlign:"top"}},fmtDMY(p.po_date)),
             h("td",{style:{padding:"7px 8px",fontSize:13}},poItems.map((it,i)=>h("div",{key:i},it.description||"—"))),
             h("td",{style:{padding:"7px 8px",fontSize:13,textAlign:"right"}},poItems.map((it,i)=>h("div",{key:i},it.value.toFixed(2)))),
             h("td",{style:{padding:"7px 8px",fontSize:13,textAlign:"right",verticalAlign:"top",fontWeight:600}},poTotal.toFixed(2)),
@@ -40655,7 +40878,7 @@ function MaterialInwardScreen({ user, sessionCompany }){
           const c = computeGrnDisplayStatus(g,grnsItemsMap[g.grn_no]||[],relaxRackBin);
           return h("tr",{key:g.id,onClick:()=>openGrn(g),style:{cursor:"pointer",borderTop:"1px solid "+colors.border}},
             h("td",{style:{padding:"7px 8px",color:colors.accent,fontSize:13}},g.grn_no),
-            h("td",{style:{padding:"7px 8px",fontSize:13}},g.grn_date),
+            h("td",{style:{padding:"7px 8px",fontSize:13}},fmtDMY(g.grn_date)),
             h("td",{style:{padding:"7px 8px",fontSize:13}},g.location),
             h("td",{style:{padding:"7px 8px",fontSize:13}},g.vehicle_no),
             h("td",{style:{padding:"7px 8px",fontSize:13}},g.vendor_name),
@@ -40827,7 +41050,7 @@ function PoRegisterReport(){
         const rowTotal = r.items.reduce((s,it)=>s+it.value,0);
         return h("tr",{key:r.po_no,style:{borderTop:"1px solid "+colors.border}},
           h("td",{style:{padding:"6px 8px",color:colors.accent,fontSize:13,verticalAlign:"top"}},r.po_no),
-          h("td",{style:{padding:"6px 8px",fontSize:13,verticalAlign:"top"}},r.po_date),
+          h("td",{style:{padding:"6px 8px",fontSize:13,verticalAlign:"top"}},fmtDMY(r.po_date)),
           h("td",{style:{padding:"6px 8px",fontSize:13}}, r.items.map((it,i)=>h("div",{key:i},it.description||"—"))),
           h("td",{style:{padding:"6px 8px",fontSize:13,textAlign:"right"}}, r.items.map((it,i)=>h("div",{key:i},it.value.toFixed(2)))),
           h("td",{style:{padding:"6px 8px",fontSize:13,textAlign:"right",verticalAlign:"top",fontWeight:600}},rowTotal.toFixed(2))
@@ -41056,7 +41279,7 @@ function VendorsScreen({ user }){
             h("td",{style:{padding:"5px 6px",fontSize:12.5}},p.no), h("td",{style:{padding:"5px 6px",fontSize:12.5}},p.wef),
             h("td",{style:{padding:"5px 6px",fontSize:12.5}},Array.from(p.uplift).map(u=>u?"+"+u+"%":"none").join(", ")),
             h("td",{style:{padding:"5px 6px",fontSize:12.5,textAlign:"right"}},p.count.toLocaleString("en-IN")),
-            h("td",{style:{padding:"5px 6px",fontSize:12.5}},p.last?new Date(p.last).toLocaleDateString("en-GB"):"\u2014")))))),
+            h("td",{style:{padding:"5px 6px",fontSize:12.5}},p.last?fmtDMY(p.last):"\u2014")))))),
       (!creatingNew && vtab==="qt") && h("div",{style:{background:colors.panel,border:"1px solid "+colors.border,borderRadius:8,padding:14}},
         h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:8,textTransform:"uppercase",letterSpacing:0.4}},"Quote lines whose cost comes from this vendor"),
         extra.quotes===null ? h("div",{style:{fontSize:12,color:colors.mutedLight}},"Loading\u2026") : !extra.quotes.length ? h("div",{style:{fontSize:12.5,color:colors.mutedLight}},"None yet (lines saved from build 97 on are counted).") :
@@ -41073,7 +41296,7 @@ function VendorsScreen({ user }){
         h("table",{style:{borderCollapse:"collapse",width:"100%"}},
           h("thead",null,h("tr",null,["P.O. No","Date","Status"].map(l=>h("th",{key:l,style:{textAlign:"left",padding:"5px 6px",color:colors.muted,fontSize:11.5}},l)))),
           h("tbody",null,extra.pos.map(p=>h("tr",{key:p.po_no,style:{borderTop:"1px solid "+colors.border}},
-            h("td",{style:{padding:"5px 6px",fontSize:12.5}},p.po_no), h("td",{style:{padding:"5px 6px",fontSize:12.5}},p.po_date?new Date(p.po_date).toLocaleDateString("en-GB"):"\u2014"),
+            h("td",{style:{padding:"5px 6px",fontSize:12.5}},p.po_no), h("td",{style:{padding:"5px 6px",fontSize:12.5}},p.po_date?fmtDMY(p.po_date):"\u2014"),
             h("td",{style:{padding:"5px 6px",fontSize:12.5}},p.status)))))),
       (!creatingNew && vtab==="adr") ? h("div",{style:{background:colors.panel,border:"1px solid "+colors.border,borderRadius:8,padding:14}},
         h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:8,textTransform:"uppercase",letterSpacing:0.4}},"Addresses (multiple, each with own GST)"),
@@ -41128,7 +41351,7 @@ function TagRegisterScreen({ user }){
     {label:"Spec", get:r=>r.spec},
     {label:"Grade", get:r=>r.grade},
     {label:"Basis", get:r=>r.tagging_basis},
-    {label:"Date", get:r=>new Date(r.created_at).toLocaleDateString()},
+    {label:"Date", get:r=>fmtDMY(r.created_at)},
   ];
 
   return h("div",{style:{padding:20}},
@@ -41147,7 +41370,7 @@ function TagRegisterScreen({ user }){
         h("p",{style:{margin:0}},h("span",{style:{color:colors.muted}},"Tag number: "),detail.tag.tag_number),
         h("p",{style:{margin:0}},h("span",{style:{color:colors.muted}},"Basis: "),detail.tag.tagging_basis),
         h("p",{style:{margin:0}},h("span",{style:{color:colors.muted}},"GRN: "),detail.tag.grn_no),
-        h("p",{style:{margin:0}},h("span",{style:{color:colors.muted}},"GRN date: "),detail.grn?detail.grn.grn_date:"—"),
+        h("p",{style:{margin:0}},h("span",{style:{color:colors.muted}},"GRN date: "),detail.grn?fmtDMY(detail.grn.grn_date):"—"),
         h("p",{style:{margin:0}},h("span",{style:{color:colors.muted}},"Vendor: "),detail.grn?detail.grn.vendor_name:"—"),
         h("p",{style:{margin:0}},h("span",{style:{color:colors.muted}},"P.O. no: "),detail.grn?detail.grn.po_no:"—"),
         h("p",{style:{margin:0}},h("span",{style:{color:colors.muted}},"Item: "),detail.tag.description),
@@ -41166,7 +41389,7 @@ function TagRegisterScreen({ user }){
         h("td",{style:{padding:"7px 8px",fontSize:13}},r.spec),
         h("td",{style:{padding:"7px 8px",fontSize:13}},r.grade),
         h("td",{style:{padding:"7px 8px",fontSize:13}},r.tagging_basis),
-        h("td",{style:{padding:"7px 8px",fontSize:13}},new Date(r.created_at).toLocaleDateString())
+        h("td",{style:{padding:"7px 8px",fontSize:13}},fmtDMY(r.created_at))
       )))
     ),
     h("div",{style:{display:"flex",gap:8,marginTop:10}},
@@ -41573,7 +41796,7 @@ function GrnStatusReport(){
       )),
       h("tbody",null,rows.map(r=>h("tr",{key:r.id,style:{borderTop:"1px solid "+colors.border}},
         h("td",{style:{padding:"5px 6px",fontSize:12.5,color:colors.accent}},r.grn_no),
-        h("td",{style:{padding:"5px 6px",fontSize:12.5}},r.grn_date),
+        h("td",{style:{padding:"5px 6px",fontSize:12.5}},fmtDMY(r.grn_date)),
         h("td",{style:{padding:"5px 6px",fontSize:12.5}},r.vendor_name),
         h("td",{style:{padding:"5px 6px",fontSize:12.5}},r.po_no),
         h("td",{style:{padding:"5px 6px",fontSize:12.5,color}},r.reason||"—")
