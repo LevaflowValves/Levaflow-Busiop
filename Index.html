@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-02T04:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-02T08:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -2140,7 +2140,7 @@ function MenuTabs({ user, active, onChange }) {
   }
   if(isAdmin) {
     groups.push({ label:"Rules", subgroups:[
-      { label:"Rules", tabs:[{key:"item_moc_rules",label:"Datasheet MOC"},{key:"description_master",label:"Description"},{key:"selection_questions",label:"Selection Questions"}] }
+      { label:"Rules", tabs:[{key:"item_moc_rules",label:"Datasheet MOC"},{key:"description_master",label:"Description"},{key:"selection_questions",label:"Selection Questions"},{key:"valve_extras",label:"Valve Extras"}] }
     ]});
     groups.push({ label:"Admin", subgroups:[
       { label:"Company", tabs:[{key:"company_master",label:"Company Master"},{key:"gst_structures",label:"GST Structures"},{key:"gst_variance_report",label:"GST Variance Report"},{key:"contract_number_setup",label:"Contract Numbering"},{key:"sale_order_status_tbl",label:"Sale Order Status"},{key:"doc_status_master",label:"Document Status Master"},...byKeys(["doc_category_tbl"]),{key:"data_quality_flags",label:"Data Quality Flags"},...(isSuperAdmin?[{key:"posts",label:"Posts"}]:[])] },
@@ -5569,7 +5569,7 @@ const PRICELIST_CODES = [
 const PRICELIST_MATERIAL_LABELS = ["Body","Bonnet","Cover","Ball","Disc","Wedge","Plate","Stem","Shaft","Trim","Seat","Seat & seal","Liner","Working parts","Hinge pin","Spring","Float","Gasket","Packing"];
 const plNorm = s => String(s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
 // A template/MOC label a vendor prints under a different name.
-const PRICELIST_LABEL_ALIASES = { wedge:["trim","disc"], disc:["trim","wedge","plate"], door:["disc","trim"], spindle:["stem","shaft"], mfgstandard:["designstandard"], flangestandard:["drilling"], seatring:["trim","seat"], seat:["seatseal","liner"], seatseal:["seat"], shaft:["stem"], stem:["shaft"], gasket:["bonnetgasket","bodygasket"], bonnetgasket:["gasket"], bodygasket:["gasket"], liner:["seat","seatseal"] };
+const PRICELIST_LABEL_ALIASES = { extendedstem:["stemextension"], stemextensionlength:["stemextension"], extensionstem:["stemextension"], antistatic:["antistaticdevice"], antistaticfeature:["antistaticdevice"], antistaticdesign:["antistaticdevice"], union:["unionends"], unionend:["unionends"], unionconnection:["unionends"], wedge:["trim","disc"], disc:["trim","wedge","plate"], door:["disc","trim"], spindle:["stem","shaft"], mfgstandard:["designstandard"], flangestandard:["drilling"], seatring:["trim","seat"], seat:["seatseal","liner"], seatseal:["seat"], shaft:["stem"], stem:["shaft"], gasket:["bonnetgasket","bodygasket"], bonnetgasket:["gasket"], bodygasket:["gasket"], liner:["seat","seatseal"] };
 function pricelistLookup(attrs, label){
   const a = attrs||{};
   const byNorm = {}; Object.keys(a).forEach(k=>{ if(String(a[k]||"").trim()) byNorm[plNorm(k)] = a[k]; });
@@ -5577,6 +5577,29 @@ function pricelistLookup(attrs, label){
   if(byNorm[n]) return String(byNorm[n]);
   for(const alt of (PRICELIST_LABEL_ALIASES[n]||[])) if(byNorm[alt]) return String(byNorm[alt]);
   return "";
+}
+// 2 Oct (115) — which datasheet fields a price-list line answered in the
+// valve questions (and its extras), and the value each gets.
+function datasheetSelectionLabels(line){
+  const mv = (line && line.material_values) || {};
+  const list = Array.isArray(mv.__from_selection) ? mv.__from_selection : Object.keys(mv.__answer_codes||{});
+  return new Set(list.filter(Boolean).map(plNorm));
+}
+function isSelectionLabel(set, label){
+  const n = plNorm(label);
+  return set.has(n) || (PRICELIST_LABEL_ALIASES[n]||[]).some(a=>set.has(a));
+}
+function datasheetSelectionValue(line, f){
+  const mv = (line && line.material_values) || {};
+  const v = pricelistLookup(mv, f.label);
+  if(!v) return "";
+  const codes = mv.__answer_codes||{};
+  const code = codes[Object.keys(codes).find(k=>plNorm(k)===plNorm(f.label))||""]||"";
+  if(f.options && f.options.length){
+    const hit = f.options.find(o=>plNorm(o)===plNorm(v)) || (code && f.options.find(o=>plNorm(o)===plNorm(code))) || f.options.find(o=>plNorm(o).includes(plNorm(v)) || plNorm(v).includes(plNorm(o)));
+    return hit || v;
+  }
+  return v;
 }
 function pricelistBuiltCode(r){
   return ["valve_type","construction","size","end_conn","rating","body","trim","seat","operator"].map(k=>String(r[k]||"").replace(/\s+/g,"").toUpperCase()).join("-");
@@ -5725,15 +5748,18 @@ function plOptionText(part, code){ const m = plMeaning(part, code); return part=
 // Question template + item wording + item families + vendor statuses, each
 // optional: a missing table just means "no questions" / "no status".
 async function loadValveFinderSetup(){
-  const out = { questions:[], labels:[], families:{}, vendors:new Map() };
+  const out = { questions:[], labels:[], families:{}, vendors:new Map(), extras:[] };
   const safe = async(p)=>{ try{ const { data, error } = await p; return error ? [] : (data||[]); } catch(e){ return []; } };
-  const [qs, ls, its, vs] = await Promise.all([
+  const [qs, ls, its, vs, exs, exr] = await Promise.all([
     safe(sb.from("selection_question_tbl").select("*").order("sort_order")),
     safe(sb.from("selection_item_label_tbl").select("*")),
     safe(sb.from("item_tbl").select("item,family")),
     safe(sb.from("vendor_tbl").select("*").eq("is_archived",false)),
+    safe(sb.from("pricelist_extra_tbl").select("*").eq("active",true).order("sort_order")),
+    safe(sb.from("pricelist_extra_rate_tbl").select("*")),
   ]);
   out.questions = qs; out.labels = ls;
+  out.extras = exs.map(e=>({...e, rates: exr.filter(r=>r.extra_key===e.extra_key)}));
   its.forEach(r=>{ if(r.item && r.family) out.families[normalizeItemName(r.item)] = r.family; });
   vs.forEach(v=>{ if(v.vendor_name) out.vendors.set(norm(v.vendor_name), v); });
   return out;
@@ -5755,6 +5781,75 @@ function valveFinderQuestions(setup, item, rowsOfItem){
 function valveFinderMatch(rows, ans, skipPart){
   return (rows||[]).filter(r=>Object.keys(ans||{}).every(p=>p===skipPart || !ans[p] || String(r[PL_PART_COL[p]])===String(ans[p])));
 }
+// ---- VALVE EXTRAS (2 Oct, build 115) ----------------------------------
+// Extended stem, anti-static device and union ends: add-ons to a price-list
+// model rather than models of their own. Which valves each applies to and
+// what it costs live in pricelist_extra_tbl / pricelist_extra_rate_tbl
+// (Rules › Valve Extras). basis: size_amount = fixed amount by size and stem
+// grade; pct = % of the valve cost; union = per union by size and body grade,
+// x per_valve_qty (both ends) plus fixing_pct % of the union cost.
+const NB_OF_INCH = {"1/4":8,"3/8":10,"1/2":15,"3/4":20,"1":25,"1-1/4":32,"1.25":32,"1-1/2":40,"1.5":40,"2":50,"2-1/2":65,"2.5":65,"3":80,"4":100,"5":125,"6":150,"8":200,"10":250,"12":300,"14":350,"16":400,"18":450,"20":500,"24":600};
+const NB_SET = new Set([8,10,15,20,25,32,40,50,65,80,100,125,150,200,250,300,350,400,450,500,600,700,750,800,900,1000,1200]);
+function sizeToNB(size){
+  const s = String(size||"").toUpperCase().replace(/\s+/g,"");
+  if(!s) return null;
+  let m = s.match(/^(?:DN)?(\d+)(?:NB|MM|DN)?$/);
+  if(m && (/NB|MM|DN/.test(s) || NB_SET.has(Number(m[1])) && Number(m[1])>24)) return Number(m[1]);
+  m = s.match(/(\d+)(?:NB|MM)/); if(m) return Number(m[1]);
+  const inch = s.replace(/(INCH|IN|"|'')$/,"").replace(/^(\d+)\s*(\d\/\d)$/,"$1-$2");
+  if(NB_OF_INCH[inch]) return NB_OF_INCH[inch];
+  m = s.match(/^(\d+)$/); if(m) return NB_OF_INCH[m[1]] || Number(m[1]);
+  return null;
+}
+function unionGradeOfBody(body){
+  const b = String(body||"").toUpperCase().replace(/[^A-Z0-9]/g,"");
+  if(/^(CF8M|CF3M|F316L?|SS316L?|A351CF8M)$/.test(b)) return "SS316";
+  if(/^(CF8|CF3|F304L?|SS304L?|SS|A351CF8)$/.test(b)) return "SS304";
+  if(/^(A105N?|WCB|WCC|LCB|LCC|CS|MS|A216WCB)$/.test(b)) return "CS";
+  if(/^(CI|DI|GM|BRZ|BRONZE|GUNMETAL|MI|GI)$/.test(b)) return "MI";
+  return null;
+}
+const UNION_GRADE_TEXT = { CS:"forged CS (A105)", SS304:"SS304", SS316:"SS316", MI:"malleable iron / GI" };
+function stemGradeOf(r){ return /316|CF8M|CF3M/i.test(String(r.trim||"")+" "+String(((r.attrs||{}).Stem)||"")) ? "316" : "STD"; }
+function extraRate(ex, grade, nb){ return (ex.rates||[]).find(x=>x.grade===grade && nb>=Number(x.size_from_nb) && nb<=Number(x.size_to_nb)) || null; }
+// Does this extra apply to this model, and what does it add?
+// Returns null when it doesn't apply; {amount:null, why} when it applies but
+// has no rate (shown greyed with the reason).
+function valveExtraFor(ex, r){
+  if(!ex || !r) return null;
+  if(ex.applies_items && !new RegExp(ex.applies_items,"i").test(String(r.item||""))) return null;
+  if(ex.applies_ends && !new RegExp(ex.applies_ends,"i").test(String(r.end_conn||""))) return null;
+  const nb = sizeToNB(r.size);
+  if(ex.max_size_nb && (nb==null || nb>Number(ex.max_size_nb))) return null;
+  const base = pricelistCost(r);
+  if(ex.basis==="pct"){ const pct = Number(ex.pct)||0; return { amount: Math.round(base*pct)/100, detail: pct+"% of the valve cost", dsValue: ex.datasheet_value||"Yes" }; }
+  if(nb==null) return { amount:null, why:"size "+r.size+" not understood" };
+  if(ex.basis==="size_amount"){
+    const g = stemGradeOf(r), rt = extraRate(ex, g, nb) || extraRate(ex, "STD", nb);
+    if(!rt) return { amount:null, why:"no rate for "+nb+"NB" };
+    return { amount:Number(rt.amount), detail: "\u20B9"+fmt2(Number(rt.amount))+" for "+nb+"NB, "+(g==="316"?"SS316":"SS304/410")+" stem", dsValue: ex.datasheet_value||"Yes" };
+  }
+  if(ex.basis==="union"){
+    const g = unionGradeOfBody(r.body);
+    if(!g) return { amount:null, why:"no union grade for a "+r.body+" body" };
+    const rt = extraRate(ex, g, nb);
+    if(!rt) return { amount:null, why:"no "+g+" union rate for "+nb+"NB" };
+    const qty = Number(ex.per_valve_qty)||1, each = Number(rt.amount), fix = Number(ex.fixing_pct)||0;
+    const amount = Math.round(each*qty*(1+fix/100)*100)/100;
+    return { amount, detail: qty+" \u00d7 \u20B9"+fmt2(each)+" "+UNION_GRADE_TEXT[g]+" union"+(fix?" + "+fix+"% fixing":""), dsValue: (ex.datasheet_value||"Union both ends")+", "+UNION_GRADE_TEXT[g] };
+  }
+  return null;
+}
+// Extras that apply to a model: [{ex, key, label, amount, detail, why, dsValue}]
+function valveExtrasForRow(setup, r){
+  return ((setup&&setup.extras)||[]).map(ex=>{ const v = valveExtraFor(ex, r); return v ? {ex, key:ex.extra_key, label:ex.label, ...v} : null; }).filter(Boolean);
+}
+// The ticked extras that apply and are priced, and their total.
+function pickedValveExtras(setup, r, opts){
+  const list = valveExtrasForRow(setup, r).filter(x=>opts && opts[x.key] && x.amount!=null);
+  return { list, total: Math.round(list.reduce((a,x)=>a+x.amount,0)*100)/100 };
+}
+
 function vendorFlag(setup, vendorName){
   const v = setup && setup.vendors ? setup.vendors.get(norm(vendorName)) : null;
   if(!v) return { status:"Not on Vendors master", tone:"amber", note:"Add this vendor on Inventory › Vendors.", v:null };
@@ -5774,7 +5869,7 @@ function vendorPill(flag){ const t = VF_TONE[flag.tone]||VF_TONE.amber; return h
 // Every list offers only answers that exist given the other answers, with
 // a model count. Exactly one model left (with the required ones answered)
 // closes the form and opens that model.
-function ValveFinderForm({ setup, allRows, item, answers, onPickItem, onAnswers, onDone, onSkip, onClose }){
+function ValveFinderForm({ setup, allRows, item, answers, opts, onOpts, onPickItem, onAnswers, onDone, onSkip, onClose }){
   const items = useMemo(()=>Array.from(new Set((allRows||[]).map(r=>r.item))).sort(),[allRows]);
   const rowsOfItem = useMemo(()=> item ? (allRows||[]).filter(r=>norm(r.item)===norm(item)) : [], [allRows,item]);
   const qs = useMemo(()=> item ? valveFinderQuestions(setup, item, rowsOfItem) : [], [setup,item,rowsOfItem]);
@@ -5843,7 +5938,23 @@ function ValveFinderForm({ setup, allRows, item, answers, onPickItem, onAnswers,
       fixed.length>0 && h("div",{style:{fontSize:12,color:colors.muted,background:"#f6f5f0",borderRadius:6,padding:"7px 10px"}},
         "Not asked for "+item+" (only one kind in the price list): ", fixed.map((q,i)=>h("span",{key:q.part},i?" · ":"",h("b",null,q.label)," "+plMeaning(q.part,q.only)))),
       !m.length && h("div",{style:{border:"1px solid #f0d58a",background:"#fff6dc",color:"#8a5a10",borderRadius:6,padding:"8px 12px",fontSize:12.5}},
-        h("b",null,"Nothing matches all of these. "),"Closest: change one answer —",h("div",null,tips.length?tips:"clear an answer to see more."))
+        h("b",null,"Nothing matches all of these. "),"Closest: change one answer —",h("div",null,tips.length?tips:"clear an answer to see more.")),
+      // 2 Oct (115) — Options: the extras that apply to at least one model
+      // still in the running. The exact amount shows on the model's panel.
+      onOpts && (()=>{
+        const avail = ((setup&&setup.extras)||[]).map(ex=>{
+          const hits = m.map(r=>valveExtraFor(ex,r)).filter(v=>v && v.amount!=null);
+          if(!hits.length) return null;
+          const lo = Math.min(...hits.map(v=>v.amount)), hi = Math.max(...hits.map(v=>v.amount));
+          return { ex, text: ex.basis==="pct" ? (Number(ex.pct)||0)+"% of the valve cost" : (lo===hi ? "\u20B9"+fmt2(lo) : "\u20B9"+fmt2(lo)+" \u2013 \u20B9"+fmt2(hi)+" depending on size and grade") };
+        }).filter(Boolean);
+        if(!avail.length) return null;
+        return h("div",{style:{borderTop:"1px solid "+colors.border,paddingTop:10,display:"grid",gridTemplateColumns:"minmax(120px,190px) 1fr",gap:10,alignItems:"start"}},
+          h("div",{style:{fontSize:13}},"Options"),
+          h("div",{style:{display:"flex",flexDirection:"column",gap:4}}, avail.map(a=>h("label",{key:a.ex.extra_key,style:{display:"flex",gap:8,alignItems:"center",fontSize:13,cursor:"pointer"}},
+            h("input",{type:"checkbox",checked:!!(opts&&opts[a.ex.extra_key]),onChange:e=>{ const on=e.target.checked; onOpts(o=>({...(o||{}),[a.ex.extra_key]:on})); }}),
+            h("span",null,a.ex.label),h("span",{style:{fontSize:11.5,color:colors.mutedLight}},a.text)))));
+      })()
     ),
     h(React.Fragment,null,
       h("button",{type:"button",onClick:()=>onPickItem(""),style:btnSecondary},"← Change item"),
@@ -6028,6 +6139,76 @@ function ValvePriceScreen({ user }){
       shown.length>limit && h("div",{style:{display:"flex",justifyContent:"center",paddingTop:10}},h("button",{onClick:()=>setLimit(l=>l+100),style:{...btnSecondary,fontSize:12}},"Show "+Math.min(100,shown.length-limit)+" more")),
       h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:8}},"View only. Click a row for its description and materials. Prices are kept on BOM › Price List.")
     )
+  );
+}
+
+// 2 Oct (115) — Rules › Valve Extras. The extras offered in the valve
+// questions (extended stem, anti-static device, union ends) and their rates.
+// Admin / Super Admin edit; everyone else sees the figures.
+function ValveExtrasScreen({ user }){
+  const isAdmin = user.role==="admin" || user.role==="super_admin";
+  const [extras,setExtras] = useState(null);
+  const [rates,setRates] = useState([]);
+  const [err,setErr] = useState("");
+  const [msg,setMsg] = useState("");
+  const load = async()=>{
+    const [{data:ex,error:e1},{data:rt,error:e2}] = await Promise.all([
+      sb.from("pricelist_extra_tbl").select("*").order("sort_order"),
+      sb.from("pricelist_extra_rate_tbl").select("*").order("extra_key").order("grade").order("size_from_nb")]);
+    if(e1||e2){ setErr("The extras tables are not in this database yet. Run the build 115 price list SQL for this company."); setExtras([]); return; }
+    setExtras(ex||[]); setRates(rt||[]);
+  };
+  useEffect(()=>{ load(); },[]);
+  const saveExtra = async(ex, patch)=>{
+    const { error } = await sb.from("pricelist_extra_tbl").update({...patch, updated_at:new Date().toISOString(), updated_by:user.username}).eq("extra_key",ex.extra_key);
+    if(error){ alert(saveFailedText(ex.label, error)); return; }
+    await logAudit("UPDATE","pricelist_extra_tbl",ex.extra_key,"Valve extra "+ex.label+" changed: "+JSON.stringify(patch),user.username,ex,patch);
+    setMsg("Saved."); load();
+  };
+  const saveRate = async(r, v)=>{
+    const n = Number(String(v).replace(/[^0-9.]/g,""));
+    if(!(n>=0) || String(v).trim()===""){ alert("Enter an amount."); return; }
+    if(n===Number(r.amount)) return;
+    const { error } = await sb.from("pricelist_extra_rate_tbl").update({amount:n}).eq("id",r.id);
+    if(error){ alert(saveFailedText("The rate", error)); return; }
+    await logAudit("UPDATE","pricelist_extra_rate_tbl",String(r.id),"Valve extra rate "+r.extra_key+" "+r.grade+" "+r.size_from_nb+"-"+r.size_to_nb+"NB: \u20B9"+r.amount+" \u2192 \u20B9"+n,user.username,{amount:r.amount},{amount:n});
+    setMsg("Saved."); load();
+  };
+  const GRADE_NAME = { STD:"SS304 / SS410 stem", "316":"SS316 stem", CS:"Forged CS (A105)", SS304:"SS304", SS316:"SS316", MI:"Malleable iron / GI" };
+  const cell = {padding:"6px 8px",borderTop:"1px solid #f0eee5",fontSize:12.5};
+  if(extras===null) return h("div",{style:{padding:24,color:colors.mutedLight}},"Loading\u2026");
+  return h("div",{style:{padding:"20px 24px",maxWidth:980}},
+    h("h2",{style:{margin:0,fontSize:18}},"Valve Extras"),
+    h("div",{style:{fontSize:12,color:colors.muted,margin:"4px 0 14px"}},"Offered under Options in the valve questions and on a price-list line. Amounts are in rupees per valve unless said; a change applies to lines added from now on."+(isAdmin?"":" Only an Admin can change them.")),
+    err && h("div",{style:{color:colors.danger,fontSize:13,marginBottom:10}},err),
+    msg && h("div",{style:{color:"#0f6e3f",fontSize:12,marginBottom:8}},msg),
+    extras.map(ex=>{
+      const rs = rates.filter(r=>r.extra_key===ex.extra_key);
+      const GORDER = ["STD","316","CS","SS304","SS316","MI"];
+      const grades = Array.from(new Set(rs.map(r=>r.grade))).sort((a,b)=>(GORDER.indexOf(a)<0?99:GORDER.indexOf(a))-(GORDER.indexOf(b)<0?99:GORDER.indexOf(b)));
+      const bands = Array.from(new Map(rs.map(r=>[r.size_from_nb+"-"+r.size_to_nb,[r.size_from_nb,r.size_to_nb]])).values()).sort((a,b)=>a[0]-b[0]);
+      return h("div",{key:ex.extra_key,style:{border:"1px solid "+colors.border,borderRadius:8,padding:"12px 14px",marginBottom:14,background:"#fff"}},
+        h("div",{style:{display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap",alignItems:"center"}},
+          h("div",null,h("div",{style:{fontWeight:700,fontSize:14}},ex.label),
+            h("div",{style:{fontSize:11.5,color:colors.muted}},"For items matching \""+(ex.applies_items||"any")+"\""+(ex.applies_ends?", ends "+ex.applies_ends:"")+(ex.max_size_nb?", up to "+ex.max_size_nb+"NB":""))),
+          h("label",{style:{fontSize:12,display:"flex",gap:6,alignItems:"center"}},h("input",{type:"checkbox",disabled:!isAdmin,checked:ex.active!==false,onChange:e=>saveExtra(ex,{active:e.target.checked})}),"Offered")),
+        ex.basis==="pct" && h("div",{style:{marginTop:8,fontSize:12.5,display:"flex",gap:6,alignItems:"center"}},"Adds",
+          h("input",{defaultValue:ex.pct,disabled:!isAdmin,onBlur:e=>{ const n=Number(e.target.value); if(n>=0 && n!==Number(ex.pct)) saveExtra(ex,{pct:n}); },style:{...inputStyle,width:70,padding:"4px 6px"}}),"% of the valve cost"),
+        ex.basis==="union" && h("div",{style:{marginTop:8,fontSize:12.5,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}},
+          "Per valve: ",h("b",null,ex.per_valve_qty||1)," unions (both ends) + fixing",
+          h("input",{defaultValue:ex.fixing_pct,disabled:!isAdmin,onBlur:e=>{ const n=Number(e.target.value); if(n>=0 && n!==Number(ex.fixing_pct)) saveExtra(ex,{fixing_pct:n}); },style:{...inputStyle,width:60,padding:"4px 6px"}}),
+          "% of the union cost. Union grade follows the body: A105/WCB/CS/MS \u2192 forged CS; CF8/F304 \u2192 SS304; CF8M/F316 \u2192 SS316; CI/DI/GM/bronze \u2192 malleable iron."),
+        rs.length>0 && h("div",{style:{overflowX:"auto",marginTop:10}},
+          h("table",{style:{borderCollapse:"collapse",minWidth:420}},
+            h("thead",null,h("tr",null,h("th",{style:{...cell,textAlign:"left",fontSize:11,color:colors.muted}},"Size"),
+              grades.map(g=>h("th",{key:g,style:{...cell,textAlign:"right",fontSize:11,color:colors.muted}},GRADE_NAME[g]||g+(ex.basis==="union"?" (per union)":""))))),
+            h("tbody",null,bands.map(([a,b])=>h("tr",{key:a},
+              h("td",{style:cell},b>=9999?(a+"NB and above"):(a===0?"up to "+b+"NB":(a===b?a+"NB":a+"\u2013"+b+"NB"))),
+              grades.map(g=>{ const r = rs.find(x=>x.grade===g && x.size_from_nb===a);
+                return h("td",{key:g,style:{...cell,textAlign:"right"}}, !r ? "\u2014" :
+                  h("input",{defaultValue:r.amount,disabled:!isAdmin,onBlur:e=>saveRate(r,e.target.value),style:{...inputStyle,width:90,padding:"4px 6px",textAlign:"right"}})); }))))))
+      );
+    })
   );
 }
 
@@ -6465,6 +6646,10 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
   // which vendor's cost the user picked (none until picked when several).
   const [plSetup,setPlSetup]=useState(null);
   const [plAns,setPlAns]=useState({});
+  // 2 Oct (115) — ticked extras (extended stem, anti-static, union ends),
+  // and, while a line is being changed, its qty / Sf / UOM to keep.
+  const [plOpts,setPlOpts]=useState({});
+  const plKeepRef = useRef(null);
   const [plFinder,setPlFinder]=useState(null); // null = closed; {item} = open
   const [plVendorPicked,setPlVendorPicked]=useState(null);
   const [plWhy,setPlWhy]=useState("");
@@ -6777,7 +6962,9 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
   const selectPricelistModel = (r)=>{
     const offersNow = pricelistOffers(plModels, r.model_code);
     setPlVendorPicked(offersNow.length<=1 ? plKey(r) : null); setPlWhy("");
-    setPlAdded(""); setPlSel(r); setPlSf(String(PRICELIST_DEFAULT_SF)); setPlDesc(""); setPlDescTouched(false); setPlDescRule(undefined); setPlMissing({}); setPlQty("1"); setPlUom("Nos");
+    const keep = plKeepRef.current;
+    setPlAdded(""); setPlSel(r); setPlSf(keep ? keep.sf : String(PRICELIST_DEFAULT_SF)); setPlDesc(""); setPlDescTouched(false); setPlDescRule(undefined);
+    setPlMissing(keep && keep.missing ? keep.missing : {}); setPlQty(keep ? keep.qty : "1"); setPlUom(keep ? keep.uom : "Nos");
     setPlMocLabels(null);
     sb.from("description_master").select("*").eq("item",r.item).maybeSingle().then(({data})=>setPlDescRule(data||null),()=>setPlDescRule(null));
     // Which materials the datasheet wants: the item's Datasheet MOC rule
@@ -6805,7 +6992,12 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     const labels = plMocLabels.length ? plMocLabels : PRICELIST_MATERIAL_LABELS.filter(l=>String(attrs[l]||"").trim());
     return labels.map(l=>({ label:l, fromList: pricelistLookup(attrs,l) }));
   },[plSel,plMocLabels]);
-  const plAutoDesc = useMemo(()=> (plSel && plMocLabels!==null && plDescRule!==undefined) ? buildPricelistDescription(plDescRule, plSel, plMaterialRows, plMissing) : "", [plSel,plMocLabels,plDescRule,plMaterialRows,plMissing]);
+  const plPicked = useMemo(()=> plSel ? pickedValveExtras(plSetup, plSel, plOpts) : {list:[],total:0}, [plSetup,plSel,plOpts]);
+  const plAutoDesc = useMemo(()=>{
+    if(!(plSel && plMocLabels!==null && plDescRule!==undefined)) return "";
+    const base = buildPricelistDescription(plDescRule, plSel, plMaterialRows, plMissing);
+    return plPicked.list.length ? base+", "+plPicked.list.map(x=>x.dsValue&&x.key==="union_ends"?x.dsValue:x.label).join(", ") : base;
+  }, [plSel,plMocLabels,plDescRule,plMaterialRows,plMissing,plPicked]);
   useEffect(()=>{ if(!plDescTouched) setPlDesc(plAutoDesc); },[plAutoDesc,plDescTouched]);
   const addPricelistLineToCart = ()=>{
     const r = plSel; if(!r) return;
@@ -6820,7 +7012,8 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
       setTimeout(()=>{ const el = document.querySelector('[data-pl-gap="1"]'); if(el){ el.scrollIntoView({block:"center"}); el.focus(); } },50);
       return;
     }
-    const cost = pricelistCost(r);
+    const extras = pickedValveExtras(plSetup, r, plOpts);
+    const cost = Math.round((pricelistCost(r)+extras.total)*100)/100;
     const material_values = {...(r.attrs||{})};
     plMaterialRows.forEach(m=>{ material_values[m.label] = m.fromList || String(plMissing[m.label]).trim(); });
     material_values.__material_labels = plMaterialRows.map(m=>m.label); // the rows its datasheet shows, in order
@@ -6830,6 +7023,13 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     plItemQs.forEach(q=>{ if(!q.datasheet_field) return; const code = r[q.col]; if(code==null||code==="") return;
       material_values[q.datasheet_field] = q.part==="size" ? String(code) : plMeaning(q.part, code); dsCodes[q.datasheet_field] = String(code); });
     if(Object.keys(dsCodes).length) material_values.__answer_codes = dsCodes;
+    // 2 Oct (115) — extras on the line, the answers (so Change answers can
+    // reopen them), and which datasheet fields come from the selection.
+    extras.list.forEach(x=>{ if(x.ex.datasheet_label) material_values[x.ex.datasheet_label] = x.dsValue||"Yes"; });
+    material_values.__options = extras.list.map(x=>({ key:x.key, label:x.label, amount:x.amount, detail:x.detail, ds_label:x.ex.datasheet_label||"", ds_value:x.dsValue||"" }));
+    material_values.__answers = {...plAns};
+    material_values.__base_cost = pricelistCost(r);
+    material_values.__from_selection = Object.keys(dsCodes).concat(extras.list.map(x=>x.ex.datasheet_label).filter(Boolean));
     const desc = plDesc.trim() || plAutoDesc || r.model_code;
     const newItem = {
       model:r.model_code, item:r.item, size:r.size, sub_assembly:"", component:desc,
@@ -6840,12 +7040,40 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
       is_direct_price:true, validation_status:"Validated",
       excel_file_name:"", excel_file_path:"", no_excel_code_used:"",
       added_by:user.username, custom_item:r.item, custom_model_recorded:r.model_code,
-      price_source:"pricelist", pricelist_model_code:r.model_code, pricelist_ref:pricelistRefText(r), pricelist_vendor:r.vendor||null, material_values
+      price_source:"pricelist", pricelist_model_code:r.model_code,
+      pricelist_ref:pricelistRefText(r)+(extras.list.length?" + extras \u20B9"+fmt2(extras.total)+" ("+extras.list.map(x=>x.label+" \u20B9"+fmt2(x.amount)).join(", ")+") = \u20B9"+fmt2(cost):""),
+      pricelist_vendor:r.vendor||null, material_values
     };
-    setCart(c=>c.concat([newItem]));
+    const keep = plKeepRef.current; plKeepRef.current = null;
+    setCart(c=> (keep && keep.cartIndex!=null) ? c.slice(0,keep.cartIndex).concat([newItem]).concat(c.slice(keep.cartIndex)) : c.concat([newItem]));
     if(!refDesc.trim()) setRefDesc(desc);
     setPlAdded(r.model_code+" × "+qty+" added to the estimate at ₹"+fmt2(computeSalesPrice(cost, sf))+" each.");
-    setPlSel(null); setPlMissing({});
+    setPlSel(null); setPlMissing({}); setPlOpts({});
+  };
+  // 2 Oct (115) — Change answers on a line already in the estimate: it comes
+  // out of the cart and back into the questions with its answers, extras,
+  // qty, Sf and typed materials; adding it again puts it back in its place.
+  const changePricelistCartLine = (idx)=>{
+    const l = cart[idx]; if(!l) return;
+    const mv = l.material_values||{};
+    plKeepRef.current = { qty:String(l.dp_order_qty||1), sf:String(l.sf||PRICELIST_DEFAULT_SF), uom:l.uom||"Nos", cartIndex:idx, original:l,
+      missing: Object.fromEntries(Object.keys(mv).filter(k=>!k.startsWith("__")).map(k=>[k,mv[k]])) };
+    setCart(c=>c.filter((_,i)=>i!==idx));
+    setShowSave(false);   // the cart sits in the save window; the questions and the line's panel are behind it
+    setPricingWay("pricelist"); setSelectedModel(null); setIsCustomModel(false);
+    if(plModels===null) loadPricelist();
+    const opts = {}; (mv.__options||[]).forEach(o=>{ opts[o.key]=true; });
+    const row = (plModels||[]).find(x=>x.model_code===l.pricelist_model_code);
+    const ans = mv.__answers || (row ? Object.fromEntries(PL_PARTS.map(p=>[p.part,row[p.col]]).filter(([,v])=>v!=null&&v!=="")) : {});
+    setPlOpts(opts); setPlAns(ans); setPlItem(l.item||""); setPlSel(null);
+    setPlFinder({item:l.item||""}); loadValveFinderSetup().then(setPlSetup,()=>{});
+  };
+  const putChangedLineBack = ()=>{
+    const keep = plKeepRef.current; if(!keep || !keep.original) return;
+    plKeepRef.current = null;
+    setCart(c=>c.slice(0,keep.cartIndex).concat([keep.original]).concat(c.slice(keep.cartIndex)));
+    setPlSel(null); setPlOpts({});
+    setPlAdded("Line "+(keep.cartIndex+1)+" put back unchanged.");
   };
   const selectModel = async(m)=>{
     setPricingWay(customModelName && m===customModelName ? "custom" : "bom");
@@ -8444,13 +8672,17 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
             plAdded && h("div",{style:{display:"inline-block",background:"#eafaf1",border:"1px solid #9fd8c6",color:"#0f6e3f",borderRadius:6,padding:"8px 14px",fontSize:13,marginBottom:14}},"✓ "+plAdded+" Save it with Save to estimate, or pick another model to add."),
             h("div",{style:{color:colors.mutedLight,fontSize:14}},"Pick a model from the price list on the left. The cost comes from the price list; you choose the sales factor."))
         : (()=>{
-          const r = plSel; const cost = pricelistCost(r); const sfN = Number(plSf);
+          const r = plSel; const baseCost = pricelistCost(r); const cost = Math.round((baseCost+plPicked.total)*100)/100; const sfN = Number(plSf);
+          const extrasHere = valveExtrasForRow(plSetup, r);
           const vendorChosen = plVendorPicked===plKey(r);
           const sfOk = sfN>0 && vendorChosen;
           const segs = [["Type",r.valve_type],["Construction",r.construction],["Size",r.size],["End",r.end_conn],["Rating",r.rating],["Body",r.body],["Trim",r.trim],["Seat",r.seat],["Operator",r.operator]];
           const specRows = Object.keys(r.attrs||{}).filter(k=>!plMaterialRows.some(m=>plNorm(m.label)===plNorm(k)) && !PRICELIST_MATERIAL_LABELS.some(l=>plNorm(l)===plNorm(k)));
           const gaps = plMaterialRows.filter(m=>!m.fromList && !String(plMissing[m.label]||"").trim());
           return h("div",{style:{maxWidth:640}},
+            plKeepRef.current && plKeepRef.current.original && h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,background:"#fff6dc",border:"1px solid #f0d58a",borderRadius:6,padding:"7px 12px",marginBottom:10,fontSize:12.5,color:"#8a5a10"}},
+              h("span",null,"Changing line "+(plKeepRef.current.cartIndex+1)+" ("+plKeepRef.current.original.model+"). Qty and sales factor are kept; Add to estimate puts it back in its place."),
+              h("button",{type:"button",onClick:putChangedLineBack,style:{...btnSecondary,fontSize:11.5,padding:"4px 10px",whiteSpace:"nowrap"}},"Put it back unchanged")),
             h("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:12,flexWrap:"wrap"}},
               h("h2",{style:{margin:0,fontSize:19,fontWeight:700}},"Pricelist — no BOM"),
               h("span",{style:{fontSize:10.5,padding:"2px 8px",borderRadius:8,background:"#e6f4f1",color:"#0f6e56"}},"price from master")),
@@ -8481,6 +8713,16 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
                     fl.note && h("div",{style:{fontSize:11,color:fl.tone==="red"?"#a3312a":"#8a5a10"}},"\u26A0 "+fl.note),
                     on && o.note && h("div",{style:{fontSize:11,marginTop:2,color:"#5a6b80"}},o.note)));
               })),
+            // 2 Oct (115) — Options: extras that apply to this model.
+            extrasHere.length>0 && h("div",{style:{border:"1px solid "+colors.border,borderRadius:6,background:"#fff",padding:"10px 12px",marginBottom:10}},
+              h("div",{style:{display:"flex",justifyContent:"space-between",gap:8,marginBottom:6}},
+                h("div",{style:{fontSize:12.5,fontWeight:700}},"Options"),
+                plPicked.total>0 && h("div",{style:{fontSize:11.5,color:colors.muted}},"adds \u20B9"+fmt2(plPicked.total)+" to the cost")),
+              extrasHere.map(x=>h("label",{key:x.key,style:{display:"flex",alignItems:"flex-start",gap:8,padding:"4px 0",fontSize:12.5,cursor:x.amount==null?"default":"pointer",color:x.amount==null?colors.mutedLight:colors.text}},
+                h("input",{type:"checkbox",disabled:x.amount==null,checked:!!plOpts[x.key]&&x.amount!=null,onChange:e=>{ const on=e.target.checked; setPlOpts(o=>({...o,[x.key]:on})); },style:{marginTop:2}}),
+                h("div",{style:{flex:1}},
+                  h("div",{style:{display:"flex",justifyContent:"space-between",gap:8}},h("span",null,x.label),x.amount!=null && h("strong",{style:{fontVariantNumeric:"tabular-nums"}},"+ \u20B9"+fmt2(x.amount))),
+                  h("div",{style:{fontSize:11,color:colors.mutedLight}},x.amount==null ? "Not priced: "+x.why : x.detail))))),
             h("div",{style:{border:"1px solid "+colors.border,borderRadius:6,background:"#fff",padding:"10px 12px",marginBottom:10}},
               h("div",{style:{display:"flex",justifyContent:"space-between",gap:8,flexWrap:"wrap",marginBottom:6}},
                 h("div",{style:{fontSize:12.5,fontWeight:700}},"Datasheet · Material Data"),
@@ -8509,7 +8751,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
               h("div",{style:{flex:1}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"UOM"),h(MasterSelect,{value:plUom,onChange:v=>setPlUom(v),options:(uoms||[]).slice(),table:"uom_tbl",valueCol:"uom",fieldLabel:"UOM",placeholder:"Select…",style:{padding:"8px 10px",fontSize:13},refreshOptions:onRefresh}))
             ),
             h("div",{style:{display:"flex",gap:8,alignItems:"flex-end",marginBottom:6,flexWrap:"wrap"}},
-              h("div",{style:{flex:1,minWidth:130}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Cost price (INR, from price list)"),h("input",{readOnly:true,value:vendorChosen?fmt2(cost):"Pick a vendor",style:{...inputStyle,padding:"8px 10px",fontSize:13,background:"#f6f5f0"}})),
+              h("div",{style:{flex:1,minWidth:130}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},plPicked.total>0?"Cost price (INR, \u20B9"+fmt2(baseCost)+" + extras \u20B9"+fmt2(plPicked.total)+")":"Cost price (INR, from price list)"),h("input",{readOnly:true,value:vendorChosen?fmt2(cost):"Pick a vendor",style:{...inputStyle,padding:"8px 10px",fontSize:13,background:"#f6f5f0"}})),
               h("div",{style:{paddingBottom:9,color:colors.mutedLight}},"×"),
               h("div",{style:{flex:1,minWidth:110}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Sales factor (default "+PRICELIST_DEFAULT_SF+")"),h("input",{type:"number",step:"0.05",min:0,value:plSf,onChange:e=>setPlSf(e.target.value),style:{...inputStyle,padding:"8px 10px",fontSize:13}})),
               h("div",{style:{paddingBottom:9,color:colors.mutedLight}},"="),
@@ -8843,11 +9085,13 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
 
     // 29 Sep (97) — valve finder pop-up
     plFinder && pricingWay==="pricelist" && h(ValveFinderForm,{setup:plSetup, allRows:plModels||[], item:plFinder.item, answers:plAns,
+      opts:plOpts, onOpts:setPlOpts,
       onPickItem:(it)=>{ setPlAns({}); setPlFinder({item:it}); if(it){ setPlItem(it); setPlSize(""); setPlFilter(""); setPlSel(null); } },
       onAnswers:setPlAns,
       onDone:finishValveFinder,
       onSkip:()=>{ setPlFinder(null); setPlAns({}); if(plFinder.item){ setPlItem(plFinder.item); setPlSize(""); } },
-      onClose:()=>setPlFinder(null)}),
+      // A line being changed goes back as it was when the questions are closed without picking a model.
+      onClose:()=>{ setPlFinder(null); if(!plSel) putChangedLineBack(); }}),
     // Description Master — missing-rule prompt (Admin/Super Admin only)
     descMasterPrompt && h("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.35)",zIndex:1250,display:"flex",alignItems:"center",justifyContent:"center",padding:20}},
       h("div",{style:{background:"#fff",borderRadius:10,padding:"20px 24px",width:420,maxWidth:"100%"}},
@@ -9042,7 +9286,9 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
                   h("td",{style:{padding:"7px 10px",textAlign:"right"}},fmtR(l.cost)),
                   h("td",{style:{padding:"7px 10px",textAlign:"right",fontWeight:600,color:colors.accent}},fmtR(l.sales_price)),
                   h("td",{style:{padding:"7px 10px",whiteSpace:"nowrap"}},
-                    h("button",{onClick:()=>startEditCartRow(idx),style:{...btnSecondary,padding:"3px 8px",fontSize:11,marginRight:4}},"Edit BOM"),
+                    l.price_source==="pricelist"
+                      ? h("button",{onClick:()=>changePricelistCartLine(idx),title:"Back into the questions with this line's answers; qty and sales factor are kept",style:{...btnSecondary,padding:"3px 8px",fontSize:11,marginRight:4}},"Change answers")
+                      : h("button",{onClick:()=>startEditCartRow(idx),style:{...btnSecondary,padding:"3px 8px",fontSize:11,marginRight:4}},"Edit BOM"),
                     h("button",{onClick:()=>removeFromCart(idx),style:{...btnDanger,padding:"3px 8px",fontSize:11}},"✕")
                   )
                 )
@@ -9758,7 +10004,20 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
               else prefill[f.key]=v;
             }));
           }
-          setValues({...prefill, ...loadedValues});
+          // 2 Oct (115) — fields answered in the valve questions always carry
+          // the line's answer, even on a saved datasheet: change the answer
+          // (Change answers on the line) to change them. Differences show as
+          // unsaved until Save.
+          const forced = {};
+          if(plLine){
+            const sel = datasheetSelectionLabels(plLine);
+            t.sections.filter(sec=>!sec.bomSection).forEach(sec=>sec.fields.forEach(f=>{
+              if(!isSelectionLabel(sel, f.label)) return;
+              const v = datasheetSelectionValue(plLine, f);
+              if(v) forced[f.key]=v;
+            }));
+          }
+          setValues({...prefill, ...loadedValues, ...forced});
           setOverrides((data&&data.overrides)||{});
           setReview({ exists:!!data, by:(data&&data.reviewed_by)||null, at:(data&&data.reviewed_at)||null });
           originalOverridesRef.current = (data&&data.overrides)||{};
@@ -9797,7 +10056,11 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
   // 1 Oct (112) — fields that cannot apply to this valve are left out.
   const dsCtx = datasheetContext(template, values, openLines);
   const fieldShown = f=> !datasheetFieldNotApplicable(f, dsCtx);
-  const editableSections = template.sections.filter(s=>!s.bomSection).map(s=>({...s, fields:s.fields.filter(fieldShown)})).filter(s=>s.fields.length);
+  // 2 Oct (115) — answered in the valve questions: shown, not asked again.
+  const plLineSel = (openLines||[]).find(l=>l && l.price_source==="pricelist" && l.material_values);
+  const selLabels = plLineSel ? datasheetSelectionLabels(plLineSel) : new Set();
+  const isSelField = f=> !!(f && isSelectionLabel(selLabels, f.label));
+  const editableSections = template.sections.filter(s=>!s.bomSection).map(s=>({...s, fields:s.fields.filter(f=>fieldShown(f) && !isSelField(f))})).filter(s=>s.fields.length);
   const secIdx = Math.max(0, Math.min(sectionIdx, editableSections.length-1));
   const setField = (k,v)=>setValues(vv=>({...vv,[k]:v}));
 
@@ -9854,7 +10117,7 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
     });
   };
   // Which lines can be typed over here. Sl No and Model come from the quote itself.
-  const rowLocked = (row)=> !!(row.field && (isSlNoLabel(row.field.label) || row.field.type==="auto_model"));
+  const rowLocked = (row)=> !!(row.field && (isSlNoLabel(row.field.label) || row.field.type==="auto_model" || isSelField(row.field)));
   const startRowEdit = (sectionNo,row)=>{ setRowEdit({sectionNo,key:row.key}); setRowEditDraft(row.needsChoice?"":String(row.value==null?"":row.value)); };
   const cancelRowEdit = ()=>{ setRowEdit(null); setRowEditDraft(""); };
   const saveRowEdit = (sectionNo,row)=>{
@@ -10199,7 +10462,9 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
                   !isEditing && row.isMoc && row.edited && h("button",{onClick:()=>resetMocEdit(row),title:"Put the BOM / price-list value back",
                     style:{border:"none",background:"none",color:"#0c447c",cursor:"pointer",fontSize:11,textDecoration:"underline",padding:"2px 4px",flexShrink:0}},"Reset"),
                   !isEditing && (locked
-                    ? h("span",{title:"Comes from the quote itself",style:{fontSize:10.5,color:colors.mutedLight,padding:"2px 6px",flexShrink:0}},"auto")
+                    ? (isSelField(row.field)
+                        ? h("span",{title:"Answered in the valve questions. To change it, use Change answers on the price list line, which also re-prices it.",style:{fontSize:9.5,padding:"1px 7px",borderRadius:9,background:"#e6f1fb",color:"#0c447c",whiteSpace:"nowrap",flexShrink:0}},"from selection")
+                        : h("span",{title:"Comes from the quote itself",style:{fontSize:10.5,color:colors.mutedLight,padding:"2px 6px",flexShrink:0}},"auto"))
                     : h("button",{onClick:()=>startRowEdit(section.no,row),disabled:!!rowEdit,title:"Edit this line",
                         style:{...btnSecondary,padding:"3px 10px",fontSize:11,flexShrink:0,opacity:rowEdit?0.4:1}},"Edit")),
                   !isEditing && h("button",{onClick:()=>deleteRow(section.no,row),title:"Delete this line",
@@ -25725,6 +25990,33 @@ const MANUAL_SECTIONS = [
         ]
       },
       {
+        "key": "valve_extras_and_change_answers",
+        "title": "Valve options, new grades, and Change answers",
+        "tag": "Estimator \u203a Pricelist",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "Since build 115 ball valves (and 3 way ball valves) also come with SS304, SS304L, SS316 and SS316L balls and with RPTFE seats. Where a vendor does not list them, the app works them out from the model's own ball price on the same ladder as the trims (304 \u00d71.08, 304L \u00d71.10, 316 \u00d71.15, 316L \u00d71.18 against SS410), and RPTFE at +5% on PTFE. They are marked Estimated by app; a real vendor price is never overwritten. They appear as ordinary answers to the Ball material and Seat questions."
+          },
+          {
+            "type": "p",
+            "text": "OPTIONS: after the questions, and on the model's panel, tick the extras that apply. Extended stem (100 mm): a fixed amount by size and stem grade. Anti-static device: 3% of the valve cost (ball valves). Union ends: for screwed or socket-weld ball, gate, globe and check valves up to 100NB \u2014 two unions in the grade that matches the body (A105/WCB/CS \u2192 forged CS, CF8/F304 \u2192 SS304, CF8M/F316 \u2192 SS316, CI/DI/gunmetal/bronze \u2192 malleable iron) plus 5% of the union cost for fixing. The cost on the line includes the extras, the description lists them, and the datasheet shows them. Flometriq carries the fixed amounts at Levaflow \u00d7 1.25."
+          },
+          {
+            "type": "p",
+            "text": "RULES \u203a VALVE EXTRAS: the amounts and percentages, editable by an Admin. A change applies to lines added from then on."
+          },
+          {
+            "type": "p",
+            "text": "DATASHEET: fields answered in the valve questions (and the extras) are filled in, shown as \u201cfrom selection\u201d, and not asked again. To change one, change the answer \u2014 that also re-prices the line, so price and datasheet always agree."
+          },
+          {
+            "type": "p",
+            "text": "CHANGE ANSWERS: on a price-list line in the estimate cart, or on a saved quote line (Pricing & Description), Change answers reopens the questions with the line's answers and extras. Pick the new answers; the matching model is chosen and re-priced; the quantity and sales factor stay. In the cart the line goes back in its place; Put it back unchanged undoes it. On a saved line the change is written to the line, the Sl No's model and the history. The item itself cannot change there \u2014 add a new Sl No for a different item."
+          }
+        ]
+      },
+      {
         "key": "dates_and_missing_fields",
         "title": "Dates, and when something is missing",
         "tag": "Everywhere",
@@ -26688,6 +26980,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"2 Oct 2026 (115)", summary:"Valve extras, new ball grades and RPTFE, and Change answers. SQL (one file per company, guarded): estimated SS304/304L/316/316L balls for every ball and 3 way ball valve from its own ball price on the build 108 ladder (CF8=SS304, CF3=SS304L, CF8M=SS316, CF3M=SS316L equivalents never duplicated; nearest grade kept when two bases give one), RPTFE seat at x1.05 for every PTFE row incl. the new grades; marked Estimated, real prices never touched; Flometriq rounded to Rs 5. New pricelist_extra_tbl / pricelist_extra_rate_tbl: extended stem (size_amount by size, STD or 316 stem), anti-static (3%), union ends (SCRD/SWSC/SW, up to 100NB, 2 per valve, grade by body, +5% fixing on the union cost); Flometriq amounts x1.25. APP: loadValveFinderSetup reads the extras; sizeToNB, unionGradeOfBody, valveExtraFor, valveExtrasForRow, pickedValveExtras. Valve questions get an Options section; the Pricelist panel an Options box; cost = price list cost + extras; line saves __options, __answers, __base_cost, __from_selection and the extras' datasheet values; description and pricelist_ref list them. Datasheet: fields answered in the questions (and extras) are forced from the line, marked from selection, locked and skipped by the fill wizard. Change answers: on Estimator cart lines (back into the questions, qty/Sf/UOM/typed materials kept, returns to its place, Put it back unchanged) and on saved quote lines (PricelistChangeModal: questions with saved answers, pick model/vendor, options, materials, rebuilt description, cost/sales at the line's Sf; updates estimate_lines, estimates.model, audit, value snapshot). Rules \u203a Valve Extras edits the master." },
   { date:"2 Oct 2026 (114)", summary:"Dates, Quotes Report follow-ups, sorting, INR/USD values, legacy values and missing-field prompts. DATES: fmtDMY / fmtDMYTime / toISODate \u2014 every displayed date (70 toLocaleDateString/toLocaleString date calls plus raw date cells on Quotes Report, Follow-up History, Review, Overdue lists, PO/GRN registers, quote header) reads dd/mm/yyyy regardless of region; month-only labels unchanged; calendar date boxes remain browser-drawn. QUOTES REPORT: one Log follow-up dialog (button on every row; the Stage cell opens it too) replaces the Stage editor and the + Next Follow-up box \u2014 date of follow-up, Mode, Stage (with No change), Next follow-up (not for won/lost/parked), Note, all required; half-filled close names what is missing and offers quit without saving; closed stages hand to the reason/PO box, whose Cancel returns to the follow-up. logStageMoveFollowup takes mode. Sort prompt on every Apply (date oldest/newest, next follow-up, customer), remembered; default oldest first; live and legacy sorted together. Date filter compares real dates and drops undated quotes when a range is set. Value (INR) and Value (USD) columns: own currency bold, the other converted at the USD rate typed in the filter (blank without a rate). Value filter: one range, INR or USD drop-down; choosing it prompts for the USD rate (blank to start, kept for the session); quotes in the other currency are compared at that rate, left out and counted without one. Missing live values worked out in the background on load. Legacy value sheet: Options \u203a Download / Upload (admins), sheets India - INR, Others - USD, Country not set; NEEDS SQL legacy_quote_values_2026-10-02.sql (quote_value, quote_currency). Follow-up History shows a legacy quote's imported note as its first entry. LOG FOLLOW-UPS: Outcome renamed Stage. PRICELIST: Add to estimate never disabled; lists and outlines missing materials. DATASHEET close names and outlines materials still needing a grade; unsaved changes offer close without saving." },
   { date:"1 Oct 2026 (113)", summary:"Stage changes from Log Follow-ups (and Lost / Deferred everywhere) now go through. CAUSE: moving a quote out of Draft asked \"Does it have any Extra Price Additions?\" with OK meaning STOP; OK cancelled the stage change silently while Log Follow-ups still said Saved, and in the Lost / Deferred reason box the change quietly never landed. FIXES: Lost and Deferred (any stage of kind lost or parked) never ask about Extra Price or testing. The question is reworded so OK = none needed, move the stage; Cancel = stop, with a message on every screen saying the stage did not change (Log Follow-ups adds that the entry itself is saved). The reason box checks its own save and the stage change, shows any failure, and closes when the change is stopped. Log Follow-ups Save shows any unexpected error instead of doing nothing. No SQL." },
   { date:"1 Oct 2026 (112)", summary:"Datasheets: show-only-when rules and a reviewed flag. RULES (datasheetContext / datasheetFieldNotApplicable): the End connection, Operation and Construction are read from the datasheet itself, else from the price-list line (its materials, then the END and OPERATOR parts of its model code). Thread standard / NPT / BSP fields only on screwed ends; Flange standard / face / drilling only on flanged, wafer or lugged; socket-weld fields only on socket weld; air supply / air filter / solenoid only on pneumatic; fail position / limit switch / positioner / signal / torque only on powered actuators; actuator or gearbox make only on powered or gear operation; power / timer / alarm fields only on timer or level-sensing traps, not float or thermodynamic. A field that does not apply is not asked in Fill remaining details, not counted, not shown, and not printed on the datasheet PDF, Excel or the quote PDF; its value is kept, and the section notes \"Not applicable (Lever): Air supply pressure\". REVIEWED: datasheets.reviewed_by / reviewed_at. The datasheet shows From template / Saved \u2014 not reviewed yet with a Mark as reviewed button (saves first if needed), or Reviewed by X and date. The Sl No card reads Datasheet from template \u2014 not reviewed yet / Datasheet saved \u2014 not reviewed yet / \u2713 Datasheet reviewed by X. Datasheets saved before today count as reviewed. NEEDS SQL: datasheet_review_flag_2026-10-01.sql." },
@@ -34698,6 +34991,146 @@ function SalesOverdueCallsScreen({ user, onGoLog }){
 // same direct-price-excels bucket/policy as everywhere else. Editing a
 // Validated line's sales price reverts it to Pending, matching the same
 // guard already used elsewhere in this app when a validated price changes.
+// ---- CHANGE ANSWERS ON A SAVED PRICE-LIST LINE (2 Oct, build 115) -----
+// Reopens the valve questions with the line's answers, then shows the model
+// they now point to: whose price, the extras, the materials, the new cost and
+// sales price at the line's own sales factor. Save rewrites the line (and the
+// Sl No's model) and records the change in the history. The item stays the
+// same: its datasheet belongs to it.
+function PricelistChangeModal({ line, openRef, user, onClose, onSaved }){
+  const mv = line.material_values || {};
+  const [setup,setSetup] = useState(null);
+  const [rows,setRows] = useState(null);
+  const [err,setErr] = useState("");
+  const [ans,setAns] = useState(null);
+  const [opts,setOpts] = useState(()=>{ const o={}; (mv.__options||[]).forEach(x=>{ o[x.key]=true; }); return o; });
+  const [stage,setStage] = useState("questions");
+  const [cands,setCands] = useState([]);     // offers of the models that fit
+  const [pick,setPick] = useState(null);     // the chosen offer (model + vendor)
+  const [typed,setTyped] = useState(()=>Object.fromEntries(Object.keys(mv).filter(k=>!k.startsWith("__")).map(k=>[k,String(mv[k]??"")])));
+  const [rule,setRule] = useState(undefined);
+  const [desc,setDesc] = useState("");
+  const [descTouched,setDescTouched] = useState(false);
+  const [busy,setBusy] = useState(false);
+  useEffect(()=>{
+    (async()=>{
+      try{
+        const [st, all] = await Promise.all([loadValveFinderSetup(), fetchAllPricelistModels(false)]);
+        setSetup(st); setRows(all);
+        const cur = all.find(r=>r.model_code===line.pricelist_model_code);
+        setAns(mv.__answers || (cur ? Object.fromEntries(PL_PARTS.map(p=>[p.part,cur[p.col]]).filter(([,v])=>v!=null&&v!=="")) : {}));
+      } catch(e){ setErr("The price list could not be read: "+(e.message||e)); }
+      sb.from("description_master").select("*").eq("item",line.item).maybeSingle().then(({data})=>setRule(data||null),()=>setRule(null));
+    })();
+  },[]);
+  const item = line.item;
+  const rowsOfItem = useMemo(()=> (rows||[]).filter(r=>norm(r.item)===norm(item)), [rows,item]);
+  const qs = useMemo(()=> setup ? valveFinderQuestions(setup, item, rowsOfItem) : [], [setup,item,rowsOfItem]);
+  const labels = Array.isArray(mv.__material_labels) && mv.__material_labels.length ? mv.__material_labels : PRICELIST_MATERIAL_LABELS;
+  const matRows = pick ? labels.map(l=>({ label:l, fromList: pricelistLookup(pick.attrs,l) })).filter(m=>m.fromList || String(typed[m.label]||"").trim() || (mv.__material_labels||[]).includes(m.label)) : [];
+  const picked = pick ? pickedValveExtras(setup, pick, opts) : {list:[],total:0};
+  const autoDesc = pick && rule!==undefined ? (()=>{ const b = buildPricelistDescription(rule, pick, matRows, typed); return picked.list.length ? b+", "+picked.list.map(x=>x.key==="union_ends"&&x.dsValue?x.dsValue:x.label).join(", ") : b; })() : "";
+  useEffect(()=>{ if(!descTouched) setDesc(autoDesc); },[autoDesc,descTouched]);
+  const onDone = (fit, a)=>{
+    setAns(a||{});
+    const byCode = new Map(); (fit||[]).forEach(r=>{ const g=byCode.get(r.model_code)||[]; g.push(r); byCode.set(r.model_code,g); });
+    const groups = Array.from(byCode.values()).map(g=>g.sort((x,y)=>pricelistCost(x)-pricelistCost(y))).sort((x,y)=>pricelistCost(x[0])-pricelistCost(y[0]));
+    if(!groups.length) return;
+    setCands(groups);
+    const same = groups.flat().find(r=>r.model_code===line.pricelist_model_code && r.vendor===line.pricelist_vendor);
+    setPick(same || groups[0][0]); setStage("confirm");
+  };
+  const sf = Number(line.sf)||PRICELIST_DEFAULT_SF;
+  const newCost = pick ? Math.round((pricelistCost(pick)+picked.total)*100)/100 : 0;
+  const gaps = matRows.filter(m=>!m.fromList && !String(typed[m.label]||"").trim());
+  const save = async()=>{
+    if(!pick) return;
+    const was = { model:line.model, pricelist_model_code:line.pricelist_model_code, cost:line.cost, sales_price:line.sales_price, component:line.component };
+    if(gaps.length){ alert("Fill these materials first:\n\n• "+gaps.map(g=>g.label).join("\n• ")); return; }
+    if(!desc.trim()){ alert("Enter a description."); return; }
+    const material_values = {...(pick.attrs||{})};
+    matRows.forEach(m=>{ material_values[m.label] = m.fromList || String(typed[m.label]).trim(); });
+    material_values.__material_labels = matRows.map(m=>m.label);
+    const dsCodes = {};
+    qs.forEach(q=>{ if(!q.datasheet_field) return; const code = pick[q.col]; if(code==null||code==="") return;
+      material_values[q.datasheet_field] = q.part==="size" ? String(code) : plMeaning(q.part, code); dsCodes[q.datasheet_field] = String(code); });
+    if(Object.keys(dsCodes).length) material_values.__answer_codes = dsCodes;
+    picked.list.forEach(x=>{ if(x.ex.datasheet_label) material_values[x.ex.datasheet_label] = x.dsValue||"Yes"; });
+    material_values.__options = picked.list.map(x=>({ key:x.key, label:x.label, amount:x.amount, detail:x.detail, ds_label:x.ex.datasheet_label||"", ds_value:x.dsValue||"" }));
+    material_values.__answers = {...(ans||{})};
+    material_values.__base_cost = pricelistCost(pick);
+    material_values.__from_selection = Object.keys(dsCodes).concat(picked.list.map(x=>x.ex.datasheet_label).filter(Boolean));
+    const payload = {
+      model: pick.model_code, custom_model_recorded: pick.model_code, pricelist_model_code: pick.model_code,
+      rate: newCost, cost: newCost, sales_price: computeSalesPrice(newCost, sf), component: desc.trim(),
+      pricelist_ref: pricelistRefText(pick)+(picked.list.length?" + extras ₹"+fmt2(picked.total)+" ("+picked.list.map(x=>x.label+" ₹"+fmt2(x.amount)).join(", ")+") = ₹"+fmt2(newCost):""),
+      pricelist_vendor: pick.vendor||null, material_values
+    };
+    setBusy(true);
+    try{
+      const { error } = await byLine(sb.from("estimate_lines").update(payload), line);
+      if(error) throw error;
+      if(was.model && was.model!==pick.model_code){
+        await sb.from("estimates").update({model:pick.model_code}).eq("reference_number",openRef.reference_number).eq("item_sl_no",openRef.item_sl_no).eq("model",was.model);
+      }
+      await logAudit("UPDATE","estimate_lines",openRef.reference_number+"-"+openRef.item_sl_no,
+        "Changed answers on Pricelist line: "+(was.pricelist_model_code||was.model)+" → "+pick.model_code+", cost ₹"+fmt2(was.cost)+" → ₹"+fmt2(newCost)+(picked.list.length?" (extras: "+picked.list.map(x=>x.label).join(", ")+")":""),
+        user?.username||"unknown", was, { model:pick.model_code, cost:newCost, sales_price:payload.sales_price, component:payload.component });
+      try{ await saveQuoteValueSnapshot(openRef.reference_number, "quote", user); }catch(e){}
+      onSaved();
+    } catch(e){ alert(saveFailedText("The line", e)); }
+    finally{ setBusy(false); }
+  };
+  if(err) return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1300,display:"flex",alignItems:"center",justifyContent:"center"}},
+    h("div",{style:{background:"#fff",borderRadius:8,padding:20,maxWidth:420}},h("div",{style:{marginBottom:12}},err),h("button",{onClick:onClose,style:btnSecondary},"Close")));
+  if(!setup || !rows || !ans) return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1300,display:"flex",alignItems:"center",justifyContent:"center"}},
+    h("div",{style:{background:"#fff",borderRadius:8,padding:20,fontSize:13,color:colors.mutedLight}},"Reading the price list…"));
+  if(stage==="questions") return h(ValveFinderForm,{setup, allRows:rows, item, answers:ans, opts, onOpts:setOpts,
+    onPickItem:(it)=>{ if(!it) alert("The item stays "+item+" here: its datasheet belongs to it. To quote a different item, add a new Sl No."); },
+    onAnswers:setAns, onDone, onSkip:()=>onDone(rowsOfItem.filter(r=>r.model_code===line.pricelist_model_code), ans), onClose});
+  const extrasHere = pick ? valveExtrasForRow(setup, pick) : [];
+  const box = {border:"1px solid "+colors.border,borderRadius:6,padding:"10px 12px",marginBottom:10,background:"#fff"};
+  return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1300,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"30px 16px",overflow:"auto"}},
+    h("div",{style:{background:"#fff",borderRadius:10,width:720,maxWidth:"100%"}},
+      h("div",{style:{background:colors.dark,color:"#fff",padding:"12px 18px",borderRadius:"10px 10px 0 0"}},
+        h("div",{style:{fontSize:16,fontWeight:700}},"Change answers — "+openRef.reference_number+" · Sl No "+openRef.item_sl_no),
+        h("div",{style:{fontSize:12,opacity:0.8}},"Was "+(line.pricelist_model_code||line.model)+" at ₹"+fmt2(line.cost)+" cost. Qty and the sales factor ("+sf+") stay as they are.")),
+      h("div",{style:{padding:"14px 18px"}},
+        h("div",{style:box},
+          h("div",{style:{fontSize:12.5,fontWeight:700,marginBottom:6}},cands.length>1?"Models that fit ("+cands.length+") — pick one":"Model"),
+          h("div",{style:{maxHeight:220,overflow:"auto"}}, cands.flat().map(o=>{ const on = pick && plKey(o)===plKey(pick);
+            return h("label",{key:plKey(o),style:{display:"flex",gap:8,alignItems:"flex-start",padding:"5px 6px",borderRadius:5,cursor:"pointer",background:on?"#eaf2fb":"transparent"}},
+              h("input",{type:"radio",name:"plc-pick",checked:!!on,onChange:()=>setPick(o),style:{marginTop:2}}),
+              h("div",{style:{flex:1}},
+                h("div",{style:{display:"flex",justifyContent:"space-between",gap:8}},
+                  h("span",{style:{fontFamily:"ui-monospace,Consolas,monospace",fontSize:11.5,wordBreak:"break-all"}},o.model_code),
+                  h("strong",{style:{whiteSpace:"nowrap"}},"₹ "+fmt2(pricelistCost(o)))),
+                h("div",{style:{fontSize:11,color:colors.muted}},o.vendor+" (internal)"+(isEstimatedPrice(o)?" · Estimated by app":""))));
+          })),
+          h("button",{type:"button",onClick:()=>setStage("questions"),style:{...btnSecondary,fontSize:11.5,marginTop:6}},"← Back to the questions")),
+        extrasHere.length>0 && h("div",{style:box},
+          h("div",{style:{fontSize:12.5,fontWeight:700,marginBottom:6}},"Options"),
+          extrasHere.map(x=>h("label",{key:x.key,style:{display:"flex",gap:8,alignItems:"flex-start",padding:"3px 0",fontSize:12.5,color:x.amount==null?colors.mutedLight:colors.text}},
+            h("input",{type:"checkbox",disabled:x.amount==null,checked:!!opts[x.key]&&x.amount!=null,onChange:e=>{ const on=e.target.checked; setOpts(o=>({...o,[x.key]:on})); }}),
+            h("div",{style:{flex:1}},h("div",{style:{display:"flex",justifyContent:"space-between"}},h("span",null,x.label),x.amount!=null&&h("strong",null,"+ ₹"+fmt2(x.amount))),
+              h("div",{style:{fontSize:11,color:colors.mutedLight}},x.amount==null?"Not priced: "+x.why:x.detail))))),
+        matRows.length>0 && h("div",{style:box},
+          h("div",{style:{fontSize:12.5,fontWeight:700,marginBottom:6}},"Materials"),
+          h("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:12}},h("tbody",null, matRows.map(m=>h("tr",{key:m.label,style:{borderTop:"1px solid #f0eee5"}},
+            h("td",{style:{padding:"4px 6px",width:150}},m.label),
+            h("td",{style:{padding:"4px 6px"}}, m.fromList ? h("span",null,h("span",{style:{color:"#0f6e3f",marginRight:5}},"✓"),m.fromList)
+              : h("input",{value:typed[m.label]||"",onChange:e=>{ const v=e.target.value; setTyped(t=>({...t,[m.label]:v})); },placeholder:"Not in the price list. Type it",
+                  style:{...inputStyle,padding:"4px 7px",fontSize:12,...(String(typed[m.label]||"").trim()?{}:{border:"1.5px solid #a3312a",background:"#fdf3f2"})}}))))))),
+        h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"Description (rebuilt from the new answers — edit freely)"),
+        h("textarea",{rows:3,value:desc,onChange:e=>{ setDescTouched(true); setDesc(e.target.value); },style:{...inputStyle,width:"100%",padding:"8px 10px",fontSize:13,marginBottom:10,resize:"vertical",fontFamily:"inherit"}}),
+        pick && h("div",{style:{display:"flex",gap:16,flexWrap:"wrap",fontSize:13,background:"#f6f5f0",borderRadius:6,padding:"8px 12px",marginBottom:12}},
+          h("span",null,"Cost: ",h("s",{style:{color:colors.mutedLight}},"₹"+fmt2(line.cost))," → ",h("b",null,"₹"+fmt2(newCost)),picked.total>0?" (incl. extras ₹"+fmt2(picked.total)+")":""),
+          h("span",null,"Sales price at Sf "+sf+": ",h("b",null,"₹"+fmt2(computeSalesPrice(newCost,sf))))),
+        h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8}},
+          h("button",{onClick:save,disabled:busy||!pick,style:{...btnPrimary,opacity:busy?0.6:1}},busy?"Saving…":"Save the change"),
+          h("button",{onClick:onClose,disabled:busy,style:btnSecondary},"Close")))));
+}
+
 function PricingDescriptionPanel({ openRef, openLines, user, sessionCompany, itemOptions, orderQty, onOrderQtyChange, onSaved, onViewBom, hasRealBom }){
   const dpLines = openLines.filter(l=>l.is_direct_price===true);
   // 25 Sep 2026 — Direct Price per-item pricing. When this Sl No is nothing
@@ -34724,6 +35157,7 @@ function PricingDescriptionPanel({ openRef, openLines, user, sessionCompany, ite
   const [hasDatasheet,setHasDatasheet] = useState(null); // null=loading, else boolean
   const [dsReview,setDsReview] = useState(null);          // 1 Oct (112) — {by, at} once a person has reviewed it
   const [showDatasheet,setShowDatasheet] = useState(false);
+  const [changeLine,setChangeLine] = useState(null);   // 2 Oct (115) — Change answers
   const checkDatasheet = useCallback(()=>{
     (async()=>{
       let res = await sb.from("datasheets").select("id,reviewed_by,reviewed_at").eq("reference_number",openRef.reference_number).eq("item_sl_no",openRef.item_sl_no).limit(1);
@@ -34879,7 +35313,11 @@ function PricingDescriptionPanel({ openRef, openLines, user, sessionCompany, ite
             h("div",{style:{flex:1,minWidth:120}},lab("Cost price (INR, from price list)"),h("input",{readOnly:true,value:fmt2(line.cost),style:ro})),
             h("div",{style:{flex:1,minWidth:100}},lab("Sales factor"),h("input",{type:"number",step:"0.05",min:0,value:draft.sf,onChange:e=>setDraft(lineKey(line),"sf",e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12}})),
             h("div",{style:{flex:1,minWidth:120}},lab("Sales price (INR, per item)"),h("input",{readOnly:true,value:sfN>0?fmt2(computeSalesPrice(line.cost,sfN)):"—",style:ro}))),
-          h("button",{onClick:()=>save(line),disabled:saving[lineKey(line)],style:{...btnPrimary,opacity:saving[lineKey(line)]?0.6:1}},saving[lineKey(line)]?"Saving…":"Save")
+          (line.material_values && line.material_values.__options && line.material_values.__options.length>0) && h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:8}},
+            "Extras in the cost: "+line.material_values.__options.map(o=>o.label+" \u20B9"+fmt2(o.amount)).join(", ")),
+          h("div",{style:{display:"flex",gap:8}},
+            h("button",{onClick:()=>save(line),disabled:saving[lineKey(line)],style:{...btnPrimary,opacity:saving[lineKey(line)]?0.6:1}},saving[lineKey(line)]?"Saving…":"Save"),
+            h("button",{onClick:()=>setChangeLine(line),title:"Reopen the valve questions with this line's answers; picks the matching model and re-prices it. Qty and sales factor stay.",style:btnSecondary},"Change answers"))
         );
       }
       const file = fileState[lineKey(line)]||{name:line.excel_file_name||"",path:line.excel_file_path||""};
@@ -34923,7 +35361,10 @@ function PricingDescriptionPanel({ openRef, openLines, user, sessionCompany, ite
     showDatasheet && h(DatasheetModal,{
       openRef, openLines, model:(openLines[0]&&openLines[0].model)||"", user, sessionCompany,
       onClose:()=>{ setShowDatasheet(false); checkDatasheet(); onSaved(); }
-    })
+    }),
+    changeLine && h(PricelistChangeModal,{ line:changeLine, openRef, user,
+      onClose:()=>setChangeLine(null),
+      onSaved:()=>{ setChangeLine(null); onSaved(); alert("Line changed. Open the datasheet to check it: answered fields follow the new selection; Save it there to keep them."); } })
   );
 }
 
@@ -40095,6 +40536,7 @@ function App() {
     tab==="datasheet_master"?h(DatasheetMasterEditor,{onGoToTab:setTab,user}):
     tab==="price_list"?h(PriceListMaster,{user}):
     tab==="selection_questions"?h(SelectionQuestionsScreen,{user}):
+    tab==="valve_extras"?h(ValveExtrasScreen,{user}):
     tab==="item_moc_rules"?h(ItemMocRulesEditor,{user}):
     tab==="company_master"?h(CompanyMasterEditor,{user}):
     tab==="gst_structures"?h(GstStructureEditor,{user}):
