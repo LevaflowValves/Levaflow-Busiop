@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-05T06:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-05T10:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -26532,9 +26532,13 @@ const MANUAL_SECTIONS = [
       },
       {
         "key": "enquiry_followups",
-        "title": "Enquiries \u2014 logging, the Estimation card, offer sent",
+        "title": "Enquiries \u2014 logging, the Design & Estimation card, offer sent",
         "tag": "Enquiry \u2192 Enquiries / Tasks \u2192 Task Boards / CRM \u2192 Log Follow-ups",
         "blocks": [
+          {
+            "type": "tip",
+            "text": "From build 127: click an enquiry in the list to open it; \u2190 Back to Enquiries returns to the list as you left it. Sales, the person it is assigned to and Admins can edit it. The Card shows which board it is on (e.g. Design & Estimation board \u00b7 Karthik Raj) and Open card on the board takes you there, with a button back to the enquiry. Offer sent can be marked from the enquiry \u2014 only once its quote exists in the app; it moves the quote to Offer Sent with your note. Enquiry cards now go to Design & Estimation."
+          },
           {
             "type": "p",
             "text": "Anyone in Sales logs an enquiry from Enquiry \u2192 Enquiries \u2192 + Log enquiry: customer (from the customer list), subject, Quote# (given now \u2014 every enquiry gets its Quote# when it is logged), date received, the customer's closing date, type, source, the customer's RFQ ref, the enquiry folder link and items. If the customer already has open enquiries they are listed by enquiry number and Quote#, so the same email is not logged twice. Saving puts a card in the Estimation department's Unassigned pile."
@@ -27174,6 +27178,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"5 Oct 2026 (127)", summary:"Enquiry screen, Offer sent gateway, Design & Estimation. ENQUIRIES: click a row to open the enquiry (EnquiryDetailScreen) \u2014 \u2190 Back to Enquiries returns to the list as it was (filters, search), Previous / Next step through the list. Panels: Enquiry (Edit for Sales, the person it is assigned to, Admins: subject, RFQ ref, closing date, folder, type, source, details; subject and folder are copied to the card), History (logged, card moves, follow-ups, quote stage notes), Card (stage, board, due, checklist; Open card on the board \u2192 the Task board opens that card with \u2190 Back to the enquiry), Quote (Start quote / Open Quote#). OFFER SENT gateway: only through the quote made in the app \u2014 date + note, moves the quote to Offer Sent (updateQuoteStatusForQuote, source Enquiry screen; note saved as a stage follow-up), the enquiry closes and the card completes; no offer outside the app. Card column and Card panel show the board: <department> board \u00b7 <person / Unassigned pile>. DESIGN & ESTIMATION: enquiry cards go to the department whose name has Design and Estimation (read from the department master; Estimation until the SQL runs). SQL data_design_estimation_127 (both companies): Estimation merged into Design & Estimation (or the existing spelling) in departments, employees (incl. second department), cards, approvers, limits and any other department column." },
   { date:"5 Oct 2026 (126)", summary:"New customer from where you are, and a duplicate check. + New customer next to the Customer field in Log enquiry and in Add customer allocation (Major Projects); every customer picker that already had + New (quotes, quote header, Log Follow-ups, projects, sale order) uses the same form. DUPLICATE CHECK on every new customer (CustomerCompanyForm, findCustomerDuplicates): same GST / tax ID; same name once Pvt/Private, Ltd/Limited, LLC/FZE/FZCO/WLL etc., brackets, punctuation and case are ignored; one name contained in the other; or a very similar name (2+ shared words, 60%+). A hint shows under the name; Save stops with the list \u2014 Use this one (picks the existing customer), Go back, or Create anyway with a reason. An override is written to the audit log and every Super Admin gets a notification (notif_type customer_duplicate_override) naming the customer, the look-alikes and the reason. No SQL." },
   { date:"5 Oct 2026 (125)", summary:"Customers for non-Admins. canCreateCustomers: Admin / Super Admin, or an employee whose CRM role is FSE or Telecaller / Inside Sales, or the Document Controller post holder. They get CRM \u2192 Customers (new customer, Upload PDF/image, edit customer, add / edit contacts and addresses); zone and owner are filled automatically on create as before. Customer Bulk Upload, CRM Setup and changing the owner stay Admin / Super Admin; Remove on contacts and addresses is Admin only. No SQL." },
   { date:"5 Oct 2026 (124)", summary:"Quotes Report: filters clear the screen properly. Rows were keyed by Quote# alone; 30 legacy quotes imported twice share a Quote#, and after filtering their rows stayed on screen (count 0, old-dated rows still showing). Each row is now keyed by source + Quote# + position, so the list always matches the filters; same fix on the CRM Funnel board (legacy and app cards keyed apart). Group by currency: legacy quotes join INR or USD by the customer's country (same rule as + Add value) instead of a Currency unknown group of their own; filters, sort and search already treat legacy and app quotes alike, the Legacy badge only shows the source. Legacy stage change and customer lookup no longer fail on a repeated Quote# (first match taken). SQL data_legacy_duplicates_124 (Flometriq): one copy kept per repeated Quote# (Won/Lost first, then any stage past Draft, then Draft; tie = later date), the other copy's note saved to the quote's history, then deleted; FEX240495 and FS240129-R03 left for a decision." },
@@ -31549,6 +31554,7 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved }){
       const next = 1 + Math.max(0, ...(todays||[]).map(r=>parseInt(String(r.enquiry_number).slice(prefix.length),10)||0));
       const enquiryNumber = prefix+String(next).padStart(2,"0");
       const me = await taskMyEmployeeName(user);
+      await loadEnquiryDept();
       const { data: created, error } = await sb.from("enquiry_tbl").insert({
         enquiry_number: enquiryNumber, enquiry_date: enquiryDate,
         project_id: project?.id || null, package_id: pkg?.id || null, allocation_id: allocation?.id || null,
@@ -32742,7 +32748,154 @@ function GapsChaseDashboard({ user, onGoTo }){
   );
 }
 
-function EnquiriesListScreen({ user, onGoToTab, onOpenQuote, onCreateQuoteFromEnquiry }){
+// 5 Oct (127) — one enquiry, opened from the Enquiries register. Edit (Sales, the
+// person it is assigned to, Admins), its card and board, its quote, history, and
+// the Offer sent gateway (only through the quote made in the app).
+function EnquiryDetailScreen({ user, me, enquiryId, pos, total, onBack, onPrev, onNext, onOpenQuote, onStartQuote, onOpenCard, onChanged }){
+  const isAdmin = user.role==="admin" || user.role==="super_admin";
+  const today = toISODate(new Date());
+  const [e,setE] = useState(null);
+  const [card,setCard] = useState(null);
+  const [items,setItems] = useState([]);
+  const [quote,setQuote] = useState(null);       // {stage, customer}
+  const [hist,setHist] = useState([]);
+  const [edit,setEdit] = useState(null);
+  const [types,setTypes] = useState([]);
+  const [sources,setSources] = useState([]);
+  const [sent,setSent] = useState({ date:today, note:"" });
+  const [busy,setBusy] = useState(false);
+  const load = useCallback(async()=>{
+    await loadEnquiryDept();
+    const { data: en } = await sb.from("enquiry_tbl").select("*").eq("id",enquiryId).maybeSingle();
+    setE(en||null); if(!en) return;
+    const [{ data: it },{ data: c },{ data: est },{ data: th },{ data: acts }] = await Promise.all([
+      sb.from("enquiry_item_tbl").select("item,qty").eq("enquiry_id",en.id),
+      en.task_id ? sb.from("task_tbl").select("*").eq("id",en.task_id).maybeSingle() : Promise.resolve({data:null}),
+      en.linked_reference_number ? sb.from("estimates").select("quote_status,customer_name").eq("reference_number",en.linked_reference_number).limit(1) : Promise.resolve({data:[]}),
+      en.task_id ? sb.from("task_history_tbl").select("*").eq("task_id",en.task_id) : Promise.resolve({data:[]}),
+      sb.from("activity_log_tbl").select("*").in("chase_reference",[en.enquiry_number,en.linked_reference_number].filter(Boolean)),
+    ]);
+    setItems(it||[]); setCard(c||null);
+    setQuote((est&&est[0]) ? { stage:est[0].quote_status||"Draft", customer:est[0].customer_name } : null);
+    const rows = [
+      { at:en.created_at, by:en.created_by, what:"Enquiry logged"+(en.linked_reference_number?" — Quote# "+en.linked_reference_number:"") },
+      ...(th||[]).map(r=>({ at:r.at, by:r.by_name, what:"Card: "+r.action })),
+      ...(acts||[]).map(a=>({ at:a.created_at||a.activity_date, by:a.logged_by, what:(a.chase_what==="Enquiry"?"Follow-up":"Quote "+a.chase_reference)+(a.outcome?" → "+a.outcome:"")+(a.notes?": "+a.notes:a.discussed_what?": "+a.discussed_what:"") })),
+    ].filter(r=>r.at).sort((a,b)=>String(b.at).localeCompare(String(a.at)));
+    setHist(rows);
+  },[enquiryId]);
+  useEffect(()=>{ setE(null); setEdit(null); load(); },[load]);
+  useEffect(()=>{
+    sb.from("enquiry_type_tbl").select("value").then(({data})=>setTypes((data||[]).map(r=>r.value)));
+    sb.from("enquiry_source_tbl").select("value").then(({data})=>setSources((data||[]).map(r=>r.value)));
+  },[]);
+  if(!e) return h("div",{style:{padding:20,color:colors.muted}},"Loading enquiry…");
+  const canEdit = isAdmin || (me&&me.sales) || (me&&me.name && e.assigned_to===me.name);
+  const open = enqIsOpen(e);
+  const qn = e.linked_reference_number;
+  const st = card ? TASK_STAGES.find(x=>x.key===taskStage(card,today)) : null;
+  const d10 = (x)=> x ? String(x).slice(0,10) : "";
+  const kv = (k,v)=> [h("div",{key:k+"k",style:{color:colors.muted}},k), h("div",{key:k+"v",style:{minWidth:0,overflowWrap:"anywhere"}},v)];
+  const panel = (title, extra, ...kids)=> h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"14px 16px",marginBottom:14}},
+    h("div",{style:{display:"flex",alignItems:"center",gap:8,fontWeight:700,fontSize:13,marginBottom:8}},title,extra), ...kids);
+  const inp = (k,type)=> h("input",{type:type||"text",value:edit[k]||"",onChange:ev=>setEdit({...edit,[k]:ev.target.value}),style:{...inputStyle,padding:"6px 8px",fontSize:12}});
+
+  const saveEdit = async()=>{
+    if(!String(edit.subject||"").trim()){ alert("Subject is required."); return; }
+    setBusy(true);
+    const patch = { subject:edit.subject.trim(), customer_ref:(edit.customer_ref||"").trim()||null, closing_date:edit.closing_date||null,
+      folder_link:(edit.folder_link||"").trim()||null, enquiry_type:edit.enquiry_type||null, source:edit.source||null, details:(edit.details||"").trim()||null };
+    const { error } = await sb.from("enquiry_tbl").update(patch).eq("id",e.id);
+    if(error){ setBusy(false); alert("Could not save:\n\n"+error.message); return; }
+    const changed = Object.keys(patch).filter(k=>String(patch[k]||"")!==String(e[k]||""));
+    await logAudit("UPDATE","enquiry_tbl",e.enquiry_number,"Enquiry edited: "+changed.join(", "),user?.username||"unknown",e,patch);
+    if(card && (patch.subject!==card.title || patch.folder_link!==e.folder_link)){
+      const links = (card.links||[]).filter(l=>l.name!=="Enquiry folder");
+      const cp = { title:patch.subject, links: patch.folder_link ? [{name:"Enquiry folder",url:patch.folder_link}, ...links] : links };
+      await sb.from("task_tbl").update(cp).eq("id",card.id);
+      await taskLog(card.id, (me&&me.name)||user?.username||"", "Enquiry edited ("+changed.join(", ")+")");
+    }
+    setBusy(false); setEdit(null); await load(); onChanged && onChanged();
+  };
+
+  const markSent = async()=>{
+    if(!quote){ alert("Quote# "+qn+" has not been made in the Estimator yet.\n\nOffers go out only through the quote in the app — start the quote first."); return; }
+    if(!sent.note.trim()){ alert("Add a note — what was sent and to whom. It is saved as a follow-up on the quote."); return; }
+    if(!confirm("Move Quote# "+qn+" to Offer Sent?\n\nThe enquiry closes and its card completes.")) return;
+    setBusy(true);
+    try{
+      const r = await updateQuoteStatusForQuote(qn, "Offer Sent", user?.username||"unknown", "Enquiry screen", null, sent.date ? new Date(sent.date+"T12:00:00").toISOString() : null);
+      if(r && r.error){ alert("The stage could not be changed:\n\n"+r.error.message); return; }
+      if(r && r.blocked) return;
+      await logStageMoveFollowup({ referenceNumber:qn, customerName:quote.customer||e.company_name, stage:"Offer Sent", date:sent.date, note:sent.note.trim(), username:user?.username||"unknown", where:"Enquiry screen" });
+      await enquiryOfferSent(qn, user?.username||"unknown", sent.date ? new Date(sent.date+"T12:00:00").toISOString() : null);
+      setSent({ date:today, note:"" }); await load(); onChanged && onChanged();
+    } finally { setBusy(false); }
+  };
+
+  const statusPill = (()=>{ const m = e.status==="Offer Sent"||e.status==="Converted" ? ["#eaf9f4","#085041"] : e.status==="Regretted" ? ["#eeeeea","#5f625a"] : (!e.assigned_to||e.assigned_to==="Unassigned") ? ["#fdecea","#a3312a"] : ["#fff4d6","#854f0b"];
+    return h("span",{style:{fontSize:11,padding:"3px 9px",borderRadius:10,background:m[0],color:m[1],fontWeight:700}},(!e.assigned_to||e.assigned_to==="Unassigned")&&open?"Unassigned":(e.status||"—")); })();
+
+  return h("div",{style:{padding:20,maxWidth:1250}},
+    h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},
+      h("button",{onClick:onBack,style:{...btnPrimary,padding:"8px 14px",background:"#0f7a5c"}},"← Back to Enquiries"),
+      h("span",{style:{fontSize:12,color:colors.muted}},pos+" of "+total),
+      h("button",{onClick:onPrev,disabled:!onPrev,style:{...btnSmall,opacity:onPrev?1:0.4}},"‹ Previous"),
+      h("button",{onClick:onNext,disabled:!onNext,style:{...btnSmall,opacity:onNext?1:0.4}},"Next ›")),
+    h("h2",{style:{margin:"14px 0 2px"}},e.enquiry_number+" — "+(e.subject||e.details||"")),
+    h("div",{style:{fontSize:12.5,color:colors.muted,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},e.company_name+" · received "+fmtDMY(e.enquiry_date),statusPill),
+    h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(360px,1fr))",gap:14,marginTop:14,alignItems:"start"}},
+      h("div",null,
+        panel("Enquiry", canEdit && !edit ? h("button",{onClick:()=>setEdit({...e, closing_date:d10(e.closing_date)}),style:{...btnSmall,marginLeft:"auto"}},"Edit") : null,
+          edit
+            ? h("div",{style:{display:"grid",gridTemplateColumns:"140px minmax(0,1fr)",gap:"8px 12px",fontSize:12.5,alignItems:"center"}},
+                ...kv("Subject",inp("subject")), ...kv("Customer RFQ / ref",inp("customer_ref")), ...kv("Customer closes",inp("closing_date","date")),
+                ...kv("Folder link",inp("folder_link")),
+                ...kv("Type",h("select",{value:edit.enquiry_type||"",onChange:ev=>setEdit({...edit,enquiry_type:ev.target.value}),style:{...inputStyle,padding:"6px 8px",fontSize:12}},h("option",{value:""},"—"),types.map(t=>h("option",{key:t,value:t},t)))),
+                ...kv("Source",h("select",{value:edit.source||"",onChange:ev=>setEdit({...edit,source:ev.target.value}),style:{...inputStyle,padding:"6px 8px",fontSize:12}},h("option",{value:""},"—"),sources.map(t=>h("option",{key:t,value:t},t)))),
+                ...kv("Details",h("textarea",{rows:2,value:edit.details||"",onChange:ev=>setEdit({...edit,details:ev.target.value}),style:{...inputStyle,padding:"6px 8px",fontSize:12}})),
+                h("div",{key:"b1"}), h("div",{key:"b2",style:{display:"flex",gap:8}},h("button",{onClick:()=>setEdit(null),style:btnSecondary},"Cancel"),h("button",{onClick:saveEdit,disabled:busy,style:btnPrimary},"Save")))
+            : h("div",{style:{display:"grid",gridTemplateColumns:"140px minmax(0,1fr)",gap:"6px 12px",fontSize:12.5}},
+                ...kv("Customer",e.company_name), ...kv("Customer RFQ / ref",e.customer_ref||"—"), ...kv("Subject",e.subject||"—"),
+                ...kv("Received",fmtDMY(e.enquiry_date)+(e.created_by?" · logged by "+e.created_by:"")),
+                ...kv("Customer closes",e.closing_date?h("b",{style:{color:open&&d10(e.closing_date)<today?colors.danger:colors.text}},fmtDMY(e.closing_date)):"—"),
+                ...kv("Type / source",[e.enquiry_type,e.source].filter(Boolean).join(" · ")||"—"),
+                ...kv("Items",items.length?items.map(i=>i.item+(i.qty?" × "+i.qty:"")).join(", "):"—"),
+                ...kv("Folder",e.folder_link?h("a",{href:e.folder_link,target:"_blank",rel:"noopener noreferrer"},"open ↗"):"—"),
+                ...kv("Details",e.details||"—"),
+                ...(e.regret_reason?kv("Regret reason",e.regret_reason):[]))),
+        panel("History", null,
+          hist.length ? h("div",null,hist.map((r,i)=>h("div",{key:i,style:{padding:"5px 0",borderBottom:"1px solid #f0eee6",fontSize:12}},
+            h("b",null,r.by||"—")," — ",r.what,h("div",{style:{fontSize:10.5,color:colors.mutedLight}},fmtDMYTime(r.at))))) : h("div",{style:{fontSize:12,color:colors.mutedLight}},"Nothing yet."),
+          h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:8}},"Log a customer call from Log Follow-ups with Chase What = Enquiry."))),
+      h("div",null,
+        panel("Card", st ? h("span",{style:{fontSize:10.5,fontWeight:700,color:"#fff",background:st.color,borderRadius:9,padding:"2px 8px"}},st.label) : null,
+          card ? h("div",null,
+            h("div",{style:{display:"grid",gridTemplateColumns:"140px minmax(0,1fr)",gap:"6px 12px",fontSize:12.5}},
+              ...kv("Board",enqBoardLabel(card)), ...kv("Due",card.due_date?fmtDMY(card.due_date):"not handed out yet"),
+              ...kv("Checklist",(()=>{ const [d,n]=taskProgress(card); return n?d+" / "+n:"—"; })())),
+            onOpenCard ? h("button",{onClick:()=>onOpenCard(card.id, e.id),style:{...btnSmall,marginTop:10}},"Open card on the board") : null)
+          : h("div",{style:{fontSize:12,color:colors.mutedLight}},"This enquiry has no card.")),
+        panel("Quote "+(qn||""), null,
+          h("div",{style:{fontSize:12.5,marginBottom:8}},quote ? "Stage: "+quote.stage : qn ? "Not started in the Estimator yet." : "No Quote# on this enquiry."),
+          quote ? h("button",{onClick:()=>onOpenQuote(qn,1),style:{...btnPrimary,padding:"7px 13px",background:"#0f7a5c"}},"Open Quote# "+qn)
+            : (qn && open && canEdit ? h("button",{onClick:()=>onStartQuote(qn, e.id, e.company_name),style:{...btnPrimary,padding:"7px 13px",background:"#0f7a5c"}},"Start quote "+qn+" in the Estimator") : null)),
+        h("div",{style:{border:"1px dashed #0f7a5c",background:"#f1f8f5",borderRadius:8,padding:"12px 14px"}},
+          h("div",{style:{fontWeight:700,fontSize:13,marginBottom:6}},"Offer sent"),
+          !open ? h("div",{style:{fontSize:12.5}},e.status==="Regretted" ? "Closed as Regretted." : "Offer sent"+(e.offer_sent_at?" on "+fmtDMY(e.offer_sent_at):"")+" — the enquiry is closed and its card completed.")
+          : !quote ? h("div",{style:{fontSize:12.5,color:colors.muted}},"Offers go out only through the quote in the app. Start Quote# "+(qn||"")+" in the Estimator first; then mark it sent here or on the Quote screen.")
+          : !canEdit ? h("div",{style:{fontSize:12.5,color:colors.muted}},"Sales, the person it is assigned to, or an Admin can mark it sent.")
+          : h("div",null,
+              h("div",{style:{fontSize:12,color:colors.muted,marginBottom:8}},"Moves Quote# "+qn+" to Offer Sent — the same as on the Quote screen. The enquiry closes and its card completes itself."),
+              h("div",{style:{display:"grid",gridTemplateColumns:"150px minmax(0,1fr)",gap:8,alignItems:"start"}},
+                h("input",{type:"date",value:sent.date,max:today,onChange:ev=>setSent({...sent,date:ev.target.value}),style:{...inputStyle,padding:"6px 8px",fontSize:12}}),
+                h("textarea",{rows:2,value:sent.note,onChange:ev=>setSent({...sent,note:ev.target.value}),placeholder:"Note — what was sent, to whom (saved as a follow-up on the quote)",style:{...inputStyle,padding:"6px 8px",fontSize:12}})),
+              h("button",{onClick:markSent,disabled:busy,style:{...btnPrimary,marginTop:8,background:"#0f7a5c",opacity:busy?0.6:1}},busy?"Saving…":"Mark offer sent"))))));
+}
+
+function EnquiriesListScreen({ user, onGoToTab, onOpenQuote, onCreateQuoteFromEnquiry, initialOpenId, onOpenCard, onConsumedNav }){
+  const [openId,setOpenId] = useState(initialOpenId||null);   // 127: an enquiry opened from the list
+  useEffect(()=>{ if(initialOpenId){ setOpenId(initialOpenId); onConsumedNav && onConsumedNav(); } },[initialOpenId]);
   // 5 Oct (123) — the enquiry register. Who has it and when it is due come from its
   // Estimation card (Tasks); the status follows the card and the quote:
   // Unassigned -> Assigned -> Offer Sent (quote left Draft) / Regretted.
@@ -32767,6 +32920,7 @@ function EnquiriesListScreen({ user, onGoToTab, onOpenQuote, onCreateQuoteFromEn
   const load = useCallback(async()=>{
     if(!me) return;
     setLoading(true);
+    await loadEnquiryDept();
     let qy = sb.from("enquiry_tbl").select("*").order("created_at",{ascending:false});
     if(!me.sales && me.name) qy = qy.eq("assigned_to",me.name);   // estimators see their own; Sales and Admins see all
     const { data } = await qy;
@@ -32780,7 +32934,7 @@ function EnquiriesListScreen({ user, onGoToTab, onOpenQuote, onCreateQuoteFromEn
     acts.sort((a,b)=>String(b.activity_date||"").localeCompare(String(a.activity_date||"")) || String(b.created_at).localeCompare(String(a.created_at)));
     const last = new Map(); acts.forEach(a=>{ if(!last.has(a.chase_reference)) last.set(a.chase_reference,a); });
     const tids = list.map(e=>e.task_id).filter(Boolean); let cards = [];
-    for(let k=0;k<tids.length;k+=150){ const { data:c } = await sb.from("task_tbl").select("id,status,due_date,assignee").in("id",tids.slice(k,k+150)); cards = cards.concat(c||[]); }
+    for(let k=0;k<tids.length;k+=150){ const { data:c } = await sb.from("task_tbl").select("id,status,due_date,assignee,department,approved_at,sent_at").in("id",tids.slice(k,k+150)); cards = cards.concat(c||[]); }
     const refs = Array.from(new Set(list.map(e=>e.linked_reference_number).filter(Boolean))); let est = [];
     for(let k=0;k<refs.length;k+=150){ const { data:c } = await sb.from("estimates").select("reference_number,quote_status").in("reference_number",refs.slice(k,k+150)); est = est.concat(c||[]); }
     setRows(list.map(e=>({...e, __last:last.get(e.enquiry_number)||null, __card:cards.find(c=>c.id===e.task_id)||null, __quote:est.find(r=>r.reference_number===e.linked_reference_number)||null})));
@@ -32811,7 +32965,9 @@ function EnquiriesListScreen({ user, onGoToTab, onOpenQuote, onCreateQuoteFromEn
     return pill("#fff4d6","#854f0b","Assigned");
   };
   const cardStage = (enq)=>{ const c = enq.__card; if(!c) return h("span",{style:{color:colors.mutedLight}},"no card");
-    const st = TASK_STAGES.find(s=>s.key===taskStage(c,today)); return h("span",{style:{fontSize:10.5,fontWeight:700,color:"#fff",background:st.color,borderRadius:9,padding:"2px 8px",whiteSpace:"nowrap"}},st.label); };
+    const st = TASK_STAGES.find(s=>s.key===taskStage(c,today));
+    return h("div",null,h("span",{style:{fontSize:10.5,fontWeight:700,color:"#fff",background:st.color,borderRadius:9,padding:"2px 8px",whiteSpace:"nowrap"}},st.label),
+      h("div",{style:{fontSize:10.5,color:colors.muted,marginTop:3}},enqBoardLabel(c))); };   // 127: which board
   const d10 = (x)=> x ? String(x).slice(0,10) : "";
   const shown = rows.filter(e=>{
     if(fStatus==="open" && !enqIsOpen(e)) return false;
@@ -32826,6 +32982,14 @@ function EnquiriesListScreen({ user, onGoToTab, onOpenQuote, onCreateQuoteFromEn
   const th = (t,al)=> h("th",{style:{textAlign:al||"left",padding:"6px 6px",fontSize:11.5,color:colors.muted,whiteSpace:"nowrap"}},t);
   const td = (st, ...k)=> h("td",{style:{padding:"7px 6px",verticalAlign:"top",...(st||{})}},...k);
 
+  if(openId && me){
+    const list = shown.some(x=>x.id===openId) ? shown : rows;
+    const i = list.findIndex(x=>x.id===openId);
+    return h(EnquiryDetailScreen,{ key:openId, user, me, enquiryId:openId, pos:i>=0?i+1:1, total:list.length||1,
+      onBack:()=>{ setOpenId(null); load(); },
+      onPrev: i>0 ? ()=>setOpenId(list[i-1].id) : null, onNext: i>=0 && i<list.length-1 ? ()=>setOpenId(list[i+1].id) : null,
+      onOpenQuote, onStartQuote:(ref,id,cust)=>onCreateQuoteFromEnquiry(ref,id,cust), onOpenCard, onChanged:()=>{} });
+  }
   return h("div",{style:{padding:20}},
     h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}},
       h("h2",{style:{margin:0}},"Enquiries"),
@@ -32845,10 +33009,10 @@ function EnquiriesListScreen({ user, onGoToTab, onOpenQuote, onCreateQuoteFromEn
         h("thead",null,h("tr",{style:{borderBottom:"1px solid "+colors.border}},
           th("Enquiry"),th("Customer"),th("Subject"),th("Quote#"),th("Assigned to"),th("Due"),th("Customer closes"),th("Card"),th("Last follow-up"),th("Next follow-up"),th("Status"),th("","right"))),
         h("tbody",null, shown.map(enq=>{ const cd=d10(enq.closing_date); const open=enqIsOpen(enq); const qn=enq.linked_reference_number;
-          return h("tr",{key:enq.id,style:{borderBottom:"1px solid #f0eee6"}},
+          return h("tr",{key:enq.id,onClick:()=>setOpenId(enq.id),title:"Open this enquiry",style:{borderBottom:"1px solid #f0eee6",cursor:"pointer"}},
             td({fontWeight:600,whiteSpace:"nowrap"},enq.enquiry_number,h("div",{style:{fontSize:11,fontWeight:400,color:colors.muted}},fmtDMY(enq.enquiry_date))),
             td(null,enq.company_name,enq.customer_ref?h("div",{style:{fontSize:11,color:colors.muted}},enq.customer_ref):null),
-            td({maxWidth:240},enq.subject||enq.details||"—",enq.folder_link?h("div",null,h("a",{href:enq.folder_link,target:"_blank",rel:"noopener noreferrer",style:{fontSize:11}},"folder ↗")):null),
+            td({maxWidth:240},enq.subject||enq.details||"—",enq.folder_link?h("div",null,h("a",{href:enq.folder_link,target:"_blank",rel:"noopener noreferrer",onClick:ev=>ev.stopPropagation(),style:{fontSize:11}},"folder ↗")):null),
             td({whiteSpace:"nowrap"},qn||"—",enq.__quote?h("div",{style:{fontSize:11,color:colors.muted}},enq.__quote.quote_status||"Draft"):qn?h("div",{style:{fontSize:11,color:colors.mutedLight}},"not started"):null),
             td(null,!enq.assigned_to||enq.assigned_to==="Unassigned"?h("span",{style:{color:colors.mutedLight}},"pile"):enq.assigned_to),
             td({whiteSpace:"nowrap",color:open&&enq.due_date&&toISODate(enq.due_date)<today?"#a3312a":undefined,fontWeight:open&&enq.due_date&&toISODate(enq.due_date)<today?700:400},fmtDMY(enq.due_date)||"—"),
@@ -32862,8 +33026,8 @@ function EnquiriesListScreen({ user, onGoToTab, onOpenQuote, onCreateQuoteFromEn
               enq.__last && enq.__last.next_followup_date ? fmtDMY(enq.__last.next_followup_date) : "—"),
             td(null,statusBadge(enq)),
             td({textAlign:"right",whiteSpace:"nowrap"},
-              enq.__quote ? h("button",{onClick:()=>onOpenQuote(qn,1),style:{...btnSmall,fontSize:11}},"Open Quote#")
-                : open && enq.assigned_to && enq.assigned_to!=="Unassigned" ? h("button",{onClick:()=>startQuote(enq),style:{...btnSmall,fontSize:11}},qn?"Start quote":"Convert to quote") : null));
+              enq.__quote ? h("button",{onClick:ev=>{ ev.stopPropagation(); onOpenQuote(qn,1); },style:{...btnSmall,fontSize:11}},"Open Quote#")
+                : open && enq.assigned_to && enq.assigned_to!=="Unassigned" ? h("button",{onClick:ev=>{ ev.stopPropagation(); startQuote(enq); },style:{...btnSmall,fontSize:11}},qn?"Start quote":"Convert to quote") : null));
         })))),
     showLog && h(LogEnquiryModal,{user,allocation:null,pkg:null,project:null,onCancel:()=>setShowLog(false),
       onSaved:(r)=>{ setShowLog(false); load(); if(r) alert("Enquiry "+r.enquiryNumber+" logged with Quote# "+r.quoteNo+".\n\nIts card is waiting in the "+ENQUIRY_DEPT+" Unassigned pile (Tasks) for the daily review."); }})
@@ -40508,6 +40672,7 @@ function App() {
   useEffect(()=>{
     if(prevTabRef.current==="quotes_report" && tab!=="quotes_report") setReturnToReport(true);
     if(tab==="quotes_report") setReturnToReport(false);
+    if(tab!=="task_board" && tab!=="enquiries_list") setEnqNav(null);   // 127
     prevTabRef.current = tab;
   },[tab]);
   // Dashboard drill-through (30 Aug) — clicking a Funnel stage or Zone
@@ -40574,6 +40739,7 @@ function App() {
     setEntityLookupPreselect({type,value}); setEntityReturnTo(returnTo||null); setTab("lookup_"+type);
   };
   const [openModelTarget,setOpenModelTarget]=useState(null); // model string bridge from BOM Coverage's "Open BOM" button to Estimator
+  const [enqNav,setEnqNav]=useState(null);   // 127: {enqId, taskId} — enquiry -> its card on the board -> back to the enquiry
   const [pendingNewSlNo,setPendingNewSlNo]=useState(null); // {reference_number,item_sl_no} bridge from Quotes' "+ New Sl No" to Estimator
   const [monthlyArchiveDone,setMonthlyArchiveDone]=useState(true); // suppressed on open — no form should show before the toolbar
   const [draftCount,setDraftCount]=useState(0); // fetched silently — surfaced as a toolbar badge, not a popup
@@ -40886,9 +41052,12 @@ function App() {
     tab==="lookup_package"?h(EntityLookupScreen,{user,entityType:"package",preselect:entityLookupPreselect,onGoTo:goToEntityLookup,returnTo:entityReturnTo}):
     tab==="lookup_customer"?h(EntityLookupScreen,{user,entityType:"customer",preselect:entityLookupPreselect,onGoTo:goToEntityLookup,returnTo:entityReturnTo}):
     tab==="task_board"?h(TaskBoardScreen,{user,
+      openTaskId: enqNav&&enqNav.taskId, onBackToEnquiry: enqNav ? ()=>{ setEnqNav(n=>n?{enqId:n.enqId,back:true}:null); setTab("enquiries_list"); } : null,
       onOpenQuote:(ref,slNo)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo||1});setTab("saved");},
       onStartQuote:(ref,enquiryId,prefillCustomerName)=>{ setPendingNewSlNo({reference_number:ref,item_sl_no:1,linked_enquiry_id:enquiryId,prefillCustomerName}); setTab("estimator"); } }):
     tab==="enquiries_list"?h(EnquiriesListScreen,{user,onGoToTab:setTab,
+      initialOpenId: enqNav&&enqNav.back ? enqNav.enqId : null, onConsumedNav:()=>setEnqNav(null),
+      onOpenCard:(taskId,enqId)=>{ setEnqNav({enqId,taskId}); setTab("task_board"); },
       onOpenQuote:(ref,slNo)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo});setTab("saved");},
       onCreateQuoteFromEnquiry:(ref,enquiryId,prefillCustomerName)=>{ setPendingNewSlNo({reference_number:ref,item_sl_no:1,linked_enquiry_id:enquiryId,prefillCustomerName}); setTab("estimator"); }
     }):
@@ -42310,7 +42479,25 @@ async function taskLog(taskId, by, action, title, snapshot){
 // drives the enquiry: hand-out / re-plan writes assigned_to + due_date back to
 // enquiry_tbl (taskSyncEnquiry); the quote leaving Draft (Offer Sent or later)
 // completes the card and closes the enquiry (enquiryOfferSent).
-const ENQUIRY_DEPT = "Estimation";
+// 127: enquiry cards go to Design & Estimation. The exact name is read from the
+// department master (whatever spelling it has there); before the build-127 SQL
+// runs, a company that still has only "Estimation" keeps using it.
+let ENQUIRY_DEPT = "Design & Estimation";
+let ENQUIRY_DEPT_LOADING = null;
+function loadEnquiryDept(force){
+  if(ENQUIRY_DEPT_LOADING && !force) return ENQUIRY_DEPT_LOADING;
+  ENQUIRY_DEPT_LOADING = (async()=>{
+    try{
+      const { data } = await sb.from("department_tbl").select("department");
+      const names = (data||[]).map(r=>r.department).filter(Boolean);
+      const de = names.find(n=>/design/i.test(n) && /estimat/i.test(n));
+      ENQUIRY_DEPT = de || (names.includes("Estimation") ? "Estimation" : "Design & Estimation");
+    }catch(e){}
+    return ENQUIRY_DEPT;
+  })();
+  return ENQUIRY_DEPT_LOADING;
+}
+const enqBoardLabel = (card)=> card ? ((card.department||ENQUIRY_DEPT)+" board \u00b7 "+(taskIsPile(card)?"Unassigned pile":card.assignee)) : "";
 const ENQ_CLOSED = ["Converted","Offer Sent","Regretted"];
 const enqIsOpen = (e)=> !!e && !ENQ_CLOSED.includes(e.status);
 const ENQ_CHECKLIST = ["Read the enquiry and specs","Clarifications sent / answered","BOM and costing","Datasheet / GAD if asked","Offer reviewed","Offer sent"];
@@ -42362,7 +42549,7 @@ async function enquiryOfferSent(ref, by, at){
   return n;
 }
 
-function TaskBoardScreen({ user, onOpenQuote, onStartQuote }){
+function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackToEnquiry }){
   // 3 Oct (119) — three views:
   //   Task Assignment Board  a department's Unassigned pile + one list per employee
   //                          of that department; drag a card onto a person to hand it
@@ -42453,6 +42640,8 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote }){
     setLoading(false);
   },[user?.id, user?.username]);
   useEffect(()=>{ load(true); },[load]);
+  const openedRef = useRef(false);   // 127: opened from an enquiry -> show that card
+  useEffect(()=>{ if(openTaskId && !openedRef.current && !loading && tasks.some(t=>t.id===openTaskId)){ openedRef.current = true; setOpenId(openTaskId); } },[openTaskId,loading,tasks]);
 
   const deptOf = (name)=> (emps.find(e=>e.employee_name===name)||{}).department || "";
   const taskDept = (t)=> t.department || deptOf(t.assignee);
@@ -42610,6 +42799,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote }){
 
   // ---------- header ----------
   const header = h("div",{style:{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:10}},
+    onBackToEnquiry ? h("button",{onClick:onBackToEnquiry,style:{...btnPrimary,padding:"8px 14px",background:"#0f7a5c"}},"\u2190 Back to the enquiry") : null,   // 127
     h("h2",{style:{margin:0,fontSize:16}},"Tasks"),
     h("div",{style:{display:"flex",border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden"}},
       authorised ? tabBtn("assign","Task Assignment Board") : null, tabBtn("emp",authorised?"Employee board":"My board"), tabBtn("dash","Dashboards")),
@@ -43201,6 +43391,7 @@ function PendingActionsScreen({ user }){
       const enqs = (enqAll||[]).filter(enqIsOpen);   // 123
       if(!eErr && enqs && enqs.length){
         // 123: waiting in the Estimation pile is owed by the Sales Head and the Estimation approvers
+        await loadEnquiryDept();
         const { data: estAp } = await sb.from("task_approver_tbl").select("employee_name").eq("department",ENQUIRY_DEPT);
         const heads = Array.from(new Set([...(sh||[]).map(r=>r.employee_name), ...(estAp||[]).map(r=>r.employee_name)].filter(Boolean)));
         enqs.forEach(x=>{
