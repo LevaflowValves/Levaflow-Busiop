@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-05T03:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-05T06:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -1995,8 +1995,27 @@ function TopBar({ user, sessionCompanyId, sessionCompany, onChangeCompany, onLog
   );
 }
 
+/* ---- 125: who may create customers without being an Admin ----
+   Admins, plus employees whose CRM role is FSE or Telecaller / Inside Sales,
+   plus whoever holds the Document Controller post. They get CRM -> Customers
+   (add / edit customers, contacts, addresses); bulk upload, CRM Setup and the
+   owner field stay Admin / Super Admin only. */
+async function canCreateCustomers(user){
+  if(!user) return false;
+  if(user.role==="admin" || user.role==="super_admin") return true;
+  try{
+    const { data: emp } = await sb.from("employee_tbl").select("employee_name,crm_role").eq("app_user_id",user.id).limit(1).maybeSingle();
+    if(!emp) return false;
+    if(/fse|telecaller|inside sales|onsite sales/i.test(emp.crm_role||"")) return true;
+    const { data: dc } = await sb.from("post_holder_tbl").select("employee_name").eq("post_key","doc_controller").eq("employee_name",emp.employee_name).limit(1);
+    return !!(dc && dc.length);
+  }catch(e){ return false; }
+}
+
 /* ---- MENU ---- */
 function MenuTabs({ user, active, onChange }) {
+  const [custAccess,setCustAccess] = useState(false);   // 125
+  useEffect(()=>{ let live=true; canCreateCustomers(user).then(v=>{ if(live) setCustAccess(v); }); return ()=>{ live=false; }; },[user?.id, user?.role]);
   const isAdmin = user.role==="admin" || user.role==="super_admin";
   const isSuperAdmin = user.role==="super_admin";
   const isHrAdmin = user.role==="hr_admin";
@@ -2054,6 +2073,7 @@ function MenuTabs({ user, active, onChange }) {
       ...(isAdmin?[{ label:"Vendors", tabs:[{key:"vendors",label:"Vendors"}] }]:[]),
     ]},
     { label:"CRM", subgroups:[
+      ...(!isAdmin && custAccess ? [{ label:"Customers", tabs:[{key:"customers",label:"Customers"}] }] : []),   // 125: FSE / Telecaller / Document Controller
       ...(isAdmin?[
         { label:"Customers", tabs:[{key:"customers",label:"Customers"},{key:"customer_bulk_upload",label:"Customer Bulk Upload"}] },
         { label:"CRM Setup", tabs: byKeys(["state_zone_tbl","country_zone_tbl","city_tbl","territory_rule_state_tbl","territory_rule_country_tbl","territory_rule_zone_tbl","crm_status_tbl"]) },
@@ -23396,7 +23416,41 @@ function EndUserPicker({ value, onSelect, user, disabled, otherCountry, otherCon
   );
 }
 
-function CustomerCompanyForm({ initial, onCancel, onSaved, user }){
+// ---- 126: duplicate-customer check ------------------------------------------
+// Names are compared after removing Pvt/Private, Ltd/Limited, LLC, FZE, brackets,
+// punctuation and case. Same GST / tax ID is a duplicate whatever the name.
+const CUST_SUFFIX = new Set(["pvt","ltd","llc","fzco","fze","fzc","fz","llp","wll","plc","inc","corp","corporation","co","company","the","and","pte","sdn","bhd","gmbh","sa","spa","bv","est","establishment","private","limited"]);
+const custCoreTokens = (n)=> String(n||"").toLowerCase().replace(/\(.*?\)/g," ").replace(/&/g," and ").replace(/[^a-z0-9 ]/g," ").split(/\s+/).filter(w=>w && !CUST_SUFFIX.has(w));
+function findCustomerDuplicates(name, gst, all, selfId){
+  const t = custCoreTokens(name); const core = t.join("");
+  const g = String(gst||"").toUpperCase().replace(/[^A-Z0-9]/g,"");
+  const out = [];
+  (all||[]).forEach(c=>{
+    if(selfId && c.id===selfId) return;
+    const ct = custCoreTokens(c.company_name); const cc = ct.join("");
+    const cg = String(c.gst_tax_id||"").toUpperCase().replace(/[^A-Z0-9]/g,"");
+    let why = "";
+    if(g.length>=6 && cg && cg===g) why = "Same GST / tax ID";
+    else if(core && cc===core) why = "Same name (apart from Pvt / Ltd / punctuation)";
+    else if(core.length>=6 && cc.length>=6 && (cc.includes(core) || core.includes(cc))) why = "One name contains the other";
+    else if(t.length && ct.length && (()=>{ const [sh,lg] = t.length<=ct.length ? [t,ct] : [ct,t]; return sh.some(w=>w.length>=4) && sh.every(w=>lg.includes(w)); })()) why = "One name contains the other";
+    else if(t.length>=2 && ct.length>=2){ const a=new Set(t), b=new Set(ct); const shared=[...a].filter(x=>b.has(x)).length; if(shared>=2 && shared/Math.max(a.size,b.size)>=0.6) why = "Very similar name"; }
+    if(why) out.push({ ...c, why });
+  });
+  const rank = {"Same GST / tax ID":0,"Same name (apart from Pvt / Ltd / punctuation)":1,"One name contains the other":2,"Very similar name":3};
+  return out.sort((a,b)=>rank[a.why]-rank[b.why]).slice(0,8);
+}
+async function notifySuperAdmins(message, company, type){
+  try{
+    const { data: sa } = await sb.from("app_users").select("id,username,employee_name").eq("role","super_admin");
+    const ids = (sa||[]).map(u=>u.id).filter(x=>x!=null);
+    const { data: emps } = ids.length ? await sb.from("employee_tbl").select("employee_name,app_user_id").in("app_user_id",ids) : { data:[] };
+    const names = Array.from(new Set([...(emps||[]).map(e=>e.employee_name), ...(sa||[]).map(u=>u.employee_name)].filter(Boolean)));
+    for(const n of names) await sb.from("notifications_tbl").insert({ employee_name:n, message, related_company:company||null, notif_type:type||"info" });
+  }catch(e){ console.error("Super Admin notification failed", e); }
+}
+
+function CustomerCompanyForm({ initial, onCancel, onSaved, user, onUseExisting }){
   const [f,setF] = useState(initial || {company_name:"",account_type:"",industry:"",rating:"",website:"",phone:"",zone:"",billing_street:"",billing_city:"",billing_state:"",billing_country:"",billing_pin:"",shipping_street:"",shipping_city:"",shipping_state:"",shipping_country:"",shipping_pin:"",gst_tax_id:"",account_owner:"",source:"",notes:""});
   const [saving,setSaving] = useState(false);
   const [zoneOptions,setZoneOptions] = useState([]);
@@ -23418,10 +23472,16 @@ function CustomerCompanyForm({ initial, onCancel, onSaved, user }){
   },[f.billing_state,f.billing_country,f.id]);
   const set = (k,v)=>setF(d=>({...d,[k]:v}));
   const [dupWarning,setDupWarning] = useState("");
+  // 126 — every customer once, for the duplicate check (name and GST).
+  const [allCos,setAllCos] = useState(null);
+  useEffect(()=>{ if(!(initial && initial.id)) sb.from("companies").select("id,company_name,gst_tax_id,billing_city,billing_country,owner_employee_name").order("company_name").limit(20000).then(({data})=>setAllCos(data||[])); },[]);
+  const [dupHits,setDupHits] = useState(null);       // list shown in the stop box, or null
+  const [dupReason,setDupReason] = useState("");
+  const overrideRef = useRef(null);                   // {hits, reason} once the user overrides
   const checkDup = async(name)=>{
     if(f.id || !name.trim()){ setDupWarning(""); return; }
-    const { data } = await sb.from("companies").select("company_name").ilike("company_name",name.trim()).limit(1);
-    setDupWarning((data&&data.length>0) ? "\""+data[0].company_name+"\" already exists — check before adding a duplicate." : "");
+    const hits = findCustomerDuplicates(name, f.gst_tax_id, allCos||[]);
+    setDupWarning(hits.length ? "Looks like an existing customer: "+hits.slice(0,3).map(x=>x.company_name).join(" \u00b7 ")+(hits.length>3?" \u2026":"") : "");
   };
 
   // India State -> City cascade. States load once (state_zone_tbl doubles as
@@ -23462,6 +23522,12 @@ function CustomerCompanyForm({ initial, onCancel, onSaved, user }){
 
   const save = async()=>{
     if(!f.company_name.trim()){ alert("Customer name is required."); return; }
+    if(!f.id && !overrideRef.current){   // 126: stop on a likely duplicate
+      let pool = allCos;
+      if(!pool){ const { data } = await sb.from("companies").select("id,company_name,gst_tax_id,billing_city,billing_country,owner_employee_name").limit(20000); pool = data||[]; }
+      const hits = findCustomerDuplicates(f.company_name, f.gst_tax_id, pool);
+      if(hits.length){ setDupHits(hits); return; }
+    }
     if(!f.zone){ alert("Zone is required."); return; }
     if(!f.billing_street.trim()){ alert("Street is required."); return; }
     if(!f.billing_city.trim()){ alert("City is required."); return; }
@@ -23482,6 +23548,12 @@ function CustomerCompanyForm({ initial, onCancel, onSaved, user }){
         const { error } = await sb.from("companies").insert(payload);
         if(error) throw error;
         if(payload.owner_employee_name) await logOwnershipChange(payload.company_name, "", payload.owner_employee_name, "Auto", user?.username||"unknown");
+        if(overrideRef.current){   // 126: duplicate warning overridden -> audit + Super Admins told
+          const o = overrideRef.current; const list = o.hits.map(x=>x.company_name+" ("+x.why+")").join("; ");
+          const by = user?.username||"unknown";
+          await logAudit("INSERT","companies",payload.company_name,"Duplicate warning overridden by "+by+": new customer \""+payload.company_name+"\" looks like "+list+". Reason: "+o.reason,by,null,{company_name:payload.company_name,similar:o.hits.map(x=>x.company_name),reason:o.reason});
+          await notifySuperAdmins(by+" created customer \""+payload.company_name+"\" although it looks like "+o.hits.slice(0,3).map(x=>"\""+x.company_name+"\"").join(", ")+". Reason given: "+o.reason+". Merge or archive it if it is a duplicate.", payload.company_name, "customer_duplicate_override");
+        }
         if(addContact){
           const contactPayload = {...contactF, company_name:f.company_name.trim(), created_by:user?.username||"unknown"};
           const { error: cErr } = await sb.from("contacts").insert(contactPayload);
@@ -23605,7 +23677,26 @@ function CustomerCompanyForm({ initial, onCancel, onSaved, user }){
           invalidMessage:"That city is not on the list for this country. An admin can add it with + add city.",
           style:{...inputStyle,padding:"7px 9px",fontSize:12,opacity:f[countryKey]?1:0.6}}))
   );
-  return h("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.5)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}},
+  const dupBox = dupHits && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1400,display:"flex",alignItems:"center",justifyContent:"center",padding:20}},
+    h("div",{style:{background:"#fff",borderRadius:8,padding:"18px 22px",width:560,maxWidth:"100%",maxHeight:"85vh",overflow:"auto"}},
+      h("div",{style:{fontWeight:700,fontSize:14,color:"#854f0b",marginBottom:4}},"\u26a0 This looks like a customer you already have"),
+      h("div",{style:{fontSize:12,color:colors.muted,marginBottom:10}},"\u201c"+f.company_name.trim()+"\u201d is close to "+(dupHits.length===1?"this customer":"these customers")+". Use the existing one if it is the same company."),
+      dupHits.map(x=>h("div",{key:x.id||x.company_name,style:{display:"flex",gap:10,alignItems:"center",border:"1px solid "+colors.border,borderRadius:6,padding:"8px 10px",marginBottom:6}},
+        h("div",{style:{flex:1,minWidth:0}},h("b",{style:{fontSize:12.5}},x.company_name),
+          h("div",{style:{fontSize:11,color:colors.muted}},[x.billing_city,x.billing_country].filter(Boolean).join(", ")+(x.owner_employee_name?" \u00b7 owner "+x.owner_employee_name:"")),
+          h("div",{style:{fontSize:11,color:"#854f0b"}},x.why)),
+        h("button",{onClick:async()=>{ const { data: full } = await sb.from("companies").select("*").eq("company_name",x.company_name).limit(1).maybeSingle();
+            setDupHits(null); if(onUseExisting) onUseExisting(full||x); else onSaved(full||x, null); },style:{...btnSmall,whiteSpace:"nowrap"}},"Use this one"))),
+      h("div",{style:{borderTop:"1px solid "+colors.border,marginTop:10,paddingTop:10}},
+        h("div",{style:{fontSize:12,fontWeight:600,marginBottom:4}},"It is a different company \u2014 create it anyway"),
+        h("div",{style:{fontSize:11,color:colors.muted,marginBottom:6}},"Say why. The override is recorded and every Super Admin is told."),
+        h("input",{value:dupReason,onChange:e=>setDupReason(e.target.value),placeholder:"e.g. Different branch / separate legal entity in Oman",style:{...inputStyle,padding:"7px 9px",fontSize:12,width:"100%"}})),
+      h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:12}},
+        h("button",{onClick:()=>setDupHits(null),style:btnSecondary},"Go back"),
+        h("button",{onClick:()=>{ if(!dupReason.trim()){ alert("Give a reason to create it anyway."); return; } overrideRef.current={ hits:dupHits, reason:dupReason.trim() }; setDupHits(null); setTimeout(()=>save(),0); },
+          style:{...btnPrimary,background:"#a3312a"}},"Create anyway"))));
+  return h("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.5)",zIndex:1300,display:"flex",alignItems:"center",justifyContent:"center",padding:20}},
+    dupBox,
     h("div",{style:{background:"#fff",borderRadius:8,padding:"20px 24px",width:560,maxWidth:"100%",maxHeight:"85vh",overflow:"auto"}},
       h("div",{style:{fontWeight:700,fontSize:14,marginBottom:14}},f.id?"Edit customer":"New customer"),
       h("div",{style:{display:"flex",gap:10,marginBottom:8}},
@@ -24022,6 +24113,7 @@ function AddPackageHandledModal({ companyName, user, onCancel, onSaved }){
 }
 
 function CustomersScreen({ user }){
+  const isAdminUser = user.role==="admin" || user.role==="super_admin";   // 125: others may add and edit, not remove
   const [companies,setCompanies] = useState([]);
   const [loading,setLoading] = useState(true);
   const [search,setSearch] = useState("");
@@ -24439,7 +24531,7 @@ function CustomersScreen({ user }){
             h("td",{style:{padding:"7px 8px"}},ct.is_primary==="Yes"?h("span",{style:{background:"#e1f5ee",color:"#085041",fontSize:9.5,padding:"1px 7px",borderRadius:8}},"Yes"):"—"),
             h("td",{style:{padding:"7px 8px",whiteSpace:"nowrap"}},
               h("button",{onClick:()=>setContactFormOpen(ct),style:{...btnSmall,fontSize:10,padding:"3px 8px",marginRight:5}},"Edit"),
-              h("button",{onClick:()=>removeContact(ct),style:{...btnSmall,fontSize:10,padding:"3px 8px",border:"1px solid #f0b8b8",color:colors.danger}},"Remove")
+              isAdminUser && h("button",{onClick:()=>removeContact(ct),style:{...btnSmall,fontSize:10,padding:"3px 8px",border:"1px solid #f0b8b8",color:colors.danger}},"Remove")
             )
           )),
           newRow && h("tr",{style:{borderTop:"1px solid #eceae0",background:newRow._scanned?"#faf6ea":undefined}},
@@ -24487,7 +24579,7 @@ function CustomersScreen({ user }){
                 h("td",{style:{padding:"7px 8px"}},addr.is_primary==="Yes"?h("span",{style:{background:"#e1f5ee",color:"#085041",fontSize:9.5,padding:"1px 7px",borderRadius:8}},"Yes"):"—"),
                 h("td",{style:{padding:"7px 8px",whiteSpace:"nowrap"}},
                   h("button",{onClick:()=>setAddressFormOpen({...addr}),style:{...btnSmall,fontSize:10,padding:"3px 8px",marginRight:5}},"Edit"),
-                  h("button",{onClick:()=>removeAddress(addr),style:{...btnSmall,fontSize:10,padding:"3px 8px",border:"1px solid #f0b8b8",color:colors.danger}},"Remove")
+                  isAdminUser && h("button",{onClick:()=>removeAddress(addr),style:{...btnSmall,fontSize:10,padding:"3px 8px",border:"1px solid #f0b8b8",color:colors.danger}},"Remove")
                 )
               )
           ),
@@ -25260,6 +25352,14 @@ const MANUAL_SECTIONS = [
         "title": "Customers",
         "tag": "Master Data \u2192 Customers",
         "blocks": [
+          {
+            "type": "tip",
+            "text": "Duplicate check (build 126): when you add a customer, the app compares it with every customer \u2014 same GST / tax ID, or the same name once Pvt / Private, Ltd / Limited, LLC, FZE, brackets and punctuation are ignored, or a name inside the other, or a very similar name. If it finds one, Save stops and lists them: Use this one, Go back, or Create anyway with a reason. Creating anyway is recorded and every Super Admin is told. + New customer is also next to the Customer field in Log enquiry and Add customer allocation."
+          },
+          {
+            "type": "tip",
+            "text": "From 5 October 2026 (build 125) FSEs, Telecallers / Inside Sales and the Document Controller also have CRM \u2192 Customers: they can add a new customer (or read one from a PDF / image), edit it, and add or edit its contacts and addresses. Zone and owner are filled in automatically. Customer Bulk Upload, CRM Setup, changing the owner and removing contacts or addresses stay with Admins."
+          },
           {
             "type": "p",
             "text": "Customer is the primary record in this app \u2014 a B2B setup where one customer can have many contacts. You won't find contacts listed on their own; they're always nested under their customer."
@@ -27074,6 +27174,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"5 Oct 2026 (126)", summary:"New customer from where you are, and a duplicate check. + New customer next to the Customer field in Log enquiry and in Add customer allocation (Major Projects); every customer picker that already had + New (quotes, quote header, Log Follow-ups, projects, sale order) uses the same form. DUPLICATE CHECK on every new customer (CustomerCompanyForm, findCustomerDuplicates): same GST / tax ID; same name once Pvt/Private, Ltd/Limited, LLC/FZE/FZCO/WLL etc., brackets, punctuation and case are ignored; one name contained in the other; or a very similar name (2+ shared words, 60%+). A hint shows under the name; Save stops with the list \u2014 Use this one (picks the existing customer), Go back, or Create anyway with a reason. An override is written to the audit log and every Super Admin gets a notification (notif_type customer_duplicate_override) naming the customer, the look-alikes and the reason. No SQL." },
+  { date:"5 Oct 2026 (125)", summary:"Customers for non-Admins. canCreateCustomers: Admin / Super Admin, or an employee whose CRM role is FSE or Telecaller / Inside Sales, or the Document Controller post holder. They get CRM \u2192 Customers (new customer, Upload PDF/image, edit customer, add / edit contacts and addresses); zone and owner are filled automatically on create as before. Customer Bulk Upload, CRM Setup and changing the owner stay Admin / Super Admin; Remove on contacts and addresses is Admin only. No SQL." },
   { date:"5 Oct 2026 (124)", summary:"Quotes Report: filters clear the screen properly. Rows were keyed by Quote# alone; 30 legacy quotes imported twice share a Quote#, and after filtering their rows stayed on screen (count 0, old-dated rows still showing). Each row is now keyed by source + Quote# + position, so the list always matches the filters; same fix on the CRM Funnel board (legacy and app cards keyed apart). Group by currency: legacy quotes join INR or USD by the customer's country (same rule as + Add value) instead of a Currency unknown group of their own; filters, sort and search already treat legacy and app quotes alike, the Legacy badge only shows the source. Legacy stage change and customer lookup no longer fail on a repeated Quote# (first match taken). SQL data_legacy_duplicates_124 (Flometriq): one copy kept per repeated Quote# (Won/Lost first, then any stage past Draft, then Draft; tie = later date), the other copy's note saved to the quote's history, then deleted; FEX240495 and FS240129-R03 left for a decision." },
   { date:"5 Oct 2026 (123)", summary:"Every enquiry is an Estimation task card. SQL structure_enquiry_cards_123 (both): enquiry_tbl subject, closing_date, folder_link, customer_ref, task_id, offer_sent_at, regret_reason; task_tbl.enquiry_id; employee_tbl.second_department. data_enquiry_cards_123 (both): Estimation department, labels Enquiry / Waiting customer. levaflow_estimation_123: Muthu Lakshmi second department Estimation. LOG ENQUIRY (anyone in Sales, Admins): customer from the customer list, subject, Quote# required and checked unique (estimates, legacy, other enquiries), received, customer's closing date, type, source, RFQ ref, folder link, items; open enquiries of that customer listed by enquiry number and Quote#; number ENQ-YYMMDD-NN = next free for the day; saving creates the card in the Estimation Unassigned pile (title = subject, ref = ENQ \u00b7 Quote#, label Enquiry, folder link, standard 6-item checklist) and links both ways. CARD \u2192 ENQUIRY: hand-out / re-plan / back to pile (board drag or card editor) write assigned_to, assigned_by, assigned_at, due_date and status Assigned/Unassigned; hand-out of an enquiry card offers today + 3 days. OFFER SENT: updateQuoteStatusForQuote leaving Draft (any source) calls enquiryOfferSent \u2014 enquiry Offer Sent + offer_sent_at, card Completed (approved by App (offer sent), sent_at kept, checklist Offer sent ticked, history line); the board also completes any it finds on load. Card editor: Enquiry panel (ENQ, Quote#, status, customer, RFQ ref, received, closing date, type/source, folder, items), Start quote in the Estimator / Open Quote#, Waiting for customer (+3 days, label, not stale), Regret / no quote (reason \u2192 Under Approval \u2192 Regretted on approval, back to Assigned if sent back). Task board: \u23f3 closes date on enquiry cards, chips Customer closes \u2264 7 days / Closing date passed, closing date in Table and Excel; second department: person listed on both department boards and pickers, keeps the card's department on hand-out. ENQUIRIES register rewritten: status / closing-date / search filters, Quote# with quote stage, card stage, due and closing date, follow-ups; Start quote / Open Quote#; due-date editing removed (the card owns it); Log enquiry only for Sales and Admins; estimators see their own. Enquiry Review menu item retired. Estimator save no longer marks the enquiry Converted. Log Follow-ups: Enquiry list = open enquiries; no longer moves the due date. Pending Actions: pile enquiries owed by Sales Head + Estimation approvers; enquiry_overdue dropped (the card's task_overdue covers it). Login prompt wording. Manual section rewritten." },
   { date:"4 Oct 2026 (122)", summary:"Task Manager: clutter control and quick filters. SQL structure_task_manager_122: task_tbl.updated_at (last touched; backfilled) and task_dept_setting_tbl (per department: amber_open 15, red_open 25, stale_days 7, approval_wait_days 2; security copied from enquiry_tbl), edited in Task Setup → Task Department Limits. EMPLOYEE BOARD: a person's sub-tasks on their own cards fold inside the card (▸ N sub-tasks, k overdue; click to open a row); a sub-task on someone else's card shows as a slim strip naming the card and its owner; overdue folded sub-tasks are also listed as strips in Overdue; Completed shows the last 7 days (older count noted, all in Table); Tasks Assigned is grouped This week (Mon–Sun) / Next week / Later (folded) / No due date. TASK ASSIGNMENT BOARD: load badge per person from open cards (amber / red outline at the department limits), Download department to Excel. TABLE VIEW: sub-task tree with Expand all / Collapse all, header Name · N open with load badge, completed period (7 days / this month default / quarter / all), sort by title or due, Download to Excel (cards and sub-tasks, all columns). QUICK FILTERS on board, table and assignment board: Overdue, Due today, This week, Next week, Stale, Waiting approval, No due date, Created by me (combine with AND), search title / reference / customer, label filter, Clear filters. Stale and approval-wait use the department limits; a card with a stale flag shows it. updated_at stamped on every move and edit (app keeps working if the SQL has not been run yet). Show completed toggle retired. Manual updated." },
@@ -31401,6 +31503,7 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved }){
   const [itemOptions,setItemOptions] = useState([]);
   const [customers,setCustomers] = useState([]);
   const [openOnes,setOpenOnes] = useState([]);
+  const [addCust,setAddCust] = useState(false);   // 126
   const [saving,setSaving] = useState(false);
   const [err,setErr] = useState("");
 
@@ -31490,7 +31593,11 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved }){
         h("div",null,h("strong",null,"Package: "),pkg?.package_name||"—"),
         h("div",null,h("strong",null,"Customer: "),companyName))
       : h("div",{style:{marginBottom:10}}, fld("Customer (from the customer list)",
-          h(LimitToListCombo,{value:companyName,onChange:v=>setCompanyName(v||""),options:customers,limitToList:true,placeholder:"Start typing a customer",style:{fontSize:12,width:"100%",padding:"7px 9px"}}))),
+          h("div",{style:{display:"flex",gap:6,alignItems:"center"}},
+            h("div",{style:{flex:1,minWidth:0}},h(LimitToListCombo,{value:companyName,onChange:v=>setCompanyName(v||""),options:customers,limitToList:true,placeholder:"Start typing a customer",style:{fontSize:12,width:"100%",padding:"7px 9px"}})),
+            h("button",{type:"button",onClick:()=>setAddCust(true),style:{...btnSmall,whiteSpace:"nowrap",color:"#0f7a5c"}},"+ New customer")))),   // 126
+      addCust && h(CustomerCompanyForm,{ user, onCancel:()=>setAddCust(false),
+        onSaved:(co)=>{ setAddCust(false); if(co && co.company_name){ setCustomers(cs=>cs.includes(co.company_name)?cs:[...cs,co.company_name].sort()); setCompanyName(co.company_name); } } }),
       openOnes.length ? h("div",{style:{background:"#fff4d6",color:"#854f0b",borderRadius:6,padding:"8px 10px",fontSize:11.5,marginBottom:10}},
         h("b",null,"⚠ "+companyName+" already has "+openOnes.length+" open enquir"+(openOnes.length===1?"y":"ies")+" — same one?"),
         openOnes.slice(0,6).map(o=>h("div",{key:o.enquiry_number,style:{marginTop:2}},o.enquiry_number+" · "+(o.linked_reference_number||"no Quote#")+" — "+(o.subject||o.details||"")+" ("+(o.status||"")+(o.assigned_to&&o.assigned_to!=="Unassigned"?" · "+o.assigned_to:"")+")"))) : null,
@@ -31529,6 +31636,7 @@ function AddAllocationModal({ pkg, project, user, onCancel, onSaved }){
   const [subcatOptions,setSubcatOptions] = useState([]);
   const [subcategory,setSubcategory] = useState("");
   const [newSubcat,setNewSubcat] = useState("");
+  const [addCust,setAddCust] = useState(false);   // 126
   const [saving,setSaving] = useState(false);
 
   useEffect(()=>{
@@ -31575,7 +31683,11 @@ function AddAllocationModal({ pkg, project, user, onCancel, onSaved }){
     h("div",{style:{background:"#fff",borderRadius:8,padding:"20px 24px",width:400,maxWidth:"100%"}},
       h("div",{style:{fontWeight:700,fontSize:14,marginBottom:12}},"Add customer allocation"),
       step==="search" ? h(React.Fragment,null,
-        h("input",{value:q,onChange:e=>setQ(e.target.value),placeholder:"Type to search customers…",style:{...inputStyle,width:"100%",marginBottom:8}}),
+        h("div",{style:{display:"flex",gap:6,marginBottom:8}},
+          h("input",{value:q,onChange:e=>setQ(e.target.value),placeholder:"Type to search customers…",style:{...inputStyle,flex:1}}),
+          h("button",{type:"button",onClick:()=>setAddCust(true),style:{...btnSmall,whiteSpace:"nowrap",color:"#0f7a5c"}},"+ New customer")),   // 126
+        addCust && h(CustomerCompanyForm,{ user, onCancel:()=>setAddCust(false),
+          onSaved:(co)=>{ setAddCust(false); if(co && co.company_name) pick(co.company_name); } }),
         h("div",{style:{display:"flex",flexDirection:"column",gap:6,maxHeight:220,overflow:"auto"}},
           matches.map(m=>h("div",{key:m,onClick:()=>pick(m),style:{border:"1px solid "+colors.border,borderRadius:6,padding:"8px 10px",cursor:"pointer",fontSize:12.5}},m))
         ),
