@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-06T22:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-06T23:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -23153,7 +23153,7 @@ function SaleOrderContractPicker({ user, onOpenContract }){
   },[]);
   useEffect(()=>{ load(); },[load]);
   useEffect(()=>{
-    sb.from("companies").select("company_name").order("company_name").then(({data})=>setCustomerOptions((data||[]).map(c=>c.company_name)));
+    fetchPaged(()=>sb.from("companies").select("id,company_name").order("id")).then(data=>setCustomerOptions((data||[]).map(c=>c.company_name).filter(Boolean).sort((a,b)=>a.localeCompare(b))));   // 140: every customer, not the first 1,000
   },[]);
 
   const contractLabel = (c)=> c.contract_number+" — "+(c.customer_name||"—");
@@ -23627,7 +23627,7 @@ function CustomerCompanyForm({ initial, onCancel, onSaved, user, onUseExisting }
   const [dupWarning,setDupWarning] = useState("");
   // 126 — every customer once, for the duplicate check (name and GST).
   const [allCos,setAllCos] = useState(null);
-  useEffect(()=>{ if(!(initial && initial.id)) sb.from("companies").select("id,company_name,gst_tax_id,billing_city,billing_country,owner_employee_name").order("company_name").limit(20000).then(({data})=>setAllCos(data||[])); },[]);
+  useEffect(()=>{ if(!(initial && initial.id)) fetchPaged(()=>sb.from("companies").select("id,company_name,gst_tax_id,billing_city,billing_country,owner_employee_name").order("id")).then(data=>setAllCos(data||[])); },[]);   // 140: paged
   const [dupHits,setDupHits] = useState(null);       // list shown in the stop box, or null
   const [dupReason,setDupReason] = useState("");
   const overrideRef = useRef(null);                   // {hits, reason} once the user overrides
@@ -23677,7 +23677,7 @@ function CustomerCompanyForm({ initial, onCancel, onSaved, user, onUseExisting }
     if(!f.company_name.trim()){ alert("Customer name is required."); return; }
     if(!f.id && !overrideRef.current){   // 126: stop on a likely duplicate
       let pool = allCos;
-      if(!pool){ const { data } = await sb.from("companies").select("id,company_name,gst_tax_id,billing_city,billing_country,owner_employee_name").limit(20000); pool = data||[]; }
+      if(!pool){ pool = await fetchPaged(()=>sb.from("companies").select("id,company_name,gst_tax_id,billing_city,billing_country,owner_employee_name").order("id")); }   // 140: paged
       const hits = findCustomerDuplicates(f.company_name, f.gst_tax_id, pool);
       if(hits.length){ setDupHits(hits); return; }
     }
@@ -24292,7 +24292,7 @@ function CustomersScreen({ user }){
 
   const loadCompanies = useCallback(async()=>{
     setLoading(true);
-    const {data} = await sb.from("companies").select("*").order("company_name");
+    const data = (await fetchPaged(()=>sb.from("companies").select("*").order("id"))).sort((a,b)=>String(a.company_name||"").localeCompare(String(b.company_name||"")));   // 140: every customer, not the first 1,000
     setCompanies(data||[]);
     setLoading(false);
   },[]);
@@ -24808,7 +24808,7 @@ function CustomersScreen({ user }){
         // succeeded. The contact (if any) is already saved by
         // CustomerCompanyForm itself at this point — just refresh the list.
         if(savedCompany && savedCompany.company_name){
-          const { data: freshCompanies } = await sb.from("companies").select("*").order("company_name");
+          const freshCompanies = await fetchPaged(()=>sb.from("companies").select("*").order("id"));   // 140: paged
           const match = (freshCompanies||[]).find(c=>c.company_name===savedCompany.company_name);
           if(match){ setSelected(match); if(savedContact) await loadContacts(match.company_name); }
         }
@@ -27431,6 +27431,7 @@ function downloadManualPdf(){
 // added to over time; not wired to a database table yet, so edits currently
 // mean updating this array directly.
 const FAQ_ENTRIES = [
+  { q:"Log Enquiry says the customer is not in the customer list \u2014 but it is.", a:"Fixed in build 140: the check used to see only the first 1,000 customers. If it still appears on a Quote Register line, the line's customer (from the old Excel register) really is not in Customers \u2014 use Pick Customer or Add New Customer on the form; saving ties the line to that customer." },
   { q:"Where does the Procurement Gantt come from?", a:"Purchase \u2192 Procurement Gantt. A plan is made when the Technical Head presses Approve Production BOM on the Sale Order, or with Upload BOM (the BOM Excel). Each material form is one row, however many BOM lines it has; its steps have planned and actual start and end dates. The person who makes the plan gets one task card for the contract with a sub-task per form." },
   { q:"Pipe is in my BOM ten times \u2014 why only one Pipe row?", a:"The Gantt is by material form: all Pipe lines are bought and tracked together, so they are one row. Open the row's BOM lines (Table view) to see every line, its sheet and its 3.1 / 3.2." },
   { q:"Can I put a step on the Procurement Gantt that is not there?", a:"Yes \u2014 Insert Step. Pick the form's row (or General), the step it comes after, and its planned start and end (date or week). It shows on the row and in that form's sub-task checklist." },
@@ -27467,6 +27468,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"6 Oct 2026 (140)", summary:"BUILD B \u2014 Log Enquiry refused good customers (\u201cPick the customer from the list\u2026\u201d). Cause: the form checked the name against a customer list read in one go, and the database returns at most 1,000 rows, so every customer after the first 1,000 (A\u2192Z) was refused. Now the form asks the database for that one customer (by its tie on the register line, then by name ignoring spaces, case and dots) and the drop-down holds every customer. From a Quote Register line the form uses the customer the line is tied to; if the line's customer is not in the list (old imported lines) it says so with Pick Customer / Add New Customer (prefilled with the line's name and city), and saving ties the line to that customer. Same 1,000-row cut-off fixed in: Customers screen list, Add New Customer duplicate check, Customer bulk upload duplicate check (customers and contacts), Major Projects bulk import, Sale Order contract picker, Quote Status Review, Won by Owner, Pipeline and Owner Leaderboard dashboards. No SQL." },
   { date:"6 Oct 2026 (139)", summary:"BUILD A reworked \u2014 Procurement Gantt with ONE ROW PER MATERIAL FORM. A form found many times in the BOM is one row; its steps (PO Draft, PO Approval, PO Release, RFI Stamping + RFI Test when any of it is 3.2 \u2014 never Paint / Packing \u2014 and at Our Factory) are coloured segments on the row, General row for BOM Received and Purchase BOM Approval. Every step: Planned Start / End and Actual Start / End, each a date or a week (start = Sunday, end = Saturday); an empty planned start takes the step before's end. Upload BOM reads the team's Excel layouts: header (Contract / CON No, Customer, date), the heading row (Item Code or Material Spec + Qty), each line's form from its material, testing rows skipped as services, totals / footers ignored; certification per sheet from its MTC - 3.x note or name, else asked (one sheet: asked once); review screen to change any line's form; forms summarised with 3.1 / 3.2 / 3.1 + 3.2. Task card: one per contract to whoever made the plan, one sub-task per form + General, steps as its checklist with dates; two-way with the Gantt (tick = actual end, In Progress = actual start, Gantt dates tick the card; sub-task completes itself, card goes for approval at the end); reassigning the card moves its open sub-tasks. Tasks get a Start date (shown as starts dd/mm). Insert Step replaces Insert Line. SQL: structure_board_order_and_procurement_139 (both companies; includes 138)." },
   { date:"6 Oct 2026 (138)", summary:"BUILD 6 + BUILD A. Build 6 \u2014 movable lists: My board / every employee board, PO Register and Material Inward (Kanban view) and What Needs Chasing \u2014 drag a list by its \u283f grip or pick its #, Go to list (completes as you type, \u25be shows all, scrolls and lights the list up), Reset order. Each person keeps their own last order (user_board_order_tbl; kept on the computer if the table is missing). Not changed: Task Assignment Board (shared order + Go to person), Quote Funnel, Order Status, Document Control. Enquiries: Assign \u25be / Reassign \u25be now in its own column right after Status (the ticked-rows Assign stays). Build A \u2014 Procurement Gantt (Purchase \u2192 Procurement): Approve Production BOM on the Sale Order (Technical Head / Admin) makes the plan from the BOM's material forms (Shape) and notifies Purchase; or Upload BOM (Excel read from the Shape column, or PDF with the forms ticked; Contract, Client, P O No, Certification). Lines: BOM Received, Purchase BOM Approval, per form PO Draft, PO Approval, PO Release, RFI Stamping + RFI Test (3.2 only), at Our Factory; plus Insert Line. Planned / actual as a date or a week (Sunday\u2013Saturday). Bar chart (planned + actual bars, today and delivery lines) or Table; lines in date order, Group by Stage / Material form; behind / missing flags per contract. Purchase and Admins edit; others read. SQL: structure_board_order_and_procurement_138 (both companies). Manual: Procurement Gantt, Boards \u2014 move the lists; 3 FAQs." },
   { date:"6 Oct 2026 (137c)", summary:"Quote Register: Sort \u2014 As in the Excel (row order, opens on the newest page), Date (EDate) oldest / newest first, Offer Date oldest / newest first (a date sort opens on page 1; the choice is remembered on this computer). \u26f6 Full screen \u2014 the register uses the whole window (headings stay in view while scrolling); \u2715 Exit full screen or Esc returns. History tabs say \u201chistory \u2014 closed for new lines\u201d. No SQL." },
@@ -28886,8 +28888,8 @@ function CustomerBulkUpload({ user }){
       const companyRows = companySheet ? XLSX.utils.sheet_to_json(companySheet, {defval:""}) : [];
       const contactRows = contactSheet ? XLSX.utils.sheet_to_json(contactSheet, {defval:""}) : [];
 
-      const { data: existingCompanies } = await sb.from("companies").select("*");
-      const { data: existingContacts } = await sb.from("contacts").select("*");
+      const existingCompanies = await fetchPaged(()=>sb.from("companies").select("*").order("id"));   // 140: paged (duplicate check saw only 1,000)
+      const existingContacts = await fetchPaged(()=>sb.from("contacts").select("*").order("id"));
       const existingCoByName = new Map((existingCompanies||[]).map(c=>[norm(c.company_name),c]));
       const existingCtByKey = new Map((existingContacts||[]).map(c=>[norm(c.company_name)+"|||"+norm(c.contact_name),c]));
 
@@ -31792,6 +31794,21 @@ function PackageAllocationsSection({ pkg, project, user, onCreateQuoteFromAlloca
 // whole trail is read-only, just add what's being asked for), or called
 // with none of that (a manual/walk-in entry — only Customer is required).
 // Always saves as Unassigned; assignment is a separate screen entirely.
+// 140 (Build B): find one customer in the database — by its id when known, else by name (exact, then ignoring
+// spaces, case and dots). Never from a list read, which the database cuts off at 1,000 rows.
+async function enqFindCustomer(name, id){
+  try{
+    if(id){ const { data } = await sb.from("companies").select("id,company_name").eq("id",id).maybeSingle(); if(data) return data; }
+    const n = String(name||"").replace(/\u00a0/g," ").trim(); if(!n) return null;
+    { const { data } = await sb.from("companies").select("id,company_name").eq("company_name",n).limit(1); if(data && data.length) return data[0]; }
+    { const { data } = await sb.from("companies").select("id,company_name").ilike("company_name",n.replace(/[%_\\]/g,"\\$&")).limit(1); if(data && data.length) return data[0]; }
+    const key = (x)=> String(x||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+    const words = n.split(/\s+/).filter(w=>w.replace(/[^A-Za-z0-9]/g,"").length>=3).slice(0,2);
+    if(words.length){ const { data } = await sb.from("companies").select("id,company_name").ilike("company_name","%"+words[0].replace(/[^A-Za-z0-9]/g,"")+"%").limit(500);
+      const hit = (data||[]).find(c=>key(c.company_name)===key(n)); if(hit) return hit; }
+  }catch(e){ console.error("Customer lookup", e); }
+  return null;
+}
 function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved, regLine }){
   // 5 Oct (123) — logging an enquiry: customer from the customer list, Quote# given at
   // once, customer's closing date, folder link, RFQ ref. Saving creates the enquiry
@@ -31825,8 +31842,17 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved, re
     sb.from("enquiry_type_tbl").select("value").then(({data})=>setTypes((data||[]).map(r=>r.value)));
     sb.from("enquiry_source_tbl").select("value").then(({data})=>setSources((data||[]).map(r=>r.value)));
     sb.from("item_tbl").select("item").then(({data})=>setItemOptions((data||[]).map(r=>r.item).filter(Boolean)));
-    sb.from("companies").select("company_name").order("company_name").limit(20000).then(({data})=>setCustomers(Array.from(new Set((data||[]).map(r=>r.company_name).filter(Boolean)))));
+    fetchPaged(()=>sb.from("companies").select("id,company_name").order("id")).then(data=>setCustomers(Array.from(new Set((data||[]).map(r=>r.company_name).filter(Boolean))).sort((x,y)=>x.localeCompare(y))));   // 140: every customer (was cut off at 1,000)
   },[]);
+  // 140 (Build B): a register line's customer = the customer it is tied to (company_id), or the same name in the customer list
+  // (spaces, case and dots ignored). If neither, the line's customer is not in the list: Pick Customer / Add New Customer.
+  const [rlCust,setRlCust] = useState(RL ? "checking" : "");   // "checking" | "ok" | "missing"
+  const [rlPick,setRlPick] = useState(false);
+  useEffect(()=>{ if(!RL) return; let live = true; (async()=>{
+    const found = await enqFindCustomer(RL.customer_name, RL.company_id);
+    if(!live) return;
+    if(found){ setCompanyName(found.company_name); setRlCust("ok"); } else setRlCust("missing");
+  })(); return ()=>{ live = false; }; },[RL && RL.id]);
   // Duplicate warning: the customer's enquiries still open, by enquiry number and Quote#.
   useEffect(()=>{
     const c = companyName.trim(); if(!c){ setOpenOnes([]); return; }
@@ -31843,7 +31869,11 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved, re
   const save = async()=>{
     const cust = companyName.trim(), qn = quoteNo.trim().toUpperCase(), subj = subject.trim();
     if(!cust){ setErr("Customer is required."); return; }
-    if(!fromChase && customers.length && !customers.includes(cust)){ setErr("Pick the customer from the list. A new customer is added in Customers first."); return; }
+    let custRow = null;   // 140: ask the database for this one customer (the list read used to stop at 1,000)
+    if(!fromChase){
+      custRow = await enqFindCustomer(cust, RL && rlCust==="ok" && !rlPick ? RL.company_id : null);
+      if(!custRow){ setErr(RL ? "This register line's customer \u201c"+cust+"\u201d is not in the customer list \u2014 use Pick Customer or Add New Customer." : "\u201c"+cust+"\u201d is not in the customer list \u2014 pick it from the list, or use Add New Customer."); if(RL) setRlCust("missing"); return; }
+    }
     if(!subj){ setErr("Subject is required — it becomes the card title (e.g. 200NB T-strainers, Luberef)."); return; }
     if(!qn){ setErr("Quote# is required — every enquiry gets its Quote# when it is logged."); return; }
     if(closingDate && closingDate < enquiryDate){ setErr("The last date for submission is before the date received."); return; }
@@ -31858,7 +31888,7 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved, re
         if(!rc.ok){ setErr(rc.msg); setSaving(false); return; }
         regRow = rc.line;
         if(regRow && regRow.enquiry_id){ setErr("Quote# "+qn+" already has its enquiry \u2014 open it from the Quote Register."); setSaving(false); return; }
-        if(regRow && regRow.customer_name && regKey(regRow.customer_name)!==regKey(cust)){ setErr("Quote# "+qn+" is registered for "+regRow.customer_name+", not "+cust+". Pick that customer, or correct the register line."); setSaving(false); return; }
+        if(regRow && regRow.customer_name && regKey(regRow.customer_name)!==regKey(cust) && !(custRow && regRow.company_id && regRow.company_id===custRow.id)){ setErr("Quote# "+qn+" is registered for "+regRow.customer_name+", not "+cust+". Pick that customer, or correct the register line."); setSaving(false); return; }   // 140: the line's tie counts too
       }
       // Quote# must be new
       const [{ data:e1 },{ data:e2 },{ data:e3 }] = await Promise.all([
@@ -31878,7 +31908,7 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved, re
       const { data: created, error } = await sb.from("enquiry_tbl").insert({
         enquiry_number: enquiryNumber, enquiry_date: enquiryDate,
         project_id: project?.id || null, package_id: pkg?.id || null, allocation_id: allocation?.id || null,
-        company_name: cust, enquiry_type: enquiryType || null, source: source || null,
+        company_name: (custRow && custRow.company_name) || cust, enquiry_type: enquiryType || null, source: source || null,
         details: details.trim() || null, subject: subj, closing_date: closingDate || null, folder_link: folderLink.trim() || null, customer_ref: customerRef.trim() || null,
         linked_reference_number: qn, assigned_to: "Unassigned", status: "Unassigned",
         created_by: user?.username || "unknown"
@@ -31904,7 +31934,11 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved, re
         await taskLog(card.id, me, "Created from enquiry "+enquiryNumber+" (Quote# "+qn+") in the "+ENQUIRY_DEPT+" Unassigned pile");
       }
       await logAudit("INSERT","enquiry_tbl",enquiryNumber,"Logged enquiry for "+cust+", Quote# "+qn+(fromChase?" (from project chase)":"")+(card?" — card in "+ENQUIRY_DEPT+" pile":""),user?.username||"unknown",null,{company_name:cust,linked_reference_number:qn});
-      if(regRow && regRow.id){ await sb.from("register_line_tbl").update({ enquiry_id:created.id, updated_at:new Date().toISOString(), updated_by:me||user?.username||"" }).eq("id",regRow.id); }   // 137
+      if(regRow && regRow.id){
+        const tie = (custRow && (custRow.id!==regRow.company_id || custRow.company_name!==regRow.customer_name)) ? { company_id:custRow.id, customer_name:custRow.company_name } : {};   // 140: tie the line to the customer
+        await sb.from("register_line_tbl").update({ enquiry_id:created.id, ...tie, updated_at:new Date().toISOString(), updated_by:me||user?.username||"" }).eq("id",regRow.id);   // 137
+        if(tie.company_id) await logAudit("UPDATE","register_line_tbl",regRow.quote_no,"Register line tied to customer "+tie.customer_name+" (was \u201c"+(regRow.customer_name||"")+"\u201d)",user?.username||"unknown");
+      }
       onSaved({ enquiryNumber, quoteNo:qn, enquiryId:created.id });
     } catch(e){ setErr(e.message||"Could not save enquiry."); }
     finally{ setSaving(false); }
@@ -31923,16 +31957,26 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved, re
         h("div",null,h("strong",null,"Customer: "),companyName))
       : RL ? h("div",{style:{padding:"10px 12px",background:"#f4f2ea",border:"1px dashed "+colors.border,borderRadius:6,marginBottom:12,fontSize:12.5,display:"grid",gridTemplateColumns:"repeat(2,minmax(0,1fr))",gap:"4px 16px"}},   // 137
           h("div",null,h("span",{style:{color:colors.muted}},"Quote#: "),h("b",null,RL.quote_no)),
-          h("div",null,h("span",{style:{color:colors.muted}},"Customer: "),h("b",null,RL.customer_name||"\u2014")),
+          h("div",null,h("span",{style:{color:colors.muted}},"Customer: "),h("b",null,companyName||RL.customer_name||"\u2014"),
+            rlCust==="ok" && companyName && companyName!==RL.customer_name ? h("div",{style:{fontSize:10.5,color:colors.muted}},"register line says \u201c"+RL.customer_name+"\u201d") : null),
           h("div",null,h("span",{style:{color:colors.muted}},"Received: "),RL.edate?fmtDMY(RL.edate):"\u2014"),
           h("div",null,h("span",{style:{color:colors.muted}},"Customer RFQ / ref: "),RL.enquiry_no||"\u2014"),
-          h("div",{style:{gridColumn:"1 / -1",fontSize:11,color:colors.muted}},"From the Quote Register line \u2014 change these on the register."))
+          h("div",{style:{gridColumn:"1 / -1",fontSize:11,color:colors.muted}},"From the Quote Register line \u2014 change these on the register."),
+          (rlCust==="missing" || rlPick) ? h("div",{style:{gridColumn:"1 / -1",background:"#fff4d6",color:"#854f0b",borderRadius:6,padding:"8px 10px",marginTop:4}},   // 140
+            h("div",null,h("b",null,"\u26a0 This register line's customer \u201c"+(RL.customer_name||"")+"\u201d is not in the customer list."),rlPick?null:" Pick the right customer, or add it."),
+            rlPick ? h("div",{style:{display:"flex",gap:6,alignItems:"center",marginTop:6}},
+                h("div",{style:{flex:1,minWidth:0}},h(CustomerSelect,{value:companyName,user,compact:true,onSelect:c=>{ setCompanyName((c&&c.company_name)||""); setRlCust("ok"); }})))
+              : h("div",{style:{display:"flex",gap:6,marginTop:6,flexWrap:"wrap"}},
+                h("button",{type:"button",onClick:()=>{ setRlPick(true); setCompanyName(""); },style:{...btnSmall,color:"#0f7a5c",borderColor:"#0f7a5c",fontWeight:700}},"Pick Customer"),
+                h("button",{type:"button",onClick:()=>setAddCust(true),style:{...btnSmall,color:"#0f7a5c"}},"Add New Customer")),
+            h("div",{style:{fontSize:10.5,marginTop:5}},"Saving ties the register line to the customer you choose.")) : null)
       : h("div",{style:{marginBottom:10}}, fld("Customer (from the customer list)",
           h("div",{style:{display:"flex",gap:6,alignItems:"center"}},
             h("div",{style:{flex:1,minWidth:0}},h(LimitToListCombo,{value:companyName,onChange:v=>setCompanyName(v||""),options:customers,limitToList:true,placeholder:"Start typing a customer",style:{fontSize:12,width:"100%",padding:"7px 9px"}})),
             h("button",{type:"button",onClick:()=>setAddCust(true),style:{...btnSmall,whiteSpace:"nowrap",color:"#0f7a5c"}},"Add New Customer")))),   // 126 / 137 wording
       addCust && h(CustomerCompanyForm,{ user, onCancel:()=>setAddCust(false),
-        onSaved:(co)=>{ setAddCust(false); if(co && co.company_name){ setCustomers(cs=>cs.includes(co.company_name)?cs:[...cs,co.company_name].sort()); setCompanyName(co.company_name); } } }),
+        initial: RL && rlCust!=="ok" ? {company_name:RL.customer_name||"",account_type:"",industry:"",rating:"",website:"",phone:"",zone:"",billing_street:"",billing_city:RL.city||"",billing_state:RL.state||"",billing_country:RL.country||"",billing_pin:"",shipping_street:"",shipping_city:"",shipping_state:"",shipping_country:"",shipping_pin:"",gst_tax_id:"",account_owner:"",source:"",notes:""} : undefined,
+        onSaved:(co)=>{ setAddCust(false); if(co && co.company_name){ setCustomers(cs=>cs.includes(co.company_name)?cs:[...cs,co.company_name].sort()); setCompanyName(co.company_name); if(RL){ setRlCust("ok"); setRlPick(true); } } } }),
       openOnes.length ? h("div",{style:{background:"#fff4d6",color:"#854f0b",borderRadius:6,padding:"8px 10px",fontSize:11.5,marginBottom:10}},
         h("b",null,"⚠ "+companyName+" already has "+openOnes.length+" open enquir"+(openOnes.length===1?"y":"ies")+" — same one?"),
         openOnes.slice(0,6).map(o=>h("div",{key:o.enquiry_number,style:{marginTop:2}},o.enquiry_number+" · "+(o.linked_reference_number||"no Quote#")+" — "+(o.subject||o.details||"")+" ("+(o.status||"")+(o.assigned_to&&o.assigned_to!=="Unassigned"?" · "+o.assigned_to:"")+")"))) : null,
@@ -34704,7 +34748,7 @@ function MajorProjectsBulkImport({ user }){
       const rows = XLSX.utils.sheet_to_json(sheet,{defval:""});
 
       const [{data:companies},{data:projects},{data:packageNames},{data:subcats}] = await Promise.all([
-        sb.from("companies").select("company_name"),
+        fetchPaged(()=>sb.from("companies").select("id,company_name").order("id")).then(data=>({data})),   // 140: paged
         sb.from("major_project_tbl").select("id,project_name"),
         sb.from("package_name_tbl").select("value"),
         sb.from("package_subcategory_tbl").select("package_name,subcategory"),
@@ -36675,8 +36719,8 @@ function QuoteStatusReview({ user }){
     const [{data:statusRows},{data:empRows},{data:estRows},{data:coRows}] = await Promise.all([
       loadQuoteStages(true).then(rows=>({data:rows}))   /* 22 Sep: funnel order, not alphabetical */,
       sb.from("employee_tbl").select("employee_name").eq("status","Active").order("employee_name"),
-      sb.from("estimates").select("id,reference_number,item_sl_no,customer_name,description,quote_status,order_qty,company_id,status_changed_by,status_changed_at"),
-      sb.from("companies").select("id,company_name,zone,billing_state,billing_city,owner_employee_name")
+      fetchPaged(()=>sb.from("estimates").select("id,reference_number,item_sl_no,customer_name,description,quote_status,order_qty,company_id,status_changed_by,status_changed_at").order("id")).then(data=>({data})),   // 140: paged
+      fetchPaged(()=>sb.from("companies").select("id,company_name,zone,billing_state,billing_city,owner_employee_name").order("id")).then(data=>({data}))
     ]);
     const coById = new Map((coRows||[]).map(c=>[c.id,c]));
     const refNums = Array.from(new Set((estRows||[]).map(r=>r.reference_number)));
@@ -37599,8 +37643,8 @@ function WonByOwnerReport(){
     setLoading(true);
     const [{data:allStatusRows},{data:estRows},{data:coRows}] = await Promise.all([
       loadQuoteStages(true).then(rows=>({data:rows}))   /* 22 Sep: funnel order, not alphabetical */,
-      sb.from("estimates").select("id,reference_number,item_sl_no,quote_status,order_qty,company_id"),
-      sb.from("companies").select("id,owner_employee_name")
+      fetchPaged(()=>sb.from("estimates").select("id,reference_number,item_sl_no,quote_status,order_qty,company_id").order("id")).then(data=>({data})),   // 140: paged
+      fetchPaged(()=>sb.from("companies").select("id,owner_employee_name").order("id")).then(data=>({data}))
     ]);
     setStatuses((allStatusRows||[]).map(r=>r.status).filter(Boolean));
     const coById = new Map((coRows||[]).map(c=>[c.id,c]));
@@ -38499,7 +38543,7 @@ function PipelineDashboard({ user }){
   const [leadsCount,setLeadsCount]=useState(0);
   useEffect(()=>{ (async()=>{
     setLoading(true);
-    const { data: cos } = await sb.from("companies").select("crm_status,is_archived");
+    const cos = await fetchPaged(()=>sb.from("companies").select("*").order("id"));   // 140: paged; * because not every database has is_archived
     const active = (cos||[]).filter(c=>!c.is_archived);
     setCompaniesCount(active.filter(c=>c.crm_status!=="Lead").length);
     setLeadsCount(active.filter(c=>c.crm_status==="Lead").length);
@@ -38530,8 +38574,8 @@ function OwnerLeaderboardDashboard({ user }){
   const [rows,setRows]=useState([]);
   useEffect(()=>{ (async()=>{
     setLoading(true);
-    const { data: cos } = await sb.from("companies").select("id,owner_employee_name").not("owner_employee_name","is",null);
-    const { data: ests } = await sb.from("estimates").select("reference_number,company_id,quote_status");
+    const cos = await fetchPaged(()=>sb.from("companies").select("id,owner_employee_name").not("owner_employee_name","is",null).order("id"));   // 140: paged
+    const ests = await fetchPaged(()=>sb.from("estimates").select("id,reference_number,company_id,quote_status").order("id"));
     const { data: acts } = await sb.from("activity_log_tbl").select("company_name,next_followup_date");
     const byQuote = new Map();
     (ests||[]).forEach(e=>{ if(!byQuote.has(e.reference_number)) byQuote.set(e.reference_number,e); });
