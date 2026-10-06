@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-06T16:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-06T17:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -27421,6 +27421,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"6 Oct 2026 (137c)", summary:"Quote Register: Sort \u2014 As in the Excel (row order, opens on the newest page), Date (EDate) oldest / newest first, Offer Date oldest / newest first (a date sort opens on page 1; the choice is remembered on this computer). \u26f6 Full screen \u2014 the register uses the whole window (headings stay in view while scrolling); \u2715 Exit full screen or Esc returns. History tabs say \u201chistory \u2014 closed for new lines\u201d. No SQL." },
   { date:"6 Oct 2026 (137b)", summary:"Fix: the new Register Tabs & People \u2018move existing customers\u2019, My Worklist and the overdue-calls prompt no longer ask the database for companies.is_archived (missing on some databases, which made those reads return nothing). SQL structure_companies_is_archived_137 (both) adds the column for the older screens that still use it. SQL fix_register_customers_FLOMETRIQ_137 (+ rollback): links register lines to customers by name and fills City / State / Country." },
   { date:"6 Oct 2026 (137)", summary:"BUILD 7 \u2014 Quote Register and register tabs. SQL: structure_quote_register_137 (both companies: register_tab_tbl, register_line_tbl, register_tab_person_tbl; customers whose owner a Super Admin set by hand marked owner_source Manual) and data_quote_register_FLOMETRIQ_137 (Flometriq only: the 27 Excel sheets as tabs with the customers each takes, and all 6,341 filled lines; one repeated number S210184 R01 kept once). QUOTE REGISTER (Sales \u2192 Enquiry): the Excel cloned \u2014 tabs as the sheets, same columns, month rows, 25 a page opening on the newest, search one / all tabs. + New Register Line (Sales Coordinator and Admins): next number of the tab suggested (type over it); every field required (Enquiry No NA allowed; City / State / Country locked from the customer; State for India and the UAE); customer drop-down with Add New Customer and Edit Customer; wrong tab refused naming the right one; repeats, revision endings and another tab's prefix refused, look-alikes / other year / existing quote / same Enquiry No warned (tick to save). Log Enquiry on a line opens the form with Quote#, customer, date and RFQ ref locked; \u2713 Enquiry + Edit once logged; editing a line updates its enquiry; Offer Date fills itself at Offer Sent. A new Quote# must be a register line: Make New Quote, + Log enquiry, convert-to-quote (header starts from the line). REGISTER TABS & PEOPLE (CRM \u2192 CRM Setup, Super Admin only): many-to-many grid FSE / TC per tab; first FSE owns the tab's customers; Save asks to move existing customers or only new ones (owners set by hand kept); Register Tabs (rules) master. OWNERSHIP: tabs first once anybody is ticked (Territory Rules until then, and hidden after); My Worklist and the overdue-calls prompt include every customer of my tabs; win credit picks among the quote's tab FSEs; stage-change alerts go to the tab's FSEs; FSE touch switched off on both sites; a Super Admin's owner change marks owner_source Manual. REPORTS: Register tab filter / column in Quotes Report, CRM Funnel, Quote Stage Review, Overdue Calls report; Won by Owner By Quote Register tab; CRM Dashboards Quote Register tab performance; owner filters also match anyone covering the quote's tab. Wording: Add New Customer on the customer picker everywhere. Leaving a register line, the Log enquiry form or the grid with changes asks Save / Discard / Stay. Manual: new article Quote Register." },
   { date:"6 Oct 2026 (136)", summary:"BUILD 5 \u2014 the valve price list moved off its own top-level tab into two places: Sales \u2192 Pricelist \u2192 Valve Price List, and a new Purchase tab \u2192 Price List \u2192 Valves (the same screen; who can see it is unchanged). No SQL." },
@@ -33309,6 +33310,9 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
   const [page,setPage] = useState(-1);          // -1 = last page (newest lines, as in Excel)
   const [counts,setCounts] = useState({});
   const [q,setQ] = useState(""); const [qAll,setQAll] = useState(false);
+  // 137c: sort (Excel order, or by date either way) and full screen
+  const [sortBy,setSortBy] = useState(()=>{ try{ return localStorage.getItem("qr_sort")||"excel"; }catch(e){ return "excel"; } });
+  const [fs,setFs] = useState(false);
   const [me,setMe] = useState(null);            // {name, canEdit, sales}
   const [edit,setEdit] = useState(null);        // {id|null, d:{...}, orig:{...}, co:company row|null}
   const [chk,setChk] = useState({bad:[],warn:[],ok:false});
@@ -33343,17 +33347,20 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
     let base = ()=>{ let b = sb.from("register_line_tbl").select("*",{count:"exact"});
       if(!(qs && qAll)) b = b.eq("tab_name",cur);
       if(qs){ const v = "%"+qs.replace(/[%,()]/g," ")+"%"; b = b.or("quote_no.ilike."+v+",customer_name.ilike."+v+",enquiry_no.ilike."+v+",city.ilike."+v); }
+      if(sortBy==="ed_asc"||sortBy==="ed_desc") return b.order("edate",{ascending:sortBy==="ed_asc",nullsFirst:false}).order("row_order",{ascending:sortBy==="ed_asc"}).order("id",{ascending:sortBy==="ed_asc"});
+      if(sortBy==="od_asc"||sortBy==="od_desc") return b.order("offer_date",{ascending:sortBy==="od_asc",nullsFirst:false}).order("edate",{ascending:sortBy==="od_asc",nullsFirst:false}).order("id",{ascending:sortBy==="od_asc"});
       return b.order("row_order",{ascending:true,nullsFirst:true}).order("id",{ascending:true}); };
     const { count } = await base().range(0,0);
     const n = count||0; setTotal(n);
     const last = Math.max(0, Math.ceil(n/REG_PAGE)-1);
-    const pg = page<0 || page>last ? last : page;
+    const pg = page<0 || page>last ? (sortBy==="excel" ? last : 0) : page;   // Excel order opens on the newest (last) page; a date sort on page 1
     if(page<0 || page>last) setPage(pg);
     const { data } = await base().range(pg*REG_PAGE, pg*REG_PAGE+REG_PAGE-1);
     let rs = data||[];
     if(qs){ const lo = qs.toLowerCase(); rs = rs.filter(r=>[r.quote_no,r.customer_name,r.enquiry_no,r.city].join(" ").toLowerCase().includes(lo)); }   // keeps the test stand-in honest too
     setRows(rs);
-  },[cur,page,q,qAll]);
+  },[cur,page,q,qAll,sortBy]);
+  useEffect(()=>{ if(!fs) return; const f=(e)=>{ if(e.key==="Escape" && !ask && !logFor && !custForm) setFs(false); }; document.addEventListener("keydown",f); return ()=>document.removeEventListener("keydown",f); },[fs,ask,logFor,custForm]);
   useEffect(()=>{ if(ready) load(); },[ready,load]);
 
   // unsaved guard for the top menu
@@ -33515,7 +33522,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
   const body = [];
   rows.forEach((r,i)=>{
     const mo = r.edate ? String(r.edate).slice(0,7) : "";
-    if(mo && mo!==lastMonth && !(q.trim())){ lastMonth = mo; const dt = new Date(mo+"-01T00:00:00");
+    if(mo && mo!==lastMonth && !(q.trim()) && !String(sortBy).startsWith("od")){ lastMonth = mo; const dt = new Date(mo+"-01T00:00:00");
       body.push(h("tr",{key:"m"+r.id},h("td",{colSpan:10,style:{background:"#eceae0",fontWeight:700,fontSize:11.5,color:colors.muted,padding:"4px 8px",border:"1px solid #e3e0d4"}},dt.toLocaleString("en-GB",{month:"long",year:"numeric"})))); }
     if(edit && edit.id===r.id){ body.push(editRow("e"+r.id)); const cr = chkRow("c"+r.id); if(cr) body.push(cr); return; }
     const t = tabs.find(x=>x.tab_name===r.tab_name);
@@ -33531,18 +33538,26 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
   });
   if(edit && !edit.id){ body.push(editRow("new")); const cr = chkRow("cnew"); if(cr) body.push(cr); }
 
-  const lastPage = Math.max(0, Math.ceil(total/REG_PAGE)-1); const pg = page<0 ? lastPage : page;
+  const lastPage = Math.max(0, Math.ceil(total/REG_PAGE)-1); const pg = page<0 ? (sortBy==="excel" ? lastPage : 0) : page;
   const groups = []; tabs.forEach(t=>{ const g = t.group_label||""; if(!groups.includes(g)) groups.push(g); });
-  return h("div",{style:{padding:20}},
+  return h("div",{style: fs ? {position:"fixed",inset:0,zIndex:900,background:"#f4f2ea",padding:"10px 16px",overflow:"auto"} : {padding:20}},
     h("div",{style:{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:4}},
-      h("h2",{style:{margin:0}},"Quote Register"),
+      h("h2",{style:{margin:0,fontSize:fs?18:undefined}},"Quote Register"),
+      h("button",{onClick:()=>setFs(x=>!x),title:fs?"Back to the normal view (Esc)":"Use the whole screen",style:{...btnSmall,marginLeft:fs?"auto":0,order:fs?9:0}},fs?"\u2715 Exit full screen":"\u26f6 Full screen"),
       isSuper ? h("span",{style:{fontSize:11.5,color:colors.muted}},"Who covers each tab: CRM → CRM Setup → Register Tabs & People") : null),
-    h("div",{style:{fontSize:12,color:colors.muted,marginBottom:10,maxWidth:980}},"The quote register, tab by tab as in the Excel. A new Quote# is made here first; then Log Enquiry on its line. "+(me?.canEdit?"You can add and edit lines.":"Only the Sales Coordinator and Admins add or edit lines.")),
+    fs ? null : h("div",{style:{fontSize:12,color:colors.muted,marginBottom:10,maxWidth:980}},"The quote register, tab by tab as in the Excel. A new Quote# is made here first; then Log Enquiry on its line. "+(me?.canEdit?"You can add and edit lines.":"Only the Sales Coordinator and Admins add or edit lines.")),
     err ? h("div",{style:{background:"#fdecea",color:"#a3312a",padding:"10px 12px",borderRadius:7,fontSize:12.5}},err) : null,
     h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:8}},
       me?.canEdit && tab && tab.is_open ? h("button",{onClick:startNew,style:btnPrimary},"+ New Register Line") : null,
       h("input",{value:q,onChange:e=>{ const v=e.target.value; guard(()=>{ setQ(v); setPage(-1); }); },placeholder:"Search Quote#, customer, Enquiry No, city",style:{...inputStyle,width:280,padding:"6px 9px"}}),
       h("label",{style:{fontSize:12,display:"flex",gap:5,alignItems:"center"}},h("input",{type:"checkbox",checked:qAll,onChange:e=>{ setQAll(e.target.checked); setPage(-1); }}),"all tabs"),
+      h("span",{style:{fontSize:12,color:colors.muted,marginLeft:6}},"Sort"),
+      h("select",{value:sortBy,onChange:e=>{ const v=e.target.value; guard(()=>{ setSortBy(v); setPage(-1); try{ localStorage.setItem("qr_sort",v); }catch(err){} }); },style:{...inputStyle,width:230,padding:"6px 8px"}},
+        h("option",{value:"excel"},"As in the Excel (row order)"),
+        h("option",{value:"ed_asc"},"Date (EDate) \u2014 oldest first"),
+        h("option",{value:"ed_desc"},"Date (EDate) \u2014 newest first"),
+        h("option",{value:"od_asc"},"Offer Date \u2014 oldest first"),
+        h("option",{value:"od_desc"},"Offer Date \u2014 newest first")),
       h("span",{style:{fontSize:12,color:colors.muted}},total+" line"+(total===1?"":"s")+(tab&&!tab.is_open?" · history — closed for new lines":""))),
     // tabs, wrapped, grouped as in the Excel
     h("div",{style:{display:"flex",flexWrap:"wrap",gap:3,background:"#e8e5d8",border:"1px solid "+colors.border,borderBottom:0,borderRadius:"8px 8px 0 0",padding:"5px 5px 0"}},
@@ -33551,8 +33566,8 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
         regTabLabel(t.tab_name),h("span",{style:{opacity:.6,marginLeft:4,fontSize:10.5}},counts[t.tab_name]??"")))),
     h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:"0 0 8px 8px",overflow:"hidden"}},
       h("div",{style:{padding:"8px 12px",fontWeight:700,fontSize:13,borderBottom:"1px solid "+colors.border}},tab ? (tab.title||regTabLabel(tab.tab_name)) : "",
-        tab ? h("span",{style:{fontWeight:400,color:colors.muted,fontSize:11.5,marginLeft:8}},"takes "+regTabDescribe(tab)) : null),
-      h("div",{style:{overflowX:"auto"}},
+        tab ? h("span",{style:{fontWeight:400,color:colors.muted,fontSize:11.5,marginLeft:8}},tab.is_open ? "takes "+regTabDescribe(tab) : "history \u2014 closed for new lines") : null),
+      h("div",{style:{overflow:"auto",maxHeight:fs?"calc(100vh - 250px)":"calc(100vh - 360px)",minHeight:200}},
         h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:1150}},
           h("thead",null,h("tr",null,...REG_COLS.map(c=>th(c, c==="Customer Name"?240:undefined)),th("Enquiry"),th(""))),
           h("tbody",null, body.length ? body : h("tr",null,h("td",{colSpan:10,style:{padding:14,color:colors.mutedLight,fontSize:12.5}},q.trim()?"Nothing matches.":"No lines on this tab yet."))))),
