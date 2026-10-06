@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-06T12:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-06T16:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -159,9 +159,9 @@ function WonLostOutcomeModal({ referenceNumber, newStatus, user, onDone, onCance
     setCredit(c=>({...c, loading:true}));
     (async()=>{
       const ctx = await resolveWinCreditContext(referenceNumber);
-      const fseOptions = ctx.resolvedIsFse ? [] : await fetchFseNames();
+      const fseOptions = ctx.resolvedIsFse ? [] : ((ctx.tabFses && ctx.tabFses.length) ? ctx.tabFses : await fetchFseNames());   // 137: the tab's FSEs
       if(cancelled) return;
-      setCredit(c=>({...c, ctx, fseOptions, chosen: ctx.resolvedIsFse ? ctx.resolved : "", loading:false}));
+      setCredit(c=>({...c, ctx, fseOptions, chosen: ctx.resolvedIsFse ? ctx.resolved : ((ctx.tabFses && ctx.tabFses.length) ? ctx.tabFses[0] : ""), loading:false}));
     })();
     return ()=>{ cancelled=true; };
   },[referenceNumber,newStatus]);
@@ -258,7 +258,9 @@ function WonLostOutcomeModal({ referenceNumber, newStatus, user, onDone, onCance
                     "From the Territory Rule for "+((credit.ctx.company && (credit.ctx.company.billing_state||credit.ctx.company.billing_country))||"this area")+"."))
               : h(React.Fragment,null,
                   h("div",{style:{fontSize:10.5,color:"#7a5000",marginBottom:6}},
-                    credit.ctx && credit.ctx.company
+                    credit.ctx && credit.ctx.tabFses && credit.ctx.tabFses.length>1
+                      ? "The "+regTabLabel(credit.ctx.tabName)+" tab has more than one FSE \u2014 pick who gets the credit (the first one ticked is suggested)."
+                    : credit.ctx && credit.ctx.company
                       ? "No FSE is set for "+((credit.ctx.company.billing_state||credit.ctx.company.billing_country)||"this customer's area")+(credit.ctx.resolved?" \u2014 it maps to "+credit.ctx.resolved+", who is not an FSE.":".")+" Pick who gets the credit."
                       : "This customer has no CRM record to resolve a territory from. Pick who gets the credit."),
                   h("select",{value:credit.chosen,onChange:e=>setCredit(c=>({...c,chosen:e.target.value})),style:{...inputStyle,width:"100%",marginBottom:6}},
@@ -819,6 +821,8 @@ const MASTER_TABLES = [
   // country_zone_tbl, which can vary in spelling. Resolution order is
   // State -> Country -> Zone (see resolveOwnerForAddress) — this only
   // ever fires once the more specific two have both missed.
+  // 137: the Quote Register tabs (Super Admin) - which customers each tab takes. Who covers a tab: Register Tabs & People.
+  { key: "register_tab_tbl", label: "Register Tabs (rules)", columns: ["tab_name","prefix","group_label","sort_order","is_open","is_emf","is_catchall","accepts_countries","accepts_states","accepts_zone"], colLabels:{tab_name:"Tab (as in Excel)",group_label:"Group",sort_order:"Order",is_open:"Open",is_emf:"EMF",is_catchall:"Catch-all (any other country outside India)",accepts_countries:"Countries (comma list)",accepts_states:"States / emirates (comma list; blank = whole country)",accepts_zone:"India zone (south / north / west / east)"}, addLabel:"New register tab", freeText:["tab_name","prefix","group_label","sort_order","accepts_countries","accepts_states","accepts_zone"], boolCols:["is_open","is_emf","is_catchall"], nullableCols:["prefix","group_label","accepts_countries","accepts_states","accepts_zone"] },
   { key: "territory_rule_zone_tbl", label: "Territory Rules — Zones", columns: ["employee_name","zone"], addLabel:"New rule", cascade:[{col:"employee_name",from:"employee_tbl",field:"employee_name"},{col:"zone",from:"zone_tbl",field:"value"}], groupBy:["employee_name"], editAllEnabled:true },
   { key: "sale_order_status_tbl", label: "Sale Order Status", columns: ["status","sort_order"], addLabel:"New status", freeText:["status","sort_order"] },
 ];
@@ -1564,6 +1568,8 @@ async function allocationDefaultOwner(companyName){
 async function resolveOwnerForAddress(billingState, billingCountry){
   const state = (billingState||"").trim();
   const country = (billingCountry||"").trim();
+  // 137: once the Super Admin has ticked people in Register Tabs & People, the tab decides (its first FSE).
+  try{ await regLoad(); if(regGridOn()){ const o = regOwnerFor(country, state); if(o) return o; } }catch(e){}
   if(state){
     const { data } = await sb.from("territory_rule_state_tbl").select("employee_name").ilike("state",state).limit(1).maybeSingle();
     if(data && data.employee_name) return data.employee_name;
@@ -2022,6 +2028,8 @@ async function canCreateCustomers(user){
 function MenuTabs({ user, active, onChange }) {
   const [custAccess,setCustAccess] = useState(false);   // 125
   useEffect(()=>{ let live=true; canCreateCustomers(user).then(v=>{ if(live) setCustAccess(v); }); return ()=>{ live=false; }; },[user?.id, user?.role]);
+  const [,setRegTick] = useState(0);   // 137: menu knows whether Register Tabs & People is in use
+  useEffect(()=>{ let live=true; regLoad().then(()=>{ if(live) setRegTick(t=>t+1); }); return ()=>{ live=false; }; },[active]);
   const isAdmin = user.role==="admin" || user.role==="super_admin";
   const isSuperAdmin = user.role==="super_admin";
   const isHrAdmin = user.role==="hr_admin";
@@ -2048,7 +2056,8 @@ function MenuTabs({ user, active, onChange }) {
   const salesSubgroups = (isApprovalRole && !isAdmin && !isHrAdmin) ? [
     { label:"Sale Order", tabs:[{key:"sale_order_entry",label:"Sale Order"}] },
   ] : [
-    { label:"Enquiry", tabs:[{key:"enquiries_list",label:"Enquiries"}] },   // 129: moved in from its own top-level tab
+    { label:"Enquiry", tabs:[{key:"quote_register",label:"Quote Register"},{key:"enquiries_list",label:"Enquiries"}] },   // 129: moved in from its own top-level tab; 137: Quote Register
+    ...(canSeeValvePrice(user)?[{ label:"Pricelist", tabs:[{key:"valve_price",label:"Valve Price List"}] }]:[]),   // 136 Build 5: was its own top-level tab
     { label:"Quotes", tabs:[{key:"saved",label:"Quotes"}, ...(isAdmin?[{key:"datasheet_master",label:"Datasheet Master"}]:[])] },   // 129: Datasheet Master moved here from Engineering master
     { label:"Sale Order", tabs:[{key:"sale_order_entry",label:"Sale Order"}] },
     ...(isAdmin?[{ label:"Commercials Master", tabs: byKeys(ctKeys).concat([{key:"gst_structures",label:"GST Structures"}]) }]:[]),
@@ -2079,9 +2088,8 @@ function MenuTabs({ user, active, onChange }) {
     { label:"Dashboards", tabs:[
       {key:"dashboards",label:"Dashboards"},
     ]},
-    ...(canSeeValvePrice(user)?[{ label:"Valve Price", tabs:[
-      {key:"valve_price",label:"Valve Price"},
-    ]}]:[]),
+    // 136 Build 5: Purchase — the same valve price list, under Price List.
+    ...(canSeeValvePrice(user)?[{ label:"Purchase", subgroups:[{ label:"Price List", tabs:[{key:"valve_price_purchase",label:"Valves"}] }] }]:[]),
     { label:"Inventory", subgroups:[
       { label:"Inventory", tabs:[
         {key:"po_register",label:"PO Register"},
@@ -2094,7 +2102,9 @@ function MenuTabs({ user, active, onChange }) {
       ...(!isAdmin && custAccess ? [{ label:"Customers", tabs:[{key:"customers",label:"Customers"}] }] : []),   // 125: FSE / Telecaller / Document Controller
       ...(isAdmin?[
         { label:"Customers", tabs:[{key:"customers",label:"Customers"},{key:"customer_bulk_upload",label:"Customer Bulk Upload"}] },
-        { label:"CRM Setup", tabs: byKeys(["state_zone_tbl","country_zone_tbl","city_tbl","territory_rule_state_tbl","territory_rule_country_tbl","territory_rule_zone_tbl","crm_status_tbl"]) },
+        { label:"CRM Setup", tabs: [   // 137: Register Tabs & People (Super Admin); the old Territory Rules hide once anybody is ticked in it
+          ...(isSuperAdmin?[{key:"register_people",label:"Register Tabs & People"},...byKeys(["register_tab_tbl"])]:[]),
+          ...byKeys(["state_zone_tbl","country_zone_tbl","city_tbl", ...(REG.people.length ? [] : ["territory_rule_state_tbl","territory_rule_country_tbl","territory_rule_zone_tbl"]),"crm_status_tbl"]) ] },
       ]:[]),
       { label:"Major Projects", tabs:[
         {key:"major_projects",label:"Projects"},
@@ -12526,7 +12536,7 @@ function CustomerSelect({ value, onSelect, disabled, user, compact }){
       }),
       h("datalist",{id:listId},matches.map(m=>h("option",{key:m.company_name,value:m.company_name})))
     ),
-    !disabled && h("button",{type:"button",onClick:()=>setShowAdd(true),style:{border:"1px solid "+colors.border,background:"#fff",color:"#1c8c75",fontSize:compact?13:10.5,padding:compact?"2px 6px":"6px 8px",borderRadius:compact?2:5,cursor:"pointer",whiteSpace:"nowrap",...(compact?{height:30,boxSizing:"border-box"}:{})}},"+ Add new"),
+    !disabled && h("button",{type:"button",onClick:()=>setShowAdd(true),style:{border:"1px solid "+colors.border,background:"#fff",color:"#1c8c75",fontSize:compact?13:10.5,padding:compact?"2px 6px":"6px 8px",borderRadius:compact?2:5,cursor:"pointer",whiteSpace:"nowrap",...(compact?{height:30,boxSizing:"border-box"}:{})}},"Add New Customer"),
     // Same customer form as Master Data → Customers — no separate "quick add"
     // version. Adapts CustomerCompanyForm's raw save payload into the shape
     // this picker's own onSelect already expects everywhere it's used.
@@ -14752,13 +14762,22 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     setOpenRef(null); setOpenLines([]); setRefFilter(""); setRefSearchDisplay(""); setSlNoFilter("");
     setAddNewInput(""); setAddNewMsg(null); setShowAddNewModal(true);
   };
-  const confirmAddNew = ()=>{
+  const confirmAddNew = async()=>{
     const val = addNewInput.trim();
     if(!val){ setAddNewMsg({type:"invalid",text:"Enter a quote number."}); return; }
     const hit = refOptionsList.find(o=>o.rn===val);
     if(hit){ setAddNewMsg({type:"exists", rn:hit.rn, label:hit.label}); return; }
+    // 137: a new Quote# must already be a Quote Register line (once the register is in use)
+    const rc = await regCheckQuoteNo(val);
+    if(!rc.ok){ setAddNewMsg({type:"invalid", text:rc.msg}); return; }
     setShowAddNewModal(false);
-    setQhRef(val); resetQuoteHeaderForm(); setShowQuoteHeaderModal(true);
+    setQhRef(rc.line ? rc.line.quote_no : val); resetQuoteHeaderForm();
+    if(rc.line){   // the header starts from the register line
+      if(rc.line.customer_name) setQhCustomerName(rc.line.customer_name);
+      if(rc.line.enquiry_no) setQhEnquiryNumber(rc.line.enquiry_no);
+      if(rc.line.edate) setQhEnquiryDate(String(rc.line.edate).slice(0,10));
+    }
+    setShowQuoteHeaderModal(true);
   };
   const openExistingFromAddNew = ()=>{
     if(!addNewMsg || addNewMsg.type!=="exists") return;
@@ -22304,12 +22323,16 @@ async function updateQuoteStatusForQuote(referenceNumber, newStatus, changedBy, 
       const { data: est } = await sb.from("estimates").select("customer_name").eq("reference_number",referenceNumber).limit(1).maybeSingle();
       const customerName = est?.customer_name;
       if(customerName){
-        const { data: co } = await sb.from("companies").select("owner_employee_name").eq("company_name",customerName).maybeSingle();
-        const ownerName = co?.owner_employee_name;
-        if(ownerName){
-          const { data: actingEmp } = await sb.from("employee_tbl").select("employee_name").eq("app_user_id",
-            (await sb.from("app_users").select("id").eq("username",changedBy).limit(1).maybeSingle()).data?.id || -1
-          ).limit(1).maybeSingle();
+        const { data: co } = await sb.from("companies").select("owner_employee_name,billing_state,billing_country").eq("company_name",customerName).maybeSingle();
+        // 137: with Register Tabs & People in use, every FSE on the quote's tab is told, not just the owner
+        let owners = co?.owner_employee_name ? [co.owner_employee_name] : [];
+        try{ await regLoad(); if(regGridOn()){ const n = regNorm(referenceNumber).replace(/(REV|R)\d+$/,""); const { data: rl } = await sb.from("register_line_tbl").select("tab_name").eq("quote_norm",n).limit(1).maybeSingle();
+          const tabsQ = rl ? [rl.tab_name] : (co ? regTabsFor(co.billing_country, co.billing_state, false).map(t=>t.tab_name) : []);
+          const f = Array.from(new Set(tabsQ.flatMap(t=>regPeople(t,"FSE")))); if(f.length) owners = f; } }catch(e){}
+        const { data: actingEmp } = owners.length ? await sb.from("employee_tbl").select("employee_name").eq("app_user_id",
+          (await sb.from("app_users").select("id").eq("username",changedBy).limit(1).maybeSingle()).data?.id || -1
+        ).limit(1).maybeSingle() : { data:null };
+        for(const ownerName of owners){
           const actingName = actingEmp?.employee_name;
           if(actingName!==ownerName){
             await sb.from("notifications_tbl").insert({
@@ -22615,6 +22638,14 @@ async function fetchDocumentHistory(entityIds){
 async function resolveWinCreditContext(referenceNumber){
   const out = { customerName:"", company:null, resolved:"", resolvedIsFse:false, ruleScope:null };
   try{
+    // 137: the quote's register tab (when Register Tabs & People is in use)
+    await regLoad();
+    if(regGridOn()){
+      const n0 = regNorm(referenceNumber).replace(/(REV|R)\d+$/,"");
+      const { data: rl0 } = await sb.from("register_line_tbl").select("tab_name").eq("quote_norm",n0).limit(1).maybeSingle();
+      if(rl0){ out.tabName = rl0.tab_name; out.tabFses = regPeople(rl0.tab_name,"FSE");
+        if(out.tabFses.length){ out.resolved = out.tabFses[0]; out.resolvedIsFse = out.tabFses.length===1; } }
+    }
     let customerName = "";
     const { data: est } = await sb.from("estimates").select("customer_name").eq("reference_number",referenceNumber).limit(1).maybeSingle();
     if(est) customerName = est.customer_name||"";
@@ -22639,6 +22670,12 @@ async function resolveWinCreditContext(referenceNumber){
       if((co.billing_state||"").trim()) out.ruleScope = { table:"territory_rule_state_tbl", column:"state", value:co.billing_state.trim(), label:co.billing_state.trim() };
       else if((co.billing_country||"").trim()) out.ruleScope = { table:"territory_rule_country_tbl", column:"country", value:co.billing_country.trim(), label:co.billing_country.trim() };
     }
+    // 137: no register line -> the customer's tab
+    if(regGridOn() && !(out.tabFses && out.tabFses.length) && out.company){
+      const tabsQ = regTabsFor(out.company.billing_country, out.company.billing_state, false).map(t=>t.tab_name);
+      out.tabFses = Array.from(new Set(tabsQ.flatMap(t=>regPeople(t,"FSE")))); out.tabName = tabsQ[0] || "";
+    }
+    if(out.tabFses && out.tabFses.length){ out.resolved = out.tabFses[0]; out.resolvedIsFse = out.tabFses.length===1; out.ruleScope = null; }
   }catch(e){ console.error("resolveWinCreditContext failed", e); }
   return out;
 }
@@ -23652,13 +23689,16 @@ function CustomerCompanyForm({ initial, onCancel, onSaved, user, onUseExisting }
       let savedContact = null;
       if(f.id){
         const {id,...rest} = f;
+        if(initial && (initial.owner_employee_name||"")!==(f.owner_employee_name||"")) rest.owner_source = "Manual";   // 137: kept when owners follow the register tabs
         await sb.from("companies").update(rest).eq("id",id);
         if(initial && (initial.owner_employee_name||"")!==(f.owner_employee_name||"")){
           await logOwnershipChange(f.company_name, initial.owner_employee_name||"", f.owner_employee_name||"", "Manual", user?.username||"unknown");
         }
       } else {
         let payload = {...f, created_by:user?.username||"unknown"};
+        const handOwner = user?.role==="super_admin" && (f.owner_employee_name||"").trim();   // 137
         payload = await autoAssignNewCompany(payload, user?.username||"unknown");
+        if(handOwner){ payload.owner_employee_name = f.owner_employee_name; payload.owner_source = "Manual"; }
         const { error } = await sb.from("companies").insert(payload);
         if(error) throw error;
         if(payload.owner_employee_name) await logOwnershipChange(payload.company_name, "", payload.owner_employee_name, "Auto", user?.username||"unknown");
@@ -23855,7 +23895,9 @@ function CustomerCompanyForm({ initial, onCancel, onSaved, user, onUseExisting }
           h("select",{value:f.owner_employee_name||"",disabled:user?.role!=="super_admin",onChange:e=>set("owner_employee_name",e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12,opacity:user?.role!=="super_admin"?0.6:1}},
             h("option",{value:""},"—"),
             employeeOptionsForOwner.map(name=>h("option",{key:name,value:name},name))
-          )
+          ),
+          (()=>{ const ts = (REG.tabs.length && f.billing_country) ? regAnyTabsFor(f.billing_country, f.billing_state) : [];   // 137
+            return ts.length ? h("div",{style:{fontSize:10.5,color:colors.muted,marginTop:3}},"Quote Register tab: "+ts.map(t=>regTabLabel(t.tab_name)).join(" / ")+(regGridOn()?" \u00b7 covered by "+(Array.from(new Set(ts.flatMap(t=>regPeople(t.tab_name))))).join(", ")||"nobody yet":"")) : null; })()
         )
       ),
       !f.id && h("div",{style:{marginTop:8}},
@@ -23958,7 +24000,11 @@ function MyWorklistScreen({ user }){
     const { data: emp } = await sb.from("employee_tbl").select("*").eq("app_user_id",user.id).limit(1).maybeSingle();
     if(!emp){ setEmployee(null); setLoading(false); return; }
     setEmployee(emp);
-    const { data: cos } = await sb.from("companies").select("*").eq("owner_employee_name",emp.employee_name).eq("is_archived",false);
+    let { data: cos } = await sb.from("companies").select("*").eq("owner_employee_name",emp.employee_name).eq("is_archived",false);
+    // 137: plus every customer on the Quote Register tabs this person covers (FSE or telecaller)
+    try{ await regLoad(); const myTabs = regMyTabs(emp.employee_name);
+      if(myTabs.length){ const all = await fetchPaged(()=>sb.from("companies").select("*").eq("is_archived",false).order("id"));
+        const have = new Set((cos||[]).map(c=>c.id)); cos = (cos||[]).concat(all.filter(c=>!have.has(c.id) && regCompanyInTabs(c, myTabs))); } }catch(e){ console.error("Register tabs not applied to the worklist", e); }
     setMyCompanies(cos||[]);
     const names = (cos||[]).map(c=>c.company_name);
     const { data: acts } = names.length
@@ -24071,7 +24117,7 @@ function MyWorklistScreen({ user }){
     h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}},
       h("div",{style:{fontWeight:700,fontSize:16}},"My Worklist — "+employee.employee_name+" ("+(employee.crm_role||"—")+")")
     ),
-    h("div",{style:{fontSize:11.5,color:colors.mutedLight,marginBottom:14}},"Scoped to the "+myCompanies.length+" account(s) you currently own."),
+    h("div",{style:{fontSize:11.5,color:colors.mutedLight,marginBottom:14}},"Scoped to the "+myCompanies.length+" account(s) you own or cover on your Quote Register tabs."),
     h("div",{style:{marginBottom:14}},viewBtn("date","By date"),viewBtn("customer","By customer"),viewBtn("all","All"),viewBtn("packages","Packages")),
 
     view==="date" && h(React.Fragment,null,
@@ -24357,7 +24403,9 @@ function CustomersScreen({ user }){
       // effort until there's a real login-to-employee link) and the
       // company is still Cold (pre-Lead), they become owner immediately,
       // overriding whatever Telecaller was provisionally attached.
-      if(selected.crm_status!=="Lead" && user?.id){
+      // 137 (6 Oct): FSE touch switched OFF on both sites — owners come from Register Tabs & People
+      // (or the Territory Rules until the grid is filled), and owners set by hand by a Super Admin.
+      if(false && selected.crm_status!=="Lead" && user?.id){
         const { data: emp } = await sb.from("employee_tbl").select("employee_name,crm_role").eq("app_user_id",user.id).limit(1).maybeSingle();
         if(emp && emp.crm_role==="FSE" && emp.employee_name!==selected.owner_employee_name){
           await sb.from("companies").update({owner_employee_name:emp.employee_name, owner_source:"Auto"}).eq("id",selected.id);
@@ -26687,6 +26735,41 @@ const MANUAL_SECTIONS = [
         ]
       },
       {
+        "key": "quote_register",
+        "title": "Quote Register \u2014 Quote# first, then the enquiry",
+        "tag": "Sales \u2192 Enquiry \u2192 Quote Register / CRM \u2192 CRM Setup \u2192 Register Tabs & People",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "The Quote Register is the Excel register in the app, tab by tab as the Excel sheets (Saudi Arabia, Dubai\u2026, Abu Dhabi, Oman, Kuwait, Qatar, USA, Africa, Europe, South East Asia, Exports - OTHERS, the four India tabs, the EMF tabs, and the old South / North / West / East / Tanks sheets as history). Columns as in the Excel: First OfferNo, Offer Date, Enquiry No, EDate, Customer Name, City, State, Country. Every line of the Excel is loaded; gaps in numbering are history and stay. 25 lines a page, opening on the newest; search one tab or all tabs."
+          },
+          {
+            "type": "steps",
+            "items": [
+              "When an enquiry comes in, the Sales Coordinator (or an Admin) opens the tab for the customer's territory and presses + New Register Line. The next number of that tab is filled in (highest used this year + 1; the year part changes on 1 January) \u2014 type over it to enter a number already given out elsewhere.",
+              "Every field is needed: Enquiry No (the customer's RFQ / enquiry reference \u2014 type NA when they gave none), EDate, and the customer, picked from the customer list (Add New Customer beside it). City, State and Country come from the customer and are locked; if the customer has none, Edit Customer completes it first. State is needed for India and the UAE.",
+              "Wrong tab is refused with the tab to use, e.g. \u201cPetronash Engineering Services is in Tamil Nadu, India. Use the India - South tab (FIS\u2026).\u201d An EMF enquiry goes on the EMF tab of the territory.",
+              "Numbers are checked as you save: a number already in the register (any case, spaces or hyphens), a revision ending on one (FIS260049-R1), or another tab's prefix is refused; a missing or extra digit, another year, a quote that already exists in Quotes, or the same customer's Enquiry No used before is warned \u2014 tick I've checked to save anyway.",
+              "Log Enquiry on the line opens the Log enquiry form with Quote#, customer, date and RFQ ref from the line (locked). Once logged the line shows \u2713 Enquiry and Edit, which opens the enquiry. From there the Enquiries / card / board flow is unchanged.",
+              "Offer Date fills itself when the quote moves to Offer Sent (or any later stage). Editing a line's customer, Enquiry No or EDate updates its enquiry too.",
+              "Leaving a line (or the Log enquiry form) with changes not saved asks: Save, Discard or Stay."
+            ]
+          },
+          {
+            "type": "p",
+            "text": "The register is the only place a new Quote# is born. Make New Quote (Quotes), + Log enquiry (Enquiries) and convert-to-quote accept only a number that is already a register line, and the quote header starts from that line (customer, enquiry number and date). Only the Sales Coordinator and Admins add or edit register lines; everybody can look."
+          },
+          {
+            "type": "p",
+            "text": "Register Tabs & People (CRM \u2192 CRM Setup, Super Admin only) is a grid of tabs against people: click a cell for FSE \u2192 TC (telecaller) \u2192 blank. A tab can have several FSEs and telecallers and a person can cover several tabs. Every FSE and telecaller ticked on a tab gets that tab's customers in My Worklist and the overdue-calls list; the first FSE ticked is the owner of the tab's customers. When the FSEs of a tab change, Save asks whether to move existing customers too or only new ones; owners a Super Admin set by hand are never moved. Register Tabs (rules) holds which countries / emirates / India zone each tab takes."
+          },
+          {
+            "type": "tip",
+            "text": "Until anybody is ticked in Register Tabs & People, ownership works exactly as before (Territory Rules by State, Country, Zone). Once the grid is in use the Territory Rules menu items hide. FSE touch (an FSE logging on a customer took it over) is switched off on both sites. Reports gain a Register tab filter or column: Quotes Report, CRM Funnel, Quote Stage Review, Overdue Calls report, Won by Owner (By Quote Register tab) and CRM Dashboards (Quote Register tab performance). A win is credited among the FSEs of the quote's tab."
+          }
+        ]
+      },
+      {
         "key": "enquiry_followups",
         "title": "Enquiries \u2014 logging, the Design & Estimation card, offer sent",
         "tag": "Enquiry \u2192 Enquiries / Tasks \u2192 Task Boards / CRM \u2192 Log Follow-ups",
@@ -27306,6 +27389,9 @@ function downloadManualPdf(){
 // added to over time; not wired to a database table yet, so edits currently
 // mean updating this array directly.
 const FAQ_ENTRIES = [
+  { q:"Make New Quote says the Quote# is not in the Quote Register \u2014 why?", a:"From build 137 every new Quote# is first made as a line in Sales \u2192 Enquiry \u2192 Quote Register (by the Sales Coordinator or an Admin), on the tab for the customer's territory. Then Make New Quote or Log Enquiry takes it." },
+  { q:"The Quote Register refuses my line \u2014 \u201cuse the \u2026 tab\u201d.", a:"Each tab takes customers from its own countries / emirates / India zone. The message names the tab for that customer; open that tab and add the line there. If no tab takes the country, the Super Admin adds it in CRM \u2192 CRM Setup \u2192 Register Tabs (rules)." },
+  { q:"Why do I see customers I don't own in My Worklist?", a:"Once the Super Admin ticks people in Register Tabs & People, every FSE and telecaller on a tab sees all of that tab's customers. The owner of a customer is the first FSE ticked on its tab." },
   { q:"Why is a line item showing \"no rate match\"?", a:"The Material spec + Grade combination you picked has no row in Material Rates master. Add it there, or pick a different grade." },
   { q:"Why can't I edit Enquiry number or Currency on a saved quote?", a:"Those fields lock once a Quote# already exists, so every Sl No under it stays consistent. Add a new Sl No, or start a new Quote# if the enquiry details actually changed." },
   { q:"Why is \"Generate Quote PDF\" greyed out?", a:"It's blocked until the quote shows \"ready to go\" — Commercial Terms complete and every Sl No has a datasheet filled in." },
@@ -27335,6 +27421,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"6 Oct 2026 (137)", summary:"BUILD 7 \u2014 Quote Register and register tabs. SQL: structure_quote_register_137 (both companies: register_tab_tbl, register_line_tbl, register_tab_person_tbl; customers whose owner a Super Admin set by hand marked owner_source Manual) and data_quote_register_FLOMETRIQ_137 (Flometriq only: the 27 Excel sheets as tabs with the customers each takes, and all 6,341 filled lines; one repeated number S210184 R01 kept once). QUOTE REGISTER (Sales \u2192 Enquiry): the Excel cloned \u2014 tabs as the sheets, same columns, month rows, 25 a page opening on the newest, search one / all tabs. + New Register Line (Sales Coordinator and Admins): next number of the tab suggested (type over it); every field required (Enquiry No NA allowed; City / State / Country locked from the customer; State for India and the UAE); customer drop-down with Add New Customer and Edit Customer; wrong tab refused naming the right one; repeats, revision endings and another tab's prefix refused, look-alikes / other year / existing quote / same Enquiry No warned (tick to save). Log Enquiry on a line opens the form with Quote#, customer, date and RFQ ref locked; \u2713 Enquiry + Edit once logged; editing a line updates its enquiry; Offer Date fills itself at Offer Sent. A new Quote# must be a register line: Make New Quote, + Log enquiry, convert-to-quote (header starts from the line). REGISTER TABS & PEOPLE (CRM \u2192 CRM Setup, Super Admin only): many-to-many grid FSE / TC per tab; first FSE owns the tab's customers; Save asks to move existing customers or only new ones (owners set by hand kept); Register Tabs (rules) master. OWNERSHIP: tabs first once anybody is ticked (Territory Rules until then, and hidden after); My Worklist and the overdue-calls prompt include every customer of my tabs; win credit picks among the quote's tab FSEs; stage-change alerts go to the tab's FSEs; FSE touch switched off on both sites; a Super Admin's owner change marks owner_source Manual. REPORTS: Register tab filter / column in Quotes Report, CRM Funnel, Quote Stage Review, Overdue Calls report; Won by Owner By Quote Register tab; CRM Dashboards Quote Register tab performance; owner filters also match anyone covering the quote's tab. Wording: Add New Customer on the customer picker everywhere. Leaving a register line, the Log enquiry form or the grid with changes asks Save / Discard / Stay. Manual: new article Quote Register." },
+  { date:"6 Oct 2026 (136)", summary:"BUILD 5 \u2014 the valve price list moved off its own top-level tab into two places: Sales \u2192 Pricelist \u2192 Valve Price List, and a new Purchase tab \u2192 Price List \u2192 Valves (the same screen; who can see it is unchanged). No SQL." },
   { date:"6 Oct 2026 (135)", summary:"Four builds together. SQL structure_card_actions_135 (both): task_tbl.wait_reason, wait_since. BUILD 1 \u2014 Task Labels colour: clicking the colour block opens a palette of 20 ready colours (a white dot marks colours another label already uses; hover shows which), More colours\u2026 opens the computer's own picker, a sample chip shows the label in the chosen colour. BUILD 2 \u2014 Enquiries register: Assign \u25be on each open enquiry and for ticked rows (person with their open tasks, task due date defaulting from the Enquiry / Offer task type, optional note added to the card's note); the card leaves the pile and the enquiry becomes Assigned. Same people as the Task Assignment Board (Admins, Document Controller, the board's approvers). Stale warning: open and unassigned more than 2 calendar days after the enquiry date \u2014 red row, Unassigned N days, a banner with Show only these, and a chip filter (no notification). Sort by Enquiry date (default, oldest first), Last date for submission, Date created, Task due date, with \u21c5 to flip. Renamed everywhere: Due \u2192 Task due date, Customer closes / closing date \u2192 Last date for submission. BUILD 3 \u2014 wide task card (screens 1000 px and wider): two columns \u2014 left: enquiry, Type of task / Assigned to / Task due date / Customer, Reference, checklist in two columns; right: a tall Note with \u2922 Zoom (full screen, \u2190 Back or Esc keeps the edits), Labels, Links, Sub-tasks. Change the standard list? explains Tasks \u2192 Task Setup \u2192 Task Types (new cards only) and gives Admins Open Task Types now. Enquiry Details (enquiry screen and Log enquiry) bigger with the same Zoom. BUILD 4 \u2014 three card actions everywhere: \u25b6 Start Task (the assignee; card \u2192 In Progress; an enquiry opens its Quote# in the Estimator, a document card its latest file); \u23f8 Waiting For Customer (any card; asks why, quick picks from recent reasons; amber badge with reason and since-date on the card, the Enquiries register and the enquiry screen; due + 3 days, label Waiting customer, not stale) which turns into \u25b6 Resume (customer replied); \u2716 Regret Quote (enquiry cards only; reason with quick picks; red badge; goes to the approver and closes as Regretted on approval). Start Task replaces Start quote / Start work." },
   { date:"6 Oct 2026 (134)", summary:"Task Labels: the Color column shows the colour itself and how the label looks (a sample chip in that colour) instead of the code; adding or editing a label opens a colour picker. No SQL." },
   { date:"5 Oct 2026 (133)", summary:"Task Assignment Board: the people lists open Home first (their department is the board; post holders first), then Post, then Extras — each list tagged. Drag a list by its \u283f grip to move it (e.g. Divya V ahead of Arangan Keerthi); the order is saved per board for everyone and the last arrangement opens next time (who moved it and when is shown; Reset order goes back to the default). People who join later are slotted at the end of their own group. Go to person: a combo box that completes the name as you type, lists matches underneath, ▾ shows everyone grouped Home / Post / Extra; picking a name scrolls to that list and lights it up (nothing is filtered). Employee boards and the Order Status boards keep their fixed lists. SQL: structure_board_order_133, both companies." },
@@ -31611,6 +31699,7 @@ function PackageAllocationsSection({ pkg, project, user, onCreateQuoteFromAlloca
     const ref = prompt("New Quote# for "+row.company_name+" (e.g. FEX260601):");
     if(!ref || !ref.trim()) return;
     (async()=>{
+      const rc = await regCheckQuoteNo(ref.trim()); if(!rc.ok){ alert(rc.msg); return; }   // 137
       const { data:existing } = await sb.from("estimates").select("reference_number").eq("reference_number",ref.trim()).limit(1);
       if(existing && existing.length>0){ alert("Quote# \""+ref.trim()+"\" already exists — pick a different number."); return; }
       onCreateQuoteFromAllocation(ref.trim(), row.id, row.company_name);
@@ -31653,19 +31742,22 @@ function PackageAllocationsSection({ pkg, project, user, onCreateQuoteFromAlloca
 // whole trail is read-only, just add what's being asked for), or called
 // with none of that (a manual/walk-in entry — only Customer is required).
 // Always saves as Unassigned; assignment is a separate screen entirely.
-function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved }){
+function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved, regLine }){
   // 5 Oct (123) — logging an enquiry: customer from the customer list, Quote# given at
   // once, customer's closing date, folder link, RFQ ref. Saving creates the enquiry
   // AND its card in the Estimation Unassigned pile (standard checklist, label Enquiry).
   const fromChase = !!allocation;
   const today = toISODate(new Date());
-  const [companyName,setCompanyName] = useState(allocation?.company_name || "");
+  // 137 (Build 7): opened from a Quote Register line - Quote#, customer, date received and RFQ ref come from the line, locked.
+  const RL = regLine || null;
+  const [companyName,setCompanyName] = useState(RL ? (RL.customer_name||"") : (allocation?.company_name || ""));
   const [subject,setSubject] = useState("");
-  const [quoteNo,setQuoteNo] = useState("");
-  const [enquiryDate,setEnquiryDate] = useState(today);
+  const [quoteNo,setQuoteNo] = useState(RL ? (RL.quote_no||"") : "");
+  const [enquiryDate,setEnquiryDate] = useState(RL && RL.edate ? String(RL.edate).slice(0,10) : today);
   const [closingDate,setClosingDate] = useState("");
-  const [customerRef,setCustomerRef] = useState("");
+  const [customerRef,setCustomerRef] = useState(RL ? (/^n\/?a$/i.test(String(RL.enquiry_no||"").trim()) ? "" : (RL.enquiry_no||"")) : "");
   const [folderLink,setFolderLink] = useState("");
+  const [askLeave,setAskLeave] = useState(false);   // 137: unsaved changes on Cancel
   const [enquiryType,setEnquiryType] = useState("");
   const [source,setSource] = useState(fromChase ? "From project chase" : "");
   const [details,setDetails] = useState("");
@@ -31709,13 +31801,22 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved }){
       if(fc.warning && !confirm(fc.warning+"\n\nOK = save it anyway\nCancel = go back and change the link")) return; }
     setSaving(true); setErr("");
     try{
+      // 137: the Quote# comes from the Quote Register (once it is in use on this site)
+      let regRow = RL;
+      if(!regRow && !fromChase){
+        const rc = await regCheckQuoteNo(qn);
+        if(!rc.ok){ setErr(rc.msg); setSaving(false); return; }
+        regRow = rc.line;
+        if(regRow && regRow.enquiry_id){ setErr("Quote# "+qn+" already has its enquiry \u2014 open it from the Quote Register."); setSaving(false); return; }
+        if(regRow && regRow.customer_name && regKey(regRow.customer_name)!==regKey(cust)){ setErr("Quote# "+qn+" is registered for "+regRow.customer_name+", not "+cust+". Pick that customer, or correct the register line."); setSaving(false); return; }
+      }
       // Quote# must be new
       const [{ data:e1 },{ data:e2 },{ data:e3 }] = await Promise.all([
         sb.from("estimates").select("reference_number").eq("reference_number",qn).limit(1),
         sb.from("enquiry_tbl").select("enquiry_number").eq("linked_reference_number",qn).limit(1),
         sb.from("legacy_quotes_tbl").select("reference_number").eq("reference_number",qn).limit(1),
       ]);
-      if((e1||[]).length || (e3||[]).length){ setErr("Quote# "+qn+" already exists — pick the next free number."); setSaving(false); return; }
+      if(!regRow && ((e1||[]).length || (e3||[]).length)){ setErr("Quote# "+qn+" already exists — pick the next free number."); setSaving(false); return; }
       if((e2||[]).length){ setErr("Quote# "+qn+" is already given to enquiry "+e2[0].enquiry_number+"."); setSaving(false); return; }
       // Enquiry number: ENQ-YYMMDD-NN, next free number for today
       const prefix = "ENQ-"+today.slice(2).replace(/-/g,"")+"-";
@@ -31753,7 +31854,8 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved }){
         await taskLog(card.id, me, "Created from enquiry "+enquiryNumber+" (Quote# "+qn+") in the "+ENQUIRY_DEPT+" Unassigned pile");
       }
       await logAudit("INSERT","enquiry_tbl",enquiryNumber,"Logged enquiry for "+cust+", Quote# "+qn+(fromChase?" (from project chase)":"")+(card?" — card in "+ENQUIRY_DEPT+" pile":""),user?.username||"unknown",null,{company_name:cust,linked_reference_number:qn});
-      onSaved({ enquiryNumber, quoteNo:qn });
+      if(regRow && regRow.id){ await sb.from("register_line_tbl").update({ enquiry_id:created.id, updated_at:new Date().toISOString(), updated_by:me||user?.username||"" }).eq("id",regRow.id); }   // 137
+      onSaved({ enquiryNumber, quoteNo:qn, enquiryId:created.id });
     } catch(e){ setErr(e.message||"Could not save enquiry."); }
     finally{ setSaving(false); }
   };
@@ -31769,10 +31871,16 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved }){
         h("div",null,h("strong",null,"Project: "),project?.project_name||"—"),
         h("div",null,h("strong",null,"Package: "),pkg?.package_name||"—"),
         h("div",null,h("strong",null,"Customer: "),companyName))
+      : RL ? h("div",{style:{padding:"10px 12px",background:"#f4f2ea",border:"1px dashed "+colors.border,borderRadius:6,marginBottom:12,fontSize:12.5,display:"grid",gridTemplateColumns:"repeat(2,minmax(0,1fr))",gap:"4px 16px"}},   // 137
+          h("div",null,h("span",{style:{color:colors.muted}},"Quote#: "),h("b",null,RL.quote_no)),
+          h("div",null,h("span",{style:{color:colors.muted}},"Customer: "),h("b",null,RL.customer_name||"\u2014")),
+          h("div",null,h("span",{style:{color:colors.muted}},"Received: "),RL.edate?fmtDMY(RL.edate):"\u2014"),
+          h("div",null,h("span",{style:{color:colors.muted}},"Customer RFQ / ref: "),RL.enquiry_no||"\u2014"),
+          h("div",{style:{gridColumn:"1 / -1",fontSize:11,color:colors.muted}},"From the Quote Register line \u2014 change these on the register."))
       : h("div",{style:{marginBottom:10}}, fld("Customer (from the customer list)",
           h("div",{style:{display:"flex",gap:6,alignItems:"center"}},
             h("div",{style:{flex:1,minWidth:0}},h(LimitToListCombo,{value:companyName,onChange:v=>setCompanyName(v||""),options:customers,limitToList:true,placeholder:"Start typing a customer",style:{fontSize:12,width:"100%",padding:"7px 9px"}})),
-            h("button",{type:"button",onClick:()=>setAddCust(true),style:{...btnSmall,whiteSpace:"nowrap",color:"#0f7a5c"}},"+ New customer")))),   // 126
+            h("button",{type:"button",onClick:()=>setAddCust(true),style:{...btnSmall,whiteSpace:"nowrap",color:"#0f7a5c"}},"Add New Customer")))),   // 126 / 137 wording
       addCust && h(CustomerCompanyForm,{ user, onCancel:()=>setAddCust(false),
         onSaved:(co)=>{ setAddCust(false); if(co && co.company_name){ setCustomers(cs=>cs.includes(co.company_name)?cs:[...cs,co.company_name].sort()); setCompanyName(co.company_name); } } }),
       openOnes.length ? h("div",{style:{background:"#fff4d6",color:"#854f0b",borderRadius:6,padding:"8px 10px",fontSize:11.5,marginBottom:10}},
@@ -31780,13 +31888,13 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved }){
         openOnes.slice(0,6).map(o=>h("div",{key:o.enquiry_number,style:{marginTop:2}},o.enquiry_number+" · "+(o.linked_reference_number||"no Quote#")+" — "+(o.subject||o.details||"")+" ("+(o.status||"")+(o.assigned_to&&o.assigned_to!=="Unassigned"?" · "+o.assigned_to:"")+")"))) : null,
       h("div",{style:{marginBottom:10}}, fld("Subject (becomes the card title)", inp(subject,setSubject,"e.g. 200NB T-strainers, Luberef"))),
       h("div",{style:{display:"flex",gap:10,marginBottom:10,flexWrap:"wrap"}},
-        fld("Quote#", inp(quoteNo,setQuoteNo,"e.g. FEX260601")),
-        fld("Received on", inp(enquiryDate,setEnquiryDate,"","date")),
+        RL ? null : fld("Quote# (from the Quote Register)", inp(quoteNo,setQuoteNo,"e.g. FEX260601")),
+        RL ? null : fld("Received on", inp(enquiryDate,setEnquiryDate,"","date")),
         fld("Last date for submission", inp(closingDate,setClosingDate,"","date"))),
       h("div",{style:{display:"flex",gap:10,marginBottom:10,flexWrap:"wrap"}},
         fld("Type", h("select",{value:enquiryType,onChange:e=>setEnquiryType(e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12}},h("option",{value:""},"—"),types.map(t=>h("option",{key:t,value:t},t)))),
         fld("Source", h("select",{value:source,onChange:e=>setSource(e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12}},h("option",{value:""},"—"),sources.map(x=>h("option",{key:x,value:x},x)))),
-        fld("Customer RFQ / ref", inp(customerRef,setCustomerRef,"e.g. RFQ 440012438"))),
+        RL ? null : fld("Customer RFQ / ref", inp(customerRef,setCustomerRef,"e.g. RFQ 440012438"))),
       h("div",{style:{marginBottom:10}}, fld("Enquiry folder link * (OneDrive / SharePoint / Google Drive)",
         h("div",{style:{display:"flex",gap:6}}, h("div",{style:{flex:1,minWidth:0}},inp(folderLink,setFolderLink,"Paste the folder link")),
           h("button",{type:"button",onClick:()=>{ const v=folderLink.trim(); if(!/^https?:\/\//i.test(v)){ alert("Paste the https:// link first."); return; } window.open(v,"_blank","noopener"); },style:{...btnSmall,whiteSpace:"nowrap"}},"Test link")))),
@@ -31800,8 +31908,9 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved }){
         h("button",{onClick:addItemRow,style:{...btnSmall,fontSize:11.5}},"+ Add item")),
       err && h("div",{style:{fontSize:11.5,color:colors.danger,marginBottom:10}},err),
       h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8}},
-        h("button",{onClick:onCancel,style:btnSecondary},"Cancel"),
-        h("button",{onClick:save,disabled:saving,style:{...btnPrimary,opacity:saving?0.6:1}},saving?"Saving…":"Save enquiry"))));
+        h("button",{onClick:()=>{ const dirty = !!(subject.trim()||details.trim()||folderLink.trim()||closingDate||enquiryType||(source && !fromChase)||items.some(r=>r.item.trim())||(!RL && (quoteNo.trim()||customerRef.trim()||(!fromChase && companyName.trim())))); if(dirty) setAskLeave(true); else onCancel(); },style:btnSecondary},"Cancel"),
+        h("button",{onClick:save,disabled:saving,style:{...btnPrimary,opacity:saving?0.6:1}},saving?"Saving…":"Save enquiry")),
+      askLeave ? h(UnsavedAsk,{ what:"This enquiry", onStay:()=>setAskLeave(false), onDiscard:()=>{ setAskLeave(false); onCancel(); }, onSave:()=>{ setAskLeave(false); save(); } }) : null));   // 137
 }
 // doesn't already carry this package's name as a Customer Type — offer to
 // tag it right there. The type vocabulary grows from real assignments.
@@ -33078,6 +33187,501 @@ function EnquiryDetailScreen({ user, me, enquiryId, pos, total, onBack, onPrev, 
               h("button",{onClick:markSent,disabled:busy,style:{...btnPrimary,marginTop:8,background:"#0f7a5c",opacity:busy?0.6:1}},busy?"Saving…":"Mark offer sent"))))));
 }
 
+// ==== 137 (6 Oct, Build 7) — QUOTE REGISTER and REGISTER TABS & PEOPLE =====================
+// The Excel quote register brought into the app as it is: one tab per sheet (register_tab_tbl),
+// one row per Quote# (register_line_tbl). Each open tab says which customers it takes (country /
+// emirate / India zone) and the Super Admin ticks who covers it (register_tab_person_tbl, many to
+// many: FSE and telecallers). Once anybody is ticked, ownership follows the tabs instead of the
+// old State -> Country -> Zone Territory Rules; until then nothing changes.
+const REG = { loaded:0, tabs:[], people:[], zoneByState:{}, ok:false };
+const regKey = (s)=> String(s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+const regNorm = (s)=> String(s||"").toUpperCase().replace(/[\s\-_.\/]/g,"");
+const regList = (s)=> String(s||"").split(",").map(regKey).filter(Boolean);
+const regIsIndia = (c)=> regKey(c)==="india";
+async function regLoad(force){
+  if(REG.loaded && !force && Date.now()-REG.loaded < 60000) return REG;
+  try{
+    const [t,p,z] = await Promise.all([
+      sb.from("register_tab_tbl").select("*").order("sort_order"),
+      sb.from("register_tab_person_tbl").select("*").order("sort_order"),
+      sb.from("state_zone_tbl").select("state,zone"),
+    ]);
+    REG.ok = !t.error;
+    REG.tabs = t.error ? [] : (t.data||[]);
+    REG.people = p.error ? [] : (p.data||[]);
+    REG.zoneByState = {}; ((z&&z.data)||[]).forEach(r=>{ if(r.state) REG.zoneByState[regKey(r.state)] = String(r.zone||"").toLowerCase(); });
+  }catch(e){ console.error("Register tabs not read", e); }
+  REG.loaded = Date.now();
+  return REG;
+}
+function regTabMatches(tab, country, state){
+  const ck = regKey(country); if(!ck) return false;
+  if(tab.is_catchall) return !regIsIndia(country);
+  const cs = regList(tab.accepts_countries); if(!cs.length || !cs.includes(ck)) return false;
+  const ss = regList(tab.accepts_states); if(ss.length && !ss.includes(regKey(state))) return false;
+  if(tab.accepts_zone){ const z = REG.zoneByState[regKey(state)] || ""; if(!z.includes(String(tab.accepts_zone).toLowerCase().trim())) return false; }
+  return true;
+}
+// Open tabs that take this customer. A specific tab always beats the catch-all (Exports - OTHERS).
+function regTabsFor(country, state, emf){
+  const open = REG.tabs.filter(t=>t.is_open && !!t.is_emf===!!emf);
+  const spec = open.filter(t=>!t.is_catchall && regTabMatches(t,country,state));
+  return spec.length ? spec : open.filter(t=>t.is_catchall && regTabMatches(t,country,state));
+}
+const regAnyTabsFor = (country, state)=> [...regTabsFor(country,state,false), ...regTabsFor(country,state,true)];
+const regPeople = (tabName, role)=> REG.people.filter(p=>p.tab_name===tabName && (!role || p.role===role))
+  .sort((a,b)=>((a.sort_order??100)-(b.sort_order??100)) || ((a.id||0)-(b.id||0))).map(p=>p.employee_name);
+const regGridOn = ()=> REG.people.length > 0;
+function regOwnerFor(country, state){
+  for(const t of regTabsFor(country,state,false)){ const f = regPeople(t.tab_name,"FSE"); if(f.length) return f[0]; }
+  return null;
+}
+const regMyTabs = (name)=> Array.from(new Set(REG.people.filter(p=>p.employee_name===name).map(p=>p.tab_name)));
+const regCompanyInTabs = (co, tabNames)=> regAnyTabsFor(co.billing_country, co.billing_state).some(t=>tabNames.includes(t.tab_name));
+const regTabLabel = (n)=> String(n||"").trim().replace(/,\s*$/,"");
+function regTabDescribe(t){
+  if(!t) return "";
+  if(t.is_catchall) return "any country outside India that no other tab takes";
+  if(t.accepts_zone) return "India – "+String(t.accepts_zone).replace(/^./,c=>c.toUpperCase())+" zone states";
+  const cs = String(t.accepts_countries||"").split(",").map(s=>s.trim()).filter(Boolean);
+  const ss = String(t.accepts_states||"").split(",").map(s=>s.trim()).filter(Boolean);
+  if(ss.length) return cs[0]+" – "+ss.join(", ");
+  return cs.length>6 ? cs.slice(0,6).join(", ")+" and other "+(t.tab_name.trim())+" countries" : cs.join(", ");
+}
+// Quote# -> tab, for reports. Revision endings (R01, -R2, Rev 3) fall back to the base number.
+async function regQuoteTabMap(){
+  const m = new Map();
+  try{
+    const rows = await fetchPaged(()=>sb.from("register_line_tbl").select("quote_norm,tab_name").order("id"));
+    rows.forEach(r=>m.set(r.quote_norm, r.tab_name));
+  }catch(e){}
+  return m;
+}
+function regTabOfQuote(map, ref){
+  if(!map || !ref) return "";
+  const n = regNorm(ref); if(map.has(n)) return map.get(n);
+  const b = n.replace(/(REV|R)\d+$/,""); return map.get(b) || "";
+}
+// When a quote leaves Draft its register line gets the Offer Date (only if still blank).
+async function regMarkOfferDate(ref, when){
+  try{
+    const n = regNorm(ref).replace(/(REV|R)\d+$/,"");
+    const d = toISODate(when ? new Date(when) : new Date());
+    await sb.from("register_line_tbl").update({ offer_date:d, updated_at:new Date().toISOString(), updated_by:"App (offer sent)" }).eq("quote_norm",n).is("offer_date",null);
+  }catch(e){ console.error("Register offer date not set", e); }
+}
+// The Quote# a new quote may use: it has to be a register line (once the register is in use).
+async function regCheckQuoteNo(ref){
+  const n = regNorm(ref);
+  if(!n) return { ok:false, msg:"Enter a quote number." };
+  const { count, error: cErr } = await sb.from("register_line_tbl").select("id",{count:"exact",head:true});
+  if(cErr || !count) return { ok:true, line:null };   // register not in use on this site yet
+  const { data } = await sb.from("register_line_tbl").select("*").eq("quote_norm",n.replace(/(REV|R)\d+$/,"")).limit(1).maybeSingle();
+  if(!data) return { ok:false, msg:"Quote# "+n+" is not in the Quote Register. The Sales Coordinator makes the register line first (Sales → Enquiry → Quote Register); then the quote can be made." };
+  return { ok:true, line:data };
+}
+
+// ---- Leaving with unsaved changes: Save / Discard / Stay ----
+function UnsavedAsk({ onSave, onDiscard, onStay, what }){
+  return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:3200,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
+    h("div",{style:{background:"#fff",borderRadius:10,padding:"16px 18px",width:420,maxWidth:"100%"}},
+      h("b",{style:{fontSize:14}},"You have changes that are not saved."),
+      h("div",{style:{fontSize:12,color:colors.muted,margin:"6px 0 14px"}},(what?what+" — ":"")+"save them before leaving, or discard them?"),
+      h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end"}},
+        h("button",{onClick:onStay,style:btnSecondary},"Stay"),
+        h("button",{onClick:onDiscard,style:{...btnSecondary,color:colors.danger,borderColor:colors.danger}},"Discard"),
+        h("button",{onClick:onSave,style:btnPrimary},"Save"))));
+}
+
+// ---- QUOTE REGISTER (Sales -> Enquiry -> Quote Register) ----
+const REG_PAGE = 25;
+const REG_COLS = ["First OfferNo","Offer Date","Enquiry No","EDate","Customer Name","City","State","Country"];
+function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
+  const isAdmin = user?.role==="admin" || user?.role==="super_admin";
+  const isSuper = user?.role==="super_admin";
+  const today = toISODate(new Date());
+  const [ready,setReady] = useState(false);
+  const [tabs,setTabs] = useState([]);
+  const [cur,setCur] = useState(()=>{ try{ return localStorage.getItem("qr_tab")||""; }catch(e){ return ""; } });
+  const [rows,setRows] = useState([]);
+  const [total,setTotal] = useState(0);
+  const [page,setPage] = useState(-1);          // -1 = last page (newest lines, as in Excel)
+  const [counts,setCounts] = useState({});
+  const [q,setQ] = useState(""); const [qAll,setQAll] = useState(false);
+  const [me,setMe] = useState(null);            // {name, canEdit, sales}
+  const [edit,setEdit] = useState(null);        // {id|null, d:{...}, orig:{...}, co:company row|null}
+  const [chk,setChk] = useState({bad:[],warn:[],ok:false});
+  const [busy,setBusy] = useState(false);
+  const [ask,setAsk] = useState(null);          // {then}
+  const [logFor,setLogFor] = useState(null);    // register line to log an enquiry from
+  const [enqOpen,setEnqOpen] = useState(null);  // enquiry id shown inline
+  const [custForm,setCustForm] = useState(null);// {initial} for Add New Customer / Edit Customer
+  const [err,setErr] = useState("");
+  const tab = tabs.find(t=>t.tab_name===cur) || null;
+
+  useEffect(()=>{ (async()=>{
+    await regLoad(true);
+    const ts = REG.tabs; setTabs(ts);
+    if(!REG.ok){ setErr("The Quote Register tables are not there yet — run structure_quote_register_137 on this database."); setReady(true); return; }
+    if(!ts.find(t=>t.tab_name===cur)) setCur((ts.find(t=>t.is_open)||ts[0]||{}).tab_name||"");
+    const name = await taskMyEmployeeName(user);
+    const { data: sc } = await sb.from("post_holder_tbl").select("employee_name").eq("post_key","sales_coordinator");
+    const { data: emp } = name ? await sb.from("employee_tbl").select("*").eq("employee_name",name).limit(1).maybeSingle() : { data:null };
+    const isSc = !!name && (sc||[]).some(r=>r.employee_name===name);
+    const sales = isAdmin || isSc || /sales/i.test(emp?.department||"") || (emp ? empBoards(emp).some(b=>/sales/i.test(b)) : false);
+    setMe({ name, canEdit: isAdmin || isSc, sales });
+    const cs = {};
+    await Promise.all(ts.map(async t=>{ const { count } = await sb.from("register_line_tbl").select("id",{count:"exact",head:true}).eq("tab_name",t.tab_name); cs[t.tab_name]=count||0; }));
+    setCounts(cs);
+    setReady(true);
+  })(); },[]);
+
+  const load = useCallback(async()=>{
+    if(!cur && !(q.trim() && qAll)) return;
+    const qs = q.trim();
+    let base = ()=>{ let b = sb.from("register_line_tbl").select("*",{count:"exact"});
+      if(!(qs && qAll)) b = b.eq("tab_name",cur);
+      if(qs){ const v = "%"+qs.replace(/[%,()]/g," ")+"%"; b = b.or("quote_no.ilike."+v+",customer_name.ilike."+v+",enquiry_no.ilike."+v+",city.ilike."+v); }
+      return b.order("row_order",{ascending:true,nullsFirst:true}).order("id",{ascending:true}); };
+    const { count } = await base().range(0,0);
+    const n = count||0; setTotal(n);
+    const last = Math.max(0, Math.ceil(n/REG_PAGE)-1);
+    const pg = page<0 || page>last ? last : page;
+    if(page<0 || page>last) setPage(pg);
+    const { data } = await base().range(pg*REG_PAGE, pg*REG_PAGE+REG_PAGE-1);
+    let rs = data||[];
+    if(qs){ const lo = qs.toLowerCase(); rs = rs.filter(r=>[r.quote_no,r.customer_name,r.enquiry_no,r.city].join(" ").toLowerCase().includes(lo)); }   // keeps the test stand-in honest too
+    setRows(rs);
+  },[cur,page,q,qAll]);
+  useEffect(()=>{ if(ready) load(); },[ready,load]);
+
+  // unsaved guard for the top menu
+  const dirty = !!edit && JSON.stringify(edit.d)!==JSON.stringify(edit.orig);
+  useEffect(()=>{ setUnsavedGuard(dirty, "The Quote Register line you are editing is not saved. Leave anyway?"); return ()=>setUnsavedGuard(false); },[dirty]);
+  const guard = (then)=>{ if(dirty) setAsk({ then }); else then(); };
+
+  const pickTab = (n)=> guard(()=>{ setEdit(null); setCur(n); setPage(-1); setQ(""); try{ localStorage.setItem("qr_tab",n); }catch(e){} });
+
+  // ---- next number for the tab: highest used this year + 1
+  const nextNo = async(t)=>{
+    if(!t || !t.prefix) return "";
+    const yy = today.slice(2,4); const px = regNorm(t.prefix);
+    const { data } = await sb.from("register_line_tbl").select("quote_norm").eq("tab_name",t.tab_name).like("quote_norm",px+yy+"%").limit(5000);
+    let mx = 0; (data||[]).forEach(r=>{ const m = String(r.quote_norm).match(new RegExp("^"+px+yy+"(\\d+)$")); if(m) mx = Math.max(mx, parseInt(m[1],10)); });
+    return px+yy+String(mx+1).padStart(4,"0");
+  };
+  const blank = { quote_no:"", offer_date:"", enquiry_no:"", edate:today, customer_name:"", company_id:null, city:"", state:"", country:"" };
+  const startNew = ()=> guard(async()=>{
+    if(!tab || !tab.is_open) return;
+    const no = await nextNo(tab);
+    const d = { ...blank, quote_no:no };
+    setEdit({ id:null, d, orig:{...blank}, co:null }); setChk({bad:[],warn:[],ok:false});
+    setPage(-1); setQ("");
+  });
+  const startEdit = (r)=> guard(async()=>{
+    const d = { quote_no:r.quote_no||"", offer_date:r.offer_date?String(r.offer_date).slice(0,10):"", enquiry_no:r.enquiry_no||"", edate:r.edate?String(r.edate).slice(0,10):"", customer_name:r.customer_name||"", company_id:r.company_id||null, city:r.city||"", state:r.state||"", country:r.country||"" };
+    let co = null; if(r.company_id){ const { data } = await sb.from("companies").select("*").eq("id",r.company_id).maybeSingle(); co = data||null; }
+    setEdit({ id:r.id, d, orig:{...d}, co, line:r }); setChk({bad:[],warn:[],ok:false});
+  });
+  const setD = (p)=> setEdit(e=>({ ...e, d:{ ...e.d, ...p } }));
+  const pickCustomer = async(sel)=>{
+    const nm = (sel&&sel.company_name)||"";
+    if(!nm){ setD({ customer_name:"", company_id:null, city:"", state:"", country:"" }); setEdit(e=>({...e, co:null})); return; }
+    const { data: co } = await sb.from("companies").select("*").eq("company_name",nm).limit(1).maybeSingle();
+    setD({ customer_name:nm, company_id:co?.id||null, city:co?.billing_city||"", state:co?.billing_state||"", country:co?.billing_country||"" });
+    setEdit(e=>({ ...e, co:co||null }));
+  };
+
+  // ---- the checks (refuse = bad, warn = needs the tick)
+  const runChecks = async(e)=>{
+    const d = e.d, bad = [], warn = [];
+    const n = regNorm(d.quote_no);
+    const t = tab;
+    // mandatory
+    const miss = [];
+    if(!n) miss.push("First OfferNo"); if(!String(d.enquiry_no||"").trim()) miss.push("Enquiry No (type NA if the customer gave none)");
+    if(!d.edate) miss.push("EDate"); if(!d.customer_name) miss.push("Customer Name");
+    if(miss.length) bad.push("Fill in: "+miss.join(", ")+".");
+    if(d.customer_name && !d.company_id) bad.push("Pick the customer from the list, or Add New Customer.");
+    if(d.company_id){
+      const needState = regIsIndia(d.country) || ["unitedarabemirates","uae"].includes(regKey(d.country));
+      const gaps = [!String(d.city||"").trim()&&"City", !String(d.country||"").trim()&&"Country", needState && !String(d.state||"").trim() && "State"].filter(Boolean);
+      if(gaps.length) bad.push(d.customer_name+" has no "+gaps.join(" / ")+" in the customer list — use Edit Customer to complete it first.");
+    }
+    if(n){
+      const base = n.replace(/(REV|R)\d+$/,"");
+      const { data: same } = await sb.from("register_line_tbl").select("id,quote_no,tab_name,customer_name").in("quote_norm", Array.from(new Set([n,base]))).limit(5);
+      const other = (same||[]).filter(r=>r.id!==e.id);
+      if(other.length){ const o = other[0]; bad.push((base!==n && regNorm(o.quote_no)===base ? "A revision ending on " : "Already in the register: ")+o.quote_no+" ("+(o.customer_name||"no customer")+", tab "+regTabLabel(o.tab_name)+")."+(base!==n?" Revisions belong to the quote, not the register.":"")); }
+      const pm = n.match(/^([A-Z]+)(\d+)$/);
+      if(!pm) warn.push("“"+d.quote_no+"” is not the usual PREFIX + YY + number.");
+      else if(t && t.prefix){
+        const px = regNorm(t.prefix);
+        if(pm[1]!==px){ const owner = tabs.find(x=>x.is_open && regNorm(x.prefix)===pm[1]); bad.push(pm[1]+"… numbers are not used on this tab (it uses "+px+"…)."+(owner?" "+pm[1]+"… numbers belong on the "+regTabLabel(owner.tab_name)+" tab.":"")); }
+        else {
+          if(pm[2].length!==6){ const fix = px+pm[2].slice(0,2)+pm[2].slice(2).replace(/^0+/,"").padStart(4,"0"); warn.push("It has "+pm[2].length+" digits, not 6 — did you mean "+fix+"?"); }
+          else if(pm[2].slice(0,2)!==today.slice(2,4) && !e.id) warn.push("Year "+pm[2].slice(0,2)+" is not this year ("+today.slice(2,4)+").");
+        }
+      }
+      if(!other.length && !e.id){
+        const [{ data: es },{ data: lg }] = await Promise.all([
+          sb.from("estimates").select("reference_number,customer_name").eq("reference_number",n).limit(1),
+          sb.from("legacy_quotes_tbl").select("reference_number,customer_name").eq("reference_number",n).limit(1)]);
+        const hit = (es||[])[0] || (lg||[])[0];
+        if(hit) warn.push("A quote "+n+" already exists in Quotes ("+(hit.customer_name||"")+"). Saving registers that quote here.");
+      }
+    }
+    // wrong tab
+    if(t && d.company_id && d.country){
+      const allowed = regTabsFor(d.country, d.state, t.is_emf);
+      if(!allowed.some(x=>x.tab_name===t.tab_name)){
+        const where = [d.state, d.country].filter(Boolean).join(", ");
+        if(allowed.length) bad.push(d.customer_name+" is in "+where+". Use the "+allowed.map(x=>regTabLabel(x.tab_name)+" tab ("+x.prefix+"…)").join(" or ")+". This tab, "+regTabLabel(t.tab_name)+", is for "+regTabDescribe(t)+".");
+        else bad.push("No open "+(t.is_emf?"EMF ":"")+"tab takes customers from "+where+". Ask the Super Admin to add it to a tab (CRM → CRM Setup → Register Tabs).");
+      }
+    }
+    // same customer + same enquiry no
+    if(d.company_id && String(d.enquiry_no||"").trim() && !/^n\/?a$/i.test(String(d.enquiry_no).trim())){
+      const { data: dup } = await sb.from("register_line_tbl").select("id,quote_no,enquiry_no").eq("company_id",d.company_id).limit(500);
+      const hit = (dup||[]).find(r=>r.id!==e.id && regNorm(r.enquiry_no)===regNorm(d.enquiry_no));
+      if(hit) warn.push("This customer's Enquiry No "+d.enquiry_no+" is already registered as "+hit.quote_no+".");
+    }
+    return { bad, warn };
+  };
+
+  const save = async()=>{
+    if(!edit || busy) return false;
+    setBusy(true);
+    try{
+      const c = await runChecks(edit);
+      if(c.bad.length){ setChk({ ...c, ok:false }); return false; }
+      if(c.warn.length && !chk.ok){ setChk({ ...c, ok:false }); return false; }
+      const d = edit.d, by = me?.name || user?.username || "";
+      const row = { tab_name:cur, quote_no:regNorm(d.quote_no), quote_norm:regNorm(d.quote_no), offer_date:d.offer_date||null, enquiry_no:String(d.enquiry_no).trim(), edate:d.edate||null,
+        customer_name:d.customer_name, company_id:d.company_id, city:d.city||null, state:d.state||null, country:d.country||null };
+      if(!edit.id){
+        const { data: mx } = await sb.from("register_line_tbl").select("row_order").eq("tab_name",cur).order("row_order",{ascending:false}).limit(1);
+        row.row_order = ((mx&&mx[0]&&mx[0].row_order)||0)+1;
+        const { data: ins, error } = await sb.from("register_line_tbl").insert({ ...row, created_by:by }).select().single();
+        if(error){ alert(/duplicate|unique/i.test(error.message||"") ? "That number was just taken by someone else — the next free one is suggested again." : "Could not save the line:\n\n"+error.message); if(/duplicate|unique/i.test(error.message||"")) setEdit(e=>({...e})); return false; }
+        await logAudit("INSERT","register_line_tbl",row.quote_no,"Quote Register: "+row.quote_no+" on "+regTabLabel(cur)+" for "+row.customer_name,by,null,row);
+        setCounts(cs=>({ ...cs, [cur]:(cs[cur]||0)+1 }));
+      } else {
+        const { error } = await sb.from("register_line_tbl").update({ ...row, updated_by:by, updated_at:new Date().toISOString() }).eq("id",edit.id);
+        if(error){ alert("Could not save the line:\n\n"+error.message); return false; }
+        await logAudit("UPDATE","register_line_tbl",row.quote_no,"Quote Register line edited",by,edit.line,row);
+        // the enquiry follows the line (customer, RFQ ref, date received)
+        const eid = edit.line && edit.line.enquiry_id;
+        if(eid && (edit.orig.customer_name!==d.customer_name || edit.orig.enquiry_no!==d.enquiry_no || edit.orig.edate!==d.edate)){
+          await sb.from("enquiry_tbl").update({ company_name:d.customer_name, customer_ref:row.enquiry_no, enquiry_date:d.edate }).eq("id",eid);
+          await logAudit("UPDATE","enquiry_tbl",String(eid),"Enquiry updated from its Quote Register line "+row.quote_no,by,null,{company_name:d.customer_name,customer_ref:row.enquiry_no,enquiry_date:d.edate});
+        }
+      }
+      setEdit(null); setChk({bad:[],warn:[],ok:false}); setUnsavedGuard(false);
+      await load();
+      return true;
+    } finally { setBusy(false); }
+  };
+
+  if(!ready) return h("div",{style:{padding:20,color:colors.muted}},"Loading the Quote Register…");
+  if(enqOpen) return h(EnquiryDetailScreen,{ user, me:{ name:me?.name, sales:!!me?.sales }, enquiryId:enqOpen, pos:1, total:1,
+    onBack:()=>{ setEnqOpen(null); load(); }, onPrev:null, onNext:null, onOpenQuote, onStartQuote:(ref,id,cust)=>onStartQuote&&onStartQuote(ref,id,cust), onOpenCard, onChanged:()=>{} });
+
+  const th = (t,w)=> h("th",{key:t,style:{position:"sticky",top:0,background:"#faf9f5",textAlign:"left",padding:"6px 7px",fontSize:11,color:colors.muted,border:"1px solid #e3e0d4",whiteSpace:"nowrap",minWidth:w||undefined,zIndex:1}},t);
+  const td = (k,...kids)=> h("td",{key:k,style:{border:"1px solid #e3e0d4",padding:"5px 7px",verticalAlign:"top",whiteSpace:"nowrap",fontSize:12}},...kids);
+  const lock = (v)=> h("span",{title:"From the customer — change it on the customer",style:{display:"inline-block",minWidth:90,background:"#f4f2ea",border:"1px dashed #d8d4c5",borderRadius:5,padding:"4px 6px",color:colors.muted}},v||"—");
+  const dmyOrNote = (d,note)=> d ? fmtDMY(d) : (note||"");
+  const editRow = (key)=>{ const d = edit.d;
+    return h("tr",{key,style:{background:"#fffbe8"}},
+      td("n",h("input",{value:d.quote_no,onChange:e=>{ setD({quote_no:e.target.value}); setChk({bad:[],warn:[],ok:false}); },style:{...inputStyle,width:130,fontWeight:700,padding:"4px 6px"}})),
+      td("od",h("input",{type:"date",value:d.offer_date||"",onChange:e=>setD({offer_date:e.target.value}),title:"Fills itself when the quote moves to Offer Sent",style:{...inputStyle,width:135,padding:"4px 6px"}})),
+      td("en",h("input",{value:d.enquiry_no,onChange:e=>setD({enquiry_no:e.target.value}),placeholder:"RFQ ref, or NA",style:{...inputStyle,width:150,padding:"4px 6px"}})),
+      td("ed",h("input",{type:"date",value:d.edate||"",onChange:e=>setD({edate:e.target.value}),style:{...inputStyle,width:135,padding:"4px 6px"}})),
+      td("cu",h("div",{style:{minWidth:300}},h(CustomerSelect,{value:d.customer_name,onSelect:pickCustomer,user,compact:true})),
+        edit.co ? h("button",{onClick:()=>setCustForm({initial:edit.co}),style:{...btnSmall,marginTop:4,fontSize:11}},"Edit Customer") : null),
+      td("ci",lock(d.city)), td("st",lock(d.state)), td("co",lock(d.country)),
+      td("x",h("span",{style:{fontSize:11,color:colors.muted}},edit.id?"editing":"new line")),
+      td("b",h("div",{style:{display:"flex",gap:5}},
+        h("button",{onClick:save,disabled:busy,style:{...btnPrimary,padding:"5px 10px",fontSize:12}},busy?"Saving…":"Save"),
+        h("button",{onClick:()=>guard(()=>{ setEdit(null); setChk({bad:[],warn:[],ok:false}); }),style:{...btnSmall}},"Cancel"))));
+  };
+  const chkRow = (key)=> (chk.bad.length || chk.warn.length) ? h("tr",{key},h("td",{colSpan:10,style:{padding:"6px 8px",border:"1px solid #e3e0d4",whiteSpace:"normal"}},
+    chk.bad.length ? h("div",{style:{background:"#fdecea",color:"#a3312a",borderRadius:6,padding:"7px 10px",fontSize:12,marginBottom:chk.warn.length?6:0}},h("b",null,"✖ Can't save: "),chk.bad.map((b,i)=>h("div",{key:i},b))) : null,
+    chk.warn.length ? h("div",{style:{background:"#fff4d6",color:"#854f0b",borderRadius:6,padding:"7px 10px",fontSize:12}},h("b",null,"⚠ Check before saving:"),chk.warn.map((b,i)=>h("div",{key:i},b)),
+      chk.bad.length ? null : h("label",{style:{display:"flex",gap:6,alignItems:"center",marginTop:5}},h("input",{type:"checkbox",checked:chk.ok,onChange:e=>setChk(c=>({...c,ok:e.target.checked}))}),"I've checked — save anyway")) : null)) : null;
+
+  let lastMonth = "";
+  const body = [];
+  rows.forEach((r,i)=>{
+    const mo = r.edate ? String(r.edate).slice(0,7) : "";
+    if(mo && mo!==lastMonth && !(q.trim())){ lastMonth = mo; const dt = new Date(mo+"-01T00:00:00");
+      body.push(h("tr",{key:"m"+r.id},h("td",{colSpan:10,style:{background:"#eceae0",fontWeight:700,fontSize:11.5,color:colors.muted,padding:"4px 8px",border:"1px solid #e3e0d4"}},dt.toLocaleString("en-GB",{month:"long",year:"numeric"})))); }
+    if(edit && edit.id===r.id){ body.push(editRow("e"+r.id)); const cr = chkRow("c"+r.id); if(cr) body.push(cr); return; }
+    const t = tabs.find(x=>x.tab_name===r.tab_name);
+    body.push(h("tr",{key:r.id},
+      td("n",h("b",{style:{color:"#1f4e8c"}},r.quote_no), q.trim()&&qAll ? h("span",{style:{fontSize:10.5,color:colors.mutedLight}}," ("+regTabLabel(r.tab_name)+")") : null),
+      td("od",dmyOrNote(r.offer_date,r.offer_date_note)), td("en",r.enquiry_no||""), td("ed",dmyOrNote(r.edate,r.edate_note)),
+      td("cu",r.customer_name||""), td("ci",r.city||""), td("st",r.state||""), td("co",r.country||""),
+      td("x", r.enquiry_id
+        ? h("span",{style:{display:"inline-flex",gap:5,alignItems:"center"}},h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:9,padding:"2px 8px",background:"#e4f3ed",color:"#085041"}},"✓ Enquiry"),
+            h("button",{onClick:()=>guard(()=>{ setEdit(null); setEnqOpen(r.enquiry_id); }),style:{...btnSmall,fontSize:11}},"Edit"))
+        : (me?.sales && t && t.is_open ? h("button",{onClick:()=>guard(()=>{ setEdit(null); setLogFor(r); }),style:{...btnSmall,fontSize:11}},"Log Enquiry") : null)),
+      td("b", me?.canEdit && t && t.is_open ? h("button",{onClick:()=>startEdit(r),title:"Edit this line",style:{...btnSmall,fontSize:11}},"✎") : null)));
+  });
+  if(edit && !edit.id){ body.push(editRow("new")); const cr = chkRow("cnew"); if(cr) body.push(cr); }
+
+  const lastPage = Math.max(0, Math.ceil(total/REG_PAGE)-1); const pg = page<0 ? lastPage : page;
+  const groups = []; tabs.forEach(t=>{ const g = t.group_label||""; if(!groups.includes(g)) groups.push(g); });
+  return h("div",{style:{padding:20}},
+    h("div",{style:{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:4}},
+      h("h2",{style:{margin:0}},"Quote Register"),
+      isSuper ? h("span",{style:{fontSize:11.5,color:colors.muted}},"Who covers each tab: CRM → CRM Setup → Register Tabs & People") : null),
+    h("div",{style:{fontSize:12,color:colors.muted,marginBottom:10,maxWidth:980}},"The quote register, tab by tab as in the Excel. A new Quote# is made here first; then Log Enquiry on its line. "+(me?.canEdit?"You can add and edit lines.":"Only the Sales Coordinator and Admins add or edit lines.")),
+    err ? h("div",{style:{background:"#fdecea",color:"#a3312a",padding:"10px 12px",borderRadius:7,fontSize:12.5}},err) : null,
+    h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:8}},
+      me?.canEdit && tab && tab.is_open ? h("button",{onClick:startNew,style:btnPrimary},"+ New Register Line") : null,
+      h("input",{value:q,onChange:e=>{ const v=e.target.value; guard(()=>{ setQ(v); setPage(-1); }); },placeholder:"Search Quote#, customer, Enquiry No, city",style:{...inputStyle,width:280,padding:"6px 9px"}}),
+      h("label",{style:{fontSize:12,display:"flex",gap:5,alignItems:"center"}},h("input",{type:"checkbox",checked:qAll,onChange:e=>{ setQAll(e.target.checked); setPage(-1); }}),"all tabs"),
+      h("span",{style:{fontSize:12,color:colors.muted}},total+" line"+(total===1?"":"s")+(tab&&!tab.is_open?" · history — closed for new lines":""))),
+    // tabs, wrapped, grouped as in the Excel
+    h("div",{style:{display:"flex",flexWrap:"wrap",gap:3,background:"#e8e5d8",border:"1px solid "+colors.border,borderBottom:0,borderRadius:"8px 8px 0 0",padding:"5px 5px 0"}},
+      tabs.map(t=>h("button",{key:t.tab_name,onClick:()=>pickTab(t.tab_name),title:(t.title||"")+(t.is_open?"":" — history"),
+        style:{border:"1px solid "+colors.border,borderBottom:0,borderTop:"3px solid "+(t.tab_name===cur?"#0f7a5c":"transparent"),background:t.tab_name===cur?"#fff":"#faf9f5",color:t.is_emf?"#6b4fa0":t.is_open?colors.text:colors.mutedLight,fontWeight:t.tab_name===cur?700:400,padding:"5px 10px",fontSize:12,cursor:"pointer",borderRadius:"6px 6px 0 0",whiteSpace:"nowrap"}},
+        regTabLabel(t.tab_name),h("span",{style:{opacity:.6,marginLeft:4,fontSize:10.5}},counts[t.tab_name]??"")))),
+    h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:"0 0 8px 8px",overflow:"hidden"}},
+      h("div",{style:{padding:"8px 12px",fontWeight:700,fontSize:13,borderBottom:"1px solid "+colors.border}},tab ? (tab.title||regTabLabel(tab.tab_name)) : "",
+        tab ? h("span",{style:{fontWeight:400,color:colors.muted,fontSize:11.5,marginLeft:8}},"takes "+regTabDescribe(tab)) : null),
+      h("div",{style:{overflowX:"auto"}},
+        h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:1150}},
+          h("thead",null,h("tr",null,...REG_COLS.map(c=>th(c, c==="Customer Name"?240:undefined)),th("Enquiry"),th(""))),
+          h("tbody",null, body.length ? body : h("tr",null,h("td",{colSpan:10,style:{padding:14,color:colors.mutedLight,fontSize:12.5}},q.trim()?"Nothing matches.":"No lines on this tab yet."))))),
+      h("div",{style:{display:"flex",gap:8,alignItems:"center",justifyContent:"flex-end",padding:"8px 12px",borderTop:"1px solid "+colors.border,fontSize:12}},
+        h("button",{disabled:pg<=0,onClick:()=>guard(()=>setPage(pg-1)),style:{...btnSmall,opacity:pg<=0?0.4:1}},"‹ Previous"),
+        h("span",null,"Page "+(pg+1)+" of "+(lastPage+1)),
+        h("button",{disabled:pg>=lastPage,onClick:()=>guard(()=>setPage(pg+1)),style:{...btnSmall,opacity:pg>=lastPage?0.4:1}},"Next ›"))),
+    ask ? h(UnsavedAsk,{ what:"Quote Register line", onStay:()=>setAsk(null),
+      onDiscard:()=>{ const t = ask.then; setAsk(null); setEdit(null); setChk({bad:[],warn:[],ok:false}); setUnsavedGuard(false); t(); },
+      onSave:async()=>{ const t = ask.then; setAsk(null); if(await save()) t(); } }) : null,
+    custForm ? h(CustomerCompanyForm,{ user, initial:custForm.initial||undefined, onCancel:()=>setCustForm(null),
+      onSaved:async(co)=>{ setCustForm(null); if(co && co.company_name) await pickCustomer({ company_name:co.company_name }); } }) : null,
+    logFor ? h(LogEnquiryModal,{ user, allocation:null, pkg:null, project:null, regLine:logFor, onCancel:()=>setLogFor(null),
+      onSaved:(r)=>{ setLogFor(null); load(); if(r) alert("Enquiry "+r.enquiryNumber+" logged for Quote# "+r.quoteNo+".\n\nIts card is in the "+ENQUIRY_DEPT+" Unassigned pile (Tasks)."); } }) : null);
+}
+
+// ---- REGISTER TABS & PEOPLE (CRM -> CRM Setup), Super Admin only: many to many grid ----
+function RegisterTabsPeopleScreen({ user, onGoToTab }){
+  const isSuper = user?.role==="super_admin";
+  const [tabs,setTabs] = useState([]);
+  const [people,setPeople] = useState([]);   // [{name, role}]  role from crm_role: FSE / TC
+  const [cur,setCur] = useState({});         // tab -> {name: "FSE"|"TC"}
+  const [saved,setSaved] = useState({});
+  const [busy,setBusy] = useState(false);
+  const [ask,setAsk] = useState(null);       // leaving
+  const [moveAsk,setMoveAsk] = useState(false);
+  const [msg,setMsg] = useState("");
+  const [hideClosed,setHideClosed] = useState(true);
+  useEffect(()=>{ if(!isSuper) return; (async()=>{
+    await regLoad(true);
+    setTabs(REG.tabs);
+    const { data: emps } = await sb.from("employee_tbl").select("employee_name,crm_role,status").order("employee_name");
+    const live = (emps||[]).filter(e=>e.employee_name && !/inactive|left|relieved|resigned/i.test(e.status||""));
+    const role = (e)=> /fse|field/i.test(e.crm_role||"") ? "FSE" : /tele|inside/i.test(e.crm_role||"") ? "TC" : "";
+    const ticked = new Set(REG.people.map(p=>p.employee_name));
+    const ps = live.filter(e=>role(e) || ticked.has(e.employee_name)).map(e=>({ name:e.employee_name, role:role(e)||"" }));
+    ps.sort((a,b)=> (a.role===b.role ? a.name.localeCompare(b.name) : a.role==="FSE" ? -1 : b.role==="FSE" ? 1 : a.role==="TC" ? -1 : 1));
+    setPeople(ps);
+    const m = {}; REG.people.forEach(p=>{ (m[p.tab_name]=m[p.tab_name]||{})[p.employee_name] = p.role; });
+    setCur(JSON.parse(JSON.stringify(m))); setSaved(m);
+  })(); },[isSuper]);
+  const get = (o,t,n)=> (o[t]||{})[n]||"";
+  const changes = []; tabs.forEach(t=>people.forEach(p=>{ if(get(cur,t.tab_name,p.name)!==get(saved,t.tab_name,p.name)) changes.push([t.tab_name,p.name]); }));
+  const dirty = changes.length>0;
+  useEffect(()=>{ setUnsavedGuard(dirty, "The Register Tabs & People grid has changes that are not saved. Leave anyway?"); return ()=>setUnsavedGuard(false); },[dirty]);
+  if(!isSuper) return h("div",{style:{padding:24}},h("b",null,"Register Tabs & People is for the Super Admin."),h("div",{style:{fontSize:12.5,color:colors.muted,marginTop:4}},"Ask the Super Admin to change who covers a tab."));
+  const cycle = (t,n)=> setCur(o=>{ const x = JSON.parse(JSON.stringify(o)); x[t]=x[t]||{}; const v = x[t][n]||""; const nx = v===""?"FSE":v==="FSE"?"TC":""; if(nx) x[t][n]=nx; else delete x[t][n]; return x; });
+  const fsesOf = (o,t)=> Object.keys(o[t]||{}).filter(n=>o[t][n]==="FSE");
+  const doSave = async(moveExisting)=>{
+    setBusy(true); setMsg("");
+    try{
+      const by = user?.username||"";
+      for(const [t,n] of changes){
+        const v = get(cur,t,n);
+        if(!v){ const { error } = await sb.from("register_tab_person_tbl").delete().eq("tab_name",t).eq("employee_name",n); if(error) throw error; }
+        else {
+          const order = Object.keys(cur[t]||{}).indexOf(n);
+          const { error } = await sb.from("register_tab_person_tbl").upsert({ tab_name:t, employee_name:n, role:v, sort_order:order<0?100:order, updated_by:by, updated_at:new Date().toISOString() },{ onConflict:"tab_name,employee_name" });
+          if(error) throw error;
+        }
+      }
+      await logAudit("UPDATE","register_tab_person_tbl","grid","Register Tabs & People: "+changes.map(([t,n])=>regTabLabel(t)+" · "+n+" → "+(get(cur,t,n)||"none")).join("; "),by,null,null);
+      setSaved(JSON.parse(JSON.stringify(cur)));
+      await regLoad(true);
+      let moved = 0;
+      if(moveExisting){
+        const cos = await fetchPaged(()=>sb.from("companies").select("id,company_name,billing_state,billing_country,owner_employee_name,owner_source,is_archived").order("id"));
+        const byOwner = new Map(); const hist = [];
+        cos.forEach(c=>{ if(c.is_archived) return; if(String(c.owner_source||"").toLowerCase()==="manual") return;
+          const o = regOwnerFor(c.billing_country, c.billing_state); if(!o || o===c.owner_employee_name) return;
+          if(!byOwner.has(o)) byOwner.set(o,[]); byOwner.get(o).push(c.id);
+          hist.push({ company_name:c.company_name, old_owner:c.owner_employee_name||"", new_owner:o, reason:"Register tabs", changed_by:by }); });
+        for(const [o,ids] of byOwner){ for(let k=0;k<ids.length;k+=200){ const { error } = await sb.from("companies").update({ owner_employee_name:o, owner_source:"Auto" }).in("id",ids.slice(k,k+200)); if(error) throw error; } moved += ids.length;
+          await sb.from("notifications_tbl").insert({ employee_name:o, message:ids.length+" customer"+(ids.length===1?"":"s")+" moved to you by the Register Tabs & People grid ("+by+")." }); }
+        for(let k=0;k<hist.length;k+=500) await sb.from("ownership_history_tbl").insert(hist.slice(k,k+500));
+      }
+      setMsg(changes.length+" change"+(changes.length===1?"":"s")+" saved"+(moveExisting?" · "+moved+" customer"+(moved===1?"":"s")+" moved to their tab's FSE (owners set by hand kept)":"")+".");
+      setUnsavedGuard(false);
+      return true;
+    }catch(e){ alert("Could not save:\n\n"+(e.message||e)); return false; }
+    finally{ setBusy(false); }
+  };
+  const fseChanged = tabs.some(t=>JSON.stringify(fsesOf(cur,t.tab_name))!==JSON.stringify(fsesOf(saved,t.tab_name)));
+  const onSave = ()=>{ if(!dirty) return; if(fseChanged) setMoveAsk(true); else doSave(false); };
+  const shown = tabs.filter(t=>!(hideClosed && !t.is_open));
+  const groups = []; shown.forEach(t=>{ if(!groups.includes(t.group_label||"")) groups.push(t.group_label||""); });
+  const cellSt = { border:"1px solid #e3e0d4", textAlign:"center", cursor:"pointer", minWidth:38, height:32, padding:0, userSelect:"none" };
+  const chip = (v)=> v==="FSE" ? h("span",{style:{display:"inline-block",borderRadius:5,padding:"2px 6px",fontWeight:700,fontSize:11,background:"#e3edf9",color:"#1f4e8c"}},"FSE")
+                   : v==="TC" ? h("span",{style:{display:"inline-block",borderRadius:5,padding:"2px 6px",fontWeight:700,fontSize:11,background:"#fff1cc",color:"#7a4f00"}},"TC") : null;
+  return h("div",{style:{padding:20}},
+    h("div",{style:{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}},h("h2",{style:{margin:0}},"Register Tabs & People"),
+      h("span",{style:{fontSize:10.5,fontWeight:700,background:colors.dark,color:"#fff",borderRadius:9,padding:"2px 8px"}},"Super Admin only")),
+    h("div",{style:{fontSize:12,color:colors.muted,margin:"4px 0 10px",maxWidth:1000,lineHeight:1.5}},
+      "Who covers each Quote Register tab. Click a cell: FSE → TC (telecaller) → blank. A tab can have several FSEs and telecallers; a person can cover several tabs. Every FSE and telecaller ticked on a tab gets its customers in My Worklist and the overdue-calls list; the first FSE ticked is the customer's owner and gets new customers. Until anybody is ticked, owners follow the old Territory Rules."),
+    h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:8}},
+      h("button",{onClick:onSave,disabled:!dirty||busy,style:{...btnPrimary,opacity:!dirty||busy?0.5:1}},busy?"Saving…":"Save all"),
+      h("button",{onClick:()=>setCur(JSON.parse(JSON.stringify(saved))),disabled:!dirty||busy,style:{...btnSecondary,opacity:!dirty?0.5:1}},"Discard"),
+      h("span",{style:{fontSize:12,color:colors.muted}},(dirty?changes.length+" change(s) not saved · ":"")+(()=>{ const n = tabs.filter(t=>t.is_open && !fsesOf(cur,t.tab_name).length).length; return n ? n+" open tab(s) with no FSE" : "Every open tab has an FSE"; })()),
+      msg ? h("span",{style:{fontSize:12,color:"#0f7a5c"}},msg) : null,
+      h("label",{style:{fontSize:12,display:"flex",gap:5,alignItems:"center",marginLeft:"auto"}},h("input",{type:"checkbox",checked:hideClosed,onChange:e=>setHideClosed(e.target.checked)}),"Hide history tabs"),
+      onGoToTab ? h("button",{onClick:()=>{ if(!confirmLeaveIfDirty()) return; onGoToTab("register_tab_tbl"); },style:btnSmall},"Tab rules…") : null),
+    people.length===0 ? h("div",{style:{fontSize:12.5,color:colors.danger,marginBottom:8}},"No employees have CRM role FSE or Telecaller yet (HR → Employees).") : null,
+    h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,overflow:"auto",maxHeight:"calc(100vh - 260px)"}},
+      h("table",{style:{borderCollapse:"separate",borderSpacing:0,fontSize:12}},
+        h("thead",null,h("tr",null,
+          h("th",{style:{position:"sticky",top:0,left:0,zIndex:4,background:"#faf9f5",textAlign:"left",padding:"6px 8px",minWidth:230,border:"1px solid #e3e0d4",verticalAlign:"bottom",fontSize:11,color:colors.muted}},"Tab (as in Excel) · prefix"),
+          ...people.map(p=>h("th",{key:p.name,title:p.role==="FSE"?"Field Sales Engineer":p.role==="TC"?"Telecaller":"(no CRM role)",style:{position:"sticky",top:0,zIndex:3,background:"#faf9f5",border:"1px solid #e3e0d4",padding:"6px 4px",verticalAlign:"bottom"}},
+            h("div",{style:{writingMode:"vertical-rl",transform:"rotate(180deg)",whiteSpace:"nowrap",fontSize:11.5,fontWeight:700,maxHeight:150}},p.name,h("span",{style:{fontWeight:400,color:colors.muted}}," · "+(p.role==="FSE"?"FSE":p.role==="TC"?"Telecaller":"—"))))),
+          h("th",{style:{position:"sticky",top:0,zIndex:3,background:"#faf9f5",border:"1px solid #e3e0d4",fontSize:11,color:colors.muted,padding:"6px 8px",verticalAlign:"bottom",whiteSpace:"nowrap"}},"Covered by"))),
+        h("tbody",null, groups.flatMap(g=>[
+          h("tr",{key:"g"+g},h("td",{colSpan:people.length+2,style:{position:"sticky",left:0,background:"#faf9f5",fontWeight:700,fontSize:10.5,color:colors.muted,textTransform:"uppercase",letterSpacing:".06em",padding:"4px 8px",border:"1px solid #e3e0d4"}},g||"—")),
+          ...shown.filter(t=>(t.group_label||"")===g).map(t=>{ const f = fsesOf(cur,t.tab_name).length; const tc = Object.values(cur[t.tab_name]||{}).filter(v=>v==="TC").length;
+            return h("tr",{key:t.tab_name},
+              h("td",{style:{position:"sticky",left:0,zIndex:2,background:"#fff",border:"1px solid #e3e0d4",padding:"5px 8px",minWidth:230}},
+                h("b",{style:{color:t.is_emf?"#6b4fa0":t.is_open?colors.text:colors.mutedLight}},regTabLabel(t.tab_name)),h("span",{style:{fontSize:11,color:colors.muted}}," · "+(t.prefix||"")+(t.is_open?"":" · history")),
+                h("div",{style:{fontSize:10.5,color:colors.mutedLight,whiteSpace:"normal",maxWidth:260}},regTabDescribe(t))),
+              ...people.map(p=>{ const v = get(cur,t.tab_name,p.name), d = v!==get(saved,t.tab_name,p.name);
+                return h("td",{key:p.name,onClick:()=>cycle(t.tab_name,p.name),title:regTabLabel(t.tab_name)+" · "+p.name+" — click to change",style:{...cellSt,background:d?"#fff7c2":undefined}},chip(v)); }),
+              h("td",{style:{border:"1px solid #e3e0d4",fontSize:11,padding:"0 8px",whiteSpace:"nowrap",color:t.is_open&&!f?colors.danger:colors.muted,fontWeight:t.is_open&&!f?700:400}},f+" FSE · "+tc+" TC")); })])))),
+    moveAsk ? h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:3200,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
+      h("div",{style:{background:"#fff",borderRadius:10,padding:"16px 18px",width:470,maxWidth:"100%"}},
+        h("b",{style:{fontSize:14}},"The FSEs on some tabs changed."),
+        h("div",{style:{fontSize:12,color:colors.muted,margin:"6px 0 14px",lineHeight:1.5}},"Move the existing customers of those tabs to their tab's first FSE too, or only new customers from now on? Owners a Super Admin set by hand are never moved."),
+        h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",flexWrap:"wrap"}},
+          h("button",{onClick:()=>setMoveAsk(false),style:btnSecondary},"Stay"),
+          h("button",{onClick:async()=>{ setMoveAsk(false); await doSave(false); },style:btnSecondary},"Only new ones"),
+          h("button",{onClick:async()=>{ setMoveAsk(false); await doSave(true); },style:btnPrimary},"Move existing too")))) : null);
+}
+// ==== end 137 ===========================================================================================
+
 function EnquiriesListScreen({ user, onGoToTab, onOpenQuote, onCreateQuoteFromEnquiry, initialOpenId, onOpenCard, onConsumedNav }){
   const [openId,setOpenId] = useState(initialOpenId||null);   // 127: an enquiry opened from the list
   useEffect(()=>{ if(initialOpenId){ setOpenId(initialOpenId); onConsumedNav && onConsumedNav(); } },[initialOpenId]);
@@ -33159,6 +33763,7 @@ function EnquiriesListScreen({ user, onGoToTab, onOpenQuote, onCreateQuoteFromEn
     const ref = prompt("New Quote# for "+enq.company_name+" (e.g. FEX260601):");
     if(!ref || !ref.trim()) return;
     (async()=>{
+      const rc = await regCheckQuoteNo(ref.trim()); if(!rc.ok){ alert(rc.msg); return; }   // 137
       const { data:existing } = await sb.from("estimates").select("reference_number").eq("reference_number",ref.trim()).limit(1);
       if(existing && existing.length>0){ alert("Quote# \""+ref.trim()+"\" already exists — pick a different number."); return; }
       await sb.from("enquiry_tbl").update({linked_reference_number:ref.trim()}).eq("id",enq.id);
@@ -33619,6 +34224,9 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
   // reload that follows then confirms it from the database.
   const patchRow = (ref, changes)=> setRows(rs=>rs.map(r=>r.reference_number===ref ? {...r, ...changes} : r));
   const [zoneOptions,setZoneOptions] = useState([]);
+  const [regMap,setRegMap] = useState(null);     // 137: Quote# -> Quote Register tab
+  const [regTabs,setRegTabs] = useState([]);
+  useEffect(()=>{ (async()=>{ await regLoad(); setRegTabs(REG.tabs.map(t=>t.tab_name)); setRegMap(await regQuoteTabMap()); })(); },[]);
   const [statusOptions,setStatusOptions] = useState([]);
   const [reportNatureOptions,setReportNatureOptions] = useState([]);
   // Follow-up History (31 Aug) — historyPopupFor holds the row the user
@@ -34014,7 +34622,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
     setApplied(next);
   };
   const FILTER_LABELS = { dateFrom:"From", dateTo:"To", refLike:"Reference", customerLike:"Customer", projectLike:"Project",
-    countryLike:"Country", stateLike:"State", cityLike:"City", zone:"Region", status:"Stage", followUp:"Follow-up", valueMin:"Value \u2265", valueMax:"Value \u2264", valueCcy:"Value in" };
+    countryLike:"Country", stateLike:"State", cityLike:"City", zone:"Region", regTab:"Register tab", status:"Stage", followUp:"Follow-up", valueMin:"Value \u2265", valueMax:"Value \u2264", valueCcy:"Value in" };
   const pendingKeys = Object.keys(FILTER_LABELS).filter(k=>(filters[k]||"")!==(applied[k]||""));
   const VALUE_KEYS = ["valueCcy","valueMin","valueMax"];
   const valueRangeOn = String(applied.valueMin||"")!=="" || String(applied.valueMax||"")!=="";
@@ -34243,6 +34851,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
     if(applied.stateLike && r.state!==applied.stateLike) return false;
     if(applied.countryLike && r.country!==applied.countryLike) return false;
     if(applied.zone && r.region!==applied.zone) return false;
+    if(applied.regTab && regTabOfQuote(regMap, r.reference_number)!==applied.regTab) return false;   // 137
     if(applied.status && r.status!==applied.status) return false;
     if(applied.followUp && followUpBucket(r)!==applied.followUp) return false;
     if(applied.projectLike && !(r.project_reference||"").toLowerCase().includes(applied.projectLike.toLowerCase())) return false;
@@ -34300,7 +34909,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
     h("td",{style:{...STICKY0,background:g.__grp==="head"?"#e6f1fb":"#faf9f4"}}),
     h("td",{style:{...STICKY1,padding:"8px 10px",fontWeight:700,background:g.__grp==="head"?"#e6f1fb":"#faf9f4",color:g.__grp==="head"?"#0c447c":colors.text}},
       g.__grp==="head" ? g.ccy : "Total "+g.ccy),
-    h("td",{colSpan:6,style:{padding:"8px 10px",fontSize:12,background:g.__grp==="head"?"#e6f1fb":"#faf9f4",color:g.__grp==="head"?"#0c447c":colors.muted}},
+    h("td",{colSpan:7,style:{padding:"8px 10px",fontSize:12,background:g.__grp==="head"?"#e6f1fb":"#faf9f4",color:g.__grp==="head"?"#0c447c":colors.muted}},
       g.__grp==="head" ? (g.count+" quote"+(g.count===1?"":"s")+(g.noValue?" \u00b7 "+g.noValue+" with no value yet":"")) : ""),
     // The group's total sits under its own column: INR under Value (INR),
     // everything else under Value (USD).
@@ -34354,6 +34963,9 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
       fld("Region (Zone)", h("select",{value:filters.zone,onChange:e=>setF("zone",e.target.value),style:{...inputStyle,padding:"6px 8px",fontSize:12}},
         h("option",{value:""},"All"), zoneOptions.map(z=>h("option",{key:z,value:z},z))
       ),"zone"),
+      regTabs.length ? fld("Register tab", h("select",{value:filters.regTab||"",onChange:e=>setF("regTab",e.target.value),style:{...inputStyle,padding:"6px 8px",fontSize:12}},
+        h("option",{value:""},"All"), regTabs.map(z=>h("option",{key:z,value:z},regTabLabel(z)))
+      ),"regTab") : null,   // 137
       fld("Stage", h("select",{value:filters.status,onChange:e=>setF("status",e.target.value),style:{...inputStyle,padding:"6px 8px",fontSize:12}},
         h("option",{value:""},"All"), statusOptions.map(s=>h("option",{key:s,value:s},s))
       ),"status"),
@@ -34435,7 +35047,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
       maxHeight: isFull ? "calc(100vh - 150px)" : "calc(100vh - 260px)", minHeight:240}},
       h("table",{className:"qr-table",style:{borderCollapse:"separate",borderSpacing:0,width:"100%",fontSize:14}},
         h("thead",null,h("tr",{style:{background:"#eef6f3",textAlign:"left"}},
-          ["S.No","Reference No","Reference Date","Customer Name","Region","City","State","Stage","Value (INR)","Value (USD)","Project Reference","Last interaction","Next Follow-up",""].map((c,ci)=>
+          ["S.No","Reference No","Reference Date","Customer Name","Region","Register tab","City","State","Stage","Value (INR)","Value (USD)","Project Reference","Last interaction","Next Follow-up",""].map((c,ci)=>
             h("th",{key:c,style:{padding:"9px 10px",borderBottom:"2px solid #0f7a5c",whiteSpace:"nowrap",fontSize:11.5,color:"#4c6a61",
               position:"sticky",top:0,zIndex:ci<2?4:3,background:"#eef6f3",
               ...(ci===0?{left:0,width:52,minWidth:52}:ci===1?{left:52,minWidth:170,borderRight:"1px solid #cfe3dd"}:{})}},c))
@@ -34453,6 +35065,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
           h("td",{style:{padding:"10px",whiteSpace:"nowrap"}},fmtDMY(r.reference_date)||"\u2014"),
           h("td",{style:{padding:"10px"}},r.customer_name),
           h("td",{style:{padding:"10px"}},r.region),
+          h("td",{style:{padding:"10px",whiteSpace:"nowrap"}},regTabLabel(regTabOfQuote(regMap, r.reference_number))||"\u2014"),   // 137
           h("td",{style:{padding:"10px"}},r.city),
           h("td",{style:{padding:"10px"}},r.state),
           h("td",{style:{padding:"10px"}},
@@ -34712,6 +35325,8 @@ function CrmDashboardsScreen({ user, onDrillToQuotesReport, onOpenQuote, onGoToT
   const [data,setData] = useState(null);
   const [expandedCard,setExpandedCard] = useState(null); // toggles an inline detail list for cards with no real Quotes Report filter to drill into
 
+  const [dashRegMap,setDashRegMap] = useState(null);   // 137: Quote# -> register tab
+  useEffect(()=>{ (async()=>{ await regLoad(); if(REG.tabs.length) setDashRegMap(await regQuoteTabMap()); })(); },[]);
   const load = useCallback(async()=>{
     setLoading(true);
     try{
@@ -34874,6 +35489,14 @@ function CrmDashboardsScreen({ user, onDrillToQuotesReport, onOpenQuote, onGoToT
         modeStats[a.activity_type].total++; if(q.quote_status==="Won") modeStats[a.activity_type].won++;
       });
 
+      // 8b. 137: the same by Quote Register tab
+      const regMap = dashRegMap;
+      const tabStats = {};
+      if(regMap) quotes.filter(q=>(q.quote_status==="Won"||q.quote_status==="Lost")&&changedInPeriod(q)).forEach(q=>{
+        const t = regTabLabel(regTabOfQuote(regMap, q.reference_number)) || "(not on the register)";
+        if(!tabStats[t]) tabStats[t]={won:0,total:0,value:0};
+        tabStats[t].total++; if(q.quote_status==="Won"){ tabStats[t].won++; tabStats[t].value+=(valueByRef.get(q.reference_number)||0); }
+      });
       // 8. Zone/Country performance — win rate + real ₹ won value
       const zoneStats = {};
       quotes.filter(q=>(q.quote_status==="Won"||q.quote_status==="Lost")&&changedInPeriod(q)).forEach(q=>{
@@ -34974,6 +35597,7 @@ function CrmDashboardsScreen({ user, onDrillToQuotesReport, onOpenQuote, onGoToT
         ]),
         category("Geography and Segment",[
           card("Zone / Region performance", Object.keys(zoneStats).length===0?line("No closed deals this period."):Object.entries(zoneStats).map(([z,s])=>line(z+" — "+Math.round(100*s.won/s.total)+"% win rate ("+s.total+" closed, "+fmtCr(s.value)+" won)",false,()=>drillZone(z)))),
+          REG.tabs.length ? card("Quote Register tab performance", Object.keys(tabStats).length===0?line("No closed deals this period."):Object.entries(tabStats).sort((a,b)=>b[1].value-a[1].value).map(([z,s])=>line(z+" — "+Math.round(100*s.won/s.total)+"% win rate ("+s.total+" closed, "+fmtCr(s.value)+" won)"))) : null,   // 137
           card("Prospecting vs nurturing", h(React.Fragment,null, line("Cold — "+coldCount+" ("+((coldCount+chaseCount)?Math.round(100*coldCount/(coldCount+chaseCount)):0)+"%)"), line("Offer/Order follow-up — "+chaseCount))),
         ]),
         category("Time-based Trends",[
@@ -35021,7 +35645,7 @@ function CrmFunnelKanban({ user }){
   // includeLegacy defaults ON: the whole point of this rework was legacy
   // quotes not showing up here at all, so hiding them again by default
   // would undercut the fix.
-  const [filters,setFilters] = useState({ search:"", owner:"", zone:"", nature:"", includeLegacy:true });
+  const [filters,setFilters] = useState({ search:"", owner:"", zone:"", regTab:"", nature:"", includeLegacy:true });
   const [ownerOptions,setOwnerOptions] = useState([]);
   const [zoneOptions,setZoneOptions] = useState([]);
   const [natureOptions,setNatureOptions] = useState([]);
@@ -35073,9 +35697,10 @@ function CrmFunnelKanban({ user }){
       ? await sb.from("companies").select("company_name,owner_employee_name,zone").in("company_name",customerNames)
       : { data: [] };
     const coByName = new Map((cos||[]).map(c=>[c.company_name,c]));
+    await regLoad(); const regMap = REG.tabs.length ? await regQuoteTabMap() : null;   // 137
     const withOwnerZone = allCards.map(c=>{
       const co = coByName.get(c.customer_name)||{};
-      return { ...c, owner: co.owner_employee_name||"", zone: co.zone||"" };
+      return { ...c, owner: co.owner_employee_name||"", zone: co.zone||"", regTab: regTabOfQuote(regMap, c.reference_number) };
     });
 
     setStatuses((statusRows||[]).map(r=>r.status).filter(Boolean));
@@ -35112,7 +35737,8 @@ function CrmFunnelKanban({ user }){
   const setF = (k,v)=> setFilters(f=>({...f,[k]:v}));
   const filteredCards = cards.filter(c=>{
     if(!filters.includeLegacy && c.is_legacy) return false;
-    if(filters.owner && c.owner!==filters.owner) return false;
+    if(filters.owner && c.owner!==filters.owner && !(c.regTab && regPeople(c.regTab).includes(filters.owner))) return false;   // 137: anyone covering its tab too
+    if(filters.regTab && c.regTab!==filters.regTab) return false;
     if(filters.zone && c.zone!==filters.zone) return false;
     if(filters.nature && c.quote_nature!==filters.nature) return false;
     if(filters.search){
@@ -35189,11 +35815,14 @@ function CrmFunnelKanban({ user }){
       h("select",{value:filters.zone,onChange:e=>setF("zone",e.target.value),style:{...inputStyle,width:"auto",padding:"6px 8px",fontSize:12}},
         h("option",{value:""},"Zone: All"), zoneOptions.map(z=>h("option",{key:z,value:z},z))
       ),
+      REG.tabs.length ? h("select",{value:filters.regTab,onChange:e=>setF("regTab",e.target.value),style:{...inputStyle,width:"auto",padding:"6px 8px",fontSize:12}},   // 137
+        h("option",{value:""},"Register tab: All"), REG.tabs.map(t=>h("option",{key:t.tab_name,value:t.tab_name},regTabLabel(t.tab_name)))
+      ) : null,
       // Nature filter removed 22 Sep — Stage is the one funnel field.
       h("label",{style:{fontSize:11.5,color:colors.muted,display:"flex",alignItems:"center",gap:4}},
         h("input",{type:"checkbox",checked:filters.includeLegacy,onChange:e=>setF("includeLegacy",e.target.checked)}),"Include Legacy"
       ),
-      h("button",{onClick:()=>setFilters({search:"",owner:"",zone:"",nature:"",includeLegacy:true}),style:{...btnSecondary,marginLeft:"auto",fontSize:11.5,padding:"6px 12px"}},"Clear filters")
+      h("button",{onClick:()=>setFilters({search:"",owner:"",zone:"",regTab:"",nature:"",includeLegacy:true}),style:{...btnSecondary,marginLeft:"auto",fontSize:11.5,padding:"6px 12px"}},"Clear filters")
     ),
     loading?h("div",{style:{fontSize:12,color:colors.mutedLight}},"Loading…"):
     viewMode==="table"
@@ -35347,7 +35976,7 @@ function QuoteStatusReview({ user }){
   const [owners,setOwners] = useState([]);
   const [rows,setRows] = useState([]);
   const [loading,setLoading] = useState(true);
-  const [fOwner,setFOwner] = useState(""); const [fZone,setFZone] = useState("");
+  const [fOwner,setFOwner] = useState(""); const [fZone,setFZone] = useState(""); const [fTab,setFTab] = useState("");   // 137
   const [fState,setFState] = useState(""); const [fCity,setFCity] = useState("");
   const [fStatus,setFStatus] = useState(""); const [fValueMin,setFValueMin] = useState("");
   const [fValueMax,setFValueMax] = useState(""); const [fFrom,setFFrom] = useState(""); const [fTo,setFTo] = useState("");
@@ -35369,6 +35998,7 @@ function QuoteStatusReview({ user }){
       ? await sb.from("estimate_lines").select("reference_number,item_sl_no,sales_price").in("reference_number",refNums)
       : { data: [] };
     const now = Date.now();
+    await regLoad(); const regMap = REG.tabs.length ? await regQuoteTabMap() : null;   // 137
     const out = (estRows||[]).map(est=>{
       const co = est.company_id ? coById.get(est.company_id) : null;
       const totalValue = (lineRows||[]).filter(l=>l.reference_number===est.reference_number && l.item_sl_no===est.item_sl_no)
@@ -35377,7 +36007,8 @@ function QuoteStatusReview({ user }){
       const daysInStatus = changedAt ? Math.floor((now-changedAt.getTime())/86400000) : null;
       return {
         ...est, totalValue, daysInStatus,
-        owner: co?co.owner_employee_name:"", zone: co?co.zone:"", state: co?co.billing_state:"", city: co?co.billing_city:""
+        owner: co?co.owner_employee_name:"", zone: co?co.zone:"", state: co?co.billing_state:"", city: co?co.billing_city:"",
+        regTab: regTabOfQuote(regMap, est.reference_number)
       };
     });
     setStatuses((statusRows||[]).map(r=>r.status).filter(Boolean));
@@ -35388,7 +36019,8 @@ function QuoteStatusReview({ user }){
   useEffect(()=>{ load(); },[load]);
 
   const filtered = rows.filter(r=>{
-    if(fOwner && r.owner!==fOwner) return false;
+    if(fOwner && r.owner!==fOwner && !(r.regTab && regPeople(r.regTab).includes(fOwner))) return false;   // 137: anyone covering its tab too
+    if(fTab && r.regTab!==fTab) return false;
     if(fZone && r.zone!==fZone) return false;
     if(fState && (r.state||"").toLowerCase()!==fState.toLowerCase()) return false;
     if(fCity && (r.city||"").toLowerCase()!==fCity.toLowerCase()) return false;
@@ -35431,6 +36063,7 @@ function QuoteStatusReview({ user }){
     h("div",{style:{background:"#faf9f4",borderRadius:8,padding:"10px 12px",marginBottom:14,display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:8}},
       sel(fOwner,setFOwner,owners,"All owners"),
       sel(fZone,setFZone,zones,"All zones"),
+      REG.tabs.length ? sel(fTab,setFTab,REG.tabs.map(t=>t.tab_name),"All register tabs") : null,   // 137
       h("input",{value:fState,onChange:e=>{setFState(e.target.value);setPage(0);},placeholder:"State",style:{...inputStyle,padding:"6px 8px",fontSize:12}}),
       h("input",{value:fCity,onChange:e=>{setFCity(e.target.value);setPage(0);},placeholder:"City",style:{...inputStyle,padding:"6px 8px",fontSize:12}}),
       sel(fStatus,setFStatus,statuses,"All statuses"),
@@ -35447,6 +36080,7 @@ function QuoteStatusReview({ user }){
         h("th",{style:{padding:"7px 9px",fontSize:10.5}},"Customer"),
         h("th",{style:{padding:"7px 9px",fontSize:10.5}},"Owner"),
         h("th",{style:{padding:"7px 9px",fontSize:10.5}},"Zone"),
+        h("th",{style:{padding:"7px 9px",fontSize:10.5}},"Register tab"),
         h("th",{style:{padding:"7px 9px",fontSize:10.5,textAlign:"right"}},"Value (INR)"),
         h("th",{style:{padding:"7px 9px",fontSize:10.5}},"Days in stage"),
         h("th",{style:{padding:"7px 9px",fontSize:10.5}},"Stage")
@@ -35459,6 +36093,7 @@ function QuoteStatusReview({ user }){
             h("td",{style:{padding:"7px 9px"}},r.customer_name||"—"),
             h("td",{style:{padding:"7px 9px",color:colors.muted}},r.owner||"—"),
             h("td",{style:{padding:"7px 9px",color:colors.muted}},r.zone||"—"),
+            h("td",{style:{padding:"7px 9px",color:colors.muted,whiteSpace:"nowrap"}},regTabLabel(r.regTab)||"—"),
             h("td",{style:{padding:"7px 9px",textAlign:"right"}},"INR "+fmtR(r.totalValue)),
             h("td",{style:{padding:"7px 9px",color:stale?colors.danger:colors.muted,fontWeight:stale?700:400}},r.daysInStatus===null?"—":r.daysInStatus+" days"),
             h("td",{style:{padding:"5px 9px"}},
@@ -35590,14 +36225,15 @@ function letterheadForReports(doc, W, title){
 function OverdueCallsReport(){
   const [rows,setRows] = useState([]);
   const [loading,setLoading] = useState(true);
-  const [fOwner,setFOwner] = useState(""); const [fZone,setFZone] = useState("");
+  const [fOwner,setFOwner] = useState(""); const [fZone,setFZone] = useState(""); const [fTab,setFTab] = useState("");   // 137
   const [owners,setOwners] = useState([]); const [zones,setZones] = useState([]);
   const [page,setPage] = useState(0);
   const pageSize = 25;
 
   const load = useCallback(async()=>{
     setLoading(true);
-    const { data: cos } = await sb.from("companies").select("company_name,owner_employee_name,zone").eq("is_archived",false);
+    const { data: cos } = await sb.from("companies").select("company_name,owner_employee_name,zone,billing_state,billing_country").eq("is_archived",false);
+    await regLoad();   // 137
     const names = (cos||[]).map(c=>c.company_name);
     const { data: acts } = names.length
       ? await sb.from("activity_log_tbl").select("*").in("company_name",names).not("next_followup_date","is",null).order("created_at",{ascending:false})
@@ -35612,7 +36248,8 @@ function OverdueCallsReport(){
       .map(a=>{
         const co = coByName.get(a.company_name);
         const daysOverdue = Math.floor((Date.now()-new Date(a.next_followup_date).getTime())/86400000);
-        return { ...a, owner:co?co.owner_employee_name:"", zone:co?co.zone:"", daysOverdue };
+        const regTabs = co && REG.tabs.length ? regAnyTabsFor(co.billing_country, co.billing_state).map(t=>t.tab_name) : [];
+        return { ...a, owner:co?co.owner_employee_name:"", zone:co?co.zone:"", daysOverdue, regTabs };
       })
       .sort((a,b)=>b.daysOverdue-a.daysOverdue);
     setOwners(Array.from(new Set(out.map(r=>r.owner).filter(Boolean))).sort());
@@ -35622,7 +36259,7 @@ function OverdueCallsReport(){
   },[]);
   useEffect(()=>{ load(); },[load]);
 
-  const filtered = rows.filter(r=>(!fOwner||r.owner===fOwner) && (!fZone||r.zone===fZone));
+  const filtered = rows.filter(r=>(!fOwner||r.owner===fOwner||(r.regTabs||[]).some(t=>regPeople(t).includes(fOwner))) && (!fZone||r.zone===fZone) && (!fTab||(r.regTabs||[]).includes(fTab)));
   const pageRows = filtered.slice(page*pageSize,(page+1)*pageSize);
   const oldestDays = filtered.length ? Math.max(...filtered.map(r=>r.daysOverdue)) : 0;
   const ownersAffected = new Set(filtered.map(r=>r.owner).filter(Boolean)).size;
@@ -35636,7 +36273,9 @@ function OverdueCallsReport(){
       ),
       h("select",{value:fZone,onChange:e=>{setFZone(e.target.value);setPage(0);},style:{...inputStyle,padding:"6px 8px",fontSize:12,width:150}},
         h("option",{value:""},"All zones"),zones.map(z=>h("option",{key:z,value:z},z))
-      )
+      ),
+      REG.tabs.length ? h("select",{value:fTab,onChange:e=>{setFTab(e.target.value);setPage(0);},style:{...inputStyle,padding:"6px 8px",fontSize:12,width:200}},   // 137
+        h("option",{value:""},"All register tabs"),REG.tabs.map(t=>h("option",{key:t.tab_name,value:t.tab_name},regTabLabel(t.tab_name)))) : null
     ),
     loading?h("div",{style:{fontSize:12,color:colors.mutedLight}},"Loading…"):h(React.Fragment,null,
       h("div",{style:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:16}},
@@ -35648,6 +36287,7 @@ function OverdueCallsReport(){
         h("thead",null,h("tr",{style:{background:"#faf9f4",textAlign:"left"}},
           h("th",{style:{padding:"7px 9px",fontSize:10.5}},"Customer"),
           h("th",{style:{padding:"7px 9px",fontSize:10.5}},"Owner"),
+          h("th",{style:{padding:"7px 9px",fontSize:10.5}},"Register tab"),
           h("th",{style:{padding:"7px 9px",fontSize:10.5}},"Was due"),
           h("th",{style:{padding:"7px 9px",fontSize:10.5}},"Days overdue"),
           h("th",{style:{padding:"7px 9px",fontSize:10.5}},"Last outcome")
@@ -35656,11 +36296,12 @@ function OverdueCallsReport(){
           pageRows.map(r=>h("tr",{key:r.id,style:{borderTop:"1px solid #eceae0"}},
             h("td",{style:{padding:"7px 9px",fontWeight:600}},r.company_name),
             h("td",{style:{padding:"7px 9px",color:colors.muted}},r.owner||"—"),
+            h("td",{style:{padding:"7px 9px",color:colors.muted}},(r.regTabs||[]).map(regTabLabel).join(" / ")||"—"),
             h("td",{style:{padding:"7px 9px",color:colors.muted}},fmtDMY(r.next_followup_date)),
             h("td",{style:{padding:"7px 9px",color:colors.danger,fontWeight:700}},r.daysOverdue+" days"),
             h("td",{style:{padding:"7px 9px",color:colors.muted}},r.outcome||r.notes||"—")
           )),
-          pageRows.length===0 && h("tr",null,h("td",{colSpan:5,style:{padding:14,fontSize:12,color:colors.mutedLight}},"Nothing overdue."))
+          pageRows.length===0 && h("tr",null,h("td",{colSpan:6,style:{padding:14,fontSize:12,color:colors.mutedLight}},"Nothing overdue."))
         )
       ),
       h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:10,fontSize:11.5,color:colors.mutedLight}},
@@ -36262,9 +36903,11 @@ function PendingValidationScreen({ user, onOpenQuote }){
 
 function WonByOwnerReport(){
   const [wonStatuses,setWonStatuses] = useState(["Won"]); // best-effort default; adjustable below
-  const [rows,setRows] = useState([]);
+  let [rows,setRows] = useState([]);
   const [loading,setLoading] = useState(true);
   const [statuses,setStatuses] = useState([]);
+  const [by,setBy] = useState("owner");          // 137: owner | tab (Quote Register tab)
+  const [rowsTab,setRowsTab] = useState([]);
 
   const load = useCallback(async(statusesToUse)=>{
     setLoading(true);
@@ -36280,7 +36923,8 @@ function WonByOwnerReport(){
     const { data:lineRows } = refNums.length
       ? await sb.from("estimate_lines").select("reference_number,item_sl_no,sales_price").in("reference_number",refNums)
       : { data: [] };
-    const byOwner = new Map();
+    const byOwner = new Map(); const byTab = new Map();
+    await regLoad(); const regMap = REG.tabs.length ? await regQuoteTabMap() : null;   // 137
     won.forEach(est=>{
       const co = est.company_id ? coById.get(est.company_id) : null;
       const owner = (co && co.owner_employee_name) ? co.owner_employee_name : "Unassigned";
@@ -36288,12 +36932,16 @@ function WonByOwnerReport(){
         .reduce((s,l)=>s+(Number(l.sales_price)||0)*(est.order_qty||1),0);
       if(!byOwner.has(owner)) byOwner.set(owner,{owner,count:0,value:0});
       const rec = byOwner.get(owner); rec.count+=1; rec.value+=value;
+      const tn = regTabLabel(regTabOfQuote(regMap, est.reference_number)) || "(not on the register)";
+      if(!byTab.has(tn)) byTab.set(tn,{owner:tn,count:0,value:0}); const rt = byTab.get(tn); rt.count+=1; rt.value+=value;
     });
     setRows(Array.from(byOwner.values()).sort((a,b)=>b.value-a.value));
+    setRowsTab(Array.from(byTab.values()).sort((a,b)=>b.value-a.value));
     setLoading(false);
   },[]);
   useEffect(()=>{ load(wonStatuses); },[]);
 
+  const ownerRows = rows; if(by==="tab") rows = rowsTab;   // 137
   const totalValue = rows.reduce((s,r)=>s+r.value,0);
   const totalCount = rows.reduce((s,r)=>s+r.count,0);
   const topOwner = rows.length ? rows[0].owner : "—";
@@ -36306,7 +36954,9 @@ function WonByOwnerReport(){
       h("div",{style:{fontSize:11.5,color:colors.muted}},"\"Won\" status(es):"),
       h("select",{multiple:true,value:wonStatuses,onChange:e=>{ const vals=Array.from(e.target.selectedOptions).map(o=>o.value); setWonStatuses(vals); load(vals); },style:{...inputStyle,padding:"4px 6px",fontSize:12,height:60}},
         statuses.map(s=>h("option",{key:s,value:s},s))
-      )
+      ),
+      REG.tabs.length ? h("select",{value:by,onChange:e=>setBy(e.target.value),style:{...inputStyle,width:"auto",padding:"5px 8px",fontSize:12,marginLeft:12}},   // 137
+        h("option",{value:"owner"},"By owner"), h("option",{value:"tab"},"By Quote Register tab")) : null
     ),
     loading?h("div",{style:{fontSize:12,color:colors.mutedLight}},"Loading…"):h(React.Fragment,null,
       h("div",{style:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:16}},
@@ -36316,7 +36966,7 @@ function WonByOwnerReport(){
       ),
       h("table",{style:{width:"100%",fontSize:12,borderCollapse:"collapse",background:"#fff",border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden"}},
         h("thead",null,h("tr",{style:{background:"#faf9f4",textAlign:"left"}},
-          h("th",{style:{padding:"7px 9px",fontSize:10.5}},"Owner"),
+          h("th",{style:{padding:"7px 9px",fontSize:10.5}},by==="tab"?"Register tab":"Owner"),
           h("th",{style:{padding:"7px 9px",fontSize:10.5,textAlign:"right"}},"Quotes won"),
           h("th",{style:{padding:"7px 9px",fontSize:10.5,textAlign:"right"}},"Value won (INR)"),
           h("th",{style:{padding:"7px 9px",fontSize:10.5,width:"30%"}},"Share")
@@ -40732,7 +41382,10 @@ function OverdueCallsPrompt({ user, onDone }){
           return un ? head : (e.assigned_to===emp.employee_name && e.due_date && toISODate(e.due_date) < t);
         }).map(e=>({...e, __un: !e.assigned_to || e.assigned_to==="Unassigned"})));
       }catch(e){ console.error("Enquiries for the login prompt not read", e); }
-      const { data: cos } = await sb.from("companies").select("company_name").eq("owner_employee_name",emp.employee_name).eq("is_archived",false);
+      let { data: cos } = await sb.from("companies").select("company_name").eq("owner_employee_name",emp.employee_name).eq("is_archived",false);
+      try{ await regLoad(); const myTabs = regMyTabs(emp.employee_name);   // 137: plus the customers of my register tabs
+        if(myTabs.length){ const all = await fetchPaged(()=>sb.from("companies").select("company_name,billing_state,billing_country").eq("is_archived",false).order("id"));
+          const have = new Set((cos||[]).map(c=>c.company_name)); cos = (cos||[]).concat(all.filter(c=>!have.has(c.company_name) && regCompanyInTabs(c, myTabs)).map(c=>({company_name:c.company_name}))); } }catch(e){}
       const names = (cos||[]).map(c=>c.company_name);
       if(!names.length){ setLoading(false); return; }
       const today = new Date().toISOString().slice(0,10);
@@ -41353,6 +42006,11 @@ function App() {
       openTaskId: enqNav&&enqNav.taskId, onBackToEnquiry: enqNav ? ()=>{ setEnqNav(n=>n?{enqId:n.enqId,back:true}:null); setTab("enquiries_list"); } : null,
       onOpenQuote:(ref,slNo)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo||1});setTab("saved");},
       onStartQuote:(ref,enquiryId,prefillCustomerName)=>{ setPendingNewSlNo({reference_number:ref,item_sl_no:1,linked_enquiry_id:enquiryId,prefillCustomerName}); setTab("estimator"); } }):
+    tab==="quote_register"?h(QuoteRegisterScreen,{user,   // 137
+      onOpenQuote:(ref,slNo)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo||1});setTab("saved");},
+      onStartQuote:(ref,enquiryId,prefillCustomerName)=>{ setPendingNewSlNo({reference_number:ref,item_sl_no:1,linked_enquiry_id:enquiryId,prefillCustomerName}); setTab("estimator"); },
+      onOpenCard:(taskId,enqId)=>{ setEnqNav({enqId,taskId}); setTab("task_board"); } }):
+    tab==="register_people"?h(RegisterTabsPeopleScreen,{user,onGoToTab:setTab}):
     tab==="enquiries_list"?h(EnquiriesListScreen,{user,onGoToTab:setTab,
       initialOpenId: enqNav&&enqNav.back ? enqNav.enqId : null, onConsumedNav:()=>setEnqNav(null),
       onOpenCard:(taskId,enqId)=>{ setEnqNav({enqId,taskId}); setTab("task_board"); },
@@ -41391,7 +42049,7 @@ function App() {
     tab==="users"?h(UsersEditor,{user}):
     tab==="permissions"?h(PermissionsEditor,null):
     tab==="dashboards"?h(DashboardsScreen,{user}):
-    tab==="valve_price"?(canSeeValvePrice(user)?h(ValvePriceScreen,{user}):h("div",{style:{padding:24,fontSize:13,color:colors.muted}},"Valve Price is for admins on this site.")):
+    (tab==="valve_price"||tab==="valve_price_purchase")?(canSeeValvePrice(user)?h(ValvePriceScreen,{user}):h("div",{style:{padding:24,fontSize:13,color:colors.muted}},"Valve Price is for admins on this site.")):
     tab==="po_register"?h(PoRegisterScreen,{user}):
     tab==="material_inward"?h(MaterialInwardScreen,{user,sessionCompany}):
     tab==="tag_register"?h(TagRegisterScreen,{user}):
@@ -42854,6 +43512,7 @@ async function taskSyncEnquiry(t, patch, by){
 // net, when the Task board loads. Safe to call more than once.
 async function enquiryOfferSent(ref, by, at){
   if(!ref) return 0;
+  await regMarkOfferDate(ref, at);   // 137: the register line's Offer Date
   let n = 0;
   try{
     const when = at || new Date().toISOString();
