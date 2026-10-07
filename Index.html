@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-07T00:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-07T01:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -27469,6 +27469,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"7 Oct 2026 (142)", summary:"Procurement Gantt before the Sale Order exists: Upload BOM no longer needs the P O No (\u201cif known\u201d; shown as \u201cto follow\u201d) and takes a Delivery date. Edit dates now also edits the plan's P O No and Delivery. When the Sale Order for that contract number is made, the plan fills its empty P O No, delivery date and contract date from it on its own (what was typed is kept). No SQL." },
   { date:"6 Oct 2026 (141)", summary:"A quote and its revisions are ONE quote in lists and counts. Quotes Report shows the latest revision of each (FXAD260027-Rev-1, not FXAD260027 as well); a blue \u201cRev-1 \u00b7 1 earlier \u25b8\u201d tag opens the earlier ones underneath, greyed and marked Superseded by \u2026 (Open and History still work; no Log follow-up on them). Last interaction / next follow-up = the latest logged on any revision (\u201con FXAD260027\u201d when it was on an earlier one). Totals and the count use the latest revision only. A Latest revision only / All revisions switch (remembered per person) brings back the full list. Legacy revisions written \u201cS210184 R01\u201d, \u201c\u2026 REV2\u201d, \u201c\u2026-R1\u201d group the same way; the same Quote# twice (a live quote and its legacy copy) is left as before. Earlier revisions are only hidden \u2014 their data is not changed. Same rule in Quote Funnel, CRM Dashboards, Quote Status Review, Won by Owner, Pipeline, Owner Leaderboard and Quote Health (these now also read past 1,000 rows). No SQL." },
   { date:"6 Oct 2026 (140)", summary:"BUILD B \u2014 Log Enquiry refused good customers (\u201cPick the customer from the list\u2026\u201d). Cause: the form checked the name against a customer list read in one go, and the database returns at most 1,000 rows, so every customer after the first 1,000 (A\u2192Z) was refused. Now the form asks the database for that one customer (by its tie on the register line, then by name ignoring spaces, case and dots) and the drop-down holds every customer. From a Quote Register line the form uses the customer the line is tied to; if the line's customer is not in the list (old imported lines) it says so with Pick Customer / Add New Customer (prefilled with the line's name and city), and saving ties the line to that customer. Same 1,000-row cut-off fixed in: Customers screen list, Add New Customer duplicate check, Customer bulk upload duplicate check (customers and contacts), Major Projects bulk import, Sale Order contract picker, Quote Status Review, Won by Owner, Pipeline and Owner Leaderboard dashboards. No SQL." },
   { date:"6 Oct 2026 (139)", summary:"BUILD A reworked \u2014 Procurement Gantt with ONE ROW PER MATERIAL FORM. A form found many times in the BOM is one row; its steps (PO Draft, PO Approval, PO Release, RFI Stamping + RFI Test when any of it is 3.2 \u2014 never Paint / Packing \u2014 and at Our Factory) are coloured segments on the row, General row for BOM Received and Purchase BOM Approval. Every step: Planned Start / End and Actual Start / End, each a date or a week (start = Sunday, end = Saturday); an empty planned start takes the step before's end. Upload BOM reads the team's Excel layouts: header (Contract / CON No, Customer, date), the heading row (Item Code or Material Spec + Qty), each line's form from its material, testing rows skipped as services, totals / footers ignored; certification per sheet from its MTC - 3.x note or name, else asked (one sheet: asked once); review screen to change any line's form; forms summarised with 3.1 / 3.2 / 3.1 + 3.2. Task card: one per contract to whoever made the plan, one sub-task per form + General, steps as its checklist with dates; two-way with the Gantt (tick = actual end, In Progress = actual start, Gantt dates tick the card; sub-task completes itself, card goes for approval at the end); reassigning the card moves its open sub-tasks. Tasks get a Start date (shown as starts dd/mm). Insert Step replaces Insert Line. SQL: structure_board_order_and_procurement_139 (both companies; includes 138)." },
@@ -34155,12 +34156,20 @@ function ProcGanttScreen({ user, onGoToTab }){
     let rows = [], from = 0;
     while(true){ const { data, error: e2 } = await sb.from("proc_line_tbl").select("*").range(from, from+999); if(e2) break; rows = rows.concat(data||[]); if(!data || data.length<1000) break; from += 1000; }
     const { data: tk } = await sb.from("task_tbl").select("id,proc_plan_id,parent_id,assignee,status").not("proc_plan_id","is",null);
+    // 142: a plan made before its Sale Order takes the P O No, delivery date and contract date from the Sale Order once it exists (blanks only).
+    try{ const need = (ps||[]).filter(p=>!p.po_no || !p.delivery_date || !p.contract_date);
+      if(need.length){ const cns = need.map(p=>p.contract_number);
+        const [{ data: sos },{ data: dvs }] = await Promise.all([ sb.from("sale_order_tbl").select("contract_number,basis_number,basis_date,oa_issued_on").in("contract_number",cns), sb.from("v_contract_delivery").select("contract_number,delivery_date").in("contract_number",cns) ]);
+        for(const p of need){ const so = (sos||[]).find(x=>String(x.contract_number)===String(p.contract_number)); const dv = (dvs||[]).find(x=>String(x.contract_number)===String(p.contract_number));
+          const patch = {}; if(!p.po_no && so && so.basis_number) patch.po_no = so.basis_number; if(!p.delivery_date && dv && dv.delivery_date) patch.delivery_date = dv.delivery_date; if(!p.contract_date && so && (so.oa_issued_on||so.basis_date)) patch.contract_date = so.oa_issued_on||so.basis_date;
+          if(Object.keys(patch).length){ const { error: ue } = await sb.from("proc_plan_tbl").update(patch).eq("id",p.id); if(!ue){ Object.assign(p,patch); await logAudit("UPDATE","proc_plan_tbl",p.contract_number,"Procurement Gantt filled from the Sale Order: "+Object.keys(patch).join(", "),"App"); } } } }
+    }catch(e){ console.warn("Procurement: Sale Order fill", e); }
     setPlans(ps||[]); setAllRows(rows); setCards((tk||[]).filter(t=>!t.parent_id)); setLoading(false);
     if((ps||[]).length && !(ps||[]).some(p=>p.contract_number===cur)) setCur(ps[0].contract_number);
   };
   useEffect(()=>{ load(); },[]);
   useEffect(()=>{ try{ localStorage.setItem("pg_cur",cur||""); }catch(e){} },[cur]);
-  const dirty = !!ed && JSON.stringify({d:ed.d,extra:ed.extra,forms:ed.forms}) !== ed.o;
+  const dirty = !!ed && JSON.stringify({d:ed.d,extra:ed.extra,forms:ed.forms,info:ed.info}) !== ed.o;
   useEffect(()=>{ setUnsavedGuard(dirty, "Procurement Gantt: your date changes are not saved. Leave anyway?"); return ()=>setUnsavedGuard(false); },[dirty]);
   const insDirty = !!ins && !!(ins.label || (ins.pe && ins.pe.v));
   const upDirty = !!up && !!up.file;
@@ -34178,7 +34187,8 @@ function ProcGanttScreen({ user, onGoToTab }){
   const pick = (cn)=> leave(()=>{ setEd(null); setCur(cn); });
 
   const openEdit = (focus)=>{ if(!plan) return; const { d, extra } = dataOf(plan); const x = { d:JSON.parse(JSON.stringify(d)), extra:JSON.parse(JSON.stringify(extra)), forms:JSON.parse(JSON.stringify(pgForms(plan))), removed:[], focus:focus||"" };
-    x.o = JSON.stringify({d:x.d,extra:x.extra,forms:x.forms}); setEd(x); setView("table");
+    x.info = { po:plan.po_no||"", deliv:plan.delivery_date?String(plan.delivery_date).slice(0,10):"" };   // 142: P O No and delivery editable here
+    x.o = JSON.stringify({d:x.d,extra:x.extra,forms:x.forms,info:x.info}); setEd(x); setView("table");
     if(focus!==undefined) setTimeout(()=>{ const el = document.querySelector('[data-pgform="'+(focus||"General")+'"]'); if(el) el.scrollIntoView({behavior:"smooth",block:"start"}); },80); };
   const setWhen = (key, which, val)=> setEd(x=>{ const d = {...x.d}; const r = {...(d[key]||{})}; r[which] = val;
     if(which==="pe" && val.v && !(r.ps && r.ps.v)){   // planned start left empty -> the step before's planned end
@@ -34205,7 +34215,8 @@ function ProcGanttScreen({ user, onGoToTab }){
       for(const k of ed.removed) await sb.from("proc_line_tbl").delete().eq("plan_id",plan.id).eq("line_key",k);
       const formsChanged = JSON.stringify(ed.forms)!==JSON.stringify(pgForms(plan));
       const cs = [...new Set(ed.forms.map(f=>f.cert))];
-      await sb.from("proc_plan_tbl").update({ ...(formsChanged?{ forms:ed.forms, cert: cs.length===1 ? cs[0] : "Mixed" }:{}), updated_by:me, updated_at:now }).eq("id",plan.id);
+      const info = ed.info ? { po_no:String(ed.info.po||"").trim()||null, delivery_date:ed.info.deliv||null } : {};   // 142
+      await sb.from("proc_plan_tbl").update({ ...(formsChanged?{ forms:ed.forms, cert: cs.length===1 ? cs[0] : "Mixed" }:{}), ...info, updated_by:me, updated_at:now }).eq("id",plan.id);
       await logAudit("UPDATE","proc_line_tbl",plan.contract_number,"Procurement Gantt dates saved ("+ups.length+" steps"+(ed.removed.length?", "+ed.removed.length+" inserted step(s) removed":"")+(formsChanged?", RFI / certification changed":"")+")",user?.username||"");
       await pgSyncTasks(plan.id, me);
       setEd(null); await load(); return true;
@@ -34230,7 +34241,7 @@ function ProcGanttScreen({ user, onGoToTab }){
 
   // ---- upload BOM (Excel) ----
   const openUp = async()=>{
-    setUp({ file:null, read:null, contract:"", client:"", po:"", note:"" });
+    setUp({ file:null, read:null, contract:"", client:"", po:"", deliv:"", note:"" });
     if(!contracts.length){ const { data } = await sb.from("sale_order_tbl").select("contract_number,customer_name,basis_number,basis_date,oa_issued_on").order("contract_number",{ascending:false}); setContracts(data||[]); }
   };
   const readFile = async(file)=>{
@@ -34249,7 +34260,7 @@ function ProcGanttScreen({ user, onGoToTab }){
   const saveUp = async()=>{
     const u = up;
     if(!u.read){ alert("Pick the BOM Excel."); return false; }
-    if(!String(u.contract).trim() || !String(u.client).trim() || !String(u.po).trim()){ alert("Contract No, Client Name and P O No are needed."); return false; }
+    if(!String(u.contract).trim() || !String(u.client).trim()){ alert("Contract No and Client Name are needed."); return false; }   // 142: P O No may follow
     if(planOf(String(u.contract).trim())){ alert("Contract "+u.contract+" already has a Procurement Gantt."); return false; }
     if(u.read.sheets.some(s=>!s.cert)){ alert("Answer the certification (3.1 or 3.2) for every sheet."); return false; }
     const unset = u.read.sheets.reduce((t,s)=>t+s.lines.filter(l=>!l.skip && !l.form).length,0);
@@ -34262,11 +34273,11 @@ function ProcGanttScreen({ user, onGoToTab }){
       const { error: upErr } = await sb.storage.from("direct-price-excels").upload(path, u.file);
       if(upErr){ alert("Could not upload the file:\n\n"+upErr.message); return false; }
       const cs = [...new Set(forms.map(f=>f.cert))]; const c = contracts.find(x=>String(x.contract_number)===String(u.contract).trim());
-      const p = await pgMakePlan({ contract_number:String(u.contract).trim(), client:String(u.client).trim(), po_no:String(u.po).trim(), contract_date:(c&&(c.oa_issued_on||c.basis_date))||u.read.date||null, delivery_date:null,
+      const p = await pgMakePlan({ contract_number:String(u.contract).trim(), client:String(u.client).trim(), po_no:String(u.po||"").trim()||(c&&c.basis_number)||null, contract_date:(c&&(c.oa_issued_on||c.basis_date))||u.read.date||null, delivery_date:u.deliv||null,
         cert: cs.length===1 ? cs[0] : "Mixed", source:"Uploaded BOM", bom_file_name:u.file.name, bom_file_path:path, forms }, user, "Uploaded BOM "+u.file.name);
       if(!p) return false;
       setUp(null); setCur(p.contract_number); await load();
-      setTimeout(()=>{ const x = { d:{ bom:{ ps:{t:"d",v:today}, pe:{t:"d",v:today}, as:{t:"d",v:today}, ae:{t:"d",v:today} } }, extra:[], forms:pgForms(p), removed:[], focus:"" }; x.o = JSON.stringify({d:x.d,extra:x.extra,forms:x.forms}); setEd(x); setView("table"); }, 60);
+      setTimeout(()=>{ const x = { d:{ bom:{ ps:{t:"d",v:today}, pe:{t:"d",v:today}, as:{t:"d",v:today}, ae:{t:"d",v:today} } }, extra:[], forms:pgForms(p), removed:[], focus:"", info:{ po:p.po_no||"", deliv:p.delivery_date?String(p.delivery_date).slice(0,10):"" } }; x.o = JSON.stringify({d:x.d,extra:x.extra,forms:x.forms,info:x.info}); setEd(x); setView("table"); }, 60);
       return true;
     } finally { setBusy(false); }
   };
@@ -34329,8 +34340,8 @@ function ProcGanttScreen({ user, onGoToTab }){
   const main = !plan ? h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:20,fontSize:12.5,color:colors.muted}},loading?"Loading…":"Pick a contract on the left.")
     : h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,overflow:"hidden",minWidth:0}},
       h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",borderBottom:"1px solid "+colors.border}},
-        hb("Client",plan.client||"—"), hb("Contract",plan.contract_number), hb("P O No",plan.po_no||"—"), hb("Date",plan.contract_date?pgDmy(String(plan.contract_date).slice(0,10)):"—"),
-        hb("Certification", certSummary(plan)), hb("Delivery",plan.delivery_date?pgDmy(String(plan.delivery_date).slice(0,10)):"—"),
+        hb("Client",plan.client||"—"), hb("Contract",plan.contract_number), hb("P O No", ed ? h("input",{value:ed.info.po,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,info:{...x.info,po:v}})); },placeholder:"to follow",style:{...inputStyle,padding:"3px 6px",fontSize:12.5,width:150}}) : (plan.po_no||h("span",{style:{color:"#854f0b",fontWeight:400}},"to follow"))), hb("Date",plan.contract_date?pgDmy(String(plan.contract_date).slice(0,10)):"—"),
+        hb("Certification", certSummary(plan)), hb("Delivery", ed ? h("input",{type:"date",value:ed.info.deliv,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,info:{...x.info,deliv:v}})); },style:{...inputStyle,padding:"3px 6px",fontSize:12.5,width:150}}) : (plan.delivery_date?pgDmy(String(plan.delivery_date).slice(0,10)):h("span",{style:{color:"#854f0b",fontWeight:400}},"to follow"))),
         hb("Task card", card ? (card.assignee||"Unassigned pile") : "—"),
         h("div",{style:{padding:"8px 12px",gridColumn:"span 2",borderBottom:"1px solid #ebe8dd"}},h("div",{style:{fontSize:10.5,color:colors.muted,textTransform:"uppercase",letterSpacing:".05em"}},"Source"),
           h("div",{style:{fontSize:12.5,marginTop:2}},plan.source==="Uploaded BOM" ? ["Uploaded BOM — ",h("a",{key:"f",href:"#",onClick:e=>{ e.preventDefault(); openFile(plan); }},plan.bom_file_name||"file")] : "Production BOM approved "+(plan.prod_bom_approved_at?fmtDMY(plan.prod_bom_approved_at):"")+(plan.prod_bom_approved_by?" · "+plan.prod_bom_approved_by:""),
@@ -34366,7 +34377,8 @@ function ProcGanttScreen({ user, onGoToTab }){
         fl("Contract No *",h("span",null,h("input",{list:"pg-contracts",value:u.contract,onChange:e=>{ const v = e.target.value; const c = contracts.find(x=>String(x.contract_number)===v); setUp(x=>({...x, contract:v, ...(c?{ client:c.customer_name||x.client, po:c.basis_number||x.po }:{}) })); },placeholder:"from the file, or pick",style:inputStyle}),
           h("datalist",{id:"pg-contracts"},contracts.map(c=>h("option",{key:c.contract_number,value:c.contract_number},c.customer_name||""))))),
         fl("Client Name *",h(CustomerSelect,{value:u.client,user,compact:true,onSelect:c=>setUp(x=>({...x,client:(c&&c.company_name)||""}))})),
-        fl("P O No *",h("input",{value:u.po,onChange:e=>setUp(x=>({...x,po:e.target.value})),style:inputStyle})),
+        fl("P O No (if known)",h("input",{value:u.po,onChange:e=>setUp(x=>({...x,po:e.target.value})),placeholder:"can follow \u2014 filled from the Sale Order",style:inputStyle})),   // 142
+        fl("Delivery date",h("input",{type:"date",value:u.deliv||"",onChange:e=>setUp(x=>({...x,deliv:e.target.value})),style:inputStyle})),
         fl("BOM file (Excel) *",h("input",{type:"file",accept:".xlsx,.xls",onChange:e=>readFile(e.target.files && e.target.files[0])}))),
       !rd ? h("div",{style:{fontSize:12,color:colors.muted,marginTop:10}},"The Excel can be one sheet or several (e.g. one per item). Each sheet's certification is read from its “MTC - 3.1 / 3.2” note or its name, or you are asked.") :
       h("div",null,
