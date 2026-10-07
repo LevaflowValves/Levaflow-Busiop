@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-07T01:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-07T08:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -604,15 +604,33 @@ function stageKind(name){ return stageInfo(name).kind||"open"; }
 // is written as a Log Follow-ups entry, so it becomes the quote's Last
 // interaction and sits in its history like any logged call. "where" names
 // the screen, so the trail can say where a move came from.
-async function logStageMoveFollowup({ referenceNumber, customerName, stage, date, note, nextFollowup, username, where, mode }){
-  const { error } = await sb.from("activity_log_tbl").insert({
+// 143: every call log carries logged_from (where it was entered). If the database does not have the column yet
+// (structure_followup_logged_from not run), the entry is saved without it rather than lost.
+async function insertActivityLog(payload){
+  let res = await sb.from("activity_log_tbl").insert(payload);
+  if(res.error && /logged_from/i.test(res.error.message||"") && "logged_from" in payload){ const { logged_from, ...rest } = payload; res = await sb.from("activity_log_tbl").insert(rest); }
+  return res;
+}
+// 143: Discussed What and Notes are both required on every Log follow-up form. Notes left empty -> offer to use
+// the Discussed What text. Returns the notes to save, or null when the person wants to type them.
+function notesOrSameAsDiscussed(discussed, notes){
+  const d = String(discussed||"").trim(), n = String(notes||"").trim();
+  if(!d || n) return n;
+  return confirm("Notes is empty.\n\nUse the same text as Discussed What for Notes?\n\nOK = use the same\nCancel = go back and type the notes") ? d : null;
+}
+// The app's own placeholder text in discussed_what (stage moves, older Quotes Report entries) — shown as "—".
+const FU_AUTO_DISCUSSED = /^(Stage moved on .+|Follow-up logged from Quotes Report)$/;
+async function logStageMoveFollowup({ referenceNumber, customerName, stage, date, note, nextFollowup, username, where, mode, discussed }){
+  const typed = String(discussed||"").trim();
+  const { error } = await insertActivityLog({
     company_name: customerName||"",
     activity_date: date || new Date().toISOString().slice(0,10),
     activity_type: mode || "Others",
     chase_what: "Offer",
     chase_reference: referenceNumber,
     contacted_whom: "",
-    discussed_what: "Stage moved on "+where,
+    discussed_what: typed || ("Stage moved on "+where),
+    logged_from: typed ? where : ("Stage move · "+where),
     outcome: stage,
     next_followup_date: nextFollowup || null,
     notes: note,
@@ -623,6 +641,8 @@ async function logStageMoveFollowup({ referenceNumber, customerName, stage, date
 }
 // Where a logged Outcome came from, for the stage trail.
 function followupSourceLabel(act){
+  const lf = String(act && act.logged_from || "");
+  if(lf) return lf.replace(/^Stage move · /,"");
   const d = String(act && act.discussed_what || "");
   if(/^Stage moved on /.test(d)) return d.replace(/^Stage moved on /,"");
   if(/from Quotes Report$/.test(d)) return "Quotes Report";
@@ -15206,28 +15226,38 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   // all pick these up automatically with zero changes on their end.
   const [quoteActivities,setQuoteActivities]=useState([]);
   const [showQuoteActivityPanel,setShowQuoteActivityPanel]=useState(false);
-  const [quoteActivityDraft,setQuoteActivityDraft]=useState({activity_type:"Call",notes:"",activity_date:new Date().toISOString().slice(0,10),next_followup_date:""});
+  const [quoteActivityDraft,setQuoteActivityDraft]=useState({activity_type:"Call",discussed:"",notes:"",activity_date:new Date().toISOString().slice(0,10),next_followup_date:""});
   const [savingQuoteActivity,setSavingQuoteActivity]=useState(false);
   const loadQuoteActivities = useCallback(async(ref)=>{
     if(!ref) return;
-    const { data } = await sb.from("activity_log_tbl").select("*").eq("reference_number",ref).order("created_at",{ascending:false});
-    setQuoteActivities(data||[]);
+    // 143: the quote's calls on every revision (chase_reference), plus any older entries this panel saved under
+    // reference_number before 143 (that column may not exist — then that part is simply skipped).
+    const fam = qFamily(ref);
+    const { data } = await sb.from("activity_log_tbl").select("*").ilike("chase_reference",fam+"%").order("created_at",{ascending:false});
+    let rows = (data||[]).filter(a=>qFamily(a.chase_reference)===fam);
+    try{ const { data: old, error: oe } = await sb.from("activity_log_tbl").select("*").ilike("reference_number",fam+"%");
+      if(!oe) (old||[]).forEach(a=>{ if(qFamily(a.reference_number)===fam && !rows.some(r=>r.id===a.id)) rows.push(a); }); }catch(e){}
+    rows.sort((a,b)=>String(b.created_at||"").localeCompare(String(a.created_at||"")));
+    setQuoteActivities(rows);
   },[]);
   useEffect(()=>{ if(quoteExportRef) loadQuoteActivities(quoteExportRef); },[quoteExportRef,loadQuoteActivities]);
   const saveQuoteActivity = async()=>{
-    if(!quoteActivityDraft.notes.trim()){ alert("Add a note before saving."); return; }
     if(!quoteActivityDraft.activity_date){ alert("Enter the date this actually happened."); return; }
+    if(!(quoteActivityDraft.discussed||"").trim()){ alert("Fill in Discussed What — what was discussed."); return; }   // 143
+    const notes = notesOrSameAsDiscussed(quoteActivityDraft.discussed, quoteActivityDraft.notes); if(notes===null) return;
     setSavingQuoteActivity(true);
     try{
-      await sb.from("activity_log_tbl").insert({
-        reference_number:quoteExportRef,
+      // 143: saved against chase_reference (as every other follow-up) so it shows in Follow-up History and the Quotes Report.
+      const { error } = await insertActivityLog({
+        chase_what:"Offer", chase_reference:quoteExportRef, logged_from:"Quote screen",
         company_name:(quoteHeaderRow&&quoteHeaderRow.customer_name)||null,
-        activity_type:quoteActivityDraft.activity_type, notes:quoteActivityDraft.notes.trim(),
+        activity_type:quoteActivityDraft.activity_type, discussed_what:quoteActivityDraft.discussed.trim(), notes,
         activity_date:quoteActivityDraft.activity_date, next_followup_date:quoteActivityDraft.next_followup_date||null,
         logged_by:user?.username||"unknown"
       });
+      if(error){ alert(saveFailedText("The follow-up for "+quoteExportRef, error)); return; }
       await logAudit("INSERT","activity_log_tbl",quoteExportRef,"Logged "+quoteActivityDraft.activity_type+" follow-up on Quote# "+quoteExportRef,user?.username||"unknown",null,null);
-      setQuoteActivityDraft({activity_type:"Call",notes:"",activity_date:new Date().toISOString().slice(0,10),next_followup_date:""});
+      setQuoteActivityDraft({activity_type:"Call",discussed:"",notes:"",activity_date:new Date().toISOString().slice(0,10),next_followup_date:""});
       await loadQuoteActivities(quoteExportRef);
     } finally { setSavingQuoteActivity(false); }
   };
@@ -21654,7 +21684,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
             h("input",{type:"date",value:quoteActivityDraft.activity_date,onChange:e=>setQuoteActivityDraft(d=>({...d,activity_date:e.target.value})),style:{...inputStyle,width:120},title:"Date this actually happened"}),
             h("input",{type:"date",value:quoteActivityDraft.next_followup_date,onChange:e=>setQuoteActivityDraft(d=>({...d,next_followup_date:e.target.value})),style:{...inputStyle,width:120},title:"Next follow-up date"})
           ),
-          h("textarea",{value:quoteActivityDraft.notes,onChange:e=>setQuoteActivityDraft(d=>({...d,notes:e.target.value})),placeholder:"What was discussed…",style:{...inputStyle,width:"100%",minHeight:60,marginBottom:8}}),
+          h("textarea",{value:quoteActivityDraft.discussed,onChange:e=>setQuoteActivityDraft(d=>({...d,discussed:e.target.value})),placeholder:"Discussed What — what did the customer say? (required)",style:{...inputStyle,width:"100%",minHeight:52,marginBottom:6,boxSizing:"border-box"}}),
+          h("textarea",{value:quoteActivityDraft.notes,onChange:e=>setQuoteActivityDraft(d=>({...d,notes:e.target.value})),placeholder:"Notes (left empty: you are offered the Discussed What text)",style:{...inputStyle,width:"100%",minHeight:44,marginBottom:8,boxSizing:"border-box"}}),
           h("button",{onClick:saveQuoteActivity,disabled:savingQuoteActivity,style:{...btnPrimary,width:"100%",opacity:savingQuoteActivity?0.6:1}},savingQuoteActivity?"Saving…":"Log follow-up")
         ),
         quoteActivities.length===0 && h("div",{style:{fontSize:12,color:colors.mutedLight}},"Nothing logged yet for this quote."),
@@ -21665,7 +21696,9 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               h("span",{style:{fontWeight:600}},a.activity_type)," · "+(a.company_name||"—")+" · "+(a.activity_date?fmtDMY(a.activity_date):"—")+" · "+(a.logged_by||"—"),
               loggedLate && h("span",{style:{fontSize:10,color:"#854f0b",marginLeft:6}},"(logged "+fmtDMY(a.created_at)+")")
             ),
-            a.notes && h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:2}},a.notes)
+            a.discussed_what && !FU_AUTO_DISCUSSED.test(a.discussed_what) && h("div",{style:{fontSize:12,marginTop:2}},a.discussed_what),   // 143
+            a.notes && h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:2}},a.notes),
+            (a.chase_reference && a.chase_reference!==quoteExportRef) && h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:1}},"on "+a.chase_reference)
           );
         })
       )
@@ -24044,29 +24077,36 @@ function MyWorklistScreen({ user }){
     .filter(a=>a.next_followup_date && a.next_followup_date<=today)
     .sort((a,b)=>(a.next_followup_date||"").localeCompare(b.next_followup_date||""));
 
-  const openLog = (companyName)=>{ setLogForPackage(null); setLogFor(companyName); setLogDraft({activity_type:"Call",outcome:"",notes:"",activity_date:new Date().toISOString().slice(0,10),next_followup_date:""}); };
-  const openPackageLog = (pkg)=>{ setLogFor(null); setLogForPackage(pkg); setLogDraft({activity_type:"Call",outcome:"",notes:"",activity_date:new Date().toISOString().slice(0,10),next_followup_date:""}); };
+  const openLog = (companyName)=>{ setLogForPackage(null); setLogFor(companyName); setLogDraft({activity_type:"Call",outcome:"",discussed:"",notes:"",activity_date:new Date().toISOString().slice(0,10),next_followup_date:""}); };
+  const openPackageLog = (pkg)=>{ setLogFor(null); setLogForPackage(pkg); setLogDraft({activity_type:"Call",outcome:"",discussed:"",notes:"",activity_date:new Date().toISOString().slice(0,10),next_followup_date:""}); };
   const saveLog = async()=>{
     if(!logDraft.activity_date){ alert("Enter the date this actually happened."); return; }
+    if(!(logDraft.discussed||"").trim()){ alert("Fill in Discussed What — what was discussed."); return; }   // 143
+    const notes = notesOrSameAsDiscussed(logDraft.discussed, logDraft.notes); if(notes===null) return;
+    logDraft.notes = notes; setLogDraft(d=>({...d,notes}));
     setSaving(true);
     try{
       if(logForPackage){
         const proj = logForPackage.major_project_tbl;
-        await sb.from("activity_log_tbl").insert({
+        const { error } = await insertActivityLog({
           package_id:logForPackage.id, company_name:(proj&&(proj.main_epc_company_name||proj.end_user_company_name))||null,
           activity_type:logDraft.activity_type, outcome:logDraft.outcome||"",
+          discussed_what:logDraft.discussed.trim(), logged_from:"My Worklist",
           notes:logDraft.notes||"", activity_date:logDraft.activity_date, next_followup_date:logDraft.next_followup_date||null,
           logged_by:user?.username||"unknown"
         });
+        if(error){ alert(saveFailedText("The follow-up", error)); return; }
         setLogForPackage(null);
       } else {
         const relevant = activities.filter(a=>a.company_name===logFor && a.next_followup_date);
         const lastFollowUp = relevant.length ? relevant[0] : null;
-        await sb.from("activity_log_tbl").insert({
+        const { error } = await insertActivityLog({
           company_name:logFor, activity_type:logDraft.activity_type, outcome:logDraft.outcome||"",
+          discussed_what:logDraft.discussed.trim(), logged_from:"My Worklist",
           notes:logDraft.notes||"", activity_date:logDraft.activity_date, next_followup_date:logDraft.next_followup_date||null,
           is_followup_of: lastFollowUp?lastFollowUp.id:null, logged_by:user?.username||"unknown"
         });
+        if(error){ alert(saveFailedText("The follow-up", error)); return; }
         setLogFor(null);
       }
       await load();
@@ -24091,7 +24131,8 @@ function MyWorklistScreen({ user }){
       h("input",{type:"date",value:logDraft.activity_date,onChange:e=>setLogDraft(d=>({...d,activity_date:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12,width:130},title:"Date this actually happened"}),
       h("input",{type:"date",value:logDraft.next_followup_date,onChange:e=>setLogDraft(d=>({...d,next_followup_date:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12,width:150},title:"Next follow-up date"})
     ),
-    h("textarea",{value:logDraft.notes,onChange:e=>setLogDraft(d=>({...d,notes:e.target.value})),placeholder:"What was discussed…",style:{...inputStyle,padding:"6px 8px",fontSize:12,width:"100%",minHeight:44,marginBottom:8}}),
+h("textarea",{value:logDraft.discussed||"",onChange:e=>setLogDraft(d=>({...d,discussed:e.target.value})),placeholder:"Discussed What — what did the customer say? (required)",style:{...inputStyle,padding:"6px 8px",fontSize:12,width:"100%",minHeight:44,marginBottom:6,boxSizing:"border-box"}}),
+    h("textarea",{value:logDraft.notes,onChange:e=>setLogDraft(d=>({...d,notes:e.target.value})),placeholder:"Notes (left empty: you are offered the Discussed What text)",style:{...inputStyle,padding:"6px 8px",fontSize:12,width:"100%",minHeight:44,marginBottom:8}}),
     h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8}},
       h("button",{onClick:()=>setLogFor(null),style:{...btnSmall,fontSize:10,padding:"3px 8px"}},"Cancel"),
       h("button",{onClick:saveLog,disabled:saving,style:{...btnSmall,fontSize:10,padding:"3px 8px"}},saving?"Saving…":"Save")
@@ -24106,7 +24147,8 @@ function MyWorklistScreen({ user }){
       h("input",{type:"date",value:logDraft.activity_date,onChange:e=>setLogDraft(d=>({...d,activity_date:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12,width:130},title:"Date this actually happened"}),
       h("input",{type:"date",value:logDraft.next_followup_date,onChange:e=>setLogDraft(d=>({...d,next_followup_date:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12,width:150},title:"Next follow-up date"})
     ),
-    h("textarea",{value:logDraft.notes,onChange:e=>setLogDraft(d=>({...d,notes:e.target.value})),placeholder:"What was discussed…",style:{...inputStyle,padding:"6px 8px",fontSize:12,width:"100%",minHeight:44,marginBottom:8}}),
+h("textarea",{value:logDraft.discussed||"",onChange:e=>setLogDraft(d=>({...d,discussed:e.target.value})),placeholder:"Discussed What — what did the customer say? (required)",style:{...inputStyle,padding:"6px 8px",fontSize:12,width:"100%",minHeight:44,marginBottom:6,boxSizing:"border-box"}}),
+    h("textarea",{value:logDraft.notes,onChange:e=>setLogDraft(d=>({...d,notes:e.target.value})),placeholder:"Notes (left empty: you are offered the Discussed What text)",style:{...inputStyle,padding:"6px 8px",fontSize:12,width:"100%",minHeight:44,marginBottom:8}}),
     h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8}},
       h("button",{onClick:()=>setLogForPackage(null),style:{...btnSmall,fontSize:10,padding:"3px 8px"}},"Cancel"),
       h("button",{onClick:saveLog,disabled:saving,style:{...btnSmall,fontSize:10,padding:"3px 8px"}},saving?"Saving…":"Save")
@@ -24385,17 +24427,22 @@ function CustomersScreen({ user }){
   const saveNewActivity = async()=>{
     if(!newActivity.activity_type){ alert("Pick an activity type."); return; }
     if(!newActivity.activity_date){ alert("Enter the date this actually happened."); return; }
+    if(!(newActivity.discussed||"").trim()){ alert("Fill in Discussed What — what was discussed."); return; }   // 143
+    const notes = notesOrSameAsDiscussed(newActivity.discussed, newActivity.notes); if(notes===null) return;
+    newActivity.notes = notes;
     setSavingActivity(true);
     try{
       const lastFollowUp = activities.find(a=>a.next_followup_date);
-      await sb.from("activity_log_tbl").insert({
+      const { error: actErr } = await insertActivityLog({
         company_name:selected.company_name, activity_type:newActivity.activity_type,
         outcome:newActivity.outcome||"", notes:newActivity.notes||"",
+        discussed_what:newActivity.discussed.trim(), logged_from:"Customers",
         activity_date:newActivity.activity_date,
         next_followup_date:newActivity.next_followup_date||null,
         is_followup_of: lastFollowUp?lastFollowUp.id:null,
         logged_by:user?.username||"unknown"
       });
+      if(actErr){ alert(saveFailedText("The activity", actErr)); return; }
       // Note: logging an activity does NOT auto-move crm_status from Cold to
       // Lead — that transition is set by hand on the company record for now
       // (Phase 2 doesn't yet define what counts as "a real enquiry").
@@ -24775,7 +24822,8 @@ function CustomersScreen({ user }){
           h("input",{type:"date",value:newActivity.activity_date,onChange:e=>setNewActivity({...newActivity,activity_date:e.target.value}),style:{...inputStyle,padding:"6px 8px",fontSize:12,width:130},title:"Date this actually happened"}),
           h("input",{type:"date",value:newActivity.next_followup_date,onChange:e=>setNewActivity({...newActivity,next_followup_date:e.target.value}),style:{...inputStyle,padding:"6px 8px",fontSize:12,width:150},title:"Next follow-up date"})
         ),
-        h("textarea",{value:newActivity.notes,onChange:e=>setNewActivity({...newActivity,notes:e.target.value}),placeholder:"What was discussed…",style:{...inputStyle,padding:"6px 8px",fontSize:12,width:"100%",minHeight:50,marginBottom:8}}),
+        h("textarea",{value:newActivity.discussed||"",onChange:e=>setNewActivity({...newActivity,discussed:e.target.value}),placeholder:"Discussed What — what did the customer say? (required)",style:{...inputStyle,padding:"6px 8px",fontSize:12,width:"100%",minHeight:44,marginBottom:6,boxSizing:"border-box"}}),
+        h("textarea",{value:newActivity.notes,onChange:e=>setNewActivity({...newActivity,notes:e.target.value}),placeholder:"Notes (left empty: you are offered the Discussed What text)",style:{...inputStyle,padding:"6px 8px",fontSize:12,width:"100%",minHeight:50,marginBottom:8}}),
         h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8}},
           h("button",{onClick:()=>setNewActivity(null),style:{...btnSmall,fontSize:10,padding:"3px 8px"}},"Cancel"),
           h("button",{onClick:saveNewActivity,disabled:savingActivity,style:{...btnSmall,fontSize:10,padding:"3px 8px"}},savingActivity?"Saving…":"Save activity")
@@ -25432,6 +25480,10 @@ const MANUAL_SECTIONS = [
         "title": "Quotes Report",
         "tag": "CRM \u2192 Funnel \u2192 Quotes Report",
         "blocks": [
+          {
+            "type": "warn",
+            "text": "Changed 7 October 2026 (build 143). LOG FOLLOW-UP now has two boxes, Discussed What (what the customer said) and Notes (your notes / next steps); both are required, and an empty Notes offers the Discussed What text. FOLLOW-UP HISTORY lists the quote's calls on every revision (Rev-0, Rev-1 \u2026) newest first, with columns Date \u00b7 logged from, Rev, Discussed What, Notes, Mode, Spoke to, Next follow-up, Logged by. The grey tag under the date says where the call was entered; a stage move shows \u2014 under Discussed What because it only asks for a note."
+          },
           {
             "type": "p",
             "text": "Changed 5 October 2026 (build 124): legacy quotes and quotes made in the app are one list \u2014 every filter (dates, region, stage, follow-up, value), the sort and the search treat them the same; the Legacy badge only shows where the quote came from. Group by currency puts a legacy quote in INR or USD by the customer's country (counted as no value yet until a value is entered). A Quote# that was imported twice no longer leaves old rows on screen after filtering."
@@ -26596,7 +26648,7 @@ const MANUAL_SECTIONS = [
               "Customer is a real search-and-pick combo, with \"+ Add new\" for a genuinely new prospect.",
               "Chase What (Offer/Order/Cold/Projects) drives what Reference shows \u2014 Offer/Order show that customer's own open Quotes or Sale Orders; Projects shows any Major Project where this Customer is the End User or Main EPC Contractor.",
               "Contacted Whom pulls from that customer's real Contacts \u2014 \"+ Add contact\" forces a small form (Name required) rather than accepting free text.",
-              "Notes lives only in a footer panel, not in the row \u2014 it follows whichever row currently has focus, and is required before that row can save (auto-save or Close for the day).",
+              "Notes lives only in a footer panel, not in the row \u2014 it follows whichever row currently has focus, and is required before that row can save (auto-save or Close for the day). From build 143, Close for the day offers to use the Discussed What text for any row whose Notes is empty.",
               "A clock icon at the end of each row opens the same History popup/screen as Quotes Report \u2014 By Customer or By Reference, whichever the row has."
             ]
           },
@@ -27431,6 +27483,8 @@ function downloadManualPdf(){
 // added to over time; not wired to a database table yet, so edits currently
 // mean updating this array directly.
 const FAQ_ENTRIES = [
+  { q:"Follow-up History shows only the latest revision's calls.", a:"Fixed in build 143: a quote's history now lists the calls logged on every revision (Rev-0, Rev-1 \u2026) together, with a Rev column saying which one each call was on." },
+  { q:"Why must I fill both Discussed What and Notes?", a:"Discussed What is what the customer said; Notes are your own notes and next steps. Both are kept in the quote's history. If you leave Notes empty, the app offers to use the Discussed What text for it." },
   { q:"Why does the Quotes Report show only Rev-2 of my quote?", a:"A quote and its revisions are one quote: the latest revision is shown and counted, so values are not added twice. Click the blue \u201cRev-2 \u00b7 2 earlier\u201d tag to see the earlier ones, or switch to All revisions." },
   { q:"Log Enquiry says the customer is not in the customer list \u2014 but it is.", a:"Fixed in build 140: the check used to see only the first 1,000 customers. If it still appears on a Quote Register line, the line's customer (from the old Excel register) really is not in Customers \u2014 use Pick Customer or Add New Customer on the form; saving ties the line to that customer." },
   { q:"Where does the Procurement Gantt come from?", a:"Purchase \u2192 Procurement Gantt. A plan is made when the Technical Head presses Approve Production BOM on the Sale Order, or with Upload BOM (the BOM Excel). Each material form is one row, however many BOM lines it has; its steps have planned and actual start and end dates. The person who makes the plan gets one task card for the contract with a sub-task per form." },
@@ -27469,6 +27523,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"7 Oct 2026 (143)", summary:"Follow-up History shows a quote's whole call log and every call now records what was discussed. SQL: structure_followup_logged_from_2026-10-07 (both companies: activity_log_tbl.logged_from, filled for older stage-move and Quotes Report entries). FOLLOW-UP HISTORY (Quotes Report clock / History, Log Follow-ups history): a quote's calls on ALL its revisions (FXDS260048, -Rev-1, older \u201cR01\u201d) in one list, newest first, with a Rev column; Discussed What and Notes are separate columns shown in full; Spoke to and Next follow-up columns; Stage column removed; a grey tag under the date says where the call was logged from (Quotes Report, Log Follow-ups, Quote screen, My Worklist, Customers, Major Projects, Stage move \u00b7 <screen>); the app's own placeholder text (\u201cStage moved on \u2026\u201d) shows as \u2014. DISCUSSED WHAT + NOTES REQUIRED on every Log follow-up form \u2014 Quotes Report Log follow-up (new Discussed What box; Note renamed Notes), the quote screen's Follow-up log, My Worklist, Customers \u2192 Activity, Major Projects package log and CRM \u2192 Log Follow-ups; Notes left empty asks whether to use the Discussed What text (Log Follow-ups asks once for all such rows at Close for the day). Stage moves still ask only for a note. Fix: the quote screen's Follow-up log saved its calls where Follow-up History and the Quotes Report never looked (reference_number); they are now saved as every other follow-up and older ones are still shown. Save failures on these forms are now reported instead of passing silently." },
   { date:"7 Oct 2026 (142)", summary:"Procurement Gantt before the Sale Order exists: Upload BOM no longer needs the P O No (\u201cif known\u201d; shown as \u201cto follow\u201d) and takes a Delivery date. Edit dates now also edits the plan's P O No and Delivery. When the Sale Order for that contract number is made, the plan fills its empty P O No, delivery date and contract date from it on its own (what was typed is kept). No SQL." },
   { date:"6 Oct 2026 (141)", summary:"A quote and its revisions are ONE quote in lists and counts. Quotes Report shows the latest revision of each (FXAD260027-Rev-1, not FXAD260027 as well); a blue \u201cRev-1 \u00b7 1 earlier \u25b8\u201d tag opens the earlier ones underneath, greyed and marked Superseded by \u2026 (Open and History still work; no Log follow-up on them). Last interaction / next follow-up = the latest logged on any revision (\u201con FXAD260027\u201d when it was on an earlier one). Totals and the count use the latest revision only. A Latest revision only / All revisions switch (remembered per person) brings back the full list. Legacy revisions written \u201cS210184 R01\u201d, \u201c\u2026 REV2\u201d, \u201c\u2026-R1\u201d group the same way; the same Quote# twice (a live quote and its legacy copy) is left as before. Earlier revisions are only hidden \u2014 their data is not changed. Same rule in Quote Funnel, CRM Dashboards, Quote Status Review, Won by Owner, Pipeline, Owner Leaderboard and Quote Health (these now also read past 1,000 rows). No SQL." },
   { date:"6 Oct 2026 (140)", summary:"BUILD B \u2014 Log Enquiry refused good customers (\u201cPick the customer from the list\u2026\u201d). Cause: the form checked the name against a customer list read in one go, and the database returns at most 1,000 rows, so every customer after the first 1,000 (A\u2192Z) was refused. Now the form asks the database for that one customer (by its tie on the register line, then by name ignoring spaces, case and dots) and the drop-down holds every customer. From a Quote Register line the form uses the customer the line is tied to; if the line's customer is not in the list (old imported lines) it says so with Pick Customer / Add New Customer (prefilled with the line's name and city), and saving ties the line to that customer. Same 1,000-row cut-off fixed in: Customers screen list, Add New Customer duplicate check, Customer bulk upload duplicate check (customers and contacts), Major Projects bulk import, Sale Order contract picker, Quote Status Review, Won by Owner, Pipeline and Owner Leaderboard dashboards. No SQL." },
@@ -30018,7 +30073,7 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
       company_name:row.companyName, activity_type:row.mode, chase_what:row.chaseWhat, chase_reference:refNumber,
       contacted_whom:row.contactedWhom||null, discussed_what:row.discussedWhat.trim(), outcome:row.outcome||"",
       notes:row.notes||"", activity_date:entryDate, next_followup_date:row.nextFollowupDate||null,
-      logged_by:user?.username||"unknown"
+      logged_by:user?.username||"unknown", logged_from:"Log Follow-ups"   // 143
     };
     if(row._savedId){
       const { error } = await sb.from("activity_log_tbl").update(payload).eq("id",row._savedId);
@@ -30159,6 +30214,13 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
   };
 
   const closeForTheDay = async()=>{
+    // 143: rows with Discussed What but no Notes — offer to use the same text for all of them at once.
+    const noNotes = rows.filter(r=>r.discussedWhat.trim() && !(r.notes||"").trim());
+    if(noNotes.length){
+      if(!confirm(noNotes.length+" row"+(noNotes.length>1?"s have":" has")+" no Notes.\n\nUse the same text as Discussed What for "+(noNotes.length>1?"them":"it")+"?\n\nOK = use the same\nCancel = go back and type the notes")) return;
+      noNotes.forEach(r=>{ r.notes = r.discussedWhat.trim(); r._dirty = true; });
+      setRows(rs=>rs.map(r=> noNotes.some(n=>n._key===r._key) ? {...r, notes:r.discussedWhat.trim(), _dirty:true} : r));
+    }
     for(const r of rows){
       if(!r.companyName.trim()){ alert("Every row needs a Customer."); return; }
       if((r.chaseWhat==="Offer"||r.chaseWhat==="Order"||r.chaseWhat==="Projects"||r.chaseWhat==="Enquiry") && !r.chaseReference){ alert("Pick a Reference for every Offer/Order/Projects/Enquiry row."); return; }
@@ -32388,7 +32450,7 @@ function PackageContactPickerModal({ pkg, project, user, onCancel, onSaved }){
 // so it surfaces on that company's own Activity history automatically.
 function PackageActivitySection({ pkg, project, user }){
   const [activities,setActivities] = useState([]);
-  const [draft,setDraft] = useState({activity_type:"Call",notes:"",activity_date:new Date().toISOString().slice(0,10),next_followup_date:""});
+  const [draft,setDraft] = useState({activity_type:"Call",discussed:"",notes:"",activity_date:new Date().toISOString().slice(0,10),next_followup_date:""});
   const [saving,setSaving] = useState(false);
 
   const load = useCallback(async()=>{
@@ -32398,18 +32460,20 @@ function PackageActivitySection({ pkg, project, user }){
   useEffect(()=>{ load(); },[load]);
 
   const save = async()=>{
-    if(!draft.notes.trim()){ alert("Add a note before saving."); return; }
     if(!draft.activity_date){ alert("Enter the date this actually happened."); return; }
+    if(!(draft.discussed||"").trim()){ alert("Fill in Discussed What — what was discussed."); return; }   // 143
+    const notes = notesOrSameAsDiscussed(draft.discussed, draft.notes); if(notes===null) return;
     setSaving(true);
     try{
-      await sb.from("activity_log_tbl").insert({
+      const { error } = await insertActivityLog({
         package_id:pkg.id, company_name:project.main_epc_company_name||project.end_user_company_name||null,
-        activity_type:draft.activity_type, notes:draft.notes.trim(),
+        activity_type:draft.activity_type, discussed_what:draft.discussed.trim(), notes, logged_from:"Major Projects",
         activity_date:draft.activity_date, next_followup_date:draft.next_followup_date||null,
         logged_by:user?.username||"unknown"
       });
+      if(error){ alert(saveFailedText("The follow-up", error)); return; }
       await logAudit("INSERT","activity_log_tbl",pkg.id,"Logged "+draft.activity_type+" follow-up on package "+pkg.package_name,user?.username||"unknown",null,null);
-      setDraft({activity_type:"Call",notes:"",activity_date:new Date().toISOString().slice(0,10),next_followup_date:""});
+      setDraft({activity_type:"Call",discussed:"",notes:"",activity_date:new Date().toISOString().slice(0,10),next_followup_date:""});
       await load();
     } finally{ setSaving(false); }
   };
@@ -32424,7 +32488,8 @@ function PackageActivitySection({ pkg, project, user }){
         h("input",{type:"date",value:draft.activity_date,onChange:e=>setDraft(d=>({...d,activity_date:e.target.value})),style:{...inputStyle,width:130},title:"Date this actually happened"}),
         h("input",{type:"date",value:draft.next_followup_date,onChange:e=>setDraft(d=>({...d,next_followup_date:e.target.value})),style:{...inputStyle,width:150},title:"Next follow-up date"})
       ),
-      h("textarea",{value:draft.notes,onChange:e=>setDraft(d=>({...d,notes:e.target.value})),placeholder:"What was discussed…",style:{...inputStyle,width:"100%",minHeight:60,marginBottom:8}}),
+      h("textarea",{value:draft.discussed,onChange:e=>setDraft(d=>({...d,discussed:e.target.value})),placeholder:"Discussed What — what did they say? (required)",style:{...inputStyle,width:"100%",minHeight:52,marginBottom:6,boxSizing:"border-box"}}),
+      h("textarea",{value:draft.notes,onChange:e=>setDraft(d=>({...d,notes:e.target.value})),placeholder:"Notes (left empty: you are offered the Discussed What text)",style:{...inputStyle,width:"100%",minHeight:44,marginBottom:8,boxSizing:"border-box"}}),
       h("button",{onClick:save,disabled:saving,style:{...btnPrimary,width:"100%",opacity:saving?0.6:1}},saving?"Saving…":"Log follow-up")
     ),
     activities.length===0 && h("div",{style:{fontSize:12,color:colors.mutedLight}},"Nothing logged yet for this package."),
@@ -32435,6 +32500,7 @@ function PackageActivitySection({ pkg, project, user }){
           h("span",{style:{fontWeight:600}},a.activity_type)," · "+(a.company_name||"—")+" · "+(a.activity_date?fmtDMY(a.activity_date):"—")+" · "+(a.logged_by||"—"),
           loggedLate && h("span",{style:{fontSize:10,color:"#854f0b",marginLeft:6}},"(logged "+fmtDMY(a.created_at)+")")
         ),
+        a.discussed_what && !FU_AUTO_DISCUSSED.test(a.discussed_what) && h("div",{style:{fontSize:12,marginTop:2}},a.discussed_what),   // 143
         a.notes && h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:2}},a.notes)
       );
     })
@@ -35063,7 +35129,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
   const [fu,setFu] = useState(null);        // {row, date, mode, stage, next, note}
   const [fuTried,setFuTried] = useState(false);
   const [fuBusy,setFuBusy] = useState(false);
-  const openFollowup = (row)=>{ setFu({ row, date:"", mode:"", stage:"", next:"", note:"" }); setFuTried(false); };
+  const openFollowup = (row)=>{ setFu({ row, date:"", mode:"", stage:"", next:"", disc:"", note:"" }); setFuTried(false); };
   const openEditor = openFollowup;            // the Stage cell opens the same dialog
   const openNextFollowup = openFollowup;
   const fuStageCloses = (f)=> f && f.stage && f.stage!==FU_NO_CHANGE && isClosedStage(f.stage);
@@ -35074,10 +35140,10 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
     if(!f.mode) m.push("Mode");
     if(!f.stage) m.push("Stage");
     if(!f.next && !fuStageCloses(f)) m.push("Next follow-up");
-    if(!(f.note||"").trim()) m.push("Note");
+    if(!(f.disc||"").trim()) m.push("Discussed What");   // 143
     return m;
   };
-  const fuTouched = (f)=> !!(f && (f.date||f.mode||f.stage||f.next||(f.note||"").trim()));
+  const fuTouched = (f)=> !!(f && (f.date||f.mode||f.stage||f.next||(f.disc||"").trim()||(f.note||"").trim()));
   const closeFollowup = ()=>{
     if(fuBusy) return;
     if(fuTouched(fu)){
@@ -35096,6 +35162,10 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
     if(miss.length){ setFuTried(true); alert("Fill these before saving:\n\n• "+miss.join("\n• ")); return; }
     if(f.date > today){ setFuTried(true); alert("The date of the follow-up can't be in the future."); return; }
     if(f.next && f.next < f.date){ alert("The next follow-up can't be before the date of this follow-up."); return; }
+    // 143: Notes required too; empty -> offer the Discussed What text.
+    const notes = notesOrSameAsDiscussed(f.disc, f.note);
+    if(notes===null){ setFuTried(true); return; }
+    if(notes!==(f.note||"").trim()){ f.note = notes; setFu(x=>x?({...x, note:notes}):x); }
     const row = f.row;
     const changing = f.stage!==FU_NO_CHANGE && f.stage!==row.status;
     const changedAtIso = new Date(f.date+"T12:00:00").toISOString();
@@ -35103,22 +35173,22 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
       setFuBusy(true);
       try{
         if(!changing){
-          const { error } = await sb.from("activity_log_tbl").insert({
+          const { error } = await insertActivityLog({
             company_name: row.customer_name, activity_date: f.date, activity_type: f.mode,
             chase_what: "Offer", chase_reference: row.reference_number, contacted_whom: "",
-            discussed_what: "Follow-up logged from Quotes Report", outcome: null,
+            discussed_what: f.disc.trim(), logged_from: "Quotes Report", outcome: null,
             next_followup_date: f.next||null, notes: f.note.trim(), logged_by: user.username,
           });
           if(error){ alert(saveFailedText("The follow-up for "+row.reference_number, error)); return; }
           setFu(null);
           patchRow(row.reference_number, { next_followup: f.next||"—",
-            last_interaction:{ date:f.date, type:f.mode, by:user.username, whom:"", text:f.note.trim() } });
+            last_interaction:{ date:f.date, type:f.mode, by:user.username, whom:"", text:f.disc.trim() } });
           load(); return;
         }
         if(isClosedStage(f.stage)){
           // Won / Lost / Deferred: the reason (or PO) box takes over; the
           // follow-up is written once that is saved.
-          pendingReportNoteRef.current = { ref:row.reference_number, customer:row.customer_name, date:f.date, note:f.note.trim(), mode:f.mode, form:f };
+          pendingReportNoteRef.current = { ref:row.reference_number, customer:row.customer_name, date:f.date, note:f.note.trim(), disc:f.disc.trim(), mode:f.mode, form:f };
           setFu(null);
           setOutcomeTarget({ referenceNumber: row.reference_number, newStatus: f.stage, changedAt: changedAtIso });
           return;
@@ -35128,11 +35198,11 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
         if(r && r.blocked) return;   // the box stays open: pick No change, or add the Extra Price first
         if(r && r.notFound){ alert(row.reference_number+" wasn't found — it may have been deleted. The list will reload."); setFu(null); load(); return; }
         const lg = await logStageMoveFollowup({ referenceNumber:row.reference_number, customerName:row.customer_name, stage:f.stage, date:f.date,
-          note:f.note.trim(), nextFollowup:f.next, username:user.username, where:"Quotes Report", mode:f.mode });
+          note:f.note.trim(), nextFollowup:f.next, username:user.username, where:"Quotes Report", mode:f.mode, discussed:f.disc.trim() });
         if(lg && lg.error) alert("The stage was changed to "+f.stage+", but the follow-up entry could not be saved:\n\n"+(lg.error.message||lg.error));
         setFu(null);
         patchRow(row.reference_number, { status:f.stage, next_followup:f.next||"—",
-          last_interaction:{ date:f.date, type:f.mode, by:user.username, whom:"", text:f.note.trim() } });
+          last_interaction:{ date:f.date, type:f.mode, by:user.username, whom:"", text:f.disc.trim() } });
         load();
       } finally { setFuBusy(false); }
     };
@@ -35974,8 +36044,10 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
           ? h("div",{style:{fontSize:11,color:colors.muted,marginBottom:10}},fu.stage+" closes the quote, so no next follow-up is needed. "+(fu.stage==="Won"?"The PO box opens next.":"The reason box opens next."))
           : h(React.Fragment,null, lab("Next follow-up","Next follow-up"),
               h("input",{type:"date",value:fu.next,min:fu.date||undefined,onChange:e=>set("next",e.target.value),style:box("Next follow-up")})),
-        lab("Note — what was discussed","Note"),
-        h("textarea",{rows:3,value:fu.note,onChange:e=>set("note",e.target.value),style:box("Note",{resize:"vertical"})}),
+        lab("Discussed What","Discussed What"),
+        h("textarea",{rows:3,value:fu.disc,onChange:e=>set("disc",e.target.value),placeholder:"What did the customer say?",style:box("Discussed What",{resize:"vertical"})}),
+        lab("Notes","Notes"),
+        h("textarea",{rows:2,value:fu.note,onChange:e=>set("note",e.target.value),placeholder:"Your notes / next steps (left empty: you are offered the Discussed What text)",style:box("Notes",{resize:"vertical"})}),
         miss.length>0 && h("div",{style:{fontSize:11.5,color:"#a3312a",margin:"2px 0 10px"}},"Still missing: "+miss.join(", ")+"."),
         h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:4}},
           h("button",{onClick:saveFollowup,disabled:fuBusy,style:{...btnPrimary,opacity:fuBusy?0.6:1}},fuBusy?"Saving…":"Save"),
@@ -35989,7 +36061,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
     onDone:async(newStatus)=>{
       const p = pendingReportNoteRef.current; pendingReportNoteRef.current = null;
       if(p && p.ref===outcomeTarget.referenceNumber){
-        const lg = await logStageMoveFollowup({ referenceNumber:p.ref, customerName:p.customer, stage:newStatus||outcomeTarget.newStatus, date:p.date, note:p.note, nextFollowup:null, username:user.username, where:"Quotes Report", mode:p.mode });
+        const lg = await logStageMoveFollowup({ referenceNumber:p.ref, customerName:p.customer, stage:newStatus||outcomeTarget.newStatus, date:p.date, note:p.note, nextFollowup:null, username:user.username, where:"Quotes Report", mode:p.mode, discussed:p.disc });
         if(lg && lg.error) alert("The stage was changed, but the follow-up entry could not be saved:\n\n"+(lg.error.message||lg.error));
       }
       setOutcomeTarget(null); load();
@@ -36010,35 +36082,53 @@ function FollowupHistoryScreen({ scope, value, user, onBack }){
   const [rows,setRows] = useState([]);
   const [loading,setLoading] = useState(true);
   const isAdminOrAbove = user.role==="admin" || user.role==="super_admin";
+  // 143: a quote's history is every call on the quote and ALL its revisions (FXDS260048, -Rev-1, "R01"…),
+  // not only the revision that was clicked. Same family rule as the Quotes Report (qFamily).
+  const fam = scope==="customer" ? "" : qFamily(value);
 
   const load = useCallback(async()=>{
     setLoading(true);
     try{
-      let q = sb.from("activity_log_tbl").select("*").order("created_at",{ascending:false});
-      q = scope==="customer" ? q.eq("company_name",value) : q.eq("chase_reference",value);
-      const { data } = await q;
+      const data = await fetchPaged(()=>{ let q = sb.from("activity_log_tbl").select("*");
+        q = scope==="customer" ? q.eq("company_name",value) : q.ilike("chase_reference",fam+"%");
+        return q.order("created_at",{ascending:false}).order("id",{ascending:false}); });
+      let list = scope==="customer" ? data : data.filter(r=>qFamily(r.chase_reference)===fam);
+      // older entries saved from the quote screen's own log before 143 (reference_number; column may not exist)
+      if(scope!=="customer"){ try{ const { data: old, error: oe } = await sb.from("activity_log_tbl").select("*").ilike("reference_number",fam+"%");
+        if(!oe) (old||[]).forEach(r=>{ if(qFamily(r.reference_number)===fam && !list.some(x=>x.id===r.id)) list.push({ ...r, chase_reference:r.chase_reference||r.reference_number, logged_from:r.logged_from||"Quote screen" }); }); }catch(e){} }
       // 2 Oct (114) — a legacy quote's history starts from the note that
       // came with the import. It is shown as the first (oldest) entry,
       // marked Imported; every follow-up logged since builds on it.
       let lq = sb.from("legacy_quotes_tbl").select("reference_number,reference_date,customer_name,followup_note");
-      lq = scope==="customer" ? lq.eq("customer_name",value) : lq.eq("reference_number",value);
+      lq = scope==="customer" ? lq.eq("customer_name",value) : lq.ilike("reference_number",fam+"%");
       const { data: legacy } = await lq;
-      const imported = (legacy||[]).filter(l=>l.followup_note && String(l.followup_note).trim()).map(l=>({
+      const imported = (legacy||[]).filter(l=>l.followup_note && String(l.followup_note).trim() && (scope==="customer" || qFamily(l.reference_number)===fam)).map(l=>({
         id:"imported-"+l.reference_number, _imported:true, activity_date:l.reference_date||"", activity_type:"Imported",
-        chase_what:"Offer", chase_reference:l.reference_number, discussed_what:"Note brought in with legacy quote "+l.reference_number,
+        chase_what:"Offer", chase_reference:l.reference_number, discussed_what:"", logged_from:"Imported with the legacy quote",
         outcome:"", notes:l.followup_note, logged_by:"Import" }));
-      setRows((data||[]).concat(imported));
+      list = list.concat(imported);
+      // newest first: by the date of the call, then when it was logged
+      list.sort((x,y)=> String(y.activity_date||"").localeCompare(String(x.activity_date||"")) || String(y.created_at||"").localeCompare(String(x.created_at||"")));
+      setRows(list);
     } finally { setLoading(false); }
-  },[scope,value]);
+  },[scope,value,fam]);
   useEffect(()=>{ load(); },[load]);
 
   const deleteRow = async(row)=>{
-    if(!confirm("Delete this follow-up entry for "+(row.company_name||"—")+" logged on "+(row.activity_date||"—")+"? This can't be undone.")) return;
+    if(!confirm("Delete this follow-up entry for "+(row.company_name||"—")+" logged on "+(fmtDMY(row.activity_date)||"—")+"? This can't be undone.")) return;
     const { error:err } = await sb.from("activity_log_tbl").delete().eq("id",row.id);
     if(err){ alert("Delete failed: "+err.message); return; }
     await logAudit("DELETE","activity_log_tbl",String(row.id),"Deleted a follow-up log entry for "+(row.company_name||"—")+" ("+(row.activity_date||"—")+") from Follow-up History",user?.username||"unknown",row,null);
     setRows(rs=>rs.filter(r=>r.id!==row.id));
   };
+
+  // where the call was logged from: the 143 column, else worked out from the app's old automatic text
+  const fromOf = (r)=> r.logged_from || (/^Stage moved on /.test(r.discussed_what||"") ? "Stage move · "+String(r.discussed_what).replace(/^Stage moved on /,"") : (r.discussed_what==="Follow-up logged from Quotes Report" ? "Quotes Report" : ""));
+  const revLabel = (ref)=>{ const n = qRevNum(ref); return n ? "Rev-"+n : "Rev-0"; };
+  const revs = scope==="customer" ? [] : [...new Set(rows.filter(r=>!r._imported || r.chase_reference).map(r=>qRevNum(r.chase_reference)))].sort((a,b)=>a-b);
+  const td = {padding:"7px 9px",verticalAlign:"top"};
+  const tag = (t)=> t ? h("div",{style:{display:"inline-block",marginTop:4,fontSize:10.5,color:colors.muted,border:"1px solid "+colors.border,borderRadius:9,padding:"0 7px",whiteSpace:"nowrap"}},t) : null;
+  const revChip = (ref)=>{ const n = qRevNum(ref); return h("span",{style:{display:"inline-block",borderRadius:4,padding:"1px 7px",fontSize:11,fontWeight:700,whiteSpace:"nowrap",background:n?"#e4f3ed":"#e6f1fb",color:n?"#0f6b4f":"#2a6db0"}},revLabel(ref)); };
 
   return h("div",{style:{padding:"20px 24px"}},
     h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}},
@@ -36046,27 +36136,30 @@ function FollowupHistoryScreen({ scope, value, user, onBack }){
       h("button",{onClick:onBack,style:btnSecondary},"← Back to Quotes Report")
     ),
     h("div",{style:{fontSize:12,color:colors.mutedLight,marginBottom:16}},
-      scope==="customer" ? "Every logged call for "+value : "Every logged call against "+value
+      scope==="customer" ? "Every logged call for "+value
+        : "Every logged call against "+fam+(revs.length>1 || (revs.length===1 && revs[0]>0) ? ", all revisions ("+revs.map(n=>n?"Rev-"+n:"Rev-0").join(", ")+")" : "")
     ),
     loading ? h("div",{style:{color:colors.mutedLight}},"Loading…") :
     h("div",{style:{overflowX:"auto"}},
-      h("table",{style:{borderCollapse:"collapse",width:"100%",fontSize:12.5,background:"#fff",border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden"}},
+      h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:980,fontSize:12.5,background:"#fff",border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden"}},
         h("thead",null,h("tr",{style:{background:colors.bg,textAlign:"left"}},
-          ["Date","Mode","Chase What","Discussed What","Stage","Notes","Logged by",""].map(c=>
+          ["Date · logged from", scope==="customer"?"Quote":"Rev","Discussed What","Notes","Mode","Spoke to","Next follow-up","Logged by",""].map(c=>
             h("th",{key:c,style:{padding:"7px 9px",borderBottom:"2px solid "+colors.dark,whiteSpace:"nowrap"}},c))
         )),
-        h("tbody",null, rows.map(r=>h("tr",{key:r.id,style:{borderTop:"1px solid "+colors.border}},
-          h("td",{style:{padding:"6px 9px",whiteSpace:"nowrap"}},fmtDMY(r.activity_date)||"—"),
-          h("td",{style:{padding:"6px 9px"}},r.activity_type||"—"),
-          h("td",{style:{padding:"6px 9px"}},r.chase_what||"—"),
-          h("td",{style:{padding:"6px 9px",maxWidth:280}},r.discussed_what||"—"),
-          h("td",{style:{padding:"6px 9px"}},r.outcome||"—"),
-          h("td",{style:{padding:"6px 9px",maxWidth:220}},r.notes||"—"),
-          h("td",{style:{padding:"6px 9px",color:colors.muted}},r.logged_by||"—"),
-          h("td",{style:{padding:"6px 9px"}}, r._imported ? h("span",{style:{fontSize:10.5,color:colors.mutedLight}},"Imported") :
+        h("tbody",null, rows.map(r=>{ const auto = !r.discussed_what || FU_AUTO_DISCUSSED.test(r.discussed_what);
+          return h("tr",{key:r.id,style:{borderTop:"1px solid "+colors.border}},
+          h("td",{style:{...td,whiteSpace:"nowrap"}},fmtDMY(r.activity_date)||"—",h("br"),tag(fromOf(r))),
+          h("td",{style:td}, scope==="customer" ? (r.chase_reference ? h("span",{style:{fontSize:11.5}},r.chase_reference) : (r.chase_what||"—")) : revChip(r.chase_reference)),
+          h("td",{style:{...td,minWidth:220,maxWidth:380,fontSize:13.5,lineHeight:1.45,whiteSpace:"pre-wrap"}}, auto ? h("span",{style:{color:colors.mutedLight}},"—") : r.discussed_what),
+          h("td",{style:{...td,minWidth:180,maxWidth:320,fontSize:13.5,lineHeight:1.45,whiteSpace:"pre-wrap"}}, r.notes||"—"),
+          h("td",{style:td},r.activity_type||"—"),
+          h("td",{style:td},r.contacted_whom||"—"),
+          h("td",{style:{...td,whiteSpace:"nowrap"}},fmtDMY(r.next_followup_date)||"—"),
+          h("td",{style:{...td,color:colors.muted}},r.logged_by||"—"),
+          h("td",{style:td}, r._imported ? h("span",{style:{fontSize:10.5,color:colors.mutedLight}},"Imported") :
             h("button",{onClick:()=>deleteRow(r),style:{...btnSmall,fontSize:10.5,padding:"3px 9px",color:"#a3312a",borderColor:"#a3312a"}},"Delete"))
-        ))),
-        rows.length===0 && h("tr",null,h("td",{colSpan:8,style:{padding:14,fontSize:12,color:colors.mutedLight}},"No follow-ups logged."))
+        ); })),
+        rows.length===0 && h("tr",null,h("td",{colSpan:9,style:{padding:14,fontSize:12,color:colors.mutedLight}},"No follow-ups logged."))
       )
     )
   );
