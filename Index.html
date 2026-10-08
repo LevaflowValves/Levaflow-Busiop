@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-08T10:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-08T12:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -11611,6 +11611,7 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
   const [sel,setSel] = useState(null);           // "d<id>" | "r<id>" | "+"
   const [busy,setBusy] = useState(false);
   const [dirMissing,setDirMissing] = useState(false);
+  const [quoteStatus,setQuoteStatus] = useState(null);   // 149: entries lock once the quote leaves Draft
 
   const load = useCallback(async(keepSel)=>{
     if(!entityRef) return;
@@ -11618,13 +11619,14 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
     const [{data:c},st,{data:sl},r,d,pk] = await Promise.all([
       sb.from("doc_category_tbl").select("*"),
       loadDocStatuses(),
-      sb.from("estimates").select("item_sl_no,item").eq("reference_number",entityRef).order("item_sl_no"),
+      sb.from("estimates").select("item_sl_no,item,quote_status").eq("reference_number",entityRef).order("item_sl_no"),
       fetchDocumentRequirements(entityRef),
       fetchDocumentHistory(entityRef),
       myPostKeys(user)
     ]);
     setCats((c||[]).slice().sort((a,b)=>String(a.value||"").localeCompare(String(b.value||""))));
     setStatuses(st||[]);
+    setQuoteStatus(((sl||[]).find(x=>x.quote_status)||{}).quote_status || "Draft");
     const seen = new Set(); setSlNos((sl||[]).filter(x=>{ const k=String(x.item_sl_no); if(seen.has(k)) return false; seen.add(k); return true; }));
     setReqs(r||[]);
     setDocs((d||[]).filter(x=>!x.is_archived));
@@ -11829,10 +11831,33 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
   const blankNx = { dir:"", status:"", link:"", file:null, what:"", notes:"", fulfil:"" };
   const [nx,setNx] = useState(blankNx);
   const [override,setOverride] = useState(null);   // {rev} once a Super Admin has unlocked the sequence
+  // 149: the trail is the record. Quote: entries editable while the quote is in Draft; Sale Order: until the next entry
+  // is logged. Otherwise a Super Admin's code unlocks this document's entries (flagged and audited).
+  const [nxOpen,setNxOpen] = useState(false);
+  const [unlockedDoc,setUnlockedDoc] = useState(null);
+  const [ed,setEd] = useState(null);   // {row, d, dir, link, what, notes, file, why}
+  const rowLocked = (d, row)=>{
+    if(unlockedDoc===d.id) return false;
+    if(isContract){ const revs = d.revisions||[]; return revs.length>0 && revs[0].id!==row.id; }
+    return !!quoteStatus && quoteStatus!=="Draft";
+  };
+  const lockWhy = (d)=> isContract ? "A later entry has been logged on "+d.doc_number+"." : "Quote "+entityRef+" has left Draft ("+quoteStatus+").";
+  const unlockDoc = async(d)=>{
+    if(user?.role!=="super_admin"){ alert("Locked — "+lockWhy(d)+"\n\nLog a new revision instead, or ask a Super Admin to unlock it with a code."); return false; }
+    const code = prompt("Locked — "+lockWhy(d)+"\n\nEnter a Deletion Code to unlock the entries of "+d.doc_number+" (the document will be flagged):");
+    if(code===null) return false;
+    const res = await verifyAndConsumeDeletionCode(code, user?.username||"unknown");
+    if(!res.ok){ alert(res.reason); return false; }
+    setUnlockedDoc(d.id);
+    const note = "Entries of "+d.doc_number+" unlocked with a code by Super Admin "+(user?.username||"unknown")+" ("+lockWhy(d)+")";
+    await sb.from("universal_documents_tbl").update({sequence_flagged:true, sequence_flag_note:note}).eq("id",d.id);
+    await logAudit("UPDATE","universal_documents_tbl",entityRef,note,user?.username||"unknown",null,null);
+    return true;
+  };
   const [notes,setNotes] = useState([]);
   const [noteText,setNoteText] = useState("");
   useEffect(()=>{
-    setOverride(null);
+    setOverride(null); setNxOpen(false); setEd(null);
     if(current && current.kind==="doc"){
       const last = (current.doc.revisions||[])[0];
       setNx({ ...blankNx, link: last ? (last.link||"") : "" });
@@ -11878,17 +11903,55 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
         await logAudit("UPDATE","universal_documents_tbl",entityRef,"New entry on "+d.doc_number+" — Rev"+rev+"-"+nx.dir+": "+String(nx.what).trim(),user?.username||"unknown",null,null);
       }
       const superseded = await supersedeHandovers(d.id, rev, user?.username);
-      setNx(blankNx); setOverride(null); setDirMissing(false);
+      setNx(blankNx); setOverride(null); setDirMissing(false); setNxOpen(false);
       await refresh();
       if(superseded) alert(d.doc_number+" was handed over to production at an earlier revision. The work order now shows Rev "+rev+" as current, and the Technical Head has been flagged to reissue it.");
     }catch(e){ alert(documentSaveErrorText(e, d.doc_number)); }
     finally{ setBusy(false); }
   };
   const changeStatus = async(row, value)=>{
+    const d = current && current.doc;
+    if(d && rowLocked(d,row)){ const ok = await unlockDoc(d); if(!ok) return; }   // 149
     const { error } = await sb.from("universal_document_history_tbl").update({status:value}).eq("id",row.id);
     if(error){ alert("Couldn't change the status: "+error.message); return; }
     await logAudit("UPDATE","universal_document_history_tbl",entityRef,"Status of "+row.doc_number+" Rev"+row.rev_number+"-"+row.direction+" changed to "+value,user?.username||"unknown",null,null);
     await refresh();
+  };
+  // 149: Edit an entry — link, Out / In, what changed, notes, PDF; a reason is required; the change is kept on the row.
+  const openEdit = async(d, row)=>{
+    if(rowLocked(d,row)){ const ok = await unlockDoc(d); if(!ok) return; }
+    setEd({ row, d, dir:row.direction||"", link:row.link||"", what:row.reason||row.what_changed||"", notes:row.notes||"", file:null, why:"" });
+  };
+  const saveEdit = async()=>{
+    const e = ed; if(!e) return; const row = e.row, d = e.d;
+    if(!String(e.why).trim()){ alert("Give the reason for the edit."); return; }
+    if(!confirmDocumentLink(e.link, "Document "+d.doc_number)) return;
+    const patch = {}, changes = [];
+    if(String(e.link).trim()!==String(row.link||"")){ patch.link = String(e.link).trim(); changes.push("link "+(row.link||"—")+" → "+patch.link); }
+    if(e.dir && e.dir!==(row.direction||"")){ patch.direction = e.dir; changes.push("Out/In "+(row.direction||"—")+" → "+e.dir); }
+    if(String(e.what).trim()!==String(row.reason||row.what_changed||"")){ patch.reason = String(e.what).trim(); changes.push("what changed"); }
+    if(String(e.notes).trim()!==String(row.notes||"")){ patch.notes = String(e.notes).trim(); changes.push("notes"); }
+    const breaksSeq = !!patch.direction && (d.revisions||[]).length>1;
+    if(breaksSeq && unlockedDoc!==d.id){
+      if(user?.role!=="super_admin"){ alert("Changing Out / In on a document with more than one entry breaks the Out / In sequence — only a Super Admin can do it."); return; }
+      const ok = await unlockDoc(d); if(!ok) return;
+    }
+    setBusy(true);
+    try{
+      if(e.file){ const path = await uploadDocFile(entityRef, e.file); if(path){ patch.file_path = path; patch.lives_in_supabase = true; changes.push("PDF replaced"); } }
+      if(!changes.length){ setEd(null); return; }
+      const entry = { at:new Date().toISOString(), by:user?.username||"unknown", why:String(e.why).trim(), changes, unlocked: unlockedDoc===d.id };
+      let { error } = await sb.from("universal_document_history_tbl").update({ ...patch, edited_log:[...(Array.isArray(row.edited_log)?row.edited_log:[]), entry] }).eq("id",row.id);
+      if(error && /edited_log/.test(error.message||"")) ({ error } = await sb.from("universal_document_history_tbl").update(patch).eq("id",row.id));   // structure_document_entry_edit not run yet
+      if(error) throw error;
+      const txt = "Rev "+row.rev_number+" "+(row.direction||"")+" of "+d.doc_number+" edited by "+(user?.username||"unknown")+": "+changes.join("; ")+" — "+String(e.why).trim()+(unlockedDoc===d.id?" (unlocked with a code)":"");
+      try{ await sb.from("universal_document_notes_tbl").insert({ document_id:d.id, note_text:"✎ "+txt, created_by:user?.username||"unknown" }); }catch(x){}
+      if(breaksSeq) await sb.from("universal_documents_tbl").update({sequence_flagged:true, sequence_flag_note:"Out/In of "+d.doc_number+" Rev"+row.rev_number+" changed — "+String(e.why).trim()}).eq("id",d.id);
+      await logAudit("UPDATE","universal_document_history_tbl",entityRef,txt,user?.username||"unknown",{link:row.link,direction:row.direction,reason:row.reason,notes:row.notes},patch);
+      setEd(null);
+      await refresh();
+    }catch(x){ alert(documentSaveErrorText(x, d.doc_number)); }
+    finally{ setBusy(false); }
   };
   const fixDirection = async(d, row)=>{
     const oldDir = row.direction||"";
@@ -12083,29 +12146,41 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
           "Fulfils: "+r.category+(r.item_sl_no!=null?" Sl "+r.item_sl_no:""),
           r.is_mandatory ? h("span",{style:{marginLeft:5,fontSize:10,padding:"1px 6px",borderRadius:9,background:"#fff4d6",color:"#854f0b",fontWeight:700}},"Mandatory") : null,
           isContract ? h("button",{onClick:()=>toggleMandatory(r),style:{marginLeft:6,border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:11}},r.is_mandatory?"Not mandatory":"Make mandatory") : null))),
-      h("div",{style:{fontSize:12,fontWeight:700,margin:"6px 0 4px"}},"Revision trail"),
+      h("div",{style:{fontSize:13,fontWeight:800,color:"#0c447c",textTransform:"uppercase",letterSpacing:".03em",margin:"12px 0 6px",paddingBottom:4,borderBottom:"2px solid #0c447c",display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},"This is the trail of the document already submitted",h("span",{style:{fontFamily:"monospace",textTransform:"none",letterSpacing:0,background:"#e6f1fb",borderRadius:5,padding:"1px 7px",fontSize:12.5}},d.doc_number)),   // 149
+      (!isContract && quoteStatus && quoteStatus!=="Draft" && unlockedDoc!==d.id) ? h("div",{style:{fontSize:11.5,color:"#854f0b",background:"#fff4d6",borderRadius:6,padding:"5px 10px",marginBottom:6}},"\ud83d\udd12 Quote "+entityRef+" has left Draft ("+quoteStatus+") — these entries are locked. Change something by adding a revision below, or a Super Admin unlocks them with a code.") : null,
+      unlockedDoc===d.id ? h("div",{style:{fontSize:11.5,color:"#a3312a",background:"#fdecea",borderRadius:6,padding:"5px 10px",marginBottom:6}},"Unlocked with a code — edits on this document are flagged.") : null,
       h("div",{style:{overflowX:"auto",border:"1px solid "+colors.border,borderRadius:6}},
         h("table",{style:{borderCollapse:"collapse",width:"100%"}},
-          h("thead",null,h("tr",{style:{background:"#faf9f4"}},["Rev","Out / In","Status","When · who","What changed","Link / file"].map(x=>h("th",{key:x,style:{textAlign:"left",padding:"6px 8px",fontSize:10.5,color:colors.muted,fontWeight:600}},x)))),
+          h("thead",null,h("tr",{style:{background:"#faf9f4"}},["Rev","Out / In","Status","When · who","What changed","Link / file",""].map(x=>h("th",{key:x,style:{textAlign:"left",padding:"6px 8px",fontSize:10.5,color:colors.muted,fontWeight:600}},x)))),
           h("tbody",null,
-            revs.length===0 ? h("tr",null,h("td",{colSpan:6,style:{...cell,color:colors.mutedLight}},"No entries yet.")) :
-            revs.map((x,i)=>h("tr",{key:x.id},
-              h("td",{style:{...cell,fontWeight:600}},"Rev "+x.rev_number),
+            revs.length===0 ? h("tr",null,h("td",{colSpan:7,style:{...cell,color:colors.mutedLight}},"No entries yet.")) :
+            revs.map((x,i)=>h("tr",{key:x.id,style:i===0?{background:"#f4faf6"}:null},
+              h("td",{style:{...cell,fontWeight:600}},"Rev "+x.rev_number, i===0 ? h("div",{style:{fontSize:10,fontWeight:400,color:colors.mutedLight}},"latest") : null),
               h("td",{style:cell},
                 h("span",{style:{fontSize:10,padding:"1px 7px",borderRadius:9,background:x.direction==="Out"?"#fff4d6":"#e6f1fb",color:x.direction==="Out"?"#854f0b":"#0c447c"}},x.direction==="Out"?"Out: we sent":x.direction==="In"?"In: we received":"—"),
-                i===0 && h("div",null,h("button",{onClick:()=>fixDirection(d,x),title:"Ticked the wrong one? Switch Out / In on this entry",style:{border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:10.5}},"Edit Out/In"))),
+                null),
               h("td",{style:cell},
-                h("select",{value:x.status||"",onChange:e=>changeStatus(x,e.target.value),style:{...chipStyle(x.status),fontSize:10.5,padding:"2px 4px",borderRadius:9,border:"none",maxWidth:200}},
+                h("select",{value:x.status||"",disabled:rowLocked(d,x)&&user?.role!=="super_admin",title:rowLocked(d,x)?"Locked — "+lockWhy(d)+" A Super Admin's code unlocks it.":"",onChange:e=>changeStatus(x,e.target.value),style:{...chipStyle(x.status),fontSize:10.5,padding:"2px 4px",borderRadius:9,border:"none",maxWidth:200}},
                   h("option",{value:""},"— status —"),
                   statusNames.map(s=>h("option",{key:s,value:s},s)))),
               h("td",{style:{...cell,whiteSpace:"nowrap",color:colors.muted}},(x.changed_at||"").slice(0,10)+(x.changed_by?" · "+x.changed_by:"")),
-              h("td",{style:cell},(x.what_changed||x.reason||""),x.notes?h("div",{style:{color:colors.mutedLight,fontSize:10.5}},"Notes: "+x.notes):null),
+              h("td",{style:cell},(x.what_changed||x.reason||""),x.notes?h("div",{style:{color:colors.mutedLight,fontSize:10.5}},"Notes: "+x.notes):null,
+                (Array.isArray(x.edited_log)?x.edited_log:[]).map((g,j)=>h("div",{key:j,style:{color:"#854f0b",fontSize:10.5}},"\u270e "+String(g.at||"").slice(0,10)+" "+(g.by||"")+": "+(g.changes||[]).join("; ")+" — "+(g.why||"")+(g.unlocked?" (unlocked with code)":"")))),
               h("td",{style:{...cell,whiteSpace:"nowrap"}},
                 x.link ? h("a",{href:x.link,target:"_blank",rel:"noreferrer",style:{color:"#0c447c",fontSize:11}},"Open link") : h("span",{style:{color:colors.mutedLight}},"no link"),
-                x.lives_in_supabase && x.file_path ? h("button",{onClick:()=>viewFile(x),style:{marginLeft:8,border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:11}},"View file") : null)))))),
-      h("div",{style:{border:"1px solid #cfe3d7",background:"#f4faf6",borderRadius:8,padding:"10px 14px",marginTop:12}},
+                x.lives_in_supabase && x.file_path ? h("button",{onClick:()=>viewFile(x),style:{marginLeft:8,border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:11}},"View file") : null),
+              h("td",{style:{...cell,whiteSpace:"nowrap"}}, rowLocked(d,x)
+                ? h("button",{onClick:()=>openEdit(d,x),title:"Locked — "+lockWhy(d),style:{...btnSmall,fontSize:10.5,padding:"2px 8px",color:colors.muted}},"\ud83d\udd12 Locked")
+                : h("button",{onClick:()=>openEdit(d,x),style:{...btnSmall,fontSize:10.5,padding:"2px 8px",color:"#1f5c40",borderColor:"#1f5c40"}},"Edit"))))))),
+      h("div",{style:{fontSize:13,fontWeight:800,color:"#0c447c",textTransform:"uppercase",letterSpacing:".03em",margin:"12px 0 6px",paddingBottom:4,borderBottom:"2px solid #0c447c",display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},"Add revisions on this doc here",h("span",{style:{fontFamily:"monospace",textTransform:"none",letterSpacing:0,background:"#e6f1fb",borderRadius:5,padding:"1px 7px",fontSize:12.5}},d.doc_number)),   // 149
+      !nxOpen ? h("div",{style:{border:"1px dashed #1f5c40",background:"#f4faf6",borderRadius:8,padding:"10px 14px",display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}},
+        h("div",{style:{flex:1,minWidth:220}},
+          h("div",{style:{fontSize:12.5,fontWeight:700}},"Next expected: Rev "+exp.rev+(exp.direction?" · "+(exp.direction==="In"?"In — the client's reply":"Out — we send it"):"")),
+          h("div",{style:{fontSize:11.5,color:colors.muted}}, !last ? "No entries yet." : exp.direction==="In" ? "The last entry was Rev "+last.rev_number+" Out, so the reply on it comes back as Rev "+last.rev_number+" In." : "The reply on Rev "+last.rev_number+" is in; the revised document goes Out as Rev "+exp.rev+".")),
+        h("button",{onClick:()=>{ setNx(x=>({...blankNx, link:x.link, dir:exp.direction||""})); setDirMissing(false); setNxOpen(true); },style:{...btnPrimary,background:"#1f5c40",padding:"8px 16px",fontSize:12.5}},"Log the next entry")) :
+      h("div",{style:{border:"1px solid #1f5c40",background:"#fff",borderRadius:8,padding:"10px 14px"}},
         h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}},
-          h("div",{style:{fontSize:12.5,fontWeight:700}},"Next entry: Rev "+rev+(exp.direction&&!override?" — the sequence says "+exp.direction:"")),
+          h("div",{style:{fontSize:12.5,fontWeight:700}},"New entry — "+d.doc_number+" · Rev "+rev+(exp.direction&&!override?" — the sequence says "+exp.direction:"")),
           override ? h("span",{style:{fontSize:11,color:"#a3312a"}},"⚠ Override active — this document will be flagged.",
               h("input",{type:"number",min:0,value:override.rev,onChange:e=>setOverride({rev:Math.max(0,Number(e.target.value)||0)}),style:{...fld,width:70,marginLeft:8,padding:"3px 6px"}}))
             : user?.role==="super_admin" && h("button",{onClick:()=>unlockSequence(d),style:{...btnSmall,fontSize:10.5}},"Override sequence (code)")),
@@ -12123,7 +12198,8 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
             h("select",{value:nx.fulfil,onChange:e=>setNx(x=>({...x,fulfil:e.target.value})),style:fld},
               h("option",{value:""},"No"),
               openSame.map(r=>h("option",{key:r.id,value:r.id},r.category+(r.item_sl_no!=null?" · Sl "+r.item_sl_no:""))))) : h("div",null)),
-        h("div",{style:{display:"flex",justifyContent:"flex-end",marginTop:12}},
+        h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:12}},
+          h("button",{onClick:()=>{ setNxOpen(false); setOverride(null); setDirMissing(false); },disabled:busy,style:btnSecondary},"Cancel"),
           h("button",{onClick:saveNext,disabled:busy,style:{...btnPrimary,background:"#1f5c40",padding:"8px 16px",fontSize:12.5,opacity:busy?0.5:1}},busy?"Saving…":("Log Rev "+rev+(nx.dir?" — "+nx.dir:""))))),
       h("div",{style:{marginTop:14}},
         h("div",{style:{fontSize:12,fontWeight:700,marginBottom:6}},"Notes on this document"),
@@ -12162,6 +12238,21 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
           sel==="+" ? renderAdd() : current ? (current.kind==="doc" ? renderDoc(current) : renderReq(current)) : null)),
       h("div",{style:{padding:"10px 20px",borderTop:"1px solid "+colors.border,display:"flex",justifyContent:"flex-end"}},
         h("button",{onClick:onClose,style:btnSecondary},"Close")),
+      ed && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"40px 16px",overflowY:"auto"}},   // 149: Edit an entry
+        h("div",{style:{background:"#fff",borderRadius:10,padding:"16px 20px",width:620,maxWidth:"96vw"}},
+          h("div",{style:{fontWeight:700,fontSize:14}},"Edit Rev "+ed.row.rev_number+" "+(ed.row.direction||"")+" — "+ed.d.doc_number),
+          h("div",{style:{fontSize:11.5,color:colors.muted,margin:"2px 0 8px"}},"Logged "+String(ed.row.changed_at||"").slice(0,10)+(ed.row.changed_by?" by "+ed.row.changed_by:"")+". Every change is kept on the row (old \u2192 new, who, when) and in the document notes."+(unlockedDoc===ed.d.id?" Unlocked with a code \u2014 this edit is flagged.":"")),
+          twoCol(
+            h("div",null, lbl("Out / In"), h("select",{value:ed.dir,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,dir:v})); },style:fld},h("option",{value:"Out"},"Out: we sent"),h("option",{value:"In"},"In: we received"))),
+            h("div",null, lbl("Google Drive link",true), linkInput(ed.link, v=>setEd(x=>({...x,link:v}))), h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:2,wordBreak:"break-all"}},"was: "+(ed.row.link||"—")))),
+          twoCol(
+            h("div",null, lbl("What changed"), h("input",{value:ed.what,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,what:v})); },style:fld})),
+            h("div",null, lbl("Notes"), h("input",{value:ed.notes,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,notes:v})); },style:fld}))),
+          lbl("Replace the PDF (optional)"), fileInput(f=>setEd(x=>({...x,file:f}))),
+          lbl("Reason for the edit",true), h("input",{value:ed.why,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,why:v})); },placeholder:"e.g. Wrong link pasted",style:fld}),
+          h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:14}},
+            h("button",{onClick:()=>setEd(null),disabled:busy,style:btnSecondary},"Cancel"),
+            h("button",{onClick:saveEdit,disabled:busy,style:{...btnPrimary,background:"#1f5c40"}},busy?"Saving…":"Save the edit")))),
       clOpen && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
         h("div",{style:{background:"#fff",borderRadius:10,padding:"18px 22px",width:480,maxWidth:"94vw",maxHeight:"80vh",overflowY:"auto"}},
           h("div",{style:{fontWeight:700,fontSize:14,marginBottom:4}},"Pick several — "+entityRef),
@@ -23740,6 +23831,9 @@ function CustomerCompanyForm({ initial, onCancel, onSaved, user, onUseExisting }
     if(!f.billing_street.trim()){ alert("Street is required."); return; }
     if(!f.billing_city.trim()){ alert("City is required."); return; }
     if(!f.billing_country.trim()){ alert("Country is required."); return; }
+    // 151: the Quote Register tabs go by state / emirate — required for India and the UAE ("Other Territory" places nobody)
+    if((regIsIndia(f.billing_country) || ["uae","unitedarabemirates"].includes(regKey(f.billing_country))) && (!String(f.billing_state||"").trim() || /^other\s*territory$/i.test(String(f.billing_state).trim()))){
+      alert((regIsIndia(f.billing_country)?"State":"Emirate")+" is required for a customer in "+f.billing_country+" \u2014 the Quote Register tab and the sales owner are decided by it."); return; }
     if(addContact && !contactF.contact_name.trim()){ alert("Contact name is required (or uncheck \"Add a contact too\")."); return; }
     setSaving(true);
     try {
@@ -26318,6 +26412,7 @@ const MANUAL_SECTIONS = [
               "The document number is suggested from the category's prefix (DWG-, ITP-\u2026) and checked as you type; a number already used anywhere is refused.",
               "Categories kept PER SL NO (e.g. GA drawings) can add one requirement for every Sl No in one go. Pick several\u2026 does the same for many categories at once.",
               "The link is mandatory everywhere; the PDF is optional.",
+              "Changed 8 October 2026 (build 149): a document tab has two bold blue headings with the document number — THIS IS THE TRAIL OF THE DOCUMENT ALREADY SUBMITTED (the record, read-only) and ADD REVISIONS ON THIS DOC HERE (Log the next entry opens the form). Edit on a row fixes the link, Out / In, what changed, notes or the PDF, with a reason; once a quote leaves Draft (or a later entry exists on a Sale Order document) the row is locked and only a Super Admin’s code unlocks it.",
               "On a document's tab: the revision trail (status changeable on any row, Edit Out/In on the latest), then the NEXT ENTRY pre-filled with the revision the Out/In sequence expects and the last link. Tick Out or In fresh each time."
             ]
           },
@@ -26665,6 +26760,10 @@ const MANUAL_SECTIONS = [
         "blocks": [
           {
             "type": "p",
+            "text": "Changed 8 October 2026 (build 151). REFERENCE FOR AN OFFER: type the quote number or the customer \u2014 the box searches every customer's quotes as you type (quotes in the app, legacy quotes and Quote Register lines; revisions together) and each one reads quote no. \u2013 enquiry no. (\u201cno enquiry\u201d until one is logged). Picking one fills the customer; if the row already has another customer it asks which is right. Closed quotes (Won / Lost / Parked) are not offered. A NUMBER NOT IN THE APP: the last line \u201c+ None of these \u2014 use \u2026 as a new quote\u201d opens the Quote Register on the tab of its prefix with the number and the customer filled in (blue bar: \u2190 Back to Log Follow-ups; your rows are kept). Give the Enquiry No (NA if none) and Save \u2014 the number joins the register (tagged \u201cfrom Log Follow-ups\u201d) and comes back as the row's reference; from then on it is offered everywhere. A new customer: Add New Customer on that line, save, and you are back with it chosen. Anyone can add a number this way. ENQUIRY: a quote without an enquiry asks \u201cLog enquiry now / Later\u201d whenever it is picked; Later never blocks the call, and until it is logged the quote sits in Pending Actions for the Sales Coordinator. Enquiry chase: the list reads quote no. \u2013 enquiry no. (\u201cno quote yet\u201d before a quote). Before a quote exists, log the call as Cold."
+          },
+          {
+            "type": "p",
             "text": "A dense, spreadsheet-style screen for logging every call in one sitting \u2014 one Date of Entry for the whole session, one row per call, across as many customers as you actually worked that day."
           },
           {
@@ -26736,6 +26835,10 @@ const MANUAL_SECTIONS = [
         "title": "Tasks \u2014 Task Assignment Board, Employee board, Dashboards",
         "tag": "Tasks \u2192 Task Boards & Dashboards",
         "blocks": [
+          {
+            "type": "p",
+            "text": "Changed 8 October 2026 (build 151). ALL BOARDS (Tasks \u2192 All boards, for everyone): every department's board as a band \u2014 its Unassigned pile, then one list per person; every department in the master shows, even one with nobody in it. Your own department opens, the rest are folded; click a band to open or fold it and drag \u283f to reorder the bands (kept for you in this browser). Drag a card to any list: within a department it is a hand-out and asks the due date; into another department it is a transfer \u2014 it asks the reason, the card's history and the receiver's bell get it, and its sub-tasks go with it. A card moves only if you may move it. DUE DATE ON THE CARD: the \u201cTask due\u201d date on a card, on each sub-task when unfolded, and in the list table is a button \u2014 click, pick the date, Enter saves (Esc cancels); the history records \u201cDue date old \u2192 new (on the board)\u201d. A procurement sub-task's date comes from the Gantt: its grey \ud83d\udd12 chip opens the Gantt at that form. \u229e TABLE asks Summary (one row per card, sub-tasks counted, late ones in red) or Detailed (each card, then its sub-tasks indented with holder, stage and due date); a switch at the top changes it and Download to Excel follows the view. NEW / EDIT TASK: Department comes first and lists every department, even one with nobody in it (Levaflow's Admin); Assigned to then lists that department's people and its Unassigned pile."
+          },
           {
             "type": "tip",
             "text": "Build 128. Your board: Overdue, Today's, In Progress (yellow \u2014 drag your own card there when you start it), Tasks Assigned, Under Approval, then Completed today / this week / this month / Q1\u2013Q4; completed cards move down by themselves and last year's are archived. Cards show customer and Quote#, enquiry number and date, and the due date \u2014 \u25be more shows the rest. Every list scrolls on its own, has its own order (Sort lists by sets them all), \u25be / \u25b4 to expand or fold all, and \u229e Table to see it as a table; on the Unassigned pile's table you can tick several cards and hand them out at once. Every card has a Type of task (Task Setup \u2192 Task Types), which sets its department, checklist and due date. Tasks \u2192 Tasks Completed Report prints the day, week or month as a PDF."
@@ -27519,6 +27622,13 @@ function downloadManualPdf(){
 // added to over time; not wired to a database table yet, so edits currently
 // mean updating this array directly.
 const FAQ_ENTRIES = [
+  { q:"The quote number I need is not in the Reference list on Log Follow-ups \u2014 what do I do?", a:"Type it. If it is nowhere in the app, the last line says \u201c+ None of these \u2014 use \u2026 as a new quote\u201d. That opens the Quote Register on the right tab with the number and the customer filled in; give the Enquiry No (NA if none) and Save. You are taken back to Log Follow-ups with the number as the reference, and it is offered to everyone from then on." },
+  { q:"Why does a reference say \u201cno enquiry\u201d?", a:"No enquiry has been logged for that quote. Picking it asks \u201cLog enquiry now / Later\u201d. Later is fine \u2014 the call is still logged \u2014 but a number added from Log Follow-ups stays in the Sales Coordinator's Pending Actions until its enquiry is logged." },
+  { q:"My day shows a call I did not log \u2014 why?", a:"My day now lists the follow-ups on every customer of your Quote Register tabs, whoever logged the last call (the latest entry decides the date). The row says \u201clast call by \u2026\u201d when it was someone else." },
+  { q:"How do I change a card's due date without opening it?", a:"Click the date on the card (or on a sub-task, or in the \u229e table), pick the new date and press Enter. A procurement sub-task's date is set on the Gantt \u2014 its grey \ud83d\udd12 chip opens the Gantt." },
+  { q:"Can I move a card to another department from All boards?", a:"Yes, if you may move that card: drag it onto a list in the other department's band. It asks the due date and the reason; the reason goes into the card's history and the receiver gets a bell. Its sub-tasks go with it." },
+  { q:"Why can't I save a customer in India or the UAE without a state?", a:"The Quote Register tab and the sales owner are decided by the state or emirate, so it is required for those two countries; \u201cOther Territory\u201d is not accepted there." },
+  { q:"I saved a document entry with the wrong link — how do I fix it?", a:"Press Edit on that row in the trail, correct the link and give the reason. While the quote is in Draft anyone who can open the box can do it; once the offer is sent the row shows \ud83d\udd12 Locked \u2014 add a revision, or ask a Super Admin to unlock it with a code. Every edit is kept on the row." },
   { q:"When is the weekly report made, and who sees it?", a:"Every Friday at 6 pm, for the week Saturday \u2013 Friday; the monthly one on the last day of the month at 6 pm. It is frozen when made. You see your own lines; a board head sees their board\u2019s people; Admins and Super Admins see everyone. Reports \u2192 Weekly & Monthly Reports." },
   { q:"What counts as Delayed in the weekly report?", a:"Something finished in that week after its due date: a task sent for approval late, a call or visit logged after its planned Next follow-up, or a procurement step finished after its planned end. Overdue is what is still open past due when the report is made; Proposed is what is due next week." },
   { q:"Who gets a new procurement card?", a:"Nobody at first: it waits in the Purchase Unassigned pile. The Purchase head sees it at log-in (My day \u2192 Waiting in the Purchase pile) and hands it to a buyer, or drags it on the Task Assignment Board in the daily review. Its sub-tasks go with it." },
@@ -27569,6 +27679,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"8 Oct 2026 (151)", summary:"Quote reference gateways, My day for tab customers, due date on the card, Summary / Detailed table, All boards, Department on Add task \u2014 and the build-149 Documents box (missing from the 150 file) put back. SQL: structure_register_line_source_151 (both companies: register_line_tbl.source) and, if not run yet, structure_document_entry_edit_2026-10-08 (both). Data SQL already run on Flometriq today: data_uae_emirate_fill and data_uae_wrong_country_fix (UAE customers' emirate from city/address; 14 non-UAE customers corrected). LOG FOLLOW-UPS: Offer reference is a type-in search across every customer's quotes, legacy quotes and Quote Register lines, shown as quote no. \u2013 enquiry no.; picking fills the customer (asks if it differs); closed quotes not offered. \u201c+ None of these \u2014 use \u2026 as a new quote\u201d opens the Quote Register (gateway: blue bar \u2190 Back to Log Follow-ups, rows kept) on the prefix's tab with number and customer filled; EDate not required there; anyone may save; the line is tagged \u201cfrom Log Follow-ups\u201d and returns as the reference. Add New Customer works from that line and returns with the customer chosen. A quote without an enquiry asks Log enquiry now / Later (the enquiry form takes the date when the line has none and writes it back to the line); such lines from Log Follow-ups sit in Pending Actions for the Sales Coordinator (source quote_no_enquiry). Enquiry chase list reads quote no. \u2013 enquiry no. CUSTOMER FORM: State / emirate required for India and the UAE (Other Territory refused). MY DAY: calls on every customer of my Quote Register tabs, whoever logged them (latest entry decides); \u201clast call by \u2026\u201d under the customer. TASKS: due date changed in place on cards, sub-tasks and the list table (history \u201cDue date old \u2192 new (on the board)\u201d; procurement sub-tasks locked to the Gantt, chip opens it). \u229e Table asks Summary or Detailed (sub-tasks indented), switch on top, Excel follows. ALL BOARDS tab for everyone: every department as a band (pile + people, empty departments too), own department open, fold / reorder kept per browser; drag across lists and departments \u2014 cross-department asks the reason, sub-tasks follow, bell to the receiver; links to Quote Funnel and Document Control Board. ADD / EDIT TASK: Department picker first (every department, even empty \u2014 fixes Admin missing in Levaflow), Assigned to filtered to it." },
+  { date:"8 Oct 2026 (149b)", summary:"Documents box: the record and the next entry kept apart, Edit, and locking. SQL: structure_document_entry_edit_2026-10-08 (both companies: universal_document_history_tbl.edited_log). Each document tab now has two headings in bold blue with the document number: THIS IS THE TRAIL OF THE DOCUMENT ALREADY SUBMITTED (read-only, the latest entry marked) and ADD REVISIONS ON THIS DOC HERE \u2014 a closed box \u201cNext expected: Rev 0 \u00b7 In \u2014 the client\u2019s reply\u201d with Log the next entry; the form opens empty with Out / In picked from the sequence, has Cancel, and closes after saving. EDIT on every entry (replaces Edit Out/In): link, Out / In, what changed, notes, replace the PDF; a reason is required; each edit is kept on the row (\u270e old \u2192 new, who, when, why), in the document notes and the audit log. LOCKING: a quote\u2019s entries (and their Status) can be changed only while the quote is in Draft; a Sale Order\u2019s entry only until the next entry is logged on that document. After that \u2014 add a revision, or a Super Admin unlocks the document with a Deletion Code (the document is flagged, like a sequence override). Changing Out / In on a document with more than one entry still needs a Super Admin." },
   { date:"8 Oct 2026 (150)", summary:"One card on several boards, and the Inter-Department board. SQL: structure_task_multi_board_150 (both companies): task_tbl.also_departments (text[]) and a department row Inter-Department (no members, no approver). CARD EDITOR: Also on boards \u2014 tick the other boards this card should show on; its own department stays the home board. It is ONE record: a change made from any board shows on every board, nothing is copied. BOARDS: a shared card shows on its home board and on every ticked board \u2014 in each board's Unassigned pile while nobody has it (the first hand-out from any pile takes it out of all of them; a second person gets \u201cAlready taken\u201d), and afterwards on the holder's list, or in a \u201c\ud83d\udd17 Shared with <board>\u201d list where the holder has no list. A purple \u201c\ud83d\udd17 Shared from / Also on\u201d tag marks it. INTER-DEPARTMENT BOARD: every card on more than one board, in one place (Admins and the Document Controller see all; a board head sees those touching their boards). No approver of its own: a shared card is approved by its home board's approver and the dashboards and reports count it once, under the home board. It is never a card's home. Handing a shared card to someone of another department moves its home and keeps the old home among its boards. MY DAY: a head sees shared cards in each pile they head; the top-bar count counts a card once. History records Also on boards changes." },
   { date:"8 Oct 2026 (149)", summary:"Quote Register \u2014 owner on each line (Tenders). SQL: structure_register_line_owner_149 (both companies): register_tab_tbl.owner_per_line, register_line_tbl.line_fse / line_tc / line_owner_set_by / line_owner_set_at. A tab with \u201cOwner on each line\u201d ticked (CRM Setup \u2192 Register Tabs (rules); Levaflow: Tenders (GeM)) asks for the FSE (required) and the Telecaller (optional, \u201cNo telecaller\u201d) on every new line, both starting from the region of the customer's state. Once saved the owner is fixed: the Sales Coordinator cannot change it; Super Admin and the Sales Head can (\ud83d\udc64 on the line), and every change is in the audit log. The line's owner, not the tab's people, gets the quote's stage alerts and win credit, and counts for the Owner filter of the Quotes Report and CRM Funnel. Such a tab never decides who owns a customer and adds nobody's customers to worklists; it takes any customer from its countries (no wrong-zone refusal)." },
   { date:"8 Oct 2026 (148)", summary:"Employee performance and weekly / monthly reports. SQL: structure_period_reports_2026-10-08 (both companies; needs the build-146 SQL first): period_report_tbl, make_period_report() and a pg_cron timer \u2014 weekly report every Friday 6 pm for the week Saturday \u2013 Friday, monthly report on the last day of the month 6 pm (India time). If the timer cannot be set, the app makes the report the first time anyone opens it after 6 pm. Each report is frozen and lists per person: DELAYED (finished late in the period, with days late), OVERDUE (still open past due when made) and PROPOSED (due / planned in the next week or month) \u2014 tasks, calls & visits (Next by) and procurement Gantt steps (owed by the form\u2019s holder). Bell to everyone in it and to Super Admins. REPORTS \u2192 Weekly & Monthly Reports: past reports on the left, Show everyone / a department / a person, summary then the three lists, Download Excel and PDF; Super Admins can make the latest one now if the timer missed it. Who sees what: yourself; board heads their boards; Admins and Super Admins everyone. PERFORMANCE PAGE: Tasks \u2192 Dashboards \u2192 My performance, or Performance beside a name \u2014 open now, overdue, due in 7 days, waiting approval, completed on time vs late, average days late, the last 12 weeks (Sat \u2013 Fri) on time and late, the lists behind them, calls & visits (FSE / Telecaller) or late procurement steps; links to the person\u2019s board and weekly reports." },
@@ -29826,6 +29938,88 @@ function QuoteStatusOwnerAlerts({ user, onDone }){
 // already existed). Marking Outcome = Won reuses the exact same
 // WonLostOutcomeModal the Quotes screen and Funnel board already use —
 // same PO Number/Date/Value capture, not a separate path.
+// 151: QUOTE REFERENCE INDEX — every quote number the app knows, from the quotes, legacy quotes and the Quote Register,
+// one entry per quote (revisions together), with the enquiry it came from. Read in pages, kept 5 minutes.
+const QREF = { at:0, list:[], busy:null };
+const qrefBase = (r)=> regNorm(r).replace(/(REV|R)\d+$/,"");
+async function qrefLoad(force){
+  if(!force && QREF.at && Date.now()-QREF.at < 300000) return QREF.list;
+  if(QREF.busy) return QREF.busy;
+  QREF.busy = (async()=>{
+    try{
+      const [es, lg, rl, en] = await Promise.all([
+        fetchPaged(()=>sb.from("estimates").select("id,reference_number,customer_name,quote_status,linked_enquiry_id").order("id")),
+        fetchPaged(()=>sb.from("legacy_quotes_tbl").select("id,reference_number,customer_name,quote_status").order("id")),
+        fetchPaged(()=>sb.from("register_line_tbl").select("*").order("id")),
+        fetchPaged(()=>sb.from("enquiry_tbl").select("id,enquiry_number,linked_reference_number,status").order("id"))]);
+      const enById = new Map((en||[]).map(e=>[e.id,e])), enByRef = new Map();
+      (en||[]).forEach(e=>{ if(e.linked_reference_number) enByRef.set(qrefBase(e.linked_reference_number), e); });
+      const map = new Map();
+      const put = (ref, src, o)=>{ if(!ref) return; const b = qrefBase(ref); if(!b) return;
+        const cur = map.get(b);
+        if(!cur){ map.set(b, { base:b, ref, src, ...o }); return; }
+        const rank = { quote:3, legacy:2, register:1 };
+        if(rank[src] > rank[cur.src] || (src===cur.src && regNorm(ref) > regNorm(cur.ref))){ map.set(b, { ...cur, ref, src, ...Object.fromEntries(Object.entries(o).filter(([k,v])=>v!==undefined && v!==null && v!=="")) }); }
+        else Object.entries(o).forEach(([k,v])=>{ if((cur[k]===undefined||cur[k]===null||cur[k]==="") && v) cur[k]=v; }); };
+      (rl||[]).forEach(r=>put(r.quote_no,"register",{ customer:r.customer_name||"", status:"", line:r, enqId:r.enquiry_id||null, tab:r.tab_name }));
+      (lg||[]).forEach(r=>put(r.reference_number,"legacy",{ customer:r.customer_name||"", status:r.quote_status||"" }));
+      (es||[]).forEach(r=>put(r.reference_number,"quote",{ customer:r.customer_name||"", status:r.quote_status||"", enqId:r.linked_enquiry_id||null }));
+      const lineByBase = new Map((rl||[]).map(r=>[qrefBase(r.quote_no), r]));
+      QREF.list = Array.from(map.values()).map(e=>{
+        const line = e.line || lineByBase.get(e.base) || null;
+        const enq = (e.enqId && enById.get(e.enqId)) || (line && line.enquiry_id && enById.get(line.enquiry_id)) || enByRef.get(e.base) || null;
+        return { ...e, line, enq: enq ? enq.enquiry_number : "", hasEnq: !!enq, closed: !!e.status && isClosedStage(e.status) };
+      });
+      QREF.at = Date.now();
+    }catch(err){ console.error("Quote reference list not read", err); }
+    QREF.busy = null;
+    return QREF.list;
+  })();
+  return QREF.busy;
+}
+// The text kept in a follow-up row: quote no. first (that part is what is saved), then the enquiry no. and the stage.
+const qrefOption = (e)=> e.ref+" — "+(e.enq||"no enquiry")+" · "+(e.status||(e.src==="register"?"Register only":"—"))+(e.src==="legacy"?" [Legacy]":"");
+const qrefFind = (ref)=>{ const b = qrefBase(String(ref||"").split(" — ")[0]); return QREF.list.find(e=>e.base===b) || null; };
+// Type-in box for an Offer reference: searches every customer's quotes as you type; the last line forces a new quote.
+function QuoteRefSearch({ value, companyName, onPick, onForceNew, onFocus, style }){
+  const [text,setText] = useState(null);          // null = not typing, show the value
+  const [open,setOpen] = useState(false);
+  const [list,setList] = useState(QREF.list);
+  const [pos,setPos] = useState(null);
+  const inRef = useRef(null);
+  const place = ()=>{ const r = inRef.current && inRef.current.getBoundingClientRect(); if(r) setPos({ left:r.left, top:r.bottom+2, width:Math.max(r.width,420) }); };
+  const start = async()=>{ onFocus && onFocus(); place(); setOpen(true); setList(await qrefLoad()); };
+  const q = text===null ? "" : text.trim(), qn = regNorm(q).replace(/(REV|R)\d+$/,""), lo = q.toLowerCase();
+  const co = String(companyName||"").trim().toLowerCase();
+  let hits = (list||[]).filter(e=>!e.closed);
+  hits = q ? hits.filter(e=>e.base.includes(qn) || (lo.length>=3 && String(e.customer||"").toLowerCase().includes(lo)) || (e.enq && regNorm(e.enq).includes(regNorm(q))))
+           : (co ? hits.filter(e=>String(e.customer||"").trim().toLowerCase()===co) : []);
+  hits.sort((a,b)=> ((String(b.customer||"").trim().toLowerCase()===co)-(String(a.customer||"").trim().toLowerCase()===co)) || b.base.localeCompare(a.base));
+  hits = hits.slice(0,40);
+  const exact = q && (list||[]).some(e=>e.base===qn);
+  const closedHit = q && (list||[]).find(e=>e.base===qn && e.closed);
+  const groups = [["quote","In the app — quotes"],["legacy","Legacy quotes"],["register","Quote Register only (no quote in the app yet)"]];
+  const pick = (e)=>{ setText(null); setOpen(false); onPick(e); };
+  return h("div",{style:{position:"relative"}},
+    h("input",{ref:inRef,value:text===null ? (value||"") : text,placeholder:"Type quote no. or customer…",
+      onFocus:start, onChange:e=>{ setText(e.target.value); if(!open){ place(); setOpen(true); } },
+      onBlur:()=>setTimeout(()=>{ setOpen(false); setText(null); },200),
+      onKeyDown:e=>{ if(e.key==="Escape"){ setOpen(false); setText(null); } if(e.key==="Enter" && hits.length===1){ e.preventDefault(); pick(hits[0]); } },
+      style:{...style, fontFamily:"monospace"}}),
+    open && pos ? h("div",{style:{position:"fixed",left:pos.left,top:pos.top,width:pos.width,maxWidth:"90vw",maxHeight:340,overflowY:"auto",zIndex:1200,background:"#fff",border:"1px solid #1f5fa8",borderRadius:6,boxShadow:"0 6px 18px rgba(0,0,0,.18)",fontSize:12.5},onMouseDown:e=>e.preventDefault()},
+      !(list||[]).length && QREF.busy ? h("div",{style:{padding:8,color:colors.muted}},"Reading the quote numbers…") : null,
+      groups.map(([src,label])=>{ const g = hits.filter(e=>e.src===src); if(!g.length) return null;
+        return h("div",{key:src},
+          h("div",{style:{padding:"4px 9px",fontSize:10.5,letterSpacing:".05em",textTransform:"uppercase",color:colors.muted,background:"#f3f5f8"}},label),
+          g.map(e=>h("div",{key:e.base,onClick:()=>pick(e),style:{padding:"6px 9px",display:"flex",justifyContent:"space-between",gap:10,cursor:"pointer"},
+              onMouseEnter:ev=>ev.currentTarget.style.background="#e6eef8",onMouseLeave:ev=>ev.currentTarget.style.background=""},
+            h("span",{style:{fontFamily:"monospace"}},e.ref+" – ",h("span",{style:{color:e.hasEnq?undefined:"#9a6200"}},e.enq||"no enquiry")),
+            h("span",{style:{color:colors.muted,textAlign:"right"}},(e.customer||"no customer")+(e.status?" · "+e.status:""))))); }),
+      !q && !hits.length ? h("div",{style:{padding:8,color:colors.muted}},co ? "No open quotes for this customer. Type a quote number." : "Type a quote number or the customer.") : null,
+      closedHit ? h("div",{style:{padding:8,color:colors.muted}},closedHit.ref+" is "+closedHit.status+" — closed quotes are not followed up.") : null,
+      q && !exact && !closedHit ? h("div",{onClick:()=>{ setOpen(false); setText(null); onForceNew(regNorm(q)); },style:{padding:"8px 9px",borderTop:"1px solid #d6dde6",color:"#1f5fa8",fontWeight:600,cursor:"pointer"}},
+        "+ None of these — use “",h("span",{style:{fontFamily:"monospace"}},regNorm(q)),"” as a new quote") : null) : null);
+}
 function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdue, onClose }){
   const blankRow = ()=>({
     _key: Math.random().toString(36).slice(2),
@@ -29904,6 +30098,20 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
   // row currently has focus — set on any field's onFocus within a row.
   const [activeRowKey,setActiveRowKey] = useState(null);
   const rowsRef = useRef(rows); rowsRef.current = rows;
+  // 151: quote reference gateways — a number not in the app goes to the Quote Register (qrGate); a quote without an enquiry asks for it
+  const [qrGate,setQrGate] = useState(null);   // { key, quote_no, company }
+  const [enqAsk,setEnqAsk] = useState(null);   // { key, entry }
+  const [enqLog,setEnqLog] = useState(null);   // { key, line }
+  const pickQuoteRef = async(key, e)=>{
+    const row = rowsRef.current.find(x=>x._key===key); if(!row || !e) return;
+    const cust = String(e.customer||"").trim();
+    if(cust && row.companyName && row.companyName.trim().toLowerCase()!==cust.toLowerCase()){
+      if(!window.confirm(e.ref+" is a quote for "+cust+", not "+row.companyName+".\n\nOK = switch this row to "+cust+"\nCancel = keep "+row.companyName+" and pick another reference")) return;
+    }
+    if(cust && (row.companyName||"").trim().toLowerCase()!==cust.toLowerCase()) await onCompanyChange(key, cust);
+    updateRow(key,{ chaseReference: qrefOption(e) });
+    if(!e.hasEnq && e.line) setEnqAsk({ key, entry:e }); else setEnqAsk(null);
+  };
   const isAdminOrAbove = user.role==="admin" || user.role==="super_admin";
   // Overdue-calls prefill flow (30 Aug) — arrived here via a double-click
   // on an overdue row in FseOverdueCallsPrompt/SalesOverdueCallsScreen.
@@ -30173,6 +30381,10 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
   const refreshReferenceOptions = async(key,companyName,chaseWhat)=>{
     if(!companyName || chaseWhat==="Cold" || chaseWhat==="Payment"){ updateRow(key,{referenceOptions:[],chaseReference:""}); return; }
     if(chaseWhat==="Offer"){
+      // 151: from the quote reference index (quotes, legacy quotes and Quote Register lines), shown as quote no. — enquiry no. · stage
+      try{ const all = await qrefLoad(); const co = String(companyName).trim().toLowerCase();
+        const mine = all.filter(e=>!e.closed && String(e.customer||"").trim().toLowerCase()===co);
+        if(all.length){ updateRow(key,{referenceOptions: mine.map(qrefOption)}); return; } }catch(e){}
       const CLOSED = { includes: isClosedStage };   // 22 Sep: from the stage master
       const { data } = await sb.from("estimates").select("reference_number,quote_status").eq("customer_name",companyName);
       const open = Array.from(new Map((data||[]).filter(r=>!CLOSED.includes(r.quote_status)).map(r=>[r.reference_number,r])).values());
@@ -30188,9 +30400,17 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
       });
     } else if(chaseWhat==="Enquiry"){
       // 2 Oct (117) — the customer's enquiries not yet turned into a quote.
-      const { data:dAll } = await sb.from("enquiry_tbl").select("enquiry_number,status,assigned_to,due_date").eq("company_name",companyName).order("created_at",{ascending:false});
+      const { data:dAll } = await sb.from("enquiry_tbl").select("id,enquiry_number,status,assigned_to,due_date").eq("company_name",companyName).order("created_at",{ascending:false});
       const data = (dAll||[]).filter(enqIsOpen);   // 123: open = not Offer Sent / Regretted / Converted
-      updateRow(key,{referenceOptions:(data||[]).map(r=>r.enquiry_number+" — "+(r.status||"Received")+(r.assigned_to&&r.assigned_to!=="Unassigned"?" · "+r.assigned_to:" · unassigned"))});
+      // 151: shown as quote no. – enquiry no. (the enquiry no. is still what is saved for an Enquiry chase)
+      let qOf = {}; try{ const ids = (data||[]).map(r=>r.id).filter(Boolean);
+        const [{ data: ln },{ data: lk }] = await Promise.all([ ids.length ? sb.from("register_line_tbl").select("quote_no,enquiry_id").in("enquiry_id",ids) : { data:[] },
+          sb.from("enquiry_tbl").select("enquiry_number,linked_reference_number").eq("company_name",companyName) ]);
+        (lk||[]).forEach(r=>{ if(r.linked_reference_number) qOf[r.enquiry_number]=r.linked_reference_number; });
+        (ln||[]).forEach(r=>{ const e = (data||[]).find(x=>x.id===r.enquiry_id); if(e && r.quote_no) qOf[e.enquiry_number]=r.quote_no; }); }catch(e){}
+      const opts = (data||[]).map(r=>r.enquiry_number+" — "+(r.status||"Received")+(r.assigned_to&&r.assigned_to!=="Unassigned"?" · "+r.assigned_to:" · unassigned"));
+      const labels = {}; (data||[]).forEach((r,i)=>{ labels[opts[i]] = (qOf[r.enquiry_number]||"no quote yet")+" – "+r.enquiry_number+" · "+(r.status||"Received")+(r.assigned_to&&r.assigned_to!=="Unassigned"?" · "+r.assigned_to:" · unassigned"); });
+      updateRow(key,{referenceOptions:opts, referenceLabels:labels});
     } else if(chaseWhat==="Order"){
       const { data } = await sb.from("sale_order_tbl").select("contract_number,status").eq("customer_name",companyName).neq("status","Despatched");
       updateRow(key,{referenceOptions:(data||[]).map(r=>r.contract_number+" — "+r.status)});
@@ -30453,8 +30673,10 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
               h("option",{value:"Projects"},"Projects"), h("option",{value:"Enquiry"},"Enquiry")
             )),
             h("td",{style:td}, (r.chaseWhat==="Cold"||r.chaseWhat==="Payment") ? h("span",{style:{color:T.muted}},"—") :
+              r.chaseWhat==="Offer" ? h(QuoteRefSearch,{value:r.chaseReference,companyName:r.companyName,onFocus:onFocusRow,style:boxStyle({}),   // 151
+                onPick:(e)=>pickQuoteRef(r._key,e), onForceNew:(no)=>setQrGate({ key:r._key, quote_no:no, company:r.companyName||"" })}) :
               h("select",{value:r.chaseReference,onChange:e=>updateRow(r._key,{chaseReference:e.target.value}),onFocus:onFocusRow,style:boxStyle({})},
-                h("option",{value:""},"Select…"), r.referenceOptions.map(o=>h("option",{key:o,value:o},o))
+                h("option",{value:""},"Select…"), r.referenceOptions.map(o=>h("option",{key:o,value:o},(r.referenceLabels&&r.referenceLabels[o])||o))
               )
             ),
             h("td",{style:td}, !r.companyName ? h("select",{disabled:true,style:boxStyle({opacity:0.5})},h("option",null,"Pick customer first")) :
@@ -30653,6 +30875,21 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
   // chaseReference may still be in "REF — STATUS" display form if it
   // was just picked from a dropdown and not yet saved, so it's split
   // down to the bare ref the same way saveOneRowSilently already does.
+  // 151: a quote without an enquiry — ask for it (Later never blocks the call)
+  enqAsk && h("div",{style:{position:"fixed",left:"50%",transform:"translateX(-50%)",bottom:18,zIndex:1400,background:"#fff3d6",border:"1px solid #9a6200",borderRadius:8,padding:"10px 14px",boxShadow:"0 6px 18px rgba(0,0,0,.18)",fontFamily:F,fontSize:13,display:"flex",gap:12,alignItems:"center",flexWrap:"wrap",maxWidth:"94vw"}},
+    h("span",null,h("b",null,enqAsk.entry.ref+" has no enquiry logged."), " Log it now so the quote has its enquiry details."),
+    h("button",{onClick:()=>{ setEnqLog({ key:enqAsk.key, line:enqAsk.entry.line }); setEnqAsk(null); },style:{background:"#1f5fa8",color:"#fff",border:"none",borderRadius:5,padding:"5px 12px",cursor:"pointer",fontSize:12.5}},"Log enquiry now"),
+    h("button",{onClick:()=>setEnqAsk(null),style:{background:"#fff",border:"1px solid #ccc",borderRadius:5,padding:"5px 12px",cursor:"pointer",fontSize:12.5}},"Later")),
+  enqLog && h(LogEnquiryModal,{ user, allocation:null, pkg:null, project:null, regLine:enqLog.line, onCancel:()=>setEnqLog(null),
+    onSaved:async(r)=>{ const k = enqLog.key; setEnqLog(null); await qrefLoad(true); const row = rowsRef.current.find(x=>x._key===k);
+      const e = row && qrefFind(row.chaseReference); if(e) updateRow(k,{ chaseReference: qrefOption(e) });
+      if(r) alert("Enquiry "+r.enquiryNumber+" logged for Quote# "+r.quoteNo+"."); } }),
+  // 151: gateway 1 — Log Follow-ups → Quote Register (new number) → Add New Customer, and back
+  qrGate && h("div",{style:{position:"fixed",inset:0,zIndex:1300,background:"#f4f2ea",overflow:"auto"}},
+    h(QuoteRegisterScreen,{ user, gateway:{ quote_no:qrGate.quote_no, company:qrGate.company, from:"Log Follow-ups" },
+      onGatewayDone:async(line)=>{ const g = qrGate; setQrGate(null); if(!line) return;
+        await qrefLoad(true); const e = qrefFind(line.quote_no) || { ref:line.quote_no, base:qrefBase(line.quote_no), src:"register", customer:line.customer_name||"", status:"", line, enq:"", hasEnq:false };
+        await pickQuoteRef(g.key, e); } })),
   historyPopupFor && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1500,display:"flex",alignItems:"center",justifyContent:"center"}},
     h("div",{style:{background:"#fff",borderRadius:8,padding:"20px 24px",width:380,maxWidth:"90%",fontFamily:F}},
       h("div",{style:{fontWeight:700,fontSize:14,marginBottom:14}},"View follow-up history"),
@@ -32062,7 +32299,7 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved, re
       await logAudit("INSERT","enquiry_tbl",enquiryNumber,"Logged enquiry for "+cust+", Quote# "+qn+(fromChase?" (from project chase)":"")+(card?" — card in "+ENQUIRY_DEPT+" pile":""),user?.username||"unknown",null,{company_name:cust,linked_reference_number:qn});
       if(regRow && regRow.id){
         const tie = (custRow && (custRow.id!==regRow.company_id || custRow.company_name!==regRow.customer_name)) ? { company_id:custRow.id, customer_name:custRow.company_name } : {};   // 140: tie the line to the customer
-        await sb.from("register_line_tbl").update({ enquiry_id:created.id, ...tie, updated_at:new Date().toISOString(), updated_by:me||user?.username||"" }).eq("id",regRow.id);   // 137
+        await sb.from("register_line_tbl").update({ enquiry_id:created.id, ...tie, ...(regRow.edate ? {} : { edate:enquiryDate }), updated_at:new Date().toISOString(), updated_by:me||user?.username||"" }).eq("id",regRow.id);   // 137
         if(tie.company_id) await logAudit("UPDATE","register_line_tbl",regRow.quote_no,"Register line tied to customer "+tie.customer_name+" (was \u201c"+(regRow.customer_name||"")+"\u201d)",user?.username||"unknown");
       }
       onSaved({ enquiryNumber, quoteNo:qn, enquiryId:created.id });
@@ -32109,7 +32346,7 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved, re
       h("div",{style:{marginBottom:10}}, fld("Subject (becomes the card title)", inp(subject,setSubject,"e.g. 200NB T-strainers, Luberef"))),
       h("div",{style:{display:"flex",gap:10,marginBottom:10,flexWrap:"wrap"}},
         RL ? null : fld("Quote# (from the Quote Register)", inp(quoteNo,setQuoteNo,"e.g. FEX260601")),
-        RL ? null : fld("Received on", inp(enquiryDate,setEnquiryDate,"","date")),
+        RL && RL.edate ? null : fld("Received on", inp(enquiryDate,setEnquiryDate,"","date")),   // 151: a line forced in from Log Follow-ups has no date yet
         fld("Last date for submission", inp(closingDate,setClosingDate,"","date"))),
       h("div",{style:{display:"flex",gap:10,marginBottom:10,flexWrap:"wrap"}},
         fld("Type", h("select",{value:enquiryType,onChange:e=>setEnquiryType(e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12}},h("option",{value:""},"—"),types.map(t=>h("option",{key:t,value:t},t)))),
@@ -33545,7 +33782,8 @@ function UnsavedAsk({ onSave, onDiscard, onStay, what }){
 // ---- QUOTE REGISTER (Sales -> Enquiry -> Quote Register) ----
 const REG_PAGE = 25;
 const REG_COLS = ["First OfferNo","Offer Date","Enquiry No","EDate","Customer Name","City","State","Country"];
-function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
+function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gateway, onGatewayDone }){
+  // 151: gateway = { quote_no, company, from } — opened from Log Follow-ups to save a quote number that is not in the app yet.
   const isAdmin = user?.role==="admin" || user?.role==="super_admin";
   const isSuper = user?.role==="super_admin";
   const today = toISODate(new Date());
@@ -33623,6 +33861,16 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
   },[cur,page,q,qAll,sortBy]);
   useEffect(()=>{ if(!fs) return; const f=(e)=>{ if(e.key==="Escape" && !ask && !logFor && !custForm) setFs(false); }; document.addEventListener("keydown",f); return ()=>document.removeEventListener("keydown",f); },[fs,ask,logFor,custForm]);
   useEffect(()=>{ if(ready) load(); },[ready,load]);
+  // 151: gateway — go to the tab of the number's prefix and open a new line with the number (and the customer) filled in
+  const gwDone = useRef(false);
+  useEffect(()=>{ if(!ready || !gateway || gwDone.current) return; gwDone.current = true; (async()=>{
+    const n = regNorm(gateway.quote_no); const px = (n.match(/^[A-Z]+/)||[""])[0];
+    const t = tabs.find(x=>x.is_open && x.prefix && regNorm(x.prefix)===px);
+    if(t){ setCur(t.tab_name); try{ localStorage.setItem("qr_tab",t.tab_name); }catch(e){} }
+    else setErr("No open register tab uses the prefix "+(px||"of this number")+". Check the number, or pick the right tab and type it again.");
+    setEdit({ id:null, d:{ ...blank, quote_no:n, edate:"" }, orig:{ ...blank, quote_no:"", edate:"" }, co:null, gw:true }); setChk({bad:[],warn:[],ok:false});
+    if(gateway.company) setTimeout(()=>pickCustomer({ company_name:gateway.company }), 0);
+  })(); },[ready, gateway]);
 
   // unsaved guard for the top menu
   const dirty = !!edit && JSON.stringify(edit.d)!==JSON.stringify(edit.orig);
@@ -33674,7 +33922,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
     // mandatory
     const miss = [];
     if(!n) miss.push("First OfferNo"); if(!String(d.enquiry_no||"").trim()) miss.push("Enquiry No (type NA if the customer gave none)");
-    if(!d.edate) miss.push("EDate"); if(!d.customer_name) miss.push("Customer Name");
+    if(!d.edate && !gateway) miss.push("EDate"); if(!d.customer_name) miss.push("Customer Name");   // 151: from Log Follow-ups the date comes with the enquiry
     if(miss.length) bad.push("Fill in: "+miss.join(", ")+".");
     if(d.customer_name && !d.company_id) bad.push("Pick the customer from the list, or Add New Customer.");
     if(d.company_id){
@@ -33748,10 +33996,12 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
       if(!edit.id){
         const { data: mx } = await sb.from("register_line_tbl").select("row_order").eq("tab_name",cur).order("row_order",{ascending:false}).limit(1);
         row.row_order = ((mx&&mx[0]&&mx[0].row_order)||0)+1;
-        const { data: ins, error } = await sb.from("register_line_tbl").insert({ ...row, created_by:by }).select().single();
+        let { data: ins, error } = await sb.from("register_line_tbl").insert({ ...row, created_by:by, ...(gateway ? { source:"Log Follow-ups" } : {}) }).select().single();
+        if(error && gateway && /source/i.test(error.message||"")) ({ data: ins, error } = await sb.from("register_line_tbl").insert({ ...row, created_by:by }).select().single());   // 151 SQL not run yet
         if(error){ alert(/duplicate|unique/i.test(error.message||"") ? "That number was just taken by someone else — the next free one is suggested again." : "Could not save the line:\n\n"+error.message); if(/duplicate|unique/i.test(error.message||"")) setEdit(e=>({...e})); return false; }
         await logAudit("INSERT","register_line_tbl",row.quote_no,"Quote Register: "+row.quote_no+" on "+regTabLabel(cur)+" for "+row.customer_name,by,null,row);
         setCounts(cs=>({ ...cs, [cur]:(cs[cur]||0)+1 }));
+        if(gateway && onGatewayDone){ setEdit(null); setChk({bad:[],warn:[],ok:false}); setUnsavedGuard(false); onGatewayDone(ins||row); return true; }
       } else {
         const { error } = await sb.from("register_line_tbl").update({ ...row, updated_by:by, updated_at:new Date().toISOString() }).eq("id",edit.id);
         if(error){ alert("Could not save the line:\n\n"+error.message); return false; }
@@ -33839,7 +34089,8 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
     }
     const rowPerLine = !!(t && t.owner_per_line);
     body.push(h("tr",{key:r.id},
-      td("n",h("b",{style:{color:"#1f4e8c"}},r.quote_no), q.trim()&&qAll ? h("span",{style:{fontSize:10.5,color:colors.mutedLight}}," ("+regTabLabel(r.tab_name)+")") : null),
+      td("n",h("b",{style:{color:"#1f4e8c"}},r.quote_no), q.trim()&&qAll ? h("span",{style:{fontSize:10.5,color:colors.mutedLight}}," ("+regTabLabel(r.tab_name)+")") : null,
+        r.source==="Log Follow-ups" ? h("div",{title:"Added from Log Follow-ups"+(r.created_by?" by "+r.created_by:"")+" — check it and log its enquiry",style:{fontSize:10,color:"#1f5fa8",background:"#e6eef8",borderRadius:8,padding:"0 6px",display:"inline-block",marginTop:2}},"from Log Follow-ups") : null),   // 151
       td("od",dmyOrNote(r.offer_date,r.offer_date_note)), td("en",r.enquiry_no||""), td("ed",dmyOrNote(r.edate,r.edate_note)),
       td("cu",r.customer_name||"", rowPerLine ? ownerShow(r) : null), td("ci",r.city||""), td("st",r.state||""), td("co",r.country||""),
       td("x", r.enquiry_id
@@ -33855,8 +34106,11 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
   const lastPage = Math.max(0, Math.ceil(total/REG_PAGE)-1); const pg = page<0 ? (sortBy==="excel" ? lastPage : 0) : page;
   const groups = []; tabs.forEach(t=>{ const g = t.group_label||""; if(!groups.includes(g)) groups.push(g); });
   return h("div",{style: fs ? {position:"fixed",inset:0,zIndex:900,background:"#f4f2ea",padding:"10px 16px",overflow:"auto"} : {padding:20}},
+    gateway ? h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",background:"#1f5fa8",color:"#fff",borderRadius:7,padding:"9px 14px",marginBottom:10,fontSize:13}},   // 151
+      h("span",null,"You came from ",h("b",null,gateway.from||"Log Follow-ups"),". Save this line to use ",h("b",null,regNorm(gateway.quote_no))," as the reference — your follow-up rows are kept."),
+      h("button",{onClick:()=>guard(()=>onGatewayDone && onGatewayDone(null)),style:{...btnSmall,background:"#fff",color:"#1f5fa8",borderColor:"#fff",fontWeight:600}},"← Back to "+(gateway.from||"Log Follow-ups"))) : null,
     h("div",{style:{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:4}},
-      h("h2",{style:{margin:0,fontSize:fs?18:undefined}},"Quote Register"),
+      h("h2",{style:{margin:0,fontSize:fs?18:undefined}},gateway?"Quote Register — new quote number":"Quote Register"),
       h("button",{onClick:()=>setFs(x=>!x),title:fs?"Back to the normal view (Esc)":"Use the whole screen",style:{...btnSmall,marginLeft:fs?"auto":0,order:fs?9:0}},fs?"\u2715 Exit full screen":"\u26f6 Full screen"),
       isSuper ? h("span",{style:{fontSize:11.5,color:colors.muted}},"Who covers each tab: CRM → CRM Setup → Register Tabs & People") : null),
     fs ? null : h("div",{style:{fontSize:12,color:colors.muted,marginBottom:10,maxWidth:980}},"The quote register, tab by tab as in the Excel. A new Quote# is made here first; then Log Enquiry on its line. "+(me?.canEdit?"You can add and edit lines.":"Only the Sales Coordinator and Admins add or edit lines.")),
@@ -42765,18 +43019,45 @@ function OverdueCallsPrompt({ user, onDone, onEmpty }){
 // today clears an older date). Its Next follow-up date says when, next_followup_by says Call or Visit (older = Call).
 // Overdue = before today, Today, Proposed = the next 7 days. Tasks: the person's open cards and sub-tasks
 // (Open / In Progress) overdue or due today.
+// 151: names of the live customers on the Quote Register tabs this person covers (cached 5 minutes).
+const MY_TAB_CO_CACHE = {};
+async function myTabCompanyNames(empName){
+  const c = MY_TAB_CO_CACHE[empName]; if(c && Date.now()-c.at < 300000) return c.names;
+  await regLoad(); const tabs = regMyTabs(empName); let names = [];
+  if(tabs.length){
+    const all = await fetchPaged(()=>sb.from("companies").select("id,company_name,billing_country,billing_state,is_archived").order("id"));
+    names = Array.from(new Set(all.filter(co=>co.is_archived!==true && co.company_name && regCompanyInTabs(co,tabs)).map(co=>co.company_name)));
+  }
+  MY_TAB_CO_CACHE[empName] = { at:Date.now(), names };
+  return names;
+}
 async function loadMyDayData(user, empName, isSales){
   const today = toISODate(new Date()), wk = addDaysISO(today, 7);
   let fu = [], tasks = [];
   if(isSales && user && user.username){
     try{
       const since = addDaysISO(today, -400);
-      const acts = await fetchPaged(()=>sb.from("activity_log_tbl").select("*").eq("logged_by",user.username).gte("activity_date",since).order("created_at",{ascending:false}).order("id",{ascending:false}));
+      let acts = await fetchPaged(()=>sb.from("activity_log_tbl").select("*").eq("logged_by",user.username).gte("activity_date",since).order("created_at",{ascending:false}).order("id",{ascending:false}));
+      // 151: plus every call on the customers of my Quote Register tabs, whoever logged it (the latest entry still decides).
+      try{
+        let me = empName;
+        if(!me){ const { data: u } = await sb.from("app_users").select("employee_name").eq("username",user.username).maybeSingle(); me = u && u.employee_name; }
+        const names = me ? await myTabCompanyNames(me) : [];
+        if(names.length){
+          const seen = new Set(acts.map(a=>a.id));
+          for(let i=0;i<names.length;i+=120){
+            const part = names.slice(i,i+120);
+            const more = await fetchPaged(()=>sb.from("activity_log_tbl").select("*").in("company_name",part).gte("activity_date",since).order("created_at",{ascending:false}).order("id",{ascending:false}));
+            more.forEach(a=>{ if(!seen.has(a.id)){ seen.add(a.id); acts.push(a); } });
+          }
+          acts.sort((x,y)=>String(y.created_at||"").localeCompare(String(x.created_at||"")) || ((y.id||0)-(x.id||0)));
+        }
+      }catch(e){ console.warn("My day: tab customers", e); }
       const latest = new Map();
       acts.forEach(a=>{ const k = String(a.company_name||"").trim().toLowerCase()+"|"+String(a.chase_reference||"").trim().toLowerCase(); if(!latest.has(k)) latest.set(k,a); });
       fu = Array.from(latest.values()).filter(a=>a.next_followup_date && String(a.next_followup_date).slice(0,10)<=wk).map(a=>{
         const due = String(a.next_followup_date).slice(0,10);
-        return { ...a, by:fuNextBy(a.next_followup_by), due, bucket: due<today?"over":due===today?"today":"prop" };
+        return { ...a, by:fuNextBy(a.next_followup_by), due, bucket: due<today?"over":due===today?"today":"prop", otherBy: a.logged_by && a.logged_by!==user.username ? a.logged_by : "" };
       }).sort((x,y)=>x.due.localeCompare(y.due) || String(x.company_name||"").localeCompare(String(y.company_name||"")));
     }catch(e){ console.warn("My day: follow-ups", e); }
   }
@@ -42915,7 +43196,7 @@ function MyDayPopup({ user, employee, isSales, data, onGo, onClose, onFixGap, on
         h("tbody",null, rows.map(a=>{ const late = myDayDaysLate(a.due, today);
           const isOffer = (a.chase_what||"Offer")==="Offer" && a.chase_reference;
           return h("tr",{key:a.id,onDoubleClick:()=>goLog(a),title:"Double-click to log today's "+a.by.toLowerCase(),style:{cursor:"pointer"}},
-            td(h("b",null,a.company_name||"—")), td(a.chase_reference||"—",{color:colors.muted}),
+            td(h("div",null,h("b",null,a.company_name||"—"),a.otherBy?h("div",{style:{fontSize:10.5,color:colors.muted}},"last call by "+a.otherBy):null)), td(a.chase_reference||"—",{color:colors.muted}),
             td(h("span",{style:{fontSize:10.5,border:"1px solid "+colors.border,borderRadius:4,padding:"1px 6px",color:colors.muted}},a.by)),
             td(fmtDMY(a.due),{whiteSpace:"nowrap"}),
             td(a.bucket==="over" ? pill(late+" day"+(late===1?"":"s")+" overdue","over") : a.bucket==="today" ? pill("Today","today") : pill("Proposed","prop")),
@@ -46529,6 +46810,12 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
   const [ltDue,setLtDue] = useState("");
   const [ltCol,setLtCol] = useState("");
   const [expanded,setExpanded] = useState({});     // 128: card id -> true when "more" is open
+  const [dueEd,setDueEd] = useState(null);         // 151: id of the card / sub-task whose due date is being changed in place
+  const [dueOk,setDueOk] = useState(null);
+  // 151: All boards — every department's board as a band; folded / open and the band order are kept per person in this browser
+  const [abOpen,setAbOpen] = useState(()=>{ try{ return JSON.parse(localStorage.getItem("ab_open")||"null"); }catch(e){ return null; } });
+  const [abOrder,setAbOrder] = useState(()=>{ try{ return JSON.parse(localStorage.getItem("ab_order")||"[]"); }catch(e){ return []; } });
+  const [abDrag,setAbDrag] = useState("");
   const [listTbl,setListTbl] = useState(null);     // 128: {key,title,pile} — one list shown as a table
   const [xfer,setXfer] = useState(null);           // 145: transfer cards {fd, fp, td, tp, only, ticks:{id:true}, keep, due, why, busy}
   const SORT_KEY = "tb_sort_"+(user?.id||user?.username||"");
@@ -46679,8 +46966,17 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
       if(!toPile && (!a.date || a.date<today)){ alert("Give it a due date (today or later), so it lands in the right column on "+a.assignTo+"'s board."); return; }
       const due = toPile ? (t.due_date||null) : a.date;
       const toE = empOf(a.assignTo);   // 123: a person in two departments keeps the card's (or this board's) department
-      const newDept = toPile ? (a.pileDept || taskDept(t)) : (empInDept(toE, taskDept(t)) ? taskDept(t) : (mode==="assign" && empInDept(toE, dept)) ? dept : (deptOf(a.assignTo) || taskDept(t)));
-      const ok = await move(t,{assignee:toPile?null:a.assignTo, due_date:due, department:newDept}, taskWho(t)+" → "+(toPile?newDept+" Unassigned pile":a.assignTo)+(due?", due "+fmtDMY(due):""));
+      const newDept = a.xferDept ? a.xferDept : toPile ? (a.pileDept || taskDept(t)) : (empInDept(toE, taskDept(t)) ? taskDept(t) : (mode==="assign" && empInDept(toE, dept)) ? dept : (mode==="all" && a.pileDept && empInDept(toE, a.pileDept)) ? a.pileDept : (deptOf(a.assignTo) || taskDept(t)));
+      const what = taskWho(t)+" → "+(toPile?newDept+" Unassigned pile":a.assignTo)+(due?", due "+fmtDMY(due):"")+(a.xferDept?" (moved from "+(taskDept(t)||"no department")+" to "+newDept+" on All boards — "+a.why+")":"");
+      const ok = await move(t,{assignee:toPile?null:a.assignTo, due_date:due, department:newDept}, what);
+      if(ok!==false && a.xferDept){   // 151: a transfer on All boards — sub-tasks go with the card, the receiver is told
+        for(const s2 of tasks.filter(k=>k.parent_id===t.id && k.status!=="done" && (k.assignee||null)===(t.assignee||null))){
+          const { error } = await sb.from("task_tbl").update({ assignee:toPile?null:a.assignTo, department:newDept, moved_by:me, moved_at:new Date().toISOString(), moved_what:"Moved with its card — "+a.why }).eq("id",s2.id);
+          if(!error) await taskLog(s2.id, me, "Moved with its card “"+t.title+"” to "+newDept+" — "+a.why); }
+        try{ const to = toPile ? approvers.filter(x=>x.department===newDept).map(x=>x.employee_name) : [a.assignTo];
+          if(to.length) await sb.from("notifications_tbl").insert(to.map(n=>({ employee_name:n, message:"“"+t.title+"” moved to "+(toPile?"the "+newDept+" Unassigned pile":"you")+" by "+(me||"")+" — "+a.why }))); }catch(e){}
+        await load(false);
+      }
       if(ok!==false) setDateAsk(null); return;
     }
     if(!a.date || a.date<=today){ alert("Pick a date after today."); return; }
@@ -46776,6 +47072,26 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
   const sharedChip = (t)=> taskShared(t) ? h("span",{title:"One card on several boards \u2014 a change made anywhere shows everywhere. Home board: "+taskDept(t)+" (approval and reports count it there, once).",
       style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#efe8fb",color:"#5b3a99",marginBottom:3,marginRight:4}},
       "\ud83d\udd17 "+(dept && mode==="assign" && dept!==taskDept(t) ? "Shared from "+taskDept(t) : "Also on "+taskAlso(t).join(", "))) : null;
+  // 151: the due date changed right on the card (or sub-task, or table row). A procurement sub-task's date comes from the Gantt.
+  const dueChip = (t, small)=>{
+    const st = taskStage(t,today); if(st==="done") return null;
+    const fs = small ? 10.5 : 11.5;
+    if(t.proc_plan_id && t.parent_id) return h("span",{onClick:ev=>{ ev.stopPropagation(); if(onOpenGantt) onOpenGantt({ contract:t.ref||(parentOf(t)||{}).ref||"", form:t.proc_form||"", taskId:t.id }); },
+      title:"Set on the Procurement Gantt — click to open the Gantt at this form",style:{fontSize:fs,border:"1px solid "+colors.border,borderRadius:10,padding:"0 7px",background:"#f4f2ea",color:colors.muted,cursor:onOpenGantt?"pointer":"help",whiteSpace:"nowrap"}},"🔒 "+(t.due_date?fmtDMY(t.due_date):"no date")+" · set on the Gantt");
+    if(dueEd===t.id) return h("span",{onClick:ev=>ev.stopPropagation(),style:{display:"inline-flex",gap:4,alignItems:"center"}},
+      h("input",{type:"date",autoFocus:true,defaultValue:d10(t.due_date)||"",style:{...inputStyle,width:140,padding:"1px 5px",fontSize:fs},
+        onKeyDown:ev=>{ if(ev.key==="Escape") setDueEd(null); if(ev.key==="Enter") ev.currentTarget.blur(); },
+        onBlur:async(ev)=>{ const v = ev.currentTarget.value; setDueEd(null); if(!v || v===d10(t.due_date)) return;
+          if(await move(t,{ due_date:v }, "Due date "+(t.due_date?fmtDMY(t.due_date):"none")+" → "+fmtDMY(v)+" (on the board)")){ setDueOk(t.id); setTimeout(()=>setDueOk(x=>x===t.id?null:x),2500); } }}),
+      h("span",{style:{fontSize:10,color:"#0f7a5c"}},"Enter saves · Esc cancels"));
+    const od = taskOverdue(t,today);
+    if(!canEdit(t)) return h("span",{style:{fontSize:fs,color:od?colors.danger:colors.muted,whiteSpace:"nowrap"}},t.due_date?fmtDMY(t.due_date):"no date");
+    return h("span",{style:{display:"inline-flex",gap:4,alignItems:"center"}},
+      h("button",{onClick:ev=>{ ev.stopPropagation(); setDueEd(t.id); },onMouseDown:ev=>ev.stopPropagation(),title:"Click to change the due date",
+        style:{font:"inherit",fontSize:fs,border:"1px dashed "+(od?colors.danger:"#0f7a5c"),borderRadius:10,padding:"0 7px",background:od?"#fdecea":"#e3f2ec",color:od?colors.danger:"#0f7a5c",cursor:"pointer",whiteSpace:"nowrap"}},
+        "📅 "+(t.due_date?fmtDMY(t.due_date):"set date")),
+      dueOk===t.id ? h("span",{style:{fontSize:10,color:"#0f7a5c"}},"✓ saved") : null);
+  };
   const card = (t, opts)=>{
     const o = opts||{};
     const e = enqOf(t); const st = taskStage(t,today); const stO = TASK_STAGES.find(s=>s.key===st);
@@ -46798,7 +47114,9 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
       line2 ? h("div",{style:{fontSize:11,color:colors.muted,marginTop:1}},line2) : null,
       st!=="done" ? waitBadge(t,true) : null, e ? regretBadge(e,true) : null,   // 135 Build 4
       h("div",{style:{display:"flex",alignItems:"center",gap:6,marginTop:3,fontSize:11.5}},
-        h("span",{style:{color:od?colors.danger:st==="today"?"#854f0b":t.due_date||st==="done"?colors.text:colors.mutedLight,fontWeight:od||st==="today"?700:400}},"📅 "+dueTxt),
+        st==="done" ? h("span",{style:{color:colors.text}},"📅 "+dueTxt)
+          : h("span",{style:{display:"inline-flex",gap:5,alignItems:"center",flexWrap:"wrap",color:od?colors.danger:st==="today"?"#854f0b":colors.text,fontWeight:od||st==="today"?700:400}},
+              "Task due", dueChip(t), od ? h("span",null,over+" day"+(over===1?"":"s")+" over") : null, t.start_date ? h("span",{style:{fontWeight:400,color:colors.muted}},"starts "+fmtDMY(t.start_date)) : null),   // 151: due date changed in place
         clPast ? h("span",{title:"Last date for submission has passed: "+fmtDMY(cl),style:{color:colors.danger,fontWeight:700}},"⏳") : null,
         kOd ? h("span",{title:kOd+" sub-task(s) overdue",style:{color:colors.danger,fontSize:10.5}},"▸"+kOd) : null,
         h("span",{onClick:ev=>{ ev.stopPropagation(); setExpanded(m=>{ const x={...m}; if(x[t.id]) delete x[t.id]; else x[t.id]=true; return x; }); },
@@ -46821,7 +47139,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
           subOpen[t.id] ? kids.slice().sort(byDue).map(k=>h("div",{key:k.id,onClick:()=>setOpenId(k.id),style:{display:"flex",gap:6,alignItems:"center",padding:"3px 0 3px 8px",borderLeft:"2px solid #e3ebe7",marginLeft:4,cursor:"pointer"}},
               h("span",{style:{width:8,height:8,borderRadius:4,background:dotC(k),flexShrink:0}}),
               h("span",{style:{flex:1}},(k.status==="done"?"✓ ":"")+k.title,k.assignee!==t.assignee?h("span",{style:{color:colors.mutedLight}}," · "+taskWho(k)):null),
-              h("span",{style:{color:taskOverdue(k,today)?colors.danger:colors.mutedLight}},k.due_date?fmtDMY(k.due_date):""))) : null) : null,
+              k.status==="done" ? null : dueChip(k,true))) : null) : null,   // 151
         h("div",{style:{marginTop:6,fontSize:10.5,color:colors.mutedLight,lineHeight:1.45}},
           h("div",null,"Created by ",h("b",{style:{color:colors.muted}},t.created_by||"—")," · "+(t.created_at?fmtDMY(t.created_at):"")),
           t.moved_by ? h("div",null,"Moved by ",h("b",{style:{color:colors.muted}},t.moved_by)," · "+(t.moved_at?fmtDMYTime(t.moved_at):""),h("div",null,t.moved_what||"")) : h("div",null,"Not moved yet"))) : null);
@@ -46845,7 +47163,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     onBackToEnquiry ? h("button",{onClick:onBackToEnquiry,style:{...btnPrimary,padding:"8px 14px",background:"#0f7a5c"}},"\u2190 Back to the enquiry") : null,   // 127
     h("h2",{style:{margin:0,fontSize:16}},"Tasks"),
     h("div",{style:{display:"flex",border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden"}},
-      authorised ? tabBtn("assign","Task Assignment Board") : null, tabBtn("emp",authorised?"Employee board":"My board"), tabBtn("dash","Dashboards")),
+      authorised ? tabBtn("assign","Task Assignment Board") : null, tabBtn("emp",authorised?"Employee board":"My board"), tabBtn("all","All boards"), tabBtn("dash","Dashboards")),
     mode==="assign" ? h("select",{value:dept,onChange:e=>setDept(e.target.value),style:{...inputStyle,width:200,padding:"7px 9px"}},authDepts.map(d=>h("option",{key:d,value:d},d))) : null,
     mode==="emp" && authorised ? h("select",{value:who,onChange:e=>setWho(e.target.value),style:{...inputStyle,width:230,padding:"7px 9px"}},
       depts.map(dp=>h("optgroup",{key:dp,label:dp},visibleEmps.filter(e=>(e.department||"(no department)")===dp || empBoards(e).includes(dp)).map(e=>h("option",{key:e.employee_name,value:e.employee_name},e.employee_name+(e.employee_name===me?" (me)":"")))))) : null,
@@ -47023,6 +47341,22 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
   };
   const listTableModal = ()=>{
     if(!listTbl) return null;
+    // 151: Summary (one row per card, sub-tasks counted) or Detailed (each card, then its sub-tasks) — asked when the table opens
+    const ltLast = (()=>{ try{ return localStorage.getItem("lt_view")||""; }catch(e){ return ""; } })();
+    const setView = (v)=>{ try{ localStorage.setItem("lt_view",v); }catch(e){} setListTbl(x=>({ ...x, view:v })); };
+    if(!listTbl.view){
+      const opt = (v,t,d)=> h("button",{onClick:()=>setView(v),style:{textAlign:"left",border:"1px solid "+(ltLast===v?"#0f7a5c":colors.border),background:ltLast===v?"#e3f2ec":"#fff",borderRadius:8,padding:"12px 14px",cursor:"pointer",font:"inherit"}},
+        h("b",{style:{display:"block",fontSize:13.5}},t+(ltLast===v?"  (last used)":"")), h("span",{style:{fontSize:12,color:colors.muted}},d));
+      return h("div",{onClick:e=>{ if(e.target===e.currentTarget) setListTbl(null); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1150,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"80px 12px"}},
+        h("div",{style:{background:"#fff",borderRadius:9,width:520,maxWidth:"100%",padding:"16px 18px",display:"grid",gap:12}},
+          h("b",{style:{fontSize:14}},"Table of “"+listTbl.title+"” — which view?"),
+          h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:10}},
+            opt("sum","Summary","One row per card; its sub-tasks counted."),
+            opt("det","Detailed","Each card, then its sub-tasks — holder, stage, due date.")),
+          h("div",{style:{textAlign:"right"}},h("button",{onClick:()=>setListTbl(null),style:btnSmall},"Cancel"))));
+    }
+    const detailed = listTbl.view==="det";
+    const subsOfT = (t)=> tasks.filter(k=>k.parent_id===t.id && k.status!=="done").sort(byDue);
     let rows = itemsForKey(listTbl.key);
     const colVal = { enq:t=>(enqOf(t)||{}).enquiry_number||"", title:t=>t.title||"", cust:t=>custOf(t), quote:t=>quoteOf(t), close:t=>closeOf(t)||"9", due:t=>d10(t.due_date)||"9",
       type:t=>t.task_type||"", by:t=>t.created_by||"", on:t=>d10(t.created_at), done:t=>d10(t.approved_at) };
@@ -47053,21 +47387,31 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
             h("input",{key:"d",type:"date",value:ltDue,min:today,onChange:e=>setLtDue(e.target.value),title:"Leave empty to use each card's task type rule",style:{...inputStyle,width:150,padding:"5px 8px"}}),
             h("button",{key:"a",onClick:assignAll,style:{...btnPrimary,padding:"6px 12px",background:"#0f7a5c"}},"Assign"+(picked.length?" "+picked.length:""))] : null,
           h("button",{onClick:()=>listPdf(rows, listTbl.title),style:btnSmall},"Download PDF"),   // 128c
-          h("button",{onClick:()=>exportXlsx(rows.map(t=>({t,lvl:t.parent_id?1:0})), listTbl.title),style:btnSmall},"Download to Excel"),
+          h("span",{style:{display:"inline-flex",border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden"}},   // 151
+            [["sum","Summary"],["det","Detailed"]].map(([v,l])=>h("button",{key:v,onClick:()=>setView(v),style:{border:"none",padding:"5px 11px",fontSize:12,cursor:"pointer",background:listTbl.view===v?colors.dark:"#fff",color:listTbl.view===v?"#fff":colors.muted}},l))),
+          h("button",{onClick:()=>exportXlsx(detailed ? rows.flatMap(t=>[{t,lvl:t.parent_id?1:0}, ...subsOfT(t).map(k=>({t:k,lvl:1}))]) : rows.map(t=>({t,lvl:t.parent_id?1:0})), listTbl.title+(detailed?" (detailed)":"")),style:btnSmall},"Download to Excel"),
           h("button",{onClick:()=>{ setListTbl(null); setLtSel({}); },style:btnSmall},"Close")),
         listTbl.pile ? h("div",{style:{fontSize:11,color:colors.muted,marginBottom:6}},"Due date: leave it empty and each card gets its task type's rule (Enquiry / Offer: 3 days)."): null,
         h("div",{style:{overflowX:"auto"}},h("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:12.5,minWidth:950}},
           h("thead",null,h("tr",null, listTbl.pile ? h("th",{style:{borderBottom:"2px solid "+colors.dark}},h("input",{type:"checkbox",checked:rows.length>0&&picked.length===rows.length,onChange:e=>{ const m={}; if(e.target.checked) rows.forEach(t=>{ m[t.id]=true; }); setLtSel(m); }})) : null,
-            th("enq","Enquiry"),th("cust","Customer"),th("quote","Quote#"),th("title","Subject / task"),th("type","Type"),th("close","Last date for submission"),th("due","Task due date"),th("","Stage"),th("by","Created by"),th("on","Created on"),th("done","Completed"))),
+            th("enq","Enquiry"),th("cust","Customer"),th("quote","Quote#"),th("title",detailed?"Subject / task — sub-tasks below":"Subject / task"),th("type","Type"),th("close","Last date for submission"),th("due","Task due date"),th(null,"Stage"),detailed?th(null,"With"):th(null,"Sub-tasks"),th("by","Created by"),th("on","Created on"),th("done","Completed"))),
           h("tbody",null, rows.length===0 ? h("tr",null,td("Nothing in this list.",{color:colors.mutedLight})) :
             rows.map(t=>{ const e=enqOf(t); const st=TASK_STAGES.find(x=>x.key===taskStage(t,today)); const od=taskOverdue(t,today);
               return h("tr",{key:t.id,onClick:()=>setOpenId(t.id),style:{cursor:"pointer",background:od?"#fbefec":"transparent"}},
                 listTbl.pile ? td(h("input",{type:"checkbox",checked:!!ltSel[t.id],onClick:ev=>ev.stopPropagation(),onChange:ev=>setLtSel(m=>({...m,[t.id]:ev.target.checked}))})) : null,
                 td(e?h("b",null,e.enquiry_number):"—"), td(custOf(t)||"—"), td(quoteOf(t)||"—"), td(t.title), td(t.task_type||"—"),
                 td(closeOf(t)?fmtDMY(closeOf(t)):"—",{color:closeOf(t)&&closeOf(t)<today&&t.status!=="done"?colors.danger:colors.text}),
-                td(t.due_date?fmtDMY(t.due_date)+(od?" ("+taskDaysOver(t,today)+"d over)":""):"—",{color:od?colors.danger:colors.text,fontWeight:od?700:400,whiteSpace:"nowrap"}),
+                td(t.status==="done" ? (t.due_date?fmtDMY(t.due_date):"—") : h("span",{style:{display:"inline-flex",gap:4,alignItems:"center",flexWrap:"wrap"}},dueChip(t,true),od?h("span",{style:{color:colors.danger,fontWeight:700,fontSize:11}},taskDaysOver(t,today)+"d over"):null),{whiteSpace:"nowrap"}),   // 151
                 td(h("span",{style:{fontSize:10.5,fontWeight:700,color:"#fff",background:st.color,borderRadius:9,padding:"2px 8px",whiteSpace:"nowrap"}},st.label)),
-                td(t.created_by||"—"), td(t.created_at?fmtDMY(t.created_at):"—"), td(t.status==="done"&&t.approved_at?fmtDMY(t.approved_at):"—")); }))))));
+                detailed ? td(taskWho(t)) : (()=>{ const ks = subsOfT(t); const late = ks.filter(k=>taskOverdue(k,today)).length;
+                  return td(ks.length ? h("span",null,ks.length+" sub-task"+(ks.length===1?"":"s"),late?h("span",{style:{color:colors.danger}}," · "+late+" late"):null) : "—"); })(),
+                td(t.created_by||"—"), td(t.created_at?fmtDMY(t.created_at):"—"), td(t.status==="done"&&t.approved_at?fmtDMY(t.approved_at):"—")); }).flatMap((row,i)=>{ if(!detailed) return [row]; const t = rows[i];
+              return [row, ...subsOfT(t).map(k=>{ const kst = TASK_STAGES.find(x=>x.key===taskStage(k,today)); const kod = taskOverdue(k,today);
+                return h("tr",{key:"k"+k.id,onClick:()=>setOpenId(k.id),style:{cursor:"pointer",background:"#f7f6f1",fontSize:12}},
+                  listTbl.pile ? td("") : null, td(""), td(""), td(""), td("↳ "+k.title,{paddingLeft:24,color:colors.muted}), td(k.proc_form||k.task_type||"—"), td(""),
+                  td(h("span",{style:{display:"inline-flex",gap:4,alignItems:"center"}},dueChip(k,true),kod?h("span",{style:{color:colors.danger,fontWeight:700,fontSize:11}},taskDaysOver(k,today)+"d over"):null),{whiteSpace:"nowrap"}),
+                  td(kst?h("span",{style:{fontSize:10,fontWeight:700,color:"#fff",background:kst.color,borderRadius:9,padding:"1px 7px",whiteSpace:"nowrap"}},kst.label):"—"),
+                  td(taskWho(k)), td(k.created_by||"—"), td(k.created_at?fmtDMY(k.created_at):"—"), td("")); })]; }))))));
   };
 
   // ---------- Task Assignment Board ----------
@@ -47156,6 +47500,58 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
           listBody(shList.map(t=>h("div",{key:t.id},h("div",{style:{fontSize:10.5,color:"#5b3a99",fontWeight:700,margin:"0 0 2px 2px"}},taskWho(t)),card(t))))) : null));
   };
 
+  // ---------- 151: ALL BOARDS — every department's Task Assignment Board as a band, cards movable across lists and departments ----------
+  const allDrop = (id, person, d)=>{
+    setDragOver("");
+    const t = tasks.find(x=>String(x.id)===String(id)); if(!t) return;
+    const toPile = person===TASK_PILE;
+    if(toPile ? (taskIsPile(t) && taskDept(t)===d) : (t.assignee===person && taskDept(t)===d)) return;
+    if(!canEdit(t)){ alert("Only "+(t.assignee||"its holder")+", whoever created it, the board's approver or an Admin can move “"+t.title+"”."); return; }
+    const toE = toPile ? null : empOf(person);
+    const cross = taskDept(t)!==d && (toPile || !empInDept(toE, taskDept(t)));
+    let why = "";
+    if(cross){ const r = window.prompt("Move “"+t.title+"” from "+(taskDept(t)||"no department")+" to "+d+(toPile?" (Unassigned pile)":" ("+person+")")+".\n\nReason (goes into the card's history):",""); if(r===null) return; why = r.trim(); if(!why){ alert("A reason is needed to move a card to another department."); return; } }
+    const keep = (t.due_date&&String(t.due_date).slice(0,10)>=today) ? String(t.due_date).slice(0,10) : "";
+    const ty = taskTypes.find(x=>x.type_name===t.task_type);
+    setDateAsk({ pileDept:d, task:t, date: keep || (!toPile ? (taskTypeDue(ty,today) || (t.enquiry_id ? addDaysISO(today,3) : "")) : ""), assignTo:person, xferDept: cross ? d : null, why });
+  };
+  const allView = ()=>{
+    const all = Array.from(new Set([...deptMaster, ...emps.flatMap(x=>empBoards(x))].filter(x=>x && !isInterDept(x))));
+    const mine = deptOf(me);
+    const ordered = [...abOrder.filter(d=>all.includes(d)), ...all.filter(d=>!abOrder.includes(d)).sort((a,b)=>(b===mine)-(a===mine) || a.localeCompare(b))];
+    const isOpen = (d)=> abOpen ? !!abOpen[d] : d===mine;
+    const toggle = (d)=>{ const n = { ...(abOpen || (mine?{[mine]:true}:{})), [d]:!isOpen(d) }; setAbOpen(n); try{ localStorage.setItem("ab_open",JSON.stringify(n)); }catch(e){} };
+    const moveBand = (from,to)=>{ if(!from || from===to) return; const a = ordered.filter(x=>x!==from); const i = a.indexOf(to); a.splice(ordered.indexOf(from)<ordered.indexOf(to)?i+1:i,0,from); setAbOrder(a); try{ localStorage.setItem("ab_order",JSON.stringify(a)); }catch(e){} };
+    const band = (d)=>{
+      const members = emps.filter(e=>empInDept(e,d) && e.employee_name!=="Unassigned");
+      const pile = tasks.filter(t=>taskIsPile(t) && onBoard(t,d) && t.status!=="done" && passes(t));
+      const itemsOf = (e)=> boardItems(e.employee_name).filter(t=>t.status!=="done" && itemPasses(t) && ((e.department||"")===d || onBoard(t,d)));
+      const total = pile.length + members.reduce((n,e)=>n+itemsOf(e).length,0);
+      const late = pile.filter(t=>taskOverdue(t,today)).length + members.reduce((n,e)=>n+itemsOf(e).filter(t=>taskOverdue(t,today)).length,0);
+      const open = isOpen(d);
+      const col = (p, list, isPile)=> h("div",{key:p,onDragOver:e=>{ e.preventDefault(); if(dragOver!==d+"|"+p) setDragOver(d+"|"+p); },onDragLeave:()=>setDragOver(""),
+          onDrop:e=>{ e.preventDefault(); const id = e.dataTransfer.getData("text/plain"); if(id) allDrop(id, p, d); },
+          style:{minWidth:235,width:235,flexShrink:0,background:isPile?"#f6efe2":"#eef3f1",border:isPile?"2px dashed #c9a04a":"none",borderRadius:8,padding:7,minHeight:120,outline:dragOver===d+"|"+p?"2px dashed #0f7a5c":"none"}},
+        h("div",{style:{display:"flex",alignItems:"center",gap:6,fontWeight:700,fontSize:12,marginBottom:6}},
+          isPile ? h("span",null,"📥 Unassigned") : h("span",{onDoubleClick:()=>openBoard(p),title:"Double-click to open "+p+"'s board",style:{cursor:"pointer"}},p),
+          h("span",{style:{marginLeft:"auto",fontWeight:400,fontSize:11,background:"#fff",borderRadius:9,padding:"0 7px",color:colors.muted}},list.length)),
+        list.length ? sortList((isPile?"pile:":"p:")+p, list).map(t=>isPile ? card(t) : renderItem(t,p)) : h("div",{style:{fontSize:11,color:colors.mutedLight,textAlign:"center",padding:"10px 4px"}},isPile?"Nothing waiting":"No open tasks"));
+      return h("div",{key:d,onDragOver:e=>{ if(abDrag) e.preventDefault(); },onDrop:e=>{ if(abDrag){ e.preventDefault(); moveBand(abDrag,d); setAbDrag(""); } },
+          style:{border:"1px solid "+colors.border,borderRadius:9,background:"#fff",marginBottom:10,opacity:abDrag===d?0.5:1}},
+        h("div",{onClick:()=>toggle(d),style:{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",cursor:"pointer",background:d===mine?"#e3f2ec":"#f7f6f1",borderRadius:open?"9px 9px 0 0":9}},
+          h("span",{draggable:true,onClick:e=>e.stopPropagation(),onDragStart:e=>{ e.stopPropagation(); setAbDrag(d); try{ e.dataTransfer.setData("text/x-band",d); }catch(x){} },onDragEnd:()=>setAbDrag(""),title:"Drag to move this band",style:{cursor:"grab",color:colors.mutedLight,fontSize:15}},"⠿"),
+          h("b",{style:{fontSize:13.5}},(open?"▾ ":"▸ ")+d), d===mine ? h("span",{style:{fontSize:10.5,color:"#0f7a5c",fontWeight:700}},"your department") : null,
+          h("span",{style:{fontSize:11.5,color:colors.muted}},members.length+" people · "+total+" open card"+(total===1?"":"s")+(pile.length?" · "+pile.length+" waiting":"")),
+          late ? h("span",{style:{fontSize:11,fontWeight:700,color:"#fff",background:colors.danger,borderRadius:9,padding:"0 7px"}},late+" overdue") : null),
+        open ? h("div",{style:{display:"flex",gap:8,overflowX:"auto",alignItems:"flex-start",padding:"8px 10px 10px"}},
+          col(TASK_PILE, pile, true), ...members.map(e=>col(e.employee_name, itemsOf(e), false))) : null);
+    };
+    return h("div",null,
+      h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:8,maxWidth:1000}},"Every department's board in one place. Click a band to open or fold it, drag ⠿ to reorder the bands (kept for you in this browser). Drag a card to any list: within a department it is a hand-out (asks the due date); into another department it is a transfer and asks the reason. The usual rules apply — a card moves only if you may move it."),
+      ordered.map(band),
+      onGoToTab ? h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",fontSize:12,color:colors.muted,marginTop:4}},"Other boards:",
+        h("button",{onClick:()=>onGoToTab("crm_funnel"),style:btnSmall},"Quote Funnel"), h("button",{onClick:()=>onGoToTab("doc_board"),style:btnSmall},"Document Control Board")) : null);
+  };
   // ---------- Employee board (128): Overdue, Today's, In Progress, Tasks Assigned, Under Approval, then the Completed lists ----------
   const EMP_STAGE_COLS = ["overdue","today","progress","assigned","approval"].map(k=>TASK_STAGES.find(s=>s.key===k));
   let empVis = null;   // 138: the showing lists, set just before the columns are drawn
@@ -47275,6 +47671,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     header,
     err ? h("div",{style:{background:"#fdecea",color:colors.danger,padding:"8px 10px",borderRadius:6,marginBottom:10,fontSize:12.5}},err) : null,
     mode==="assign" && authorised ? assignView()
+      : mode==="all" ? allView()   // 151
       : mode==="dash" ? h(TaskDashboards,{ tasks, emps, me, isAdmin:(isAdmin||isDocCtl), authorised, authDepts, deptOf, taskDept, onOpenBoard:openBoard, onGoToTab })
       : empView(),
     openId!==null && h(TaskDetailModal,{ key:String(openId), taskId:openId, tasks, emps, labels, me, who:(mode==="assign"?null:who), today,
@@ -47941,10 +48338,21 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
             if(ty){ if(!(d.checklists||[]).length) p.checklists=taskTypeChecklist(ty); if(!d.due_date && d.assignee) p.due_date=taskTypeDue(ty,today); if(!d.assignee && ty.department && isNew) p.department=ty.department; }
             set(p); },style:{...inputStyle,padding:"7px 9px"}},
           h("option",{value:""},"\u2014 pick \u2014"),(taskTypes||[]).map(x=>h("option",{key:x.type_name,value:x.type_name},x.type_name+(x.due_days!=null&&x.due_days!==""?" ("+x.due_days+" d)":""))))) : null,
+        // 151: Department first — every department in the master shows, even one with nobody in it yet (its Unassigned pile)
+        (()=>{ const depAll = Array.from(new Set([...(boards||[]), ...emps.map(e=>e.department), ...emps.flatMap(e=>empBoards(e))].filter(x=>x && !isInterDept(x)))).sort();
+          const curDep = d.department || (d.assignee ? deptOf(d.assignee) : defaultDept) || "";
+          return h("div",null,lbl("Department"),h("select",{value:curDep,disabled:!editable,onChange:e=>{ const v = e.target.value; const aE = emps.find(x=>x.employee_name===d.assignee);
+              set({ department:v, ...(d.assignee && !empInDept(aE, v) ? { assignee:"" } : {}) }); },style:{...inputStyle,padding:"7px 9px"}},
+            curDep ? null : h("option",{value:""},"\u2014 pick \u2014"), depAll.map(x=>h("option",{key:x,value:x},x)))); })(),
         h("div",null,lbl("Assigned to"),h("select",{value:d.assignee||"",disabled:!editable,onChange:e=>{ const ty=(taskTypes||[]).find(x=>x.type_name===d.task_type); set({assignee:e.target.value, ...(!d.due_date && e.target.value && ty ? {due_date:taskTypeDue(ty,today)} : {})}); },style:{...inputStyle,padding:"7px 9px"}},
           h("option",{value:""},"\ud83d\udce5 Unassigned \u2014 "+((d.department||defaultDept)||"no department")+" pile"),
-          Array.from(new Set([...emps.map(e=>e.department||"(no department)"), ...emps.flatMap(e=>empBoards(e))].filter(Boolean))).sort().map(dp=>h("optgroup",{key:dp,label:dp},
-            emps.filter(e=>(e.department||"(no department)")===dp || empBoards(e).includes(dp)).map(e=>h("option",{key:e.employee_name,value:e.employee_name},e.employee_name)))))),
+          (()=>{ const dsel = d.department || (d.assignee ? "" : defaultDept) || "";
+            const groups = dsel ? [dsel] : Array.from(new Set([...emps.map(e=>e.department||"(no department)"), ...emps.flatMap(e=>empBoards(e))].filter(Boolean))).sort();
+            const inG = (e,dp)=> (e.department||"(no department)")===dp || empBoards(e).includes(dp);
+            const out = groups.map(dp=>{ const ppl = emps.filter(e=>e.employee_name!=="Unassigned" && inG(e,dp)); return ppl.length ? h("optgroup",{key:dp,label:dp},ppl.map(e=>h("option",{key:e.employee_name,value:e.employee_name},e.employee_name))) : null; });
+            if(d.assignee && dsel && !emps.some(e=>e.employee_name===d.assignee && inG(e,dsel))) out.push(h("option",{key:"__cur",value:d.assignee},d.assignee+" (other department)"));
+            if(dsel && !emps.some(e=>e.employee_name!=="Unassigned" && inG(e,dsel))) out.push(h("option",{key:"__none",value:"",disabled:true},"Nobody in "+dsel+" yet \u2014 the card goes to its pile"));
+            return out; })())),
         h("div",null,lbl("Task due date"),h("input",{type:"date",value:d.due_date||"",disabled:!editable,onChange:e=>set({due_date:e.target.value}),style:{...inputStyle,padding:"6px 9px"}})),
         h("div",null,lbl("Customer"),h("input",{value:d.customer||"",disabled:!editable,onChange:e=>set({customer:e.target.value}),style:{...inputStyle,padding:"7px 9px"}}))),
       h("div",{style:{marginTop:10}},lbl("Reference (enquiry / quote / contract)"),h("input",{value:d.ref||"",disabled:!editable,onChange:e=>set({ref:e.target.value}),style:{...inputStyle,padding:"7px 9px"}})),
@@ -48164,6 +48572,18 @@ function PendingActionsScreen({ user }){
               entity_key:p.contract_number, detail_key:(r.form||"General")+"|"+rs.step.key, owed_by_role:"purchase", owed_by_person:who, days_waiting:rs.s.l||null, urgency:"overdue", client_side:true, source:"procurement_late" }); }); });
       }
     }catch(e){ console.error("Procurement items not read", e); }
+    // 151: a quote number forced in from Log Follow-ups whose enquiry is not logged yet — the Sales Coordinator logs it
+    try{
+      const { data: ql, error: qErr } = await sb.from("register_line_tbl").select("id,quote_no,customer_name,created_at,created_by").eq("source","Log Follow-ups").is("enquiry_id",null);
+      if(!qErr && ql && ql.length){
+        const { data: scs } = await sb.from("post_holder_tbl").select("employee_name").eq("post_key","sales_coordinator");
+        const who = (scs||[]).map(r=>r.employee_name).filter(Boolean);
+        ql.forEach(l=>{ const days = l.created_at ? Math.max(0,Math.floor((Date.now()-new Date(l.created_at).getTime())/86400000)) : null;
+          const base = { what:"Quote without enquiry: "+l.quote_no+" ("+(l.customer_name||"no customer")+") — added from Log Follow-ups"+(l.created_by?" by "+l.created_by:"")+". Log its enquiry on the Quote Register line.",
+            entity_key:l.quote_no, detail_key:"enquiry", owed_by_role:"sales_coordinator", days_waiting:days, urgency: days!=null && days>2 ? "overdue" : "due", client_side:true, source:"quote_no_enquiry" };
+          if(who.length) who.forEach(p=>extra.push({ ...base, owed_by_person:p })); else extra.push({ ...base, owed_by_person:"" }); });
+      }
+    }catch(e){ console.error("Quotes without enquiry not read", e); }
     setRows([...(data||[]), ...extra]);
     setLoading(false);
   },[user?.username]);
