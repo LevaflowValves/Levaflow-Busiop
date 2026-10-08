@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-08T12:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-08T13:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -2425,6 +2425,7 @@ function BomEntryForm({ onGoToTab, user }) {
   const [cloneCategoryOptions, setCloneCategoryOptions] = useState([]);
   const [cloneDuplicateInfo, setCloneDuplicateInfo] = useState(null); // {item,size,model} of the pre-existing clash
   const [cloneBusy, setCloneBusy] = useState(false);
+  const cloneRunRef = useRef(false);   // 152
   const [cloneMsg, setCloneMsg] = useState("");
   const [cloneRefreshing, setCloneRefreshing] = useState(false);
 
@@ -2622,9 +2623,11 @@ function BomEntryForm({ onGoToTab, user }) {
   // exists in that case, the clone writes only the `bom` rows, no new
   // model_tbl insert.
   const executeClone = async(justAddedModel)=>{
-    const newSize = cloneNewSize.trim(), newModel = (justAddedModel||cloneNewModel).trim();
+    const newSize = cloneNewSize.trim(); let newModel = (justAddedModel||cloneNewModel).trim();
     if(!newSize){ setCloneMsg("Pick a new size."); return; }
     if(!newModel){ setCloneMsg("Pick or add a new model."); return; }
+    if(cloneRunRef.current) return;   // 152: a double click must not copy the lines twice
+    cloneRunRef.current = true;
     setCloneBusy(true); setCloneMsg("");
     try{
       const { data:freshCatalog, error:catErr } = await sb.from("model_tbl").select("item,size,model");
@@ -2634,13 +2637,17 @@ function BomEntryForm({ onGoToTab, user }) {
         const isExactCombo = norm(clash.item)===norm(itemFilter) && norm(clash.size)===norm(newSize);
         let silentOk = false;
         if(isExactCombo){
-          const { count, error:cntErr } = await sb.from("bom").select("id",{count:"exact",head:true}).eq("model",clash.model);
-          silentOk = !cntErr && !count;
+          // 152: count the lines under the model's name in ANY spelling (case / spaces) — a clone typed as
+          // "ycp-series…" used to miss lines saved as "YCP-SERIES…", so a second clone went on top of the first
+          const { data: have, error:cntErr } = await sb.from("bom").select("id,model").ilike("model",clash.model.replace(/[%_]/g,"\\$&"));
+          const n = (have||[]).filter(r=>norm(r.model)===norm(clash.model)).length;
+          silentOk = !cntErr && !n;
         }
         if(!silentOk){
           setCloneDuplicateInfo({item:clash.item,size:clash.size,model:clash.model});
           setCloneMsg(""); setCloneBusy(false); return;
         }
+        newModel = clash.model;   // 152: save the lines under the model's own spelling, so the BOM opens with exactly them
       }
       const sourceModel = modelInput.trim();
       const newRows = subRows.map(r=>{
@@ -2660,7 +2667,7 @@ function BomEntryForm({ onGoToTab, user }) {
       setBomStatus("Dirty");
       closeCloneDialog();
     } catch(e){ setCloneMsg("Clone failed: "+e.message); }
-    finally { setCloneBusy(false); }
+    finally { setCloneBusy(false); cloneRunRef.current = false; }
   };
   // Brand-new model, taken to the same field set as Master Data → Models'
   // own "New model" form (item/size/category + free-text model — see the
@@ -14420,8 +14427,10 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       ]);
 
       const stripId = (r)=>{ const c={...r}; delete c.id; return c; };
-      if(estRows?.length) await sb.from("estimates").insert(estRows.map(r=>({...stripId(r), reference_number:newRef, quote_status:"Draft"})));
-      if(lineRows?.length) await sb.from("estimate_lines").insert(lineRows.map(r=>({...stripId(r), reference_number:newRef})));
+      await clearLeftoversForRef(newRef);   // 152
+      let newEstRows = [];
+      if(estRows?.length){ const { data: ne, error: neErr } = await sb.from("estimates").insert(estRows.map(r=>({...stripId(r), reference_number:newRef, quote_status:"Draft"}))).select(); if(neErr) throw neErr; newEstRows = ne||[]; }
+      if(lineRows?.length){ const { error: lnErr } = await sb.from("estimate_lines").insert(remapEstimateIds(lineRows, estRows, newEstRows).map(r=>({...stripId(r), reference_number:newRef}))); if(lnErr) throw lnErr; }
       if(termsRows?.length) await sb.from("quote_commercial_terms").insert(termsRows.map(r=>({...stripId(r), reference_number:newRef})));
       if(noteRows?.length) await sb.from("quote_notes").insert(noteRows.map(r=>({...stripId(r), reference_number:newRef})));
       if(dsRows?.length) await sb.from("datasheets").insert(dsRows.map(r=>({...stripId(r), reference_number:newRef})));
@@ -14562,6 +14571,15 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     const estRow = estRowArr && estRowArr[0];
     if(!estRow) throw new Error("Source Sl No not found — it may have been removed.");
     const stripId = (r)=>{ const c={...r}; delete c.id; return c; };
+    // 152: the target Sl No must be truly free in the database (not only on this screen), and anything left behind
+    // under that number by an earlier removed Sl No is cleared first — otherwise the old lines show beside the cloned
+    // ones and every line looks duplicated.
+    const { data: taken } = await sb.from("estimates").select("id").eq("reference_number",sourceRef.reference_number).eq("item_sl_no",newSlNo).limit(1);
+    if(taken && taken.length) throw new Error("Sl No "+newSlNo+" already exists for Quote# "+sourceRef.reference_number+" (perhaps added from another screen). Close and reopen the quote, then pick a different number.");
+    for(const tb of ["estimate_lines","datasheets","quote_sl_extra_price_tbl","quote_sl_testing_tbl"]){
+      const { error: cErr } = await sb.from(tb).delete().eq("reference_number",sourceRef.reference_number).eq("item_sl_no",newSlNo);
+      if(cErr) console.warn("Clone: leftover rows not cleared from "+tb, cErr);
+    }
 
     const { data:newEst, error:estErr } = await sb.from("estimates").insert({
       ...stripId(estRow), item_sl_no:newSlNo, order_qty:Number(newQty)||1, created_by:user.username
@@ -14609,22 +14627,23 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     return newEst;
   };
 
+  const cloneRunning = useRef(false);   // 152: a double click must not clone twice
   const confirmCloneSlNo = async()=>{
-    if(!cloneTarget) return;
+    if(!cloneTarget || cloneRunning.current) return;
     const n = Number(cloneSlNoInput);
     if(!cloneSlNoInput.trim() || !Number.isInteger(n) || n<=0){ setCloneSlNoError("Enter a whole number greater than 0."); return; }
     const existing = refs.filter(r=>r.reference_number===cloneTarget.reference_number).map(r=>r.item_sl_no);
     if(existing.includes(n)){ setCloneSlNoError("Sl No "+n+" already exists for Quote# "+cloneTarget.reference_number+". Pick a different number."); return; }
     const q = Number(cloneQtyInput);
     if(!cloneQtyInput.trim() || !Number.isFinite(q) || q<=0){ setCloneSlNoError("Enter an order qty greater than 0."); return; }
-    setCloningBusy(true); setCloneSlNoError("");
+    setCloningBusy(true); setCloneSlNoError(""); cloneRunning.current = true;
     try{
       await cloneSlNo(cloneTarget, n, q);
       setCloneTarget(null);
     } catch(e){
       setCloneSlNoError("Clone failed: "+e.message);
     } finally {
-      setCloningBusy(false);
+      setCloningBusy(false); cloneRunning.current = false;
     }
   };
 
@@ -22848,6 +22867,21 @@ async function applyOutcomeNature(referenceNumber, nature, changedBy, changedAt)
 // database; a screen that reads more than that in one go silently loses
 // the rest. build() returns a fresh query each call so .range() can be
 // applied per page.
+// 152: before a quote / revision / Sale Order is copied under a new number, make sure that number is really free and
+// clear anything an earlier failed or deleted copy left behind under it — otherwise those old rows show beside the new
+// ones and every BOM line looks duplicated.
+const COPY_TABLES = ["estimate_lines","datasheets","quote_commercial_terms","quote_notes","quote_extra_price_tbl","quote_sl_extra_price_tbl","quote_sl_testing_tbl","quote_global_testing_tbl","quote_sl_job_attribute_tbl"];
+async function clearLeftoversForRef(ref){
+  const { data: has } = await sb.from("estimates").select("id").eq("reference_number",ref).limit(1);
+  if(has && has.length) throw new Error(ref+" already has Sl Nos \u2014 refusing to copy over it. Reopen the quote and try again.");
+  for(const tb of COPY_TABLES){ const { error } = await sb.from(tb).delete().eq("reference_number",ref); if(error) console.warn("Leftovers not cleared from "+tb, error); }
+}
+// Lines carry estimate_id: point the copied lines at the copied Sl No rows (same Sl No), not the originals.
+function remapEstimateIds(lineRows, oldEst, newEst){
+  const bySl = new Map((newEst||[]).map(r=>[String(r.item_sl_no), r.id]));
+  const oldSl = new Map((oldEst||[]).map(r=>[r.id, String(r.item_sl_no)]));
+  return (lineRows||[]).map(l=>{ const sl = String(l.item_sl_no ?? oldSl.get(l.estimate_id) ?? ""); const nid = bySl.get(sl); return nid ? { ...l, estimate_id:nid } : l; });
+}
 async function fetchPaged(build, pageSize){
   const size = pageSize||1000;
   let all = [], from = 0;
@@ -23013,8 +23047,10 @@ async function cloneQuoteIntoContract(quoteRef, contractNumber, customerName, us
   ]);
   if(!estRows?.length) throw new Error("No Sl Nos found under "+quoteRef+" — nothing to clone.");
 
-  if(estRows?.length) await sb.from("estimates").insert(estRows.map(r=>({...stripId(r), reference_number:contractNumber})));
-  if(lineRows?.length) await sb.from("estimate_lines").insert(lineRows.map(r=>({...stripId(r), reference_number:contractNumber})));
+  await clearLeftoversForRef(contractNumber);   // 152
+  let newEstRows = [];
+  if(estRows?.length){ const { data: ne, error: neErr } = await sb.from("estimates").insert(estRows.map(r=>({...stripId(r), reference_number:contractNumber}))).select(); if(neErr) throw neErr; newEstRows = ne||[]; }
+  if(lineRows?.length){ const { error: lnErr } = await sb.from("estimate_lines").insert(remapEstimateIds(lineRows, estRows, newEstRows).map(r=>({...stripId(r), reference_number:contractNumber}))); if(lnErr) throw lnErr; }
   if(termsRows?.length) await sb.from("quote_commercial_terms").insert(termsRows.map(r=>({...stripId(r), reference_number:contractNumber})));
   if(noteRows?.length) await sb.from("quote_notes").insert(noteRows.map(r=>({...stripId(r), reference_number:contractNumber})));
   if(dsRows?.length) await sb.from("datasheets").insert(dsRows.map(r=>({...stripId(r), reference_number:contractNumber})));
@@ -27622,6 +27658,7 @@ function downloadManualPdf(){
 // added to over time; not wired to a database table yet, so edits currently
 // mean updating this array directly.
 const FAQ_ENTRIES = [
+  { q:"I cloned a BOM and every line showed twice \u2014 why?", a:"On the BOM master the clone could run twice (double click) or land on a model that already had lines saved under a slightly different spelling, so two sets of lines ended up under one model. Since build 152 neither can happen. A model cloned before that still has the extra lines \u2014 Delete the ones that do not belong. (Clone Sl No on a quote is guarded the same way.)" },
   { q:"The quote number I need is not in the Reference list on Log Follow-ups \u2014 what do I do?", a:"Type it. If it is nowhere in the app, the last line says \u201c+ None of these \u2014 use \u2026 as a new quote\u201d. That opens the Quote Register on the right tab with the number and the customer filled in; give the Enquiry No (NA if none) and Save. You are taken back to Log Follow-ups with the number as the reference, and it is offered to everyone from then on." },
   { q:"Why does a reference say \u201cno enquiry\u201d?", a:"No enquiry has been logged for that quote. Picking it asks \u201cLog enquiry now / Later\u201d. Later is fine \u2014 the call is still logged \u2014 but a number added from Log Follow-ups stays in the Sales Coordinator's Pending Actions until its enquiry is logged." },
   { q:"My day shows a call I did not log \u2014 why?", a:"My day now lists the follow-ups on every customer of your Quote Register tabs, whoever logged the last call (the latest entry decides the date). The row says \u201clast call by \u2026\u201d when it was someone else." },
@@ -27679,6 +27716,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"8 Oct 2026 (152)", summary:"Clone no longer doubles BOM lines. No SQL. BOM MASTER (Master Data \u2192 BOM, Clone this BOM): a double click can no longer copy the lines twice; an existing model is checked for lines under its name in any spelling (case / spaces), so a clone can no longer land on top of an earlier clone saved with a different spelling; the cloned lines are saved under the model's own spelling. CLONE SL NO: the target Sl No is checked in the database (not only on screen), and anything an earlier removed Sl No left under that number (BOM lines, datasheet, Sl No extra price / testing) is cleared before the copy, so old lines no longer show beside the cloned ones; a double click cannot clone twice. AMEND (new revision) and CREATE SALE ORDER: the same check on the new number \u2014 leftovers of a failed or deleted earlier copy are cleared first, and a number that already has Sl Nos is refused; the copied BOM lines now point at the copied Sl No rows (estimate_id) instead of the original quote's." },
   { date:"8 Oct 2026 (151)", summary:"Quote reference gateways, My day for tab customers, due date on the card, Summary / Detailed table, All boards, Department on Add task \u2014 and the build-149 Documents box (missing from the 150 file) put back. SQL: structure_register_line_source_151 (both companies: register_line_tbl.source) and, if not run yet, structure_document_entry_edit_2026-10-08 (both). Data SQL already run on Flometriq today: data_uae_emirate_fill and data_uae_wrong_country_fix (UAE customers' emirate from city/address; 14 non-UAE customers corrected). LOG FOLLOW-UPS: Offer reference is a type-in search across every customer's quotes, legacy quotes and Quote Register lines, shown as quote no. \u2013 enquiry no.; picking fills the customer (asks if it differs); closed quotes not offered. \u201c+ None of these \u2014 use \u2026 as a new quote\u201d opens the Quote Register (gateway: blue bar \u2190 Back to Log Follow-ups, rows kept) on the prefix's tab with number and customer filled; EDate not required there; anyone may save; the line is tagged \u201cfrom Log Follow-ups\u201d and returns as the reference. Add New Customer works from that line and returns with the customer chosen. A quote without an enquiry asks Log enquiry now / Later (the enquiry form takes the date when the line has none and writes it back to the line); such lines from Log Follow-ups sit in Pending Actions for the Sales Coordinator (source quote_no_enquiry). Enquiry chase list reads quote no. \u2013 enquiry no. CUSTOMER FORM: State / emirate required for India and the UAE (Other Territory refused). MY DAY: calls on every customer of my Quote Register tabs, whoever logged them (latest entry decides); \u201clast call by \u2026\u201d under the customer. TASKS: due date changed in place on cards, sub-tasks and the list table (history \u201cDue date old \u2192 new (on the board)\u201d; procurement sub-tasks locked to the Gantt, chip opens it). \u229e Table asks Summary or Detailed (sub-tasks indented), switch on top, Excel follows. ALL BOARDS tab for everyone: every department as a band (pile + people, empty departments too), own department open, fold / reorder kept per browser; drag across lists and departments \u2014 cross-department asks the reason, sub-tasks follow, bell to the receiver; links to Quote Funnel and Document Control Board. ADD / EDIT TASK: Department picker first (every department, even empty \u2014 fixes Admin missing in Levaflow), Assigned to filtered to it." },
   { date:"8 Oct 2026 (149b)", summary:"Documents box: the record and the next entry kept apart, Edit, and locking. SQL: structure_document_entry_edit_2026-10-08 (both companies: universal_document_history_tbl.edited_log). Each document tab now has two headings in bold blue with the document number: THIS IS THE TRAIL OF THE DOCUMENT ALREADY SUBMITTED (read-only, the latest entry marked) and ADD REVISIONS ON THIS DOC HERE \u2014 a closed box \u201cNext expected: Rev 0 \u00b7 In \u2014 the client\u2019s reply\u201d with Log the next entry; the form opens empty with Out / In picked from the sequence, has Cancel, and closes after saving. EDIT on every entry (replaces Edit Out/In): link, Out / In, what changed, notes, replace the PDF; a reason is required; each edit is kept on the row (\u270e old \u2192 new, who, when, why), in the document notes and the audit log. LOCKING: a quote\u2019s entries (and their Status) can be changed only while the quote is in Draft; a Sale Order\u2019s entry only until the next entry is logged on that document. After that \u2014 add a revision, or a Super Admin unlocks the document with a Deletion Code (the document is flagged, like a sequence override). Changing Out / In on a document with more than one entry still needs a Super Admin." },
   { date:"8 Oct 2026 (150)", summary:"One card on several boards, and the Inter-Department board. SQL: structure_task_multi_board_150 (both companies): task_tbl.also_departments (text[]) and a department row Inter-Department (no members, no approver). CARD EDITOR: Also on boards \u2014 tick the other boards this card should show on; its own department stays the home board. It is ONE record: a change made from any board shows on every board, nothing is copied. BOARDS: a shared card shows on its home board and on every ticked board \u2014 in each board's Unassigned pile while nobody has it (the first hand-out from any pile takes it out of all of them; a second person gets \u201cAlready taken\u201d), and afterwards on the holder's list, or in a \u201c\ud83d\udd17 Shared with <board>\u201d list where the holder has no list. A purple \u201c\ud83d\udd17 Shared from / Also on\u201d tag marks it. INTER-DEPARTMENT BOARD: every card on more than one board, in one place (Admins and the Document Controller see all; a board head sees those touching their boards). No approver of its own: a shared card is approved by its home board's approver and the dashboards and reports count it once, under the home board. It is never a card's home. Handing a shared card to someone of another department moves its home and keeps the old home among its boards. MY DAY: a head sees shared cards in each pile they head; the top-bar count counts a card once. History records Also on boards changes." },
