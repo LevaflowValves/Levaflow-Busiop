@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-07T12:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-07T13:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -606,9 +606,28 @@ function stageKind(name){ return stageInfo(name).kind||"open"; }
 // the screen, so the trail can say where a move came from.
 // 143: every call log carries logged_from (where it was entered). If the database does not have the column yet
 // (structure_followup_logged_from not run), the entry is saved without it rather than lost.
+// 146: next_followup_by (Call / Visit) — how the next follow-up will be made. Saved only with a next date; a
+// database without the column (structure_followup_next_by not run) saves the entry without it.
+function fuNextBy(v){ return v==="Visit" ? "Visit" : "Call"; }
+function fuNextBySel(value, onChange, style){
+  return h("select",{value:fuNextBy(value),onChange:e=>onChange(e.target.value),title:"Next follow-up by — a call or a visit",style},
+    h("option",{value:"Call"},"Next by: Call"),h("option",{value:"Visit"},"Next by: Visit"));
+}
+// 146: My day (status box, top-bar flags) reloads when a follow-up or a task changes.
+let MYDAY_PING_T = null;
+function myDayPing(){ try{ clearTimeout(MYDAY_PING_T); MYDAY_PING_T = setTimeout(()=>window.dispatchEvent(new Event("myday:refresh")), 700); }catch(e){} }
+function fuDropMissingCols(p, err){
+  const m = String((err && err.message) || "");
+  if(/logged_from/i.test(m) && "logged_from" in p){ delete p.logged_from; return true; }
+  if(/next_followup_by/i.test(m) && "next_followup_by" in p){ delete p.next_followup_by; return true; }
+  return false;
+}
 async function insertActivityLog(payload){
-  let res = await sb.from("activity_log_tbl").insert(payload);
-  if(res.error && /logged_from/i.test(res.error.message||"") && "logged_from" in payload){ const { logged_from, ...rest } = payload; res = await sb.from("activity_log_tbl").insert(rest); }
+  const p = {...payload};
+  if(p.next_followup_date){ p.next_followup_by = fuNextBy(p.next_followup_by); } else delete p.next_followup_by;
+  let res = await sb.from("activity_log_tbl").insert(p);
+  for(let i=0;i<2 && res.error && fuDropMissingCols(p, res.error);i++) res = await sb.from("activity_log_tbl").insert(p);
+  if(!res.error) myDayPing();
   return res;
 }
 // 143: Discussed What and Notes are both required on every Log follow-up form. Notes left empty -> offer to use
@@ -620,7 +639,7 @@ function notesOrSameAsDiscussed(discussed, notes){
 }
 // The app's own placeholder text in discussed_what (stage moves, older Quotes Report entries) — shown as "—".
 const FU_AUTO_DISCUSSED = /^(Stage moved on .+|Follow-up logged from Quotes Report)$/;
-async function logStageMoveFollowup({ referenceNumber, customerName, stage, date, note, nextFollowup, username, where, mode, discussed }){
+async function logStageMoveFollowup({ referenceNumber, customerName, stage, date, note, nextFollowup, username, where, mode, discussed, nextBy }){
   const typed = String(discussed||"").trim();
   const { error } = await insertActivityLog({
     company_name: customerName||"",
@@ -632,7 +651,7 @@ async function logStageMoveFollowup({ referenceNumber, customerName, stage, date
     discussed_what: typed || ("Stage moved on "+where),
     logged_from: typed ? where : ("Stage move · "+where),
     outcome: stage,
-    next_followup_date: nextFollowup || null,
+    next_followup_date: nextFollowup || null, next_followup_by: nextBy || "Call",
     notes: note,
     logged_by: username||"unknown",
   });
@@ -1995,7 +2014,7 @@ function NotificationBell({ user }){
   );
 }
 
-function TopBar({ user, sessionCompanyId, sessionCompany, onChangeCompany, onLogout }) {
+function TopBar({ user, sessionCompanyId, sessionCompany, onChangeCompany, onLogout, flags }) {
   const [sessionCompanyName,setSessionCompanyName] = useState("");
   useEffect(()=>{
     if(!sessionCompanyId){ setSessionCompanyName(""); return; }
@@ -2019,6 +2038,7 @@ function TopBar({ user, sessionCompanyId, sessionCompany, onChangeCompany, onLog
         h("span",{style:{fontSize:11,color:"#9a9d8f"}},"Session company: "+(sessionCompanyName||"—")),
         h("button",{onClick:onChangeCompany,style:{background:"none",border:"1px solid #3a3f33",color:"#fff",padding:"4px 9px",fontSize:11,cursor:"pointer",borderRadius:6}},"Switch")
       ),
+      flags || null,   // 146: My day flags
       h("span",{style:{fontSize:12,color:"#9a9d8f"}},user.username+" ("+user.role+")"),
       h(NotificationBell,{user}),
       h("button",{onClick:()=>window.open(window.location.href,"_blank"),style:{background:"none",border:"1px solid #3a3f33",color:"#fff",padding:"6px 12px",fontSize:12,cursor:"pointer",borderRadius:6}},"⧉ New tab"),
@@ -15252,7 +15272,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         chase_what:"Offer", chase_reference:quoteExportRef, logged_from:"Quote screen",
         company_name:(quoteHeaderRow&&quoteHeaderRow.customer_name)||null,
         activity_type:quoteActivityDraft.activity_type, discussed_what:quoteActivityDraft.discussed.trim(), notes,
-        activity_date:quoteActivityDraft.activity_date, next_followup_date:quoteActivityDraft.next_followup_date||null,
+        activity_date:quoteActivityDraft.activity_date, next_followup_date:quoteActivityDraft.next_followup_date||null, next_followup_by:quoteActivityDraft.next_followup_by,
         logged_by:user?.username||"unknown"
       });
       if(error){ alert(saveFailedText("The follow-up for "+quoteExportRef, error)); return; }
@@ -21682,7 +21702,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               h("option",{value:"Call"},"Call"),h("option",{value:"Visit"},"Visit"),h("option",{value:"Email"},"Email")
             ),
             h("input",{type:"date",value:quoteActivityDraft.activity_date,onChange:e=>setQuoteActivityDraft(d=>({...d,activity_date:e.target.value})),style:{...inputStyle,width:120},title:"Date this actually happened"}),
-            h("input",{type:"date",value:quoteActivityDraft.next_followup_date,onChange:e=>setQuoteActivityDraft(d=>({...d,next_followup_date:e.target.value})),style:{...inputStyle,width:120},title:"Next follow-up date"})
+            h("input",{type:"date",value:quoteActivityDraft.next_followup_date,onChange:e=>setQuoteActivityDraft(d=>({...d,next_followup_date:e.target.value})),style:{...inputStyle,width:120},title:"Next follow-up date"}),
+            fuNextBySel(quoteActivityDraft.next_followup_by, v=>setQuoteActivityDraft(d=>({...d,next_followup_by:v})), {...inputStyle,width:120})
           ),
           h("textarea",{value:quoteActivityDraft.discussed,onChange:e=>setQuoteActivityDraft(d=>({...d,discussed:e.target.value})),placeholder:"Discussed What — what did the customer say? (required)",style:{...inputStyle,width:"100%",minHeight:52,marginBottom:6,boxSizing:"border-box"}}),
           h("textarea",{value:quoteActivityDraft.notes,onChange:e=>setQuoteActivityDraft(d=>({...d,notes:e.target.value})),placeholder:"Notes (left empty: you are offered the Discussed What text)",style:{...inputStyle,width:"100%",minHeight:44,marginBottom:8,boxSizing:"border-box"}}),
@@ -24092,7 +24113,7 @@ function MyWorklistScreen({ user }){
           package_id:logForPackage.id, company_name:(proj&&(proj.main_epc_company_name||proj.end_user_company_name))||null,
           activity_type:logDraft.activity_type, outcome:logDraft.outcome||"",
           discussed_what:logDraft.discussed.trim(), logged_from:"My Worklist",
-          notes:logDraft.notes||"", activity_date:logDraft.activity_date, next_followup_date:logDraft.next_followup_date||null,
+          notes:logDraft.notes||"", activity_date:logDraft.activity_date, next_followup_date:logDraft.next_followup_date||null, next_followup_by:logDraft.next_followup_by,
           logged_by:user?.username||"unknown"
         });
         if(error){ alert(saveFailedText("The follow-up", error)); return; }
@@ -24103,7 +24124,7 @@ function MyWorklistScreen({ user }){
         const { error } = await insertActivityLog({
           company_name:logFor, activity_type:logDraft.activity_type, outcome:logDraft.outcome||"",
           discussed_what:logDraft.discussed.trim(), logged_from:"My Worklist",
-          notes:logDraft.notes||"", activity_date:logDraft.activity_date, next_followup_date:logDraft.next_followup_date||null,
+          notes:logDraft.notes||"", activity_date:logDraft.activity_date, next_followup_date:logDraft.next_followup_date||null, next_followup_by:logDraft.next_followup_by,
           is_followup_of: lastFollowUp?lastFollowUp.id:null, logged_by:user?.username||"unknown"
         });
         if(error){ alert(saveFailedText("The follow-up", error)); return; }
@@ -24129,7 +24150,8 @@ function MyWorklistScreen({ user }){
         h("option",{value:"Call back later"},"Call back later"),h("option",{value:"No response"},"No response")
       ),
       h("input",{type:"date",value:logDraft.activity_date,onChange:e=>setLogDraft(d=>({...d,activity_date:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12,width:130},title:"Date this actually happened"}),
-      h("input",{type:"date",value:logDraft.next_followup_date,onChange:e=>setLogDraft(d=>({...d,next_followup_date:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12,width:150},title:"Next follow-up date"})
+      h("input",{type:"date",value:logDraft.next_followup_date,onChange:e=>setLogDraft(d=>({...d,next_followup_date:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12,width:150},title:"Next follow-up date"}),
+      fuNextBySel(logDraft.next_followup_by, v=>setLogDraft(d=>({...d,next_followup_by:v})), {...inputStyle,padding:"6px 8px",fontSize:12,width:120})
     ),
 h("textarea",{value:logDraft.discussed||"",onChange:e=>setLogDraft(d=>({...d,discussed:e.target.value})),placeholder:"Discussed What — what did the customer say? (required)",style:{...inputStyle,padding:"6px 8px",fontSize:12,width:"100%",minHeight:44,marginBottom:6,boxSizing:"border-box"}}),
     h("textarea",{value:logDraft.notes,onChange:e=>setLogDraft(d=>({...d,notes:e.target.value})),placeholder:"Notes (left empty: you are offered the Discussed What text)",style:{...inputStyle,padding:"6px 8px",fontSize:12,width:"100%",minHeight:44,marginBottom:8}}),
@@ -24145,7 +24167,8 @@ h("textarea",{value:logDraft.discussed||"",onChange:e=>setLogDraft(d=>({...d,dis
         h("option",{value:"Call"},"Call"),h("option",{value:"Visit"},"Visit"),h("option",{value:"Email"},"Email")
       ),
       h("input",{type:"date",value:logDraft.activity_date,onChange:e=>setLogDraft(d=>({...d,activity_date:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12,width:130},title:"Date this actually happened"}),
-      h("input",{type:"date",value:logDraft.next_followup_date,onChange:e=>setLogDraft(d=>({...d,next_followup_date:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12,width:150},title:"Next follow-up date"})
+      h("input",{type:"date",value:logDraft.next_followup_date,onChange:e=>setLogDraft(d=>({...d,next_followup_date:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12,width:150},title:"Next follow-up date"}),
+      fuNextBySel(logDraft.next_followup_by, v=>setLogDraft(d=>({...d,next_followup_by:v})), {...inputStyle,padding:"6px 8px",fontSize:12,width:120})
     ),
 h("textarea",{value:logDraft.discussed||"",onChange:e=>setLogDraft(d=>({...d,discussed:e.target.value})),placeholder:"Discussed What — what did the customer say? (required)",style:{...inputStyle,padding:"6px 8px",fontSize:12,width:"100%",minHeight:44,marginBottom:6,boxSizing:"border-box"}}),
     h("textarea",{value:logDraft.notes,onChange:e=>setLogDraft(d=>({...d,notes:e.target.value})),placeholder:"Notes (left empty: you are offered the Discussed What text)",style:{...inputStyle,padding:"6px 8px",fontSize:12,width:"100%",minHeight:44,marginBottom:8}}),
@@ -24438,7 +24461,7 @@ function CustomersScreen({ user }){
         outcome:newActivity.outcome||"", notes:newActivity.notes||"",
         discussed_what:newActivity.discussed.trim(), logged_from:"Customers",
         activity_date:newActivity.activity_date,
-        next_followup_date:newActivity.next_followup_date||null,
+        next_followup_date:newActivity.next_followup_date||null, next_followup_by:newActivity.next_followup_by,
         is_followup_of: lastFollowUp?lastFollowUp.id:null,
         logged_by:user?.username||"unknown"
       });
@@ -24820,7 +24843,8 @@ function CustomersScreen({ user }){
             h("option",{value:"Call back later"},"Call back later"),h("option",{value:"No response"},"No response")
           ),
           h("input",{type:"date",value:newActivity.activity_date,onChange:e=>setNewActivity({...newActivity,activity_date:e.target.value}),style:{...inputStyle,padding:"6px 8px",fontSize:12,width:130},title:"Date this actually happened"}),
-          h("input",{type:"date",value:newActivity.next_followup_date,onChange:e=>setNewActivity({...newActivity,next_followup_date:e.target.value}),style:{...inputStyle,padding:"6px 8px",fontSize:12,width:150},title:"Next follow-up date"})
+          h("input",{type:"date",value:newActivity.next_followup_date,onChange:e=>setNewActivity({...newActivity,next_followup_date:e.target.value}),style:{...inputStyle,padding:"6px 8px",fontSize:12,width:150},title:"Next follow-up date"}),
+          fuNextBySel(newActivity.next_followup_by, v=>setNewActivity({...newActivity,next_followup_by:v}), {...inputStyle,padding:"6px 8px",fontSize:12,width:120})
         ),
         h("textarea",{value:newActivity.discussed||"",onChange:e=>setNewActivity({...newActivity,discussed:e.target.value}),placeholder:"Discussed What — what did the customer say? (required)",style:{...inputStyle,padding:"6px 8px",fontSize:12,width:"100%",minHeight:44,marginBottom:6,boxSizing:"border-box"}}),
         h("textarea",{value:newActivity.notes,onChange:e=>setNewActivity({...newActivity,notes:e.target.value}),placeholder:"Notes (left empty: you are offered the Discussed What text)",style:{...inputStyle,padding:"6px 8px",fontSize:12,width:"100%",minHeight:50,marginBottom:8}}),
@@ -26905,12 +26929,16 @@ const MANUAL_SECTIONS = [
       },
       {
         "key": "log_followups_overdue",
-        "title": "Today screen \u2014 overdue calls and Major Projects gaps",
+        "title": "My day \u2014 calls, visits and tasks (was: Today screen)",
         "tag": "CRM \u2192 Daily / Reports \u2192 Admin only",
         "blocks": [
           {
             "type": "p",
-            "text": "An FSE or Telecaller sees a \u201cwhat needs your attention today\u201d screen automatically right after logging in, with two sections: Overdue calls (every follow-up whose Next Follow-up date has passed, based on each customer's own MOST RECENT logged call \u2014 a fresh entry logged today always clears an older overdue one, regardless of outcome) and Major Projects \u2014 needs chasing (their own Projects/Packages/Allocations with a gap \u2014 No EPC, No package, No customer, No RFQ or lost, No owner, or an overdue Enquiry \u2014 the same gap logic as the Gaps dashboard, just scoped to them and surfaced up front). If both are empty, a quick \u201cyou're on track\u201d message shows instead."
+            "text": "Changed 7 October 2026 (build 146) \u2014 My day. Every follow-up form now has Next by: Call / Visit beside Next follow-up (older entries count as Call). At log-in an FSE or Telecaller sees My day: a status box of Calls and Visits that are Overdue, due Today, or Proposed in the next 7 days (click a count to list only those), then My tasks (your own open cards and sub-tasks overdue or due today) and Major Projects gaps (click to unfold). Everyone else sees My day with My tasks only, and only when something is overdue or due today. Each row has buttons: Log call / Log visit opens Log Follow-ups filled in and Save brings you back; Open quote, History and Customer history; on a task Open card, Open quote and My board. While you are away a \u201c\u2190 Back to My day\u201d button sits at the bottom right. The top bar carries flags all day \u2014 Calls & visits and Tasks, red when anything is overdue, amber when only today\u2019s are left, green when clear \u2014 click one to open My day again. Home shows the same counts."
+          },
+          {
+            "type": "p",
+            "text": "Before build 146: An FSE or Telecaller saw a \u201cwhat needs your attention today\u201d screen automatically right after logging in, with two sections: Overdue calls (every follow-up whose Next Follow-up date has passed, based on each customer's own MOST RECENT logged call \u2014 a fresh entry logged today always clears an older overdue one, regardless of outcome) and Major Projects \u2014 needs chasing (their own Projects/Packages/Allocations with a gap \u2014 No EPC, No package, No customer, No RFQ or lost, No owner, or an overdue Enquiry \u2014 the same gap logic as the Gaps dashboard, just scoped to them and surfaced up front). If both are empty, a quick \u201cyou're on track\u201d message shows instead."
           },
           {
             "type": "steps",
@@ -27488,6 +27516,8 @@ function downloadManualPdf(){
 // added to over time; not wired to a database table yet, so edits currently
 // mean updating this array directly.
 const FAQ_ENTRIES = [
+  { q:"Why does a follow-up show as a call when I meant to visit?", a:"Pick Next by: Visit beside the Next follow-up date when you log it. Entries logged before build 146 have no Next by and count as calls." },
+  { q:"How do I clear an overdue call from My day?", a:"Log the call or visit for that customer and reference \u2014 the newest entry decides. Use the Log call / Log visit button on the row: the form opens filled in, and Save brings you back to My day with the list refreshed." },
   { q:"Someone is on leave \u2014 how do I move all their cards?", a:"Task Assignment Board \u2192 the \u21c4 on that person's list. All their open cards come ticked; untick any that stay, pick who gets them (or the Unassigned pile), give the reason and press Transfer. To move work to another department, pick that department under To. Admins can do any department; approvers only their own." },
   { q:"How do I see whether procurement is on time?", a:"Purchase \u2192 Procurement Gantt, pick the contract, View: Progress. Solid cells are done or running (from the actual dates), striped cells are planned but not started, a red outline is late. The Progress column gives steps done and how many days late. Actual dates come from ticking steps on the task card, or from Edit dates." },
   { q:"Follow-up History shows only the latest revision's calls.", a:"Fixed in build 143: a quote's history now lists the calls logged on every revision (Rev-0, Rev-1 \u2026) together, with a Rev column saying which one each call was on." },
@@ -27530,6 +27560,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"7 Oct 2026 (146)", summary:"My day — status box and flags. SQL: structure_followup_next_by_2026-10-07 (both companies: activity_log_tbl.next_followup_by). NEXT BY: every follow-up form (Log Follow-ups grid, Quotes Report Log follow-up, quote screen, My Worklist, Customers, Major Projects) has Next by: Call / Visit beside Next follow-up; older entries count as Call. MY DAY POPUP at log-in: FSE / Telecaller \u2014 a status box Calls / Visits \u00d7 Overdue / Today / Proposed (next 7 days), click a count to list only those; per customer + reference the latest entry decides (a call logged today clears an older date); then My tasks (own open cards and sub-tasks overdue or due today) and Major Projects gaps (folded). Everyone else \u2014 My tasks only, shown after the older overdue prompt and only when something is overdue or due today. BUTTONS on each row: Log call / Log visit (Log Follow-ups filled in, Save returns to My day), Open quote, History, Customer history; on a task Open card, Open quote (enquiry cards), My board. \u201c\u2190 Back to My day\u201d stays at the bottom right while you are away. TOP BAR FLAGS all day: Calls & visits (FSE / Telecaller) and Tasks \u2014 red when anything is overdue, amber when only today\u2019s are left, green when clear; click to open My day. HOME shows the same counts. Reloads every 5 minutes and whenever a follow-up is logged or a task changes. Replaces the FSE / Telecaller overdue-calls screen." },
   { date:"7 Oct 2026 (145)", summary:"Transfer cards between people and departments in one go. No SQL. Task Assignment Board \u2192 \u21c4 Transfer cards (also the small \u21c4 on each person's list and on the Unassigned pile). FROM: department + person or pile; their open cards are listed, all ticked (Show: all, Overdue only, or one label; Tick shown / Untick all). TO: any department, then a person in it or its Unassigned pile. Keep each card's due date or set one new date for all. Reason is required. Sub-tasks go with their card. Each card gets a history line \u201cTransferred from \u2026 to \u2026 \u2014 reason\u201d; an enquiry card moves its enquiry's Assigned to; a procurement card keeps its Gantt and moves its open material sub-tasks; a card In Progress goes back to Open for the new person. The receiver gets a bell notification (for a pile: that department's approvers). Who: Admins for any department; a department's task approver from and to their own departments only." },
   { date:"7 Oct 2026 (144)", summary:"Procurement Gantt chart redrawn as cells, with progress tracking, full screen and downloads. No SQL. DATES: two rows frozen at the top \u2014 month and year (\u201cOct 2026\u201d), then each week as \u201cWk 41\u201d with its Sunday\u2013Saturday dates (\u201c04\u201310\u201d); Show Weeks / Days (day number and weekday). The Material form and a new Progress column stay put when scrolling right. CELLS: each step fills whole week (or day) cells in its colour, its name in the first cell; today's week shaded with a red line, delivery a dashed line; Jump to today. VIEW: Plan (planned weeks; the screen opens on it) / Progress (solid = done or running from the actual dates, striped = planned not started, red outline = late). PROGRESS column per row: steps done of total, a bar, on track / N d late. FULL SCREEN fills the window (Esc to leave). DOWNLOAD EXCEL: Steps sheet (material, certification, step, planned and actual start/end, status) plus Gantt Plan and Gantt Progress sheets as coloured cells with the date rows and material column frozen. DOWNLOAD PDF: A3 landscape, Plan pages then Progress pages, heading, legend, date rows on every page. PENDING ACTIONS: a material form whose current step is late (past its planned end, or past its planned start and not begun) is listed for the person holding that form's sub-task (else the card), replacing the plain \u201cTask overdue\u201d line for procurement cards." },
   { date:"7 Oct 2026 (143)", summary:"Follow-up History shows a quote's whole call log and every call now records what was discussed. SQL: structure_followup_logged_from_2026-10-07 (both companies: activity_log_tbl.logged_from, filled for older stage-move and Quotes Report entries). FOLLOW-UP HISTORY (Quotes Report clock / History, Log Follow-ups history): a quote's calls on ALL its revisions (FXDS260048, -Rev-1, older \u201cR01\u201d) in one list, newest first, with a Rev column; Discussed What and Notes are separate columns shown in full; Spoke to and Next follow-up columns; Stage column removed; a grey tag under the date says where the call was logged from (Quotes Report, Log Follow-ups, Quote screen, My Worklist, Customers, Major Projects, Stage move \u00b7 <screen>); the app's own placeholder text (\u201cStage moved on \u2026\u201d) shows as \u2014. DISCUSSED WHAT + NOTES REQUIRED on every Log follow-up form \u2014 Quotes Report Log follow-up (new Discussed What box; Note renamed Notes), the quote screen's Follow-up log, My Worklist, Customers \u2192 Activity, Major Projects package log and CRM \u2192 Log Follow-ups; Notes left empty asks whether to use the Discussed What text (Log Follow-ups asks once for all such rows at Close for the day). Stage moves still ask only for a note. Fix: the quote screen's Follow-up log saved its calls where Follow-up History and the Quotes Report never looked (reference_number); they are now saved as every other follow-up and older ones are still shown. Save failures on these forms are now reported instead of passing silently." },
@@ -29786,7 +29817,7 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
   const blankRow = ()=>({
     _key: Math.random().toString(36).slice(2),
     companyName:"", mode:"Phone", chaseWhat:"Offer", chaseReference:"", referenceOptions:[],
-    contactedWhom:"", contactOptions:[], discussedWhat:"", nextFollowupDate:"", outcome:"", nature:"", notes:"",
+    contactedWhom:"", contactOptions:[], discussedWhat:"", nextFollowupDate:"", nextBy:"Call", outcome:"", nature:"", notes:"",
     showNewContact:false, _savedId:null, _dirty:false,
   });
   const [entryDate,setEntryDate] = useState(""); // empty until the prompt is answered
@@ -29944,12 +29975,12 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
           companyName: dbRow.company_name||"", mode: dbRow.activity_type||"Phone",
           chaseWhat: dbRow.chase_what||"Offer", chaseReference: dbRow.chase_reference||"", referenceOptions:[],
           contactedWhom: dbRow.contacted_whom||"", contactOptions:[], discussedWhat: dbRow.discussed_what||"",
-          nextFollowupDate: dbRow.next_followup_date||"", outcome: dbRow.outcome||"", nature:"", notes: dbRow.notes||"",
+          nextFollowupDate: dbRow.next_followup_date||"", nextBy: fuNextBy(dbRow.next_followup_by), outcome: dbRow.outcome||"", nature:"", notes: dbRow.notes||"",
           showNewContact:false, _savedId:dbRow.id, _dirty:false,
         }));
         const prefillKey = Math.random().toString(36).slice(2);
         const prefillRow = {
-          _key:prefillKey, companyName:prefill.companyName, mode:"Phone", chaseWhat:prefill.chaseWhat||"Offer",
+          _key:prefillKey, companyName:prefill.companyName, mode:prefill.mode||"Phone", chaseWhat:prefill.chaseWhat||"Offer",
           chaseReference:"", referenceOptions:[], contactedWhom:prefill.contactedWhom||"", contactOptions:[],
           discussedWhat:"", nextFollowupDate:"", outcome:"", nature:"", notes:"",
           showNewContact:false, _savedId:null, _dirty:false,
@@ -30082,15 +30113,21 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
       company_name:row.companyName, activity_type:row.mode, chase_what:row.chaseWhat, chase_reference:refNumber,
       contacted_whom:row.contactedWhom||null, discussed_what:row.discussedWhat.trim(), outcome:row.outcome||"",
       notes:row.notes||"", activity_date:entryDate, next_followup_date:row.nextFollowupDate||null,
+      ...(row.nextFollowupDate ? { next_followup_by: fuNextBy(row.nextBy) } : {}),   // 146
       logged_by:user?.username||"unknown", logged_from:"Log Follow-ups"   // 143
     };
     if(row._savedId){
-      const { error } = await sb.from("activity_log_tbl").update(payload).eq("id",row._savedId);
+      let { error } = await sb.from("activity_log_tbl").update(payload).eq("id",row._savedId);
+      for(let i=0;i<2 && error && fuDropMissingCols(payload, error);i++) ({ error } = await sb.from("activity_log_tbl").update(payload).eq("id",row._savedId));
       if(error){ alert("Couldn't save "+row.companyName+"'s follow-up: "+error.message); return; }
+      myDayPing();
     } else {
       const { data: recent } = await sb.from("activity_log_tbl").select("id").eq("company_name",row.companyName).order("created_at",{ascending:false}).limit(1);
-      const { data: inserted, error } = await sb.from("activity_log_tbl").insert({...payload, is_followup_of: recent&&recent[0]?recent[0].id:null}).select("id").single();
+      const ins = {...payload, is_followup_of: recent&&recent[0]?recent[0].id:null};
+      let { data: inserted, error } = await sb.from("activity_log_tbl").insert(ins).select("id").single();
+      for(let i=0;i<2 && error && fuDropMissingCols(ins, error);i++) ({ data: inserted, error } = await sb.from("activity_log_tbl").insert(ins).select("id").single());
       if(error){ alert("Couldn't save "+row.companyName+"'s follow-up: "+error.message); return; }
+      myDayPing();
       if(inserted) updateRow(row._key,{_savedId:inserted.id});
     }
     setRows(rs=>rs.map(r=>r._key===row._key?{...r,_dirty:false}:r));
@@ -30192,7 +30229,7 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
           companyName: dbRow.company_name||"", mode: dbRow.activity_type||"Phone",
           chaseWhat: dbRow.chase_what||"Offer", chaseReference: dbRow.chase_reference||"", referenceOptions:[],
           contactedWhom: dbRow.contacted_whom||"", contactOptions:[], discussedWhat: dbRow.discussed_what||"",
-          nextFollowupDate: dbRow.next_followup_date||"", outcome: dbRow.outcome||"", nature:"", notes: dbRow.notes||"",
+          nextFollowupDate: dbRow.next_followup_date||"", nextBy: fuNextBy(dbRow.next_followup_by), outcome: dbRow.outcome||"", nature:"", notes: dbRow.notes||"",
           showNewContact:false, _savedId:dbRow.id, _dirty:false,
         }));
         setRows(loaded);
@@ -30307,7 +30344,7 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
   const boxStyle = (extra)=>({fontFamily:F,fontSize:14,padding:"2px 4px",border:"1px solid "+T.border,borderRadius:2,width:"100%",height:30,boxSizing:"border-box",...extra});
   // Column widths — the user's exact adjusted values (converted back
   // from the Excel character-width units they left them in).
-  const COLW = [280,100,90,150,130,380,100,240,55];   // 22 Sep: Nature column removed; its width given to Discussed What and Outcome
+  const COLW = [280,100,90,150,130,300,100,80,240,55];   // 146: Next by beside Next Follow up   // 22 Sep: Nature column removed; its width given to Discussed What and Outcome
   const activeRow = rows.find(r=>r._key===activeRowKey) || rows[0];
 
   if(historyView) return h(FollowupHistoryScreen,{scope:historyView.scope, value:historyView.value, user, onBack:()=>setHistoryView(null)});
@@ -30360,8 +30397,8 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
     // Overdue-flow banner (30 Aug) — shown only when this screen was
     // reached via a double-click from the overdue-calls screen.
     isOverdueFlow && h("div",{style:{background:"#fff4d6",border:"1px solid #f0d9a8",borderRadius:6,padding:"8px 12px",marginBottom:10,display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12,color:"#854f0b"}},
-      h("span",null,"Logging today's call from your Overdue Calls list."),
-      h("button",{onClick:cancelOverdueFlow,style:{fontFamily:F,fontSize:10.5,padding:"4px 10px",background:"#fff",border:"1px solid #854f0b",color:"#854f0b",borderRadius:4,cursor:"pointer"}},"← Back to Overdue List")
+      h("span",null,prefill&&prefill.fromMyDay ? "Logging today's "+(prefill.mode==="In Person"?"visit":"call")+" from My day. Save brings you back to My day." : "Logging today's call from your Overdue Calls list."),
+      h("button",{onClick:cancelOverdueFlow,style:{fontFamily:F,fontSize:10.5,padding:"4px 10px",background:"#fff",border:"1px solid #854f0b",color:"#854f0b",borderRadius:4,cursor:"pointer"}},prefill&&prefill.fromMyDay?"← Back to My day":"← Back to Overdue List")
     ),
 
     // View toggle — Log Entries vs Review
@@ -30380,7 +30417,7 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
         h("colgroup",null, COLW.map((w,i)=>h("col",{key:i,style:{width:w}}))),
         h("thead",null,
           h("tr",{style:{background:"#eef6f3",height:43}},
-            ["Customer","Mode","Chase What","Reference","Contacted Whom","Discussed What","Next Follow up","Stage",""].map(hdr=>
+            ["Customer","Mode","Chase What","Reference","Contacted Whom","Discussed What","Next Follow up","Next by","Stage",""].map(hdr=>
               h("th",{key:hdr,style:{padding:"4px 6px",textAlign:"left",borderBottom:"1px solid "+T.border,borderRight:"1px solid #e2ede9"}},hdr))
           )
         ),
@@ -30415,6 +30452,8 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
             ),
             h("td",{style:td},h("input",{value:r.discussedWhat,onChange:e=>updateRow(r._key,{discussedWhat:e.target.value}),onFocus:onFocusRow,style:boxStyle({})})),
             h("td",{style:td},h("input",{type:"date",value:r.nextFollowupDate,onChange:e=>updateRow(r._key,{nextFollowupDate:e.target.value}),onFocus:onFocusRow,style:boxStyle({})})),
+            h("td",{style:td},h("select",{value:fuNextBy(r.nextBy),onChange:e=>updateRow(r._key,{nextBy:e.target.value}),onFocus:onFocusRow,title:"Next follow-up by",style:boxStyle({})},
+              h("option",{value:"Call"},"Call"),h("option",{value:"Visit"},"Visit"))),
             h("td",{style:{...td,background:oc.bg,color:oc.fg,overflow:"visible"}}, (r.chaseWhat==="Cold"||r.chaseWhat==="Payment"||r.chaseWhat==="Enquiry") ? h("span",{style:{color:T.muted}},"—") :
               addingOutcomeKey===r._key ? h("div",{style:{display:"flex",gap:2,alignItems:"center",flexWrap:"wrap"}},
                 h("input",{value:newOutcomeText,onChange:e=>setNewOutcomeText(e.target.value),placeholder:"New value",style:boxStyle({width:75,fontSize:10.5,height:24})}),
@@ -32477,7 +32516,7 @@ function PackageActivitySection({ pkg, project, user }){
       const { error } = await insertActivityLog({
         package_id:pkg.id, company_name:project.main_epc_company_name||project.end_user_company_name||null,
         activity_type:draft.activity_type, discussed_what:draft.discussed.trim(), notes, logged_from:"Major Projects",
-        activity_date:draft.activity_date, next_followup_date:draft.next_followup_date||null,
+        activity_date:draft.activity_date, next_followup_date:draft.next_followup_date||null, next_followup_by:draft.next_followup_by,
         logged_by:user?.username||"unknown"
       });
       if(error){ alert(saveFailedText("The follow-up", error)); return; }
@@ -32495,7 +32534,8 @@ function PackageActivitySection({ pkg, project, user }){
           h("option",{value:"Call"},"Call"),h("option",{value:"Visit"},"Visit"),h("option",{value:"Email"},"Email")
         ),
         h("input",{type:"date",value:draft.activity_date,onChange:e=>setDraft(d=>({...d,activity_date:e.target.value})),style:{...inputStyle,width:130},title:"Date this actually happened"}),
-        h("input",{type:"date",value:draft.next_followup_date,onChange:e=>setDraft(d=>({...d,next_followup_date:e.target.value})),style:{...inputStyle,width:150},title:"Next follow-up date"})
+        h("input",{type:"date",value:draft.next_followup_date,onChange:e=>setDraft(d=>({...d,next_followup_date:e.target.value})),style:{...inputStyle,width:150},title:"Next follow-up date"}),
+        fuNextBySel(draft.next_followup_by, v=>setDraft(d=>({...d,next_followup_by:v})), {...inputStyle,width:120})
       ),
       h("textarea",{value:draft.discussed,onChange:e=>setDraft(d=>({...d,discussed:e.target.value})),placeholder:"Discussed What — what did they say? (required)",style:{...inputStyle,width:"100%",minHeight:52,marginBottom:6,boxSizing:"border-box"}}),
       h("textarea",{value:draft.notes,onChange:e=>setDraft(d=>({...d,notes:e.target.value})),placeholder:"Notes (left empty: you are offered the Discussed What text)",style:{...inputStyle,width:"100%",minHeight:44,marginBottom:8,boxSizing:"border-box"}}),
@@ -35355,7 +35395,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
             company_name: row.customer_name, activity_date: f.date, activity_type: f.mode,
             chase_what: "Offer", chase_reference: row.reference_number, contacted_whom: "",
             discussed_what: f.disc.trim(), logged_from: "Quotes Report", outcome: null,
-            next_followup_date: f.next||null, notes: f.note.trim(), logged_by: user.username,
+            next_followup_date: f.next||null, next_followup_by: f.nextBy, notes: f.note.trim(), logged_by: user.username,
           });
           if(error){ alert(saveFailedText("The follow-up for "+row.reference_number, error)); return; }
           setFu(null);
@@ -35376,7 +35416,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
         if(r && r.blocked) return;   // the box stays open: pick No change, or add the Extra Price first
         if(r && r.notFound){ alert(row.reference_number+" wasn't found — it may have been deleted. The list will reload."); setFu(null); load(); return; }
         const lg = await logStageMoveFollowup({ referenceNumber:row.reference_number, customerName:row.customer_name, stage:f.stage, date:f.date,
-          note:f.note.trim(), nextFollowup:f.next, username:user.username, where:"Quotes Report", mode:f.mode, discussed:f.disc.trim() });
+          note:f.note.trim(), nextFollowup:f.next, nextBy:f.nextBy, username:user.username, where:"Quotes Report", mode:f.mode, discussed:f.disc.trim() });
         if(lg && lg.error) alert("The stage was changed to "+f.stage+", but the follow-up entry could not be saved:\n\n"+(lg.error.message||lg.error));
         setFu(null);
         patchRow(row.reference_number, { status:f.stage, next_followup:f.next||"—",
@@ -36221,7 +36261,9 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
         closes
           ? h("div",{style:{fontSize:11,color:colors.muted,marginBottom:10}},fu.stage+" closes the quote, so no next follow-up is needed. "+(fu.stage==="Won"?"The PO box opens next.":"The reason box opens next."))
           : h(React.Fragment,null, lab("Next follow-up","Next follow-up"),
-              h("input",{type:"date",value:fu.next,min:fu.date||undefined,onChange:e=>set("next",e.target.value),style:box("Next follow-up")})),
+              h("input",{type:"date",value:fu.next,min:fu.date||undefined,onChange:e=>set("next",e.target.value),style:box("Next follow-up")}),
+              lab("Next follow-up by","Next follow-up by"),
+              fuNextBySel(fu.nextBy, v=>set("nextBy",v), box("Next follow-up by"))),
         lab("Discussed What","Discussed What"),
         h("textarea",{rows:3,value:fu.disc,onChange:e=>set("disc",e.target.value),placeholder:"What did the customer say?",style:box("Discussed What",{resize:"vertical"})}),
         lab("Notes","Notes"),
@@ -42415,7 +42457,7 @@ function MastersAuditReport({ user }){
 // overdue follow-up. Color-coded: is_followup_of set = this call was
 // prompted by an earlier logged interaction; unset = a fresh first touch.
 // Skippable, never blocking — no repeat nag within the same day.
-function OverdueCallsPrompt({ user, onDone }){
+function OverdueCallsPrompt({ user, onDone, onEmpty }){
   const [loading,setLoading] = useState(true);
   const [employee,setEmployee] = useState(null);
   const [items,setItems] = useState([]); // {activity, company_name}
@@ -42456,6 +42498,7 @@ function OverdueCallsPrompt({ user, onDone }){
     })();
   },[user?.id]);
 
+  useEffect(()=>{ if(!loading && items.length===0 && enqs.length===0 && onEmpty) onEmpty(); },[loading, items.length, enqs.length]);   // 146: lets My day open
   if(loading || (items.length===0 && enqs.length===0)) return null;
   const today = new Date().toISOString().slice(0,10);
 
@@ -42506,6 +42549,183 @@ function OverdueCallsPrompt({ user, onDone }){
 // follow-up" convention as My Worklist / the old prompt / Overdue Calls
 // report — a fresh entry logged today for a company (any outcome) is
 // what's actually meant by "already handled today", not a separate check.
+// ---- 146: MY DAY — calls & visits (FSE / Telecaller) and tasks (everyone), at log-in, in the top bar and on Home ----
+// Calls & visits: the person's own logged follow-ups; per customer + reference the LATEST entry decides (one logged
+// today clears an older date). Its Next follow-up date says when, next_followup_by says Call or Visit (older = Call).
+// Overdue = before today, Today, Proposed = the next 7 days. Tasks: the person's open cards and sub-tasks
+// (Open / In Progress) overdue or due today.
+async function loadMyDayData(user, empName, isSales){
+  const today = toISODate(new Date()), wk = addDaysISO(today, 7);
+  let fu = [], tasks = [];
+  if(isSales && user && user.username){
+    try{
+      const since = addDaysISO(today, -400);
+      const acts = await fetchPaged(()=>sb.from("activity_log_tbl").select("*").eq("logged_by",user.username).gte("activity_date",since).order("created_at",{ascending:false}).order("id",{ascending:false}));
+      const latest = new Map();
+      acts.forEach(a=>{ const k = String(a.company_name||"").trim().toLowerCase()+"|"+String(a.chase_reference||"").trim().toLowerCase(); if(!latest.has(k)) latest.set(k,a); });
+      fu = Array.from(latest.values()).filter(a=>a.next_followup_date && String(a.next_followup_date).slice(0,10)<=wk).map(a=>{
+        const due = String(a.next_followup_date).slice(0,10);
+        return { ...a, by:fuNextBy(a.next_followup_by), due, bucket: due<today?"over":due===today?"today":"prop" };
+      }).sort((x,y)=>x.due.localeCompare(y.due) || String(x.company_name||"").localeCompare(String(y.company_name||"")));
+    }catch(e){ console.warn("My day: follow-ups", e); }
+  }
+  if(empName){
+    try{
+      tasks = await fetchPaged(()=>sb.from("task_tbl").select("*").eq("assignee",empName).in("status",["open","progress"]).lte("due_date",today).order("due_date"));
+      tasks = tasks.filter(t=>t.due_date).map(t=>({ ...t, due:String(t.due_date).slice(0,10), bucket:String(t.due_date).slice(0,10)<today?"over":"today" }));
+    }catch(e){ console.warn("My day: tasks", e); }
+  }
+  return { fu, tasks, today };
+}
+function myDayCounts(d){
+  const fu = (d&&d.fu)||[], tk = (d&&d.tasks)||[];
+  const c = (by,b)=> fu.filter(x=>x.by===by && x.bucket===b).length;
+  return { callOver:c("Call","over"), visitOver:c("Visit","over"), callToday:c("Call","today"), visitToday:c("Visit","today"),
+    callProp:c("Call","prop"), visitProp:c("Visit","prop"),
+    fuOver:fu.filter(x=>x.bucket==="over").length, fuToday:fu.filter(x=>x.bucket==="today").length, fuProp:fu.filter(x=>x.bucket==="prop").length,
+    tkOver:tk.filter(t=>t.bucket==="over").length, tkToday:tk.filter(t=>t.bucket==="today").length };
+}
+const MYDAY_TONE = { over:{bg:"#fdecea",fg:"#a3312a"}, today:{bg:"#fff4d6",fg:"#854f0b"}, prop:{bg:"#e6f1fb",fg:"#0c447c"} };
+function myDayDaysLate(due, today){ return Math.max(0, Math.round((new Date(today+"T12:00:00") - new Date(due+"T12:00:00"))/86400000)); }
+// Top-bar flags: red when anything is overdue, amber when only today's are left, green when clear.
+function MyDayFlags({ data, isSales, hasEmp, onOpen }){
+  if(!data || (!isSales && !hasEmp)) return null;
+  const k = myDayCounts(data);
+  const chip = (key, label, over, today, title)=>{
+    const bg = over ? "#c4453c" : today ? "#e0a72e" : "#2e6b58", fg = over ? "#fff" : today ? "#24180a" : "#e8f5ef";
+    return h("button",{key,onClick:onOpen,title,style:{background:bg,color:fg,border:"none",borderRadius:14,padding:"4px 10px",fontSize:11.5,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}},
+      label+" "+over+" overdue · "+today+" today");
+  };
+  return h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}},
+    isSales ? chip("fu","Calls & visits", k.fuOver, k.fuToday, "Your calls and visits from Next follow-up — click to open My day") : null,
+    hasEmp ? chip("tk","Tasks", k.tkOver, k.tkToday, "Your open cards overdue or due today — click to open My day") : null);
+}
+// Home: the same counts, always there after Continue.
+function MyDayHomeBox({ data, isSales, hasEmp, onOpen }){
+  if(!data || (!isSales && !hasEmp)) return null;
+  const k = myDayCounts(data);
+  const tile = (n, label, tone)=> h("div",{style:{border:"1px solid "+colors.border,borderRadius:6,padding:"8px 10px",minWidth:0}},
+    h("div",{style:{fontSize:20,fontWeight:700,color:tone?MYDAY_TONE[tone].fg:colors.text,fontVariantNumeric:"tabular-nums"}},n),
+    h("div",{style:{fontSize:11,color:colors.muted}},label));
+  const card = (title, kids, btn)=> h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:10,padding:"14px 16px",flex:"1 1 300px",minWidth:0,textAlign:"left"}},
+    h("div",{style:{fontWeight:700,fontSize:13.5,marginBottom:10}},title),
+    h("div",{style:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:10}},kids),
+    h("button",{onClick:onOpen,style:btnSmall},btn));
+  return h("div",{style:{display:"flex",gap:14,flexWrap:"wrap",maxWidth:820,margin:"0 auto 30px"}},
+    isSales ? card("Calls & visits",[
+      h(React.Fragment,{key:"a"},tile(k.fuOver, "Overdue · "+k.callOver+" call"+(k.callOver===1?"":"s")+", "+k.visitOver+" visit"+(k.visitOver===1?"":"s"), "over")),
+      h(React.Fragment,{key:"b"},tile(k.fuToday, "Today · "+k.callToday+" call"+(k.callToday===1?"":"s")+", "+k.visitToday+" visit"+(k.visitToday===1?"":"s"), "today")),
+      h(React.Fragment,{key:"c"},tile(k.fuProp, "Proposed · next 7 days", "prop"))], "Open My day") : null,
+    hasEmp ? card("My tasks",[
+      h(React.Fragment,{key:"a"},tile(k.tkOver,"Overdue","over")),
+      h(React.Fragment,{key:"b"},tile(k.tkToday,"Due today","today")),
+      h(React.Fragment,{key:"c"},tile(k.tkOver+k.tkToday,"To act on today",null))], "Open My day") : null);
+}
+// The popup. onGo(kind, payload): log | quote | history | custhist | card | board — App takes the person there and
+// shows "← Back to My day" until they come back.
+function MyDayPopup({ user, employee, isSales, data, onGo, onClose, onFixGap }){
+  const [pick,setPick] = useState(null);   // "Call|over" … filter from the status box
+  const [gapsOpen,setGapsOpen] = useState(false);
+  const [gapRows,setGapRows] = useState(null);
+  const today = (data && data.today) || toISODate(new Date());
+  const fu = (data && data.fu) || [], tasks = (data && data.tasks) || [];
+  const k = myDayCounts(data);
+  const firstName = String((employee && employee.employee_name) || (user && user.username) || "there").split(" ")[0];
+  useEffect(()=>{ if(!gapsOpen || gapRows || !employee || !employee.employee_name) return; (async()=>{
+    try{ const g = await computeMajorProjectGaps(employee.employee_name);
+      setGapRows([...g.noEpc.map(r=>({...r,type:"No EPC"})), ...g.noPackages.map(r=>({...r,type:"No package"})), ...g.noCustomer.map(r=>({...r,type:"No customer"})),
+        ...g.noRfq.map(r=>({...r,type:"No RFQ or lost"})), ...g.noOwner.map(r=>({...r,type:"No owner"})), ...g.overdue.map(r=>({...r,type:"Overdue enquiry"}))].sort((a,b)=>b.age-a.age));
+    }catch(e){ setGapRows([]); }
+  })(); },[gapsOpen]);
+  const th = (t)=> h("th",{key:t,style:{textAlign:"left",padding:"6px 8px",borderBottom:"2px solid "+colors.border,fontSize:10.5,textTransform:"uppercase",letterSpacing:".04em",color:colors.muted,whiteSpace:"nowrap",background:"#faf9f4"}},t);
+  const td = (kids, extra)=> h("td",{style:{padding:"6px 8px",borderBottom:"1px solid "+colors.border,verticalAlign:"top",...(extra||{})}},kids);
+  const pill = (txt, tone)=> h("span",{style:{background:MYDAY_TONE[tone].bg,color:MYDAY_TONE[tone].fg,borderRadius:10,padding:"2px 8px",fontSize:10.5,fontWeight:700,whiteSpace:"nowrap"}},txt);
+  const act = (label, fn, main)=> h("button",{onClick:fn,style:{fontSize:10.5,padding:"3px 8px",borderRadius:4,cursor:"pointer",whiteSpace:"nowrap",
+    border:"1px solid "+(main?"#0f7a5c":colors.border),background:main?"#0f7a5c":"#fff",color:main?"#fff":"#0f7a5c",fontWeight:main?700:500}},label);
+  const goLog = (a)=> onGo("log",{ companyName:a.company_name||"", chaseWhat:a.chase_what||"Offer", chaseReference:a.chase_reference||"", contactedWhom:a.contacted_whom||"",
+    mode: a.by==="Visit" ? "In Person" : "Phone", fromMyDay:true });
+  // status box
+  const cols = [["over","Overdue"],["today","Today"],["prop","Proposed · 7 days"]];
+  const statusBox = h("div",{style:{display:"grid",gridTemplateColumns:"80px repeat(3,1fr)",border:"1px solid "+colors.border,borderRadius:8,overflow:"hidden"}},
+    h("div",{style:{background:"#faf9f4",borderBottom:"1px solid "+colors.border}}),
+    cols.map(c=>h("div",{key:c[0],style:{background:"#faf9f4",borderBottom:"1px solid "+colors.border,borderLeft:"1px solid "+colors.border,padding:"6px 10px",fontSize:10.5,textTransform:"uppercase",letterSpacing:".05em",color:colors.muted}},c[1])),
+    ["Call","Visit"].flatMap(by=>[
+      h("div",{key:by,style:{padding:"8px 10px",fontWeight:700,fontSize:12.5,borderBottom:"1px solid "+colors.border,display:"flex",alignItems:"center"}},by+"s"),
+      ...cols.map(c=>{ const key = by+"|"+c[0]; const n = fu.filter(x=>x.by===by && x.bucket===c[0]).length; const on = pick===key;
+        return h("button",{key, onClick:()=>setPick(on?null:key), title:on?"Show all":"List only these",
+          style:{display:"flex",alignItems:"baseline",gap:6,padding:"8px 10px",border:"none",borderLeft:"1px solid "+colors.border,borderBottom:"1px solid "+colors.border,
+            background:on?"#e3f2ec":"#fff",boxShadow:on?"inset 0 0 0 2px #0f7a5c":"none",cursor:"pointer",textAlign:"left"}},
+          h("span",{style:{fontSize:20,fontWeight:700,color:n?MYDAY_TONE[c[0]].fg:colors.mutedLight,fontVariantNumeric:"tabular-nums"}},n),
+          h("span",{style:{fontSize:10.5,color:colors.muted}},by.toLowerCase()+(n===1?"":"s"))); })
+    ]));
+  const rows = fu.filter(x=> pick ? (x.by+"|"+x.bucket)===pick : true);
+  const fuTable = rows.length===0 ? h("div",{style:{fontSize:12,color:colors.mutedLight,padding:"8px 2px"}}, pick ? "None here." : "No calls or visits overdue, today or in the next 7 days.") :
+    h("div",{style:{overflowX:"auto",border:"1px solid "+colors.border,borderRadius:8,maxHeight:300,overflowY:"auto"}},
+      h("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:12}},
+        h("thead",{style:{position:"sticky",top:0}},h("tr",null,["Customer","Reference","By","Next follow-up","Status","Last discussed",""].map(th))),
+        h("tbody",null, rows.map(a=>{ const late = myDayDaysLate(a.due, today);
+          const isOffer = (a.chase_what||"Offer")==="Offer" && a.chase_reference;
+          return h("tr",{key:a.id,onDoubleClick:()=>goLog(a),title:"Double-click to log today's "+a.by.toLowerCase(),style:{cursor:"pointer"}},
+            td(h("b",null,a.company_name||"—")), td(a.chase_reference||"—",{color:colors.muted}),
+            td(h("span",{style:{fontSize:10.5,border:"1px solid "+colors.border,borderRadius:4,padding:"1px 6px",color:colors.muted}},a.by)),
+            td(fmtDMY(a.due),{whiteSpace:"nowrap"}),
+            td(a.bucket==="over" ? pill(late+" day"+(late===1?"":"s")+" overdue","over") : a.bucket==="today" ? pill("Today","today") : pill("Proposed","prop")),
+            td(a.discussed_what && !FU_AUTO_DISCUSSED.test(a.discussed_what) ? a.discussed_what : (a.notes||"—"),{color:colors.muted,maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}),
+            td(h("div",{style:{display:"flex",gap:4,flexWrap:"wrap"}},
+              act("Log "+a.by.toLowerCase(), ()=>goLog(a), true),
+              isOffer ? act("Open quote", ()=>onGo("quote",{ref:a.chase_reference})) : null,
+              a.chase_reference ? act("History", ()=>onGo("history",{ref:a.chase_reference})) : null,
+              a.company_name ? act("Customer", ()=>onGo("custhist",{name:a.company_name})) : null)));
+        }))));
+  const quoteOfCard = (t)=>{ const parts = String(t.ref||"").split(" · "); return t.enquiry_id && parts[1] ? parts[1].trim() : ""; };
+  const taskTable = tasks.length===0 ? h("div",{style:{fontSize:12,color:colors.mutedLight,padding:"8px 2px"}},"No tasks overdue or due today.") :
+    h("div",{style:{overflowX:"auto",border:"1px solid "+colors.border,borderRadius:8,maxHeight:280,overflowY:"auto"}},
+      h("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:12}},
+        h("thead",{style:{position:"sticky",top:0}},h("tr",null,["Card","Board","Due","Status","When",""].map(th))),
+        h("tbody",null, tasks.map(t=>{ const late = myDayDaysLate(t.due, today); const q = quoteOfCard(t);
+          return h("tr",{key:t.id,onDoubleClick:()=>onGo("card",{id:t.id}),title:"Double-click to open the card",style:{cursor:"pointer"}},
+            td([h("b",{key:"t"},t.title||"—"), t.parent_id ? h("span",{key:"s",style:{fontSize:10.5,color:colors.mutedLight}}," · sub-task") : null, t.ref ? h("div",{key:"r",style:{fontSize:10.5,color:colors.mutedLight}},t.ref) : null]),
+            td(t.department||"—",{color:colors.muted}), td(fmtDMY(t.due),{whiteSpace:"nowrap"}),
+            td(t.status==="progress"?"In Progress":"Open",{color:colors.muted}),
+            td(t.bucket==="over" ? pill(late+" day"+(late===1?"":"s")+" overdue","over") : pill("Today","today")),
+            td(h("div",{style:{display:"flex",gap:4,flexWrap:"wrap"}},
+              act("Open card", ()=>onGo("card",{id:t.id}), true),
+              q ? act("Open quote", ()=>onGo("quote",{ref:q})) : null,
+              act("My board", ()=>onGo("board",{})))));
+        }))));
+  const allClear = (!isSales || (k.fuOver+k.fuToday)===0) && (k.tkOver+k.tkToday)===0;
+  const bannerBits = [];
+  if(isSales && k.fuOver) bannerBits.push(k.fuOver+" call"+(k.fuOver===1?"":"s")+" / visit"+(k.fuOver===1?"":"s")+" overdue ("+k.callOver+" call"+(k.callOver===1?"":"s")+", "+k.visitOver+" visit"+(k.visitOver===1?"":"s")+")");
+  if(k.tkOver) bannerBits.push(k.tkOver+" task"+(k.tkOver===1?"":"s")+" overdue");
+  return h("div",{onKeyDown:e=>{ if(e.key==="Escape") onClose(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
+    h("div",{style:{background:"#fff",borderRadius:10,padding:"18px 20px",width:isSales?860:720,maxWidth:"100%",maxHeight:"90vh",overflowY:"auto",display:"flex",flexDirection:"column",gap:14}},
+      h("div",{style:{display:"flex",alignItems:"flex-start",gap:10}},
+        h("div",{style:{flex:1}},
+          h("div",{style:{fontWeight:700,fontSize:15}},"Hey "+firstName+", here's your day — "+fmtDMY(today)),
+          h("div",{style:{fontSize:11.5,color:colors.mutedLight,marginTop:2}}, isSales ? "Calls and visits come from the Next follow-up on your logged calls. Click a count to list only those; double-click a row to log it." : "Your open cards and sub-tasks that are overdue or due today. Double-click to open the card.")),
+        h("button",{onClick:onClose,title:"Close",style:{border:"none",background:"transparent",fontSize:18,cursor:"pointer",color:colors.muted,lineHeight:1}},"×")),
+      allClear ? h("div",{style:{background:"#e3f2ec",color:"#0f6e56",borderRadius:8,padding:"10px 12px",fontSize:13,fontWeight:600}},"You're on track — nothing overdue or due today.")
+        : bannerBits.length ? h("div",{style:{background:"#fdecea",color:"#a3312a",borderRadius:8,padding:"10px 12px",fontSize:13}},h("b",null,bannerBits.join(" · ")),"  — clear these first.")
+        : h("div",{style:{background:"#fff4d6",color:"#854f0b",borderRadius:8,padding:"10px 12px",fontSize:13}},"Nothing overdue. "+(isSales?k.fuToday+" call"+(k.fuToday===1?"":"s")+"/visit"+(k.fuToday===1?"":"s")+" and ":"")+k.tkToday+" task"+(k.tkToday===1?"":"s")+" due today."),
+      isSales ? h("div",null,
+        h("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:6}},h("b",{style:{fontSize:13}},"Calls & visits"), pick ? h("button",{onClick:()=>setPick(null),style:{...btnSmall,fontSize:10.5,padding:"2px 8px"}},"Show all") : null),
+        statusBox, h("div",{style:{height:8}}), fuTable) : null,
+      h("div",null,
+        h("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:6}},h("b",{style:{fontSize:13}},"My tasks — overdue and today"),
+          k.tkOver ? pill(k.tkOver+" overdue","over") : null, k.tkToday ? pill(k.tkToday+" today","today") : null),
+        taskTable),
+      isSales && employee && employee.employee_name ? h("div",null,
+        h("button",{onClick:()=>setGapsOpen(o=>!o),style:{border:"none",background:"transparent",padding:0,fontWeight:700,fontSize:12.5,color:colors.muted,cursor:"pointer"}},(gapsOpen?"▾ ":"▸ ")+"Major Projects — needs chasing"+(gapRows?" ("+gapRows.length+")":"")),
+        gapsOpen ? (gapRows===null ? h("div",{style:{fontSize:12,color:colors.mutedLight,marginTop:6}},"Checking…") : gapRows.length===0 ? h("div",{style:{fontSize:12,color:colors.mutedLight,marginTop:6}},"No gaps.") :
+          h("div",{style:{overflowX:"auto",border:"1px solid "+colors.border,borderRadius:8,marginTop:6}},h("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:12}},
+            h("thead",null,h("tr",null,["Project","Detail","Gap","Age",""].map(th))),
+            h("tbody",null,gapRows.map((r,i)=>h("tr",{key:i},td(h("b",null,r.project)),td(r.detail,{color:colors.muted}),td(r.type),td(r.age+"d",{color:colors.mutedLight}),
+              td(r.type!=="Overdue enquiry" && onFixGap ? act("Fix",()=>onFixGap(r.project)) : null))))))) : null) : null,
+      h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}},
+        h("span",{style:{fontSize:11,color:colors.mutedLight}},"The flags in the top bar stay all day — click one to open this again."),
+        h("button",{onClick:onClose,style:btnPrimary},"Continue to app"))));
+}
+
 function FseOverdueCallsPrompt({ user, employee, onGoLog, onContinue, onFixGap }){
   const [loading,setLoading] = useState(true);
   const [items,setItems] = useState([]);
@@ -42831,11 +43051,49 @@ function App() {
     setFollowupPrefill(prefillData);
     setOverdueFlowOrigin(origin);
     if(origin==="fse") setShowFseOverduePrompt(false);
+    if(origin==="myday"){ setShowMyDay(false); myDayFromTabRef.current = tab==="followup_entry" ? "home" : tab; }
     setTab("followup_entry");
+  };
+  // 146: My day — loaded for everyone with an employee link (calls & visits only for FSE / Telecaller); reloads every
+  // 5 minutes and whenever a follow-up is logged or a task changes (myDayPing).
+  const [myDay,setMyDay] = useState(null);
+  const myDayFromTabRef = useRef("home");
+  const [showMyDay,setShowMyDay] = useState(true);      // the log-in popup (once per log-in); flags reopen it
+  const [myDayForced,setMyDayForced] = useState(false);
+  const [overduePromptEmpty,setOverduePromptEmpty] = useState(false);   // the older prompt had nothing to show // opened from a flag / Home: show even when all clear
+  const [myDayBack,setMyDayBack] = useState(false);     // "← Back to My day" while away
+  const [myDayTaskId,setMyDayTaskId] = useState(null);
+  const [myDayHistory,setMyDayHistory] = useState(null); // {scope, value}
+  const myDayHasEmp = !!(overdueGateEmployee && overdueGateEmployee.employee_name);
+  const loadMyDay = useCallback(async()=>{
+    if(!user || overdueGateEmployee===undefined) return;
+    if(!overdueGateEmployee){ setMyDay(null); return; }
+    const d = await loadMyDayData(user, overdueGateEmployee.employee_name, isFseOrTelecaller);
+    setMyDay(d);
+  },[user?.username, overdueGateEmployee, isFseOrTelecaller]);
+  useEffect(()=>{
+    loadMyDay();
+    const t = setInterval(loadMyDay, 5*60*1000);
+    const f = ()=>loadMyDay();
+    window.addEventListener("myday:refresh", f);
+    return ()=>{ clearInterval(t); window.removeEventListener("myday:refresh", f); };
+  },[loadMyDay]);
+  const openMyDay = ()=>{ setMyDayBack(false); setMyDayForced(true); setShowMyDay(true); loadMyDay(); };
+  useEffect(()=>{ if(tab!=="task_board") setMyDayTaskId(null); },[tab]);
+  const closeMyDay = ()=>{ setShowMyDay(false); setMyDayForced(false); };
+  const myDayGo = (kind, x)=>{
+    if(kind==="log"){ handleGoLogFromOverdue(x, "myday"); return; }
+    setShowMyDay(false); setMyDayBack(true);
+    if(kind==="quote"){ setQuoteToOpen({reference_number:x.ref,item_sl_no:1}); setTab("saved"); }
+    else if(kind==="history"){ setMyDayHistory({scope:"reference",value:x.ref}); setTab("myday_history"); }
+    else if(kind==="custhist"){ setMyDayHistory({scope:"customer",value:x.name}); setTab("myday_history"); }
+    else if(kind==="card"){ setMyDayTaskId(x.id); setTab("task_board"); }
+    else if(kind==="board"){ setMyDayTaskId(null); setTab("task_board"); }
   };
   const handleBackToOverdue = ()=>{
     setFollowupPrefill(null);
-    if(overdueFlowOrigin==="fse") setShowFseOverduePrompt(true);
+    if(overdueFlowOrigin==="myday"){ setMyDayBack(false); setShowMyDay(true); setTab(myDayFromTabRef.current||"home"); }   // 146: back where you were, My day on top
+    else if(overdueFlowOrigin==="fse") setShowFseOverduePrompt(true);
     else if(overdueFlowOrigin==="admin") setTab("reports_overdue_followups");
     setOverdueFlowOrigin(null);
   };
@@ -42935,13 +43193,16 @@ function App() {
 
   return h("div",{style:{minHeight:"100vh"}},
     user.role==="super_admin" && !monthlyArchiveDone && h(MonthlyArchivePrompt,{user,onDone:()=>setMonthlyArchiveDone(true)}),
-    overdueGateEmployee!==undefined && !isFseOrTelecaller && showOverduePrompt && h(OverdueCallsPrompt,{user,onDone:dismissOverduePrompt}),
-    isFseOrTelecaller && showFseOverduePrompt && h(FseOverdueCallsPrompt,{
-      user, employee:overdueGateEmployee,
-      onGoLog:(prefillData)=>handleGoLogFromOverdue(prefillData,"fse"),
-      onContinue:()=>setShowFseOverduePrompt(false),
-      onFixGap:(projectName)=>{ setShowFseOverduePrompt(false); goToEntityLookup("__detailed_project__",projectName); }
+    overdueGateEmployee!==undefined && !isFseOrTelecaller && showOverduePrompt && h(OverdueCallsPrompt,{user,onDone:dismissOverduePrompt,onEmpty:()=>setOverduePromptEmpty(true)}),
+    // 146: My day replaces the FSE / Telecaller overdue-calls screen; everyone else sees it (tasks only) after the
+    // older overdue prompt, and only when something is overdue or due today — unless opened from a flag.
+    showMyDay && myDay && myDayHasEmp && (myDayForced || isFseOrTelecaller || ((myDayCounts(myDay).tkOver+myDayCounts(myDay).tkToday)>0 && !(showOverduePrompt && !overduePromptEmpty && !isFseOrTelecaller))) && h(MyDayPopup,{
+      user, employee:overdueGateEmployee, isSales:isFseOrTelecaller, data:myDay, onGo:myDayGo, onClose:closeMyDay,
+      onFixGap:(projectName)=>{ closeMyDay(); goToEntityLookup("__detailed_project__",projectName); }
     }),
+    myDayBack && !showMyDay && h("div",{style:{position:"fixed",right:16,bottom:16,zIndex:1100,display:"flex",alignItems:"center",gap:2,background:"#854f0b",borderRadius:22,boxShadow:"0 4px 14px rgba(0,0,0,0.18)"}},
+      h("button",{onClick:openMyDay,title:"Back to My day",style:{background:"transparent",border:"none",color:"#fff",fontWeight:700,fontSize:12.5,padding:"9px 6px 9px 16px",cursor:"pointer"}},"\u2190 Back to My day"),
+      h("button",{onClick:()=>setMyDayBack(false),title:"Dismiss",style:{background:"transparent",border:"none",color:"#ffe9b8",fontSize:15,padding:"6px 12px 6px 6px",cursor:"pointer"}},"\u00d7")),
     (user.role==="admin"||user.role==="super_admin") && showBillingOverrideReminder && h(IncompleteSaleOrderReminder,{user,onDone:dismissBillingOverrideReminder,onOpenContract:openContract}),
     showQuoteOwnerAlerts && h(QuoteStatusOwnerAlerts,{user,onDone:()=>setShowQuoteOwnerAlerts(false)}),
     returnToReport && tab!=="quotes_report" && h("div",{style:{position:"fixed",left:16,bottom:16,zIndex:1100,display:"flex",alignItems:"center",gap:2,
@@ -42963,7 +43224,7 @@ function App() {
       onSaved: (updated)=>{ setPendingHeaderPromptFor(null); finishOpenContract(updated); }
     }),
     h("div",{id:"app-sticky-header",style:{position:"sticky",top:0,zIndex:60}},
-      h(TopBar,{user,sessionCompanyId,sessionCompany,onChangeCompany:user.role==="super_admin"?(()=>setSessionCompanyIdPersisted(null)):null,onLogout:()=>{setUserPersisted(null);setSessionCompanyIdPersisted(null);setMasterData({models:[],gradesBySpec:new Map(),rateBySpecGrade:new Map(),allSpecs:[],loadingMaster:true});}}),
+      h(TopBar,{user,sessionCompanyId,sessionCompany,flags:h(MyDayFlags,{data:myDay,isSales:isFseOrTelecaller,hasEmp:myDayHasEmp,onOpen:openMyDay}),onChangeCompany:user.role==="super_admin"?(()=>setSessionCompanyIdPersisted(null)):null,onLogout:()=>{setUserPersisted(null);setSessionCompanyIdPersisted(null);setMasterData({models:[],gradesBySpec:new Map(),rateBySpecGrade:new Map(),allSpecs:[],loadingMaster:true});}}),
       h(MenuTabs,{user,active:tab,onChange:pickTab})
     ),
     // Mounted at app level so it can be opened from any screen, and captures
@@ -43061,7 +43322,7 @@ function App() {
     tab==="board_grid"?h(BoardGridScreen,{user}):
     (tab==="doc_board"||tab==="doc_report"||tab==="doc_letters")?h(DocControlScreen,{user,company:sessionCompany,initialPanel:tab==="doc_report"?"report":tab==="doc_letters"?"letters":null,onOpenContract:(row)=>{ setTab("sale_order_entry"); openContract(row); }}):
     tab==="task_board"?h(TaskBoardScreen,{user, company:sessionCompany, onGoToTab:setTab,
-      openTaskId: enqNav&&enqNav.taskId, onBackToEnquiry: enqNav ? ()=>{ setEnqNav(n=>n?{enqId:n.enqId,back:true}:null); setTab("enquiries_list"); } : null,
+      openTaskId: (enqNav&&enqNav.taskId) || myDayTaskId, onBackToEnquiry: enqNav ? ()=>{ setEnqNav(n=>n?{enqId:n.enqId,back:true}:null); setTab("enquiries_list"); } : null,
       onOpenQuote:(ref,slNo)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo||1});setTab("saved");},
       onStartQuote:(ref,enquiryId,prefillCustomerName)=>{ setPendingNewSlNo({reference_number:ref,item_sl_no:1,linked_enquiry_id:enquiryId,prefillCustomerName}); setTab("estimator"); } }):
     tab==="quote_register"?h(QuoteRegisterScreen,{user,   // 137
@@ -43115,7 +43376,9 @@ function App() {
     tab==="login_history"?h(LoginHistoryViewer,null):
     tab==="audit_log"?h(AuditLogViewer,null):
     tab==="change_password"?h(ChangePassword,{user}):
+    tab==="myday_history" && myDayHistory ? h(FollowupHistoryScreen,{scope:myDayHistory.scope, value:myDayHistory.value, user, onBack:openMyDay}) :   // 146
     tab==="home"?h("div",{style:{padding:"60px 24px",textAlign:"center"}},
+      h(MyDayHomeBox,{data:myDay,isSales:isFseOrTelecaller,hasEmp:myDayHasEmp,onOpen:openMyDay}),   // 146
       sessionCompany?.logo_data
         ? h("img",{src:sessionCompany.logo_data,alt:sessionCompany.company_name||"Company logo",style:{height:64,width:"auto",objectFit:"contain",marginBottom:14}})
         : h("div",{style:{fontSize:12,color:colors.mutedLight,marginBottom:14}},"Authored by K.Bala Boopathy"),
@@ -44512,6 +44775,7 @@ async function taskMyEmployeeName(user){
 }
 async function taskLog(taskId, by, action, title, snapshot){
   try{ await sb.from("task_history_tbl").insert({ task_id:taskId, by_name:by, action, at:new Date().toISOString(), ...(title?{task_title:title}:{}), ...(snapshot?{snapshot}:{}) }); }catch(e){ console.error("Task history not saved", e); }
+  myDayPing();   // 146
 }
 // ---- 5 Oct (123): every enquiry is an Estimation task card ----------------
 // Logging an enquiry creates a card in the Estimation Unassigned pile. The card
