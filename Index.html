@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-08T13:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-08T16:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -2130,7 +2130,7 @@ function MenuTabs({ user, active, onChange }) {
     ]},
     // 136 Build 5: Purchase — the same valve price list, under Price List.
     // 138 Build A: Procurement Gantt for everyone (Purchase edit), Price List as before.
-    { label:"Purchase", subgroups:[{ label:"Procurement", tabs:[{key:"proc_list",label:"Procurement list"},{key:"proc_gantt",label:"Procurement Gantt"}] }, ...(canSeeValvePrice(user)?[{ label:"Price List", tabs:[{key:"valve_price_purchase",label:"Valves"}] }]:[])] },
+    { label:"Purchase", subgroups:[{ label:"Procurement", tabs:[{key:"proc_list",label:"Procurement list"},{key:"proc_gantt",label:"Procurement Gantt"},{key:"proc_reports",label:"Procurement reports"}] }, ...(canSeeValvePrice(user)?[{ label:"Price List", tabs:[{key:"valve_price_purchase",label:"Valves"}] }]:[])] },
     { label:"Inventory", subgroups:[
       { label:"Inventory", tabs:[
         {key:"po_register",label:"PO Register"},
@@ -2206,6 +2206,7 @@ function MenuTabs({ user, active, onChange }) {
         {key:"reports_po_register",label:"PO Register"},
         {key:"reports_grn_status",label:"GRN Status Report"},
       ]},
+      { label:"Purchase", tabs:[ {key:"proc_reports",label:"Procurement reports"} ] },   // 154
       { label:"Employee", tabs:[
         {key:"reports_my_timesheet",label:"Timesheet"},
         {key:"reports_hr_timesheet",label:"HR Reports"},
@@ -3850,11 +3851,11 @@ function QuoteStageTrack({ referenceNumber, customerName, current, changedAt, ch
         loadTrail();
       } finally { setBusy(false); }
     };
-    // A plain user needs a code for a stage change made on this screen;
-    // admins pass straight through. 29 Sep (97): Draft → Offer Sent is
-    // free for everyone — sending the offer is routine, not a decision.
-    const freeMove = (current||"Draft")==="Draft" && st==="Offer Sent";
-    if(!(user.role==="admin"||user.role==="super_admin") && !freeMove) onRequestAuth(action); else action();
+    // 153: the funnel is open to everyone — only back to Draft (never) and out of Won (code) are held
+    const rule = stageMoveRule(current, st, user);
+    if(rule==="same") return;
+    if(rule==="draft"){ alert(stageDraftMsg(referenceNumber)); return; }
+    if(rule==="code") onRequestAuth(action); else action();
   };
   const box = {padding:"7px 4px",border:"1px solid "+colors.border,borderRadius:6,textAlign:"center",fontSize:11,cursor:ready?"pointer":"default",lineHeight:1.25,background:"#fff",color:colors.muted,flex:1,minWidth:0};
   return h("div",{style:{background:"#faf9f4",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px",marginBottom:12}},
@@ -19892,7 +19893,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       {id:"so",label:"Create Sale Order",icon:"file-invoice",color:"#185fa5",onClick:createSaleOrderFromQuote,
         why:noOpen||(isSO?"You're already on the Sale Order.":null)||(!quoteHeaderRow?"The header is still loading.":null)},
       {id:"amend",label:isSO?"Amend Sale Order":"Amend quote",icon:"git-branch",color:"#0c447c",
-        onClick:()=>{ if(isAdmin) setShowAmendPicker(true); else setShowAmendGate(true); },
+        onClick:async()=>{ if(await mayAmendFreely(user, quoteHeaderRow&&quoteHeaderRow.customer_name)) setShowAmendPicker(true); else setShowAmendGate(true); },   // 153: owner, tab FSE / TC, Sales Coordinator, Admins free; others a code
         why:noOpen||(isSO?"Amending a Sale Order isn't built yet.":null)||(!quoteHeaderRow?"The header is still loading.":null)||(quoteHeaderRow&&quoteHeaderRow.quote_status==="Draft"?"A Draft is edited directly. Amend is for a quote that has left Draft.":null)}
     ]},
     {key:"end",cap:"",row:2,push:true,items:[
@@ -22424,6 +22425,11 @@ async function verifyAndConsumeGatedPin(actionType, enteredPin, username, entity
   return {ok:true};
 }
 async function updateQuoteStatusForQuote(referenceNumber, newStatus, changedBy, source, reason, changedAt){
+  if(newStatus==="Draft" && source!=="Amend"){   // 153: back to Draft only through a new revision
+    const { data: cur } = await sb.from("estimates").select("quote_status").eq("reference_number",referenceNumber).limit(1);
+    const c = cur && cur[0] && cur[0].quote_status;
+    if(c && c!=="Draft"){ alert(stageDraftMsg(referenceNumber)); return { blocked:true }; }
+  }
   // 1 Oct (113) — a quote that is closing as lost or parked (Lost,
   // Deferred) is never asked about Extra Price or testing: neither
   // matters once the offer is dead, and the question was stopping the
@@ -23652,6 +23658,34 @@ async function verifyAndConsumeAuthCode(code, username, requiredType){
 // A field is locked once its quote's Sl No isn't "Draft" — except the
 // person editing is themselves an Admin/Super Admin, who can always save
 // directly with no code.
+// 153: THE FUNNEL IS OPEN, THE QUOTE IS LOCKED. Anyone may move a quote's stage (Won still asks the PO, Lost the
+// reason). Two exceptions: nothing goes back to Draft by its stage (Draft unlocks price and lines — a new revision
+// via Amend starts in Draft), and reopening a Won quote needs an Admin / Super Admin code. Price, lines, header,
+// terms and documents stay locked after Draft (isQuoteLocked): change them through a new revision.
+function stageMoveRule(current, next, user){
+  const cur = current || "Draft";
+  if(!next || cur===next) return "same";
+  if(next==="Draft") return "draft";
+  if(cur==="Won" && !(user && (user.role==="admin" || user.role==="super_admin"))) return "code";
+  return "ok";
+}
+const stageDraftMsg = (ref)=> "A quote can't be moved back to Draft by its stage \u2014 Draft unlocks its price and lines.\n\nTo change "+(ref||"the quote")+", use Amend quote: it makes a new revision, which starts in Draft.";
+// 153: who may make a new revision without a code — Admins, the Sales Coordinator, the customer's owner and the
+// FSE / Telecaller of the customer's Quote Register tab. Anyone else needs a one-time code.
+async function mayAmendFreely(user, customerName){
+  if(!user) return false;
+  if(user.role==="admin" || user.role==="super_admin") return true;
+  try{
+    const { data: u } = await sb.from("app_users").select("employee_name").eq("username",user.username).maybeSingle();
+    const me = u && u.employee_name; if(!me) return false;
+    const { data: sc } = await sb.from("post_holder_tbl").select("employee_name").eq("post_key","sales_coordinator");
+    if((sc||[]).some(r=>r.employee_name===me)) return true;
+    const { data: co } = await sb.from("companies").select("owner_employee_name,billing_country,billing_state").eq("company_name",customerName||"").limit(1).maybeSingle();
+    if(co && co.owner_employee_name===me) return true;
+    if(co){ await regLoad(); if(regAnyTabsFor(co.billing_country, co.billing_state).some(t=>REG.people.some(p=>p.tab_name===t.tab_name && p.employee_name===me))) return true; }
+  }catch(e){ console.warn("Amend rights not read", e); }
+  return false;
+}
 function isQuoteLocked(quoteStatus, user){
   if(user && (user.role==="admin" || user.role==="super_admin")) return false;
   return !!quoteStatus && quoteStatus!=="Draft";
@@ -23659,7 +23693,7 @@ function isQuoteLocked(quoteStatus, user){
 // Shared modal: prompts for a code, verifies it, and only then runs the
 // caller's actual save/delete. Used everywhere a non-Draft edit/delete needs
 // gating, so the rule and its wording stay consistent across the app.
-function AuthCodeGate({ requiredType, onClose, onAuthorized, user }){
+function AuthCodeGate({ requiredType, onClose, onAuthorized, user, message }){
   const [code,setCode] = useState("");
   const [busy,setBusy] = useState(false);
   const [err,setErr] = useState("");
@@ -23675,7 +23709,7 @@ function AuthCodeGate({ requiredType, onClose, onAuthorized, user }){
     h("div",{style:{background:"#fff",borderRadius:10,padding:"22px 26px",width:380,maxWidth:"92vw"}},
       h("div",{style:{fontWeight:700,fontSize:14,marginBottom:6}},"Authorization required"),
       h("div",{style:{fontSize:12,color:colors.muted,marginBottom:14,lineHeight:1.6}},
-        requiredType==="delete"
+        message ? message : requiredType==="delete"
           ? "This quote is no longer Draft. Deleting anything on it needs a one-time code from a Super Admin specifically."
           : "This quote is no longer Draft. Ask an Admin or Super Admin for a one-time code to save this change."
       ),
@@ -25652,6 +25686,10 @@ const MANUAL_SECTIONS = [
             "text": "A filterable, boxed green-themed list (matching Log Follow-ups' look, 31 Aug) of every quote \u2014 Reference Date range, Reference No/Quote No, Customer, Project Reference, City/State/Country/Region (limit-to-list, cascading), Status, Stage, and Follow-up Status (Overdue/Due today/Upcoming/None, computed from THIS quote's own latest Log Follow-ups entry \u2014 not the customer's, so two open quotes for the same customer no longer show identical follow-up data)."
           },
           {
+            "type": "p",
+            "text": "Changed 8 October 2026 (build 153) \u2014 the funnel is open, the quote is locked. ANYONE can move a quote's stage, from every screen (quote screen stage track, Quotes Report, Funnel board, Quote Stage Review, Log Follow-ups): Won still asks the PO, Lost / Deferred the reason, every move is kept with who and when. Two exceptions: a quote never goes back to Draft by its stage (Draft unlocks its price and lines \u2014 use Amend quote, whose new revision starts in Draft), and reopening a Won quote needs an Admin / Super Admin code (Admins move it directly). What stays locked after Draft is the quote itself \u2014 price, lines, Sf, header, terms, documents: change them through a new revision, or an Admin code for a one-off fix on the same revision. AMEND QUOTE: the customer's owner, the FSE / Telecaller of its Quote Register tab, the Sales Coordinator and Admins make a new revision directly; anyone else needs a one-time code."
+          },
+          {
             "type": "warn",
             "text": "Changed 22 September 2026 \u2014 this replaces what follows. A quote now has ONE field, its Stage, in this funnel order: Draft, Offer Sent, Cold Budgetary, Hot Budgetary, Purchase Requirement 50%, Purchase Requirement 80%, Won \u2014 with Lost and Deferred as exits from any open stage. Nature (Unknown / Budgetary / Purchase Requirement) no longer exists as a separate field; it is part of the stage name. Every screen says Stage: the Quote screen, Log Follow-ups' Outcome, the Quotes Report, the funnel board, Quotes by Stage, Quote Stage Review and Stage Change History. Stages, their order, whether each needs a reason and its win % are set at Sales \u2192 Commercials Master \u2192 Quote Stages."
           },
@@ -26873,6 +26911,10 @@ const MANUAL_SECTIONS = [
         "blocks": [
           {
             "type": "p",
+            "text": "Changed 8 October 2026 (build 154). ON EVERY CARD: \ud83d\udcc5 Due, \u21c4 Move, \u29c9 Copy at the bottom (and as icons in the \u229e table). Move: department, then a person or that department's Unassigned pile, and the due date; into another department it asks the reason, sub-tasks go with it and the receiver gets a bell. Copy (anyone who can see the card): title, department, who gets it \u2014 tick several people to make one copy each \u2014, due date, and whether checklists (all unticked), sub-tasks (as new, open) and labels / links / reference / customer come along. A copy is a separate card: both histories record it, and a procurement or enquiry card copies as a plain task."
+          },
+          {
+            "type": "p",
             "text": "Changed 8 October 2026 (build 151). ALL BOARDS (Tasks \u2192 All boards, for everyone): every department's board as a band \u2014 its Unassigned pile, then one list per person; every department in the master shows, even one with nobody in it. Your own department opens, the rest are folded; click a band to open or fold it and drag \u283f to reorder the bands (kept for you in this browser). Drag a card to any list: within a department it is a hand-out and asks the due date; into another department it is a transfer \u2014 it asks the reason, the card's history and the receiver's bell get it, and its sub-tasks go with it. A card moves only if you may move it. DUE DATE ON THE CARD: the \u201cTask due\u201d date on a card, on each sub-task when unfolded, and in the list table is a button \u2014 click, pick the date, Enter saves (Esc cancels); the history records \u201cDue date old \u2192 new (on the board)\u201d. A procurement sub-task's date comes from the Gantt: its grey \ud83d\udd12 chip opens the Gantt at that form. \u229e TABLE asks Summary (one row per card, sub-tasks counted, late ones in red) or Detailed (each card, then its sub-tasks indented with holder, stage and due date); a switch at the top changes it and Download to Excel follows the view. NEW / EDIT TASK: Department comes first and lists every department, even one with nobody in it (Levaflow's Admin); Assigned to then lists that department's people and its Unassigned pile."
           },
           {
@@ -26961,6 +27003,10 @@ const MANUAL_SECTIONS = [
         "blocks": [
           {
             "type": "p",
+            "text": "Changed 8 October 2026 (build 155). DELETE (\ud83d\uddd1, Sales Coordinator and Admins): only while no enquiry is logged on the line and no quote exists; asks the reason. EDIT (\u270e Edit) asks first: Details only (Enquiry No, dates, customer, city \u2014 the enquiry follows) or The number. The number of an existing line can no longer be typed over. THE NUMBER: pick the tab (the one that takes the customer is suggested) and the next free number on it, give the reason, press Show what will change (the quote and its revisions, BOM, datasheets, documents and document numbers, follow-ups, the enquiry link, task cards \u2014 with counts), then Change the number; anyone but an Admin gives a one-time code (Admin \u2192 Authorization Codes). Everything moves in one step or nothing does, and a check afterwards must find nothing still pointing at the old number (the history and audit keep it). Refused when a Sale Order exists. STRUCK-OFF LINES always show, greyed and struck through, with the reason as a badge \u2014 \ud83d\uddd1 Deleted \u00b7 reason, or \u21aa Number changed \u2192 new number \u00b7 reason (hover for who and when); the new line carries \u201cwas \u2026\u201d. A struck-off number is never used again and is not offered as a reference on Log Follow-ups. Needs structure_register_renumber_155 (both companies)."
+          },
+          {
+            "type": "p",
             "text": "The Quote Register is the Excel register in the app, tab by tab as the Excel sheets (Saudi Arabia, Dubai\u2026, Abu Dhabi, Oman, Kuwait, Qatar, USA, Africa, Europe, South East Asia, Exports - OTHERS, the four India tabs, the EMF tabs, and the old South / North / West / East / Tanks sheets as history). Columns as in the Excel: First OfferNo, Offer Date, Enquiry No, EDate, Customer Name, City, State, Country. Every line of the Excel is loaded; gaps in numbering are history and stay. 25 lines a page, opening on the newest; search one tab or all tabs."
           },
           {
@@ -26994,6 +27040,10 @@ const MANUAL_SECTIONS = [
         "title": "Procurement Gantt \u2014 Purchase plan for each contract",
         "tag": "Purchase \u2192 Procurement \u2192 Procurement Gantt",
         "blocks": [
+          {
+            "type": "p",
+            "text": "Changed 8 October 2026 (build 154). BARS UNDER EACH LINE ITEM: in the Table (and while editing dates) each line item (General, Pipe, Fittings \u2026) has \u25b8 Bars beside its name \u2014 folded until you open it. For every step the planned band is on top (striped) and the actual band below (solid; dashed while running), each with its text: \u201cPlanned 06/10 \u2013 10/10\u201d, \u201cActual 02/10 \u2013 05/10\u201d with On time / Delayed N d, \u201cStarted 07/10 \u00b7 Running \u00b7 N d left\u201d, or Not started \u00b7 N d late. One date scale for the whole plan; red line today, dashed line delivery; a dashed outline shows the original plan when it has moved. MOVING A PLANNED DATE: a planned date that is already set can be moved only by the holder of that material's card (sub-task, else the procurement card) or an Admin; others see it locked \ud83d\udd12. Save dates then asks why (Vendor delay, Client change / hold, Payment / approval delay, Transport, Re-planned internally, Other) and a note, and offers to move the later steps of the same line item (those not started) by the same days. The first plan of each step stays on record and every change is kept as rev 1, rev 2 \u2026 with old \u2192 new, days, reason, note, who and when \u2014 the \u201crev N\u201d chip on the date opens it. Needs structure_proc_date_change_154. Every moved day counts in the holder's Purchase engineer KPI. REPORTS: Reports \u2192 Purchase \u2192 Procurement reports (also under Purchase \u2192 Procurement): Materials past planned date, Pending supply (planned, expected and received supply dates), Contract summary (Late / At risk < 7 days spare / On track), Plan history and Purchase engineer KPI \u2014 each for One contract or All contracts and for one Purchase engineer or everyone, with Download PDF. KPI targets (general purchasing norms): steps on time \u2265 90 %, average delay \u2264 2 days, open late steps 0, received on time \u2265 95 %, plan dates moved \u2264 1 per 10 steps \u2014 green; amber down to 75 % / 5 d / 3 / 85 % / 2; red beyond."
+          },
           {
             "type": "warn",
             "text": "Changed 7 October 2026 (build 144). The chart is a grid of week cells: month and year on the top row, \u201cWk 41\u201d with its dates (Sunday\u2013Saturday) below, both frozen when you scroll down; the Material form and Progress columns stay put when you scroll right. Each step fills its cells in its colour. View: Plan (planned weeks \u2014 the screen opens here) or Progress (solid = done or running, striped = planned not started, red outline = late). Show Weeks or Days. Jump to today. Full screen (Esc to leave). Download Excel (Steps, Gantt Plan, Gantt Progress sheets) and Download PDF (A3, Plan then Progress). A late step also appears in Pending Actions for whoever holds that material's sub-task."
@@ -27658,6 +27708,14 @@ function downloadManualPdf(){
 // added to over time; not wired to a database table yet, so edits currently
 // mean updating this array directly.
 const FAQ_ENTRIES = [
+  { q:"How do I delete a Quote Register line?", a:"Press \ud83d\uddd1 on the line and give the reason. It works only while no enquiry is logged and no quote exists; the line then stays struck off with the reason, so the number is never used again. With an enquiry, use \u270e Edit instead." },
+  { q:"A quote number was made on the wrong tab \u2014 how do I fix it?", a:"\u270e Edit \u2192 The number: pick the right tab (fix the customer's state / emirate first if it is not offered), take the next free number, give the reason, check the list of what will change and press Change the number (non-admins need an Admin code). Everything \u2014 quote, revisions, documents, follow-ups, enquiry, cards \u2014 moves to the new number at once; the old one stays struck off." },
+  { q:"How do I copy a task to several people at once?", a:"On the card press \u29c9 Copy, pick the department and tick everyone who should get it \u2014 each gets a copy of their own. Choose the due date and whether the checklists (unticked), sub-tasks and labels / links come along." },
+  { q:"Why can't I change a planned date on the Procurement Gantt?", a:"A planned date that is already set is moved only by the holder of that material's card (or an Admin) \u2014 the \ud83d\udd12 shows who holds it. Empty planned dates and actual dates can still be filled by Purchase." },
+  { q:"Where do I see how a contract's procurement plan has moved?", a:"Reports \u2192 Purchase \u2192 Procurement reports \u2192 Plan history (one contract or all), or the \u201crev N\u201d chip on a date in the Gantt's table. The original plan is always kept." },
+  { q:"How are the Purchase engineer KPI colours decided?", a:"General purchasing norms: steps on time 90 % or more, average delay 2 days or less, no open late steps, materials received on time 95 % or more, and at most 1 planned date moved per 10 steps are green; down to 75 % / 5 days / 3 / 85 % / 2 amber; worse is red." },
+  { q:"Who can move a quote's stage?", a:"Anyone, from any screen, with no code \u2014 Won still asks the PO and Lost the reason. Only two moves are held: back to Draft (never \u2014 use Amend quote, which makes a new revision in Draft) and reopening a Won quote (Admin / Super Admin code)." },
+  { q:"I need to change the price on a quote that was already sent.", a:"Use Amend quote: it makes a new revision that starts in Draft, where you can edit. The customer's owner, the FSE / Telecaller of its register tab, the Sales Coordinator and Admins can do it directly; anyone else needs a one-time code. For a one-off fix on the same revision, ask an Admin for a code." },
   { q:"I cloned a BOM and every line showed twice \u2014 why?", a:"On the BOM master the clone could run twice (double click) or land on a model that already had lines saved under a slightly different spelling, so two sets of lines ended up under one model. Since build 152 neither can happen. A model cloned before that still has the extra lines \u2014 Delete the ones that do not belong. (Clone Sl No on a quote is guarded the same way.)" },
   { q:"The quote number I need is not in the Reference list on Log Follow-ups \u2014 what do I do?", a:"Type it. If it is nowhere in the app, the last line says \u201c+ None of these \u2014 use \u2026 as a new quote\u201d. That opens the Quote Register on the right tab with the number and the customer filled in; give the Enquiry No (NA if none) and Save. You are taken back to Log Follow-ups with the number as the reference, and it is offered to everyone from then on." },
   { q:"Why does a reference say \u201cno enquiry\u201d?", a:"No enquiry has been logged for that quote. Picking it asks \u201cLog enquiry now / Later\u201d. Later is fine \u2014 the call is still logged \u2014 but a number added from Log Follow-ups stays in the Sales Coordinator's Pending Actions until its enquiry is logged." },
@@ -27716,6 +27774,9 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"8 Oct 2026 (155)", summary:"Quote Register \u2014 Delete, Edit with number change, struck-off lines. SQL: structure_register_renumber_155 (both companies: register_line_tbl struck_kind / struck_reason / struck_by / struck_at / moved_to / moved_from, and renumber_quote()). Read-only check: check_quote_orphans_2026-10-08. DELETE only without enquiry and quote (reason; line kept struck off). EDIT asks Details only or The number; the number field of an existing line is locked. NUMBER CHANGE: tab (suggested from the customer's state / country, wrong tab refused), next free number, reason, dry-run list of every table and row count it touches, Admin code for non-admins, then renumber_quote() moves the quote and its revisions (every table with reference_number), follow-ups (chase_reference), the enquiry link, task cards (ref), Documents box (entity_id, document numbers) in one transaction, creates the new line (with the enquiry) and strikes the old one, and verifies nothing still points at the old number or undoes everything. Refused when a Sale Order exists. STRUCK-OFF lines always shown with a reason badge (hover: who, when); new line shows \u201cwas \u2026\u201d. Struck-off numbers are skipped by Log Follow-ups references and Pending Actions. The code box can now carry its own wording." },
+  { date:"8 Oct 2026 (154)", summary:"Build X and Build Y. SQL: structure_proc_date_change_154 (both companies: proc_date_change_tbl). BUILD X \u2014 every card has \ud83d\udcc5 Due, \u21c4 Move and \u29c9 Copy (cards on all boards, All boards, piles; icons in the \u229e table). Move: department \u2192 person or pile, due date; cross-department asks the reason, sub-tasks follow, bell to the receiver; history \u201c(on the card)\u201d. Copy: title, department, one copy per ticked person (or the pile), due date, optional checklists (unticked), sub-tasks (new, open), labels / links / ref / customer; histories both ways (\u201cCopied from #\u201d, \u201cCopied to #\u201d); procurement / enquiry cards copy as plain tasks; bell to each receiver. BUILD Y \u2014 PROCUREMENT GANTT: \u25b8 Bars under each line item (folded) in the Table and Edit dates, planned top / actual bottom with text and On time / Delayed / Running / Not started tags, original plan as a dashed outline once moved. Planned dates already set are moved only by the material's card holder (or Admin; others see \ud83d\udd12); Save asks the reason + note, optional cascade of later not-started steps by the same days; every change logged (original kept, rev N chips, history box). PROCUREMENT REPORTS (Reports \u2192 Purchase, and Purchase \u2192 Procurement): Materials past planned date, Pending supply, Contract summary (Late / At risk < 7 d spare / On track), Plan history, Purchase engineer KPI (steps finished, on time %, average delay, open late steps, plan dates moved and days moved by reason, received on time %, cards held; targets by purchasing norms with green / amber / red) \u2014 all with One contract / All contracts and Purchase engineer, Download PDF; rows open the Gantt at that material. Performance: Procurement KPI button." },
+  { date:"8 Oct 2026 (153)", summary:"The funnel is open to everyone, the quote is locked to revisions. No SQL. STAGE MOVES (quote screen stage track, Quotes Report log follow-up, Funnel board, Quote Stage Review, Log Follow-ups): no code for anyone \u2014 before, a non-admin was asked for a code for any move past Draft (on the Quotes Report unless he was the customer's owner, so tab FSEs were blocked). Exceptions: back to Draft is refused everywhere (use Amend \u2014 also enforced inside the stage update itself), and Won \u2192 any other stage needs an Admin / Super Admin code (Log Follow-ups saves the call and leaves the stage, saying so). Content after Draft unchanged: price, lines, Sf, header, terms and documents need a new revision or a code. AMEND QUOTE: owner, tab FSE / TC, Sales Coordinator and Admins directly; others a one-time code (before: every non-admin)." },
   { date:"8 Oct 2026 (152)", summary:"Clone no longer doubles BOM lines. No SQL. BOM MASTER (Master Data \u2192 BOM, Clone this BOM): a double click can no longer copy the lines twice; an existing model is checked for lines under its name in any spelling (case / spaces), so a clone can no longer land on top of an earlier clone saved with a different spelling; the cloned lines are saved under the model's own spelling. CLONE SL NO: the target Sl No is checked in the database (not only on screen), and anything an earlier removed Sl No left under that number (BOM lines, datasheet, Sl No extra price / testing) is cleared before the copy, so old lines no longer show beside the cloned ones; a double click cannot clone twice. AMEND (new revision) and CREATE SALE ORDER: the same check on the new number \u2014 leftovers of a failed or deleted earlier copy are cleared first, and a number that already has Sl Nos is refused; the copied BOM lines now point at the copied Sl No rows (estimate_id) instead of the original quote's." },
   { date:"8 Oct 2026 (151)", summary:"Quote reference gateways, My day for tab customers, due date on the card, Summary / Detailed table, All boards, Department on Add task \u2014 and the build-149 Documents box (missing from the 150 file) put back. SQL: structure_register_line_source_151 (both companies: register_line_tbl.source) and, if not run yet, structure_document_entry_edit_2026-10-08 (both). Data SQL already run on Flometriq today: data_uae_emirate_fill and data_uae_wrong_country_fix (UAE customers' emirate from city/address; 14 non-UAE customers corrected). LOG FOLLOW-UPS: Offer reference is a type-in search across every customer's quotes, legacy quotes and Quote Register lines, shown as quote no. \u2013 enquiry no.; picking fills the customer (asks if it differs); closed quotes not offered. \u201c+ None of these \u2014 use \u2026 as a new quote\u201d opens the Quote Register (gateway: blue bar \u2190 Back to Log Follow-ups, rows kept) on the prefix's tab with number and customer filled; EDate not required there; anyone may save; the line is tagged \u201cfrom Log Follow-ups\u201d and returns as the reference. Add New Customer works from that line and returns with the customer chosen. A quote without an enquiry asks Log enquiry now / Later (the enquiry form takes the date when the line has none and writes it back to the line); such lines from Log Follow-ups sit in Pending Actions for the Sales Coordinator (source quote_no_enquiry). Enquiry chase list reads quote no. \u2013 enquiry no. CUSTOMER FORM: State / emirate required for India and the UAE (Other Territory refused). MY DAY: calls on every customer of my Quote Register tabs, whoever logged them (latest entry decides); \u201clast call by \u2026\u201d under the customer. TASKS: due date changed in place on cards, sub-tasks and the list table (history \u201cDue date old \u2192 new (on the board)\u201d; procurement sub-tasks locked to the Gantt, chip opens it). \u229e Table asks Summary or Detailed (sub-tasks indented), switch on top, Excel follows. ALL BOARDS tab for everyone: every department as a band (pile + people, empty departments too), own department open, fold / reorder kept per browser; drag across lists and departments \u2014 cross-department asks the reason, sub-tasks follow, bell to the receiver; links to Quote Funnel and Document Control Board. ADD / EDIT TASK: Department picker first (every department, even empty \u2014 fixes Admin missing in Levaflow), Assigned to filtered to it." },
   { date:"8 Oct 2026 (149b)", summary:"Documents box: the record and the next entry kept apart, Edit, and locking. SQL: structure_document_entry_edit_2026-10-08 (both companies: universal_document_history_tbl.edited_log). Each document tab now has two headings in bold blue with the document number: THIS IS THE TRAIL OF THE DOCUMENT ALREADY SUBMITTED (read-only, the latest entry marked) and ADD REVISIONS ON THIS DOC HERE \u2014 a closed box \u201cNext expected: Rev 0 \u00b7 In \u2014 the client\u2019s reply\u201d with Log the next entry; the form opens empty with Out / In picked from the sequence, has Cancel, and closes after saving. EDIT on every entry (replaces Edit Out/In): link, Out / In, what changed, notes, replace the PDF; a reason is required; each edit is kept on the row (\u270e old \u2192 new, who, when, why), in the document notes and the audit log. LOCKING: a quote\u2019s entries (and their Status) can be changed only while the quote is in Draft; a Sale Order\u2019s entry only until the next entry is logged on that document. After that \u2014 add a revision, or a Super Admin unlocks the document with a Deletion Code (the document is flagged, like a sequence override). Changing Out / In on a document with more than one entry still needs a Super Admin." },
@@ -29999,10 +30060,10 @@ async function qrefLoad(force){
         const rank = { quote:3, legacy:2, register:1 };
         if(rank[src] > rank[cur.src] || (src===cur.src && regNorm(ref) > regNorm(cur.ref))){ map.set(b, { ...cur, ref, src, ...Object.fromEntries(Object.entries(o).filter(([k,v])=>v!==undefined && v!==null && v!=="")) }); }
         else Object.entries(o).forEach(([k,v])=>{ if((cur[k]===undefined||cur[k]===null||cur[k]==="") && v) cur[k]=v; }); };
-      (rl||[]).forEach(r=>put(r.quote_no,"register",{ customer:r.customer_name||"", status:"", line:r, enqId:r.enquiry_id||null, tab:r.tab_name }));
+      (rl||[]).filter(r=>!r.struck_kind).forEach(r=>put(r.quote_no,"register",{ customer:r.customer_name||"", status:"", line:r, enqId:r.enquiry_id||null, tab:r.tab_name }));   // 155: struck-off numbers are not offered
       (lg||[]).forEach(r=>put(r.reference_number,"legacy",{ customer:r.customer_name||"", status:r.quote_status||"" }));
       (es||[]).forEach(r=>put(r.reference_number,"quote",{ customer:r.customer_name||"", status:r.quote_status||"", enqId:r.linked_enquiry_id||null }));
-      const lineByBase = new Map((rl||[]).map(r=>[qrefBase(r.quote_no), r]));
+      const lineByBase = new Map((rl||[]).filter(r=>!r.struck_kind).map(r=>[qrefBase(r.quote_no), r]));
       QREF.list = Array.from(map.values()).map(e=>{
         const line = e.line || lineByBase.get(e.base) || null;
         const enq = (e.enqId && enById.get(e.enqId)) || (line && line.enquiry_id && enById.get(line.enquiry_id)) || enByRef.get(e.base) || null;
@@ -30555,7 +30616,13 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
         // auto-save only wrote the activity_log_tbl entry itself.
         if(r._dirty || !r._savedId) await saveOneRowSilently(r);
         if(r.chaseWhat==="Offer" && r.outcome && refNumber){
-          if(isClosedStage(r.outcome)) queue.push({referenceNumber:refNumber,newStatus:r.outcome});
+          // 153: the stage is open to everyone, except back to Draft (never) and out of Won (Admin code — on the quote screen)
+          const { data: curQ } = await sb.from("estimates").select("quote_status").eq("reference_number",refNumber).limit(1);
+          const rule153 = stageMoveRule(curQ && curQ[0] && curQ[0].quote_status, r.outcome, user);
+          if(rule153==="draft") alert("The follow-up for "+refNumber+" was saved, but its stage stays.\n\n"+stageDraftMsg(refNumber));
+          else if(rule153==="code") alert("The follow-up for "+refNumber+" was saved, but its stage stays Won.\n\nReopening a Won quote needs an Admin / Super Admin code \u2014 move it on the quote screen or the Quotes Report.");
+          else if(rule153==="same"){ /* nothing to change */ }
+          else if(isClosedStage(r.outcome)) queue.push({referenceNumber:refNumber,newStatus:r.outcome});
           else {
             const res = await applyOutcomeStatus(refNumber, r.outcome, user.username, "Follow-up log");
             // 22 Sep — the follow-up itself is saved either way; only the
@@ -33848,6 +33915,10 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
   // 149: tabs that ask the owner on each line (Tenders) — FSEs / telecallers to pick from, and who may change a fixed owner
   const [staff,setStaff] = useState({ fse:[], tc:[] });
   const [ownEdit,setOwnEdit] = useState(null);  // {id, fse, tc, line}
+  const [edPick,setEdPick] = useState(null);    // 155: the line whose Edit asks "details or number"
+  const [delL,setDelL] = useState(null);        // 155: {line, why, busy}
+  const [rn,setRn] = useState(null);            // 155: {line, tab, no, why, preview, err, busy}
+  const [rnGate,setRnGate] = useState(false);
   const tab = tabs.find(t=>t.tab_name===cur) || null;
   const perLine = !!(tab && tab.owner_per_line);
 
@@ -34088,7 +34159,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
   const dmyOrNote = (d,note)=> d ? fmtDMY(d) : (note||"");
   const editRow = (key)=>{ const d = edit.d;
     return h("tr",{key,style:{background:"#fffbe8"}},
-      td("n",h("input",{value:d.quote_no,onChange:e=>{ setD({quote_no:e.target.value}); setChk({bad:[],warn:[],ok:false}); },style:{...inputStyle,width:130,fontWeight:700,padding:"4px 6px"}})),
+      td("n",h("input",{value:d.quote_no,disabled:!!edit.id,title:edit.id?"The number is changed through Edit \u2192 The number (new number on the right tab, carried everywhere)":"",onChange:e=>{ setD({quote_no:e.target.value}); setChk({bad:[],warn:[],ok:false}); },style:{...inputStyle,width:130,fontWeight:700,padding:"4px 6px",...(edit.id?{background:"#f4f2ea"}:{})}})),   // 155
       td("od",h("input",{type:"date",value:d.offer_date||"",onChange:e=>setD({offer_date:e.target.value}),title:"Fills itself when the quote moves to Offer Sent",style:{...inputStyle,width:135,padding:"4px 6px"}})),
       td("en",h("input",{value:d.enquiry_no,onChange:e=>setD({enquiry_no:e.target.value}),placeholder:"RFQ ref, or NA",style:{...inputStyle,width:150,padding:"4px 6px"}})),
       td("ed",h("input",{type:"date",value:d.edate||"",onChange:e=>setD({edate:e.target.value}),style:{...inputStyle,width:135,padding:"4px 6px"}})),
@@ -34126,9 +34197,24 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
       return;
     }
     const rowPerLine = !!(t && t.owner_per_line);
+    if(r.struck_kind){   // 155: struck off — always shown, greyed, with its reason as a badge; its number is never used again
+      const del = r.struck_kind==="deleted";
+      const tip = (del?"Deleted":"Number changed to "+(r.moved_to||""))+" by "+(r.struck_by||"")+(r.struck_at?" on "+fmtDMYTime(r.struck_at):"")+" \u2014 "+(r.struck_reason||"");
+      const sx = {textDecoration:"line-through",color:colors.mutedLight};
+      body.push(h("tr",{key:r.id,style:{background:"#f6f5f0"}},
+        td("n",h("b",{style:{color:colors.mutedLight,textDecoration:"line-through"}},r.quote_no),
+          h("div",null,h("span",{title:tip,style:{display:"inline-block",marginTop:3,fontSize:10.5,fontWeight:700,borderRadius:9,padding:"1px 8px",cursor:"help",whiteSpace:"nowrap",
+            ...(del?{background:"#fdecea",color:"#a3312a",border:"1px solid #a3312a"}:{background:"#fff4d6",color:"#854f0b",border:"1px solid #854f0b"})}},
+            del ? "\ud83d\uddd1 Deleted \u00b7 "+(r.struck_reason||"") : "\u21aa Number changed \u2192 "+(r.moved_to||"")+" \u00b7 "+(r.struck_reason||"")))),
+        td("od",h("span",{style:sx},r.offer_date?fmtDMY(r.offer_date):"")), td("en",h("span",{style:sx},r.enquiry_no||"")), td("ed",h("span",{style:sx},r.edate?fmtDMY(r.edate):"")),
+        td("cu",h("span",{style:sx},r.customer_name||"")), td("ci",h("span",{style:sx},r.city||"")), td("st",h("span",{style:sx},r.state||"")), td("co",h("span",{style:sx},r.country||"")),
+        td("x",""), td("b",h("span",{style:{fontSize:11,color:colors.mutedLight}},"struck off"))));
+      return;
+    }
     body.push(h("tr",{key:r.id},
       td("n",h("b",{style:{color:"#1f4e8c"}},r.quote_no), q.trim()&&qAll ? h("span",{style:{fontSize:10.5,color:colors.mutedLight}}," ("+regTabLabel(r.tab_name)+")") : null,
-        r.source==="Log Follow-ups" ? h("div",{title:"Added from Log Follow-ups"+(r.created_by?" by "+r.created_by:"")+" — check it and log its enquiry",style:{fontSize:10,color:"#1f5fa8",background:"#e6eef8",borderRadius:8,padding:"0 6px",display:"inline-block",marginTop:2}},"from Log Follow-ups") : null),   // 151
+        r.source==="Log Follow-ups" ? h("div",{title:"Added from Log Follow-ups"+(r.created_by?" by "+r.created_by:"")+" — check it and log its enquiry",style:{fontSize:10,color:"#1f5fa8",background:"#e6eef8",borderRadius:8,padding:"0 6px",display:"inline-block",marginTop:2}},"from Log Follow-ups") : null,   // 151
+        r.moved_from ? h("div",{title:"This number took over from "+r.moved_from,style:{fontSize:10,color:"#0f6b4f",background:"#e4f3ed",borderRadius:8,padding:"0 6px",display:"inline-block",marginTop:2}},"was "+r.moved_from) : null),   // 155
       td("od",dmyOrNote(r.offer_date,r.offer_date_note)), td("en",r.enquiry_no||""), td("ed",dmyOrNote(r.edate,r.edate_note)),
       td("cu",r.customer_name||"", rowPerLine ? ownerShow(r) : null), td("ci",r.city||""), td("st",r.state||""), td("co",r.country||""),
       td("x", r.enquiry_id
@@ -34136,11 +34222,96 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
             h("button",{onClick:()=>guard(()=>{ setEdit(null); setEnqOpen(r.enquiry_id); }),style:{...btnSmall,fontSize:11}},"Edit"))
         : (me?.sales && t && t.is_open ? h("button",{onClick:()=>guard(()=>{ setEdit(null); setLogFor(r); }),style:{...btnSmall,fontSize:11}},"Log Enquiry") : null)),
       td("b", h("span",{style:{display:"inline-flex",gap:4}},
-        me?.canEdit && t && t.is_open ? h("button",{onClick:()=>startEdit(r),title:"Edit this line",style:{...btnSmall,fontSize:11}},"✎") : null,
+        me?.canEdit && t && t.is_open ? h("button",{onClick:()=>guard(()=>setEdPick(r)),title:"Edit this line \u2014 its details, or its number",style:{...btnSmall,fontSize:11}},"\u270e Edit") : null,   // 155
+        me?.canEdit && t && t.is_open ? h("button",{onClick:()=>{ if(r.enquiry_id){ alert("An enquiry is logged on "+r.quote_no+" \u2014 it can't be deleted.\n\nUse Edit: change its details, or give it a new number (on the right tab)."); return; } guard(()=>setDelL({ line:r, why:"", busy:false })); },
+          title:r.enquiry_id?"An enquiry is logged on this number \u2014 use Edit":"Delete this line (it stays struck off, so the number is never reused)",style:{...btnSmall,fontSize:11,color:r.enquiry_id?colors.mutedLight:colors.danger,borderColor:r.enquiry_id?colors.border:colors.danger}},"\ud83d\uddd1") : null,
         rowPerLine && me?.canOwner && !edit ? h("button",{onClick:()=>setOwnEdit({ id:r.id, fse:r.line_fse||"", tc:r.line_tc||"", line:r }),title:"Change who owns this line (Super Admin / Sales Head)",style:{...btnSmall,fontSize:11}},"\ud83d\udc64") : null))));
   });
   if(edit && !edit.id){ body.push(editRow("new")); const cr = chkRow("cnew"); if(cr) body.push(cr); }
 
+  // ---- 155: Edit (details or number) and Delete of a register line ----
+  const RN_LABEL = { "estimates.reference_number":"Quote Sl Nos (with its revisions)", "estimate_lines.reference_number":"BOM lines", "datasheets.reference_number":"Datasheets",
+    "activity_log_tbl.chase_reference":"Follow-ups", "activity_log_tbl.reference_number":"Follow-ups (quote screen)", "enquiry_tbl.linked_reference_number":"The enquiry's Quote# link", "task_tbl.ref":"Task cards",
+    "universal_documents_tbl.entity_id":"Documents box", "universal_documents_tbl.doc_number":"Document numbers", "universal_document_history_tbl.doc_number":"Document entries", "document_requests_tbl.entity_id":"Document requests",
+    "legacy_quotes_tbl.reference_number":"Legacy quote", "quote_outcomes.reference_number":"Won / lost record", "register_line_tbl":"Quote Register line (new line; the old one struck off)" };
+  const rnLabel = (k)=> RN_LABEL[k] || k.replace(/_tbl\b/g,"").replace(/\.reference_number$/,"").replace(/[._]/g," ");
+  const openRn = async(line)=>{ const t0 = tabs.find(x=>x.tab_name===line.tab_name) || tabs.find(x=>x.is_open);
+    const sug = regTabsFor(line.country, line.state, !!(t0&&t0.is_emf)); const t1 = sug[0] || t0;
+    setRn({ line, tab:t1?t1.tab_name:"", no: t1 ? await nextNo(t1) : "", why:"", preview:null, err:"", busy:false }); };
+  const rnTabCheck = (x)=>{ const t1 = tabs.find(tt=>tt.tab_name===x.tab); if(!t1) return "Pick a tab.";
+    const n = regNorm(x.no); const px = (n.match(/^[A-Z]+/)||[""])[0];
+    if(!n) return "Give the new number."; if(t1.prefix && px!==regNorm(t1.prefix)) return px+"\u2026 numbers are not used on "+regTabLabel(t1.tab_name)+" (it uses "+regNorm(t1.prefix)+"\u2026).";
+    if(n===regNorm(x.line.quote_no)) return "That is the same number.";
+    if(!t1.owner_per_line && x.line.country){ const ok = regTabsFor(x.line.country, x.line.state, !!t1.is_emf).some(tt=>tt.tab_name===t1.tab_name);
+      if(!ok) return x.line.customer_name+" is in "+[x.line.state,x.line.country].filter(Boolean).join(", ")+" \u2014 "+regTabLabel(t1.tab_name)+" does not take it. Fix the customer's state / emirate first (Edit Customer), or pick the tab that takes it."; }
+    return ""; };
+  const rnPreview = async()=>{ const e0 = rnTabCheck(rn); if(e0){ setRn(x=>({...x,err:e0,preview:null})); return; }
+    if(!rn.why.trim()){ setRn(x=>({...x,err:"Give the reason for the change.",preview:null})); return; }
+    setRn(x=>({...x,busy:true,err:""}));
+    const { data, error } = await sb.rpc("renumber_quote",{ p_old:rn.line.quote_no, p_new:regNorm(rn.no), p_tab:rn.tab, p_reason:rn.why.trim(), p_by:me?.name||user?.username||"", p_dry:true });
+    if(error){ setRn(x=>({...x,busy:false,err:/function|does not exist|schema cache/i.test(error.message||"") ? "Changing a number needs the build-155 SQL (structure_register_renumber_155, both companies)." : error.message})); return; }
+    setRn(x=>({...x,busy:false,preview:(data&&data.counts)||{}})); };
+  const rnDo = async()=>{
+    setRn(x=>({...x,busy:true,err:""}));
+    const by = me?.name||user?.username||"";
+    const { data, error } = await sb.rpc("renumber_quote",{ p_old:rn.line.quote_no, p_new:regNorm(rn.no), p_tab:rn.tab, p_reason:rn.why.trim(), p_by:by, p_dry:false });
+    if(error){ setRn(x=>({...x,busy:false,err:"Nothing was changed: "+error.message})); return; }
+    const cnt = Object.values((data&&data.counts)||{}).reduce((a,b)=>a+Number(b||0),0);
+    const t1 = rn.tab, oldN = rn.line.quote_no, newN = regNorm(rn.no);
+    setRn(null); try{ QREF.at = 0; }catch(e){}
+    await regLoad(true); setCounts(cs=>({ ...cs, [t1]:(cs[t1]||0)+1 })); await load();
+    alert(oldN+" is now "+newN+" (tab "+regTabLabel(t1)+").\n\n"+cnt+" rows moved in one go, and nothing is left pointing at "+oldN+". The old line stays struck off.");
+  };
+  const delDo = async()=>{
+    const L = delL.line; if(!delL.why.trim()){ alert("Give the reason."); return; }
+    setDelL(x=>({...x,busy:true}));
+    const n = regNorm(L.quote_no);
+    const [{ data: es },{ data: lg },{ data: fresh }] = await Promise.all([
+      sb.from("estimates").select("reference_number").eq("reference_number",n).limit(1),
+      sb.from("legacy_quotes_tbl").select("reference_number").eq("reference_number",n).limit(1),
+      sb.from("register_line_tbl").select("id,enquiry_id").eq("id",L.id).maybeSingle()]);
+    if(fresh && fresh.enquiry_id){ setDelL(null); alert("An enquiry was logged on "+L.quote_no+" a moment ago \u2014 use Edit instead."); load(); return; }
+    if((es||[]).length || (lg||[]).length){ setDelL(null); alert("A quote "+n+" exists \u2014 the line can't be deleted. Use Edit \u2192 The number to move it, or delete the quote first."); return; }
+    const by = me?.name||user?.username||"";
+    const { error } = await sb.from("register_line_tbl").update({ struck_kind:"deleted", struck_reason:delL.why.trim(), struck_by:by, struck_at:new Date().toISOString() }).eq("id",L.id);
+    if(error){ setDelL(x=>({...x,busy:false})); alert(/struck_/.test(error.message||"") ? "Delete needs the build-155 SQL (structure_register_renumber_155, both companies) \u2014 run it first." : "Could not delete: "+error.message); return; }
+    await logAudit("DELETE","register_line_tbl",L.quote_no,"Quote Register line "+L.quote_no+" deleted (struck off) \u2014 "+delL.why.trim(),by,L,null);
+    setDelL(null); try{ QREF.at = 0; }catch(e){} await load();
+  };
+  const regLineModals = ()=>{
+    const box = (title, body, foot, onClose)=> h("div",{onClick:e=>{ if(e.target===e.currentTarget) onClose(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1250,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"60px 12px",overflowY:"auto"}},
+      h("div",{style:{background:"#fff",borderRadius:10,width:560,maxWidth:"100%",padding:"14px 16px",display:"grid",gap:10,border:"1px solid #0f7a5c"}},h("b",{style:{fontSize:14}},title),body,h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end"}},foot)));
+    const fl = (l,c)=> h("label",{style:{display:"grid",gap:3,fontSize:11.5,color:colors.muted}},l,c);
+    if(edPick){ const r = edPick; const opt = (t,d,on)=> h("button",{onClick:on,style:{textAlign:"left",border:"1px solid "+colors.border,background:"#fff",borderRadius:8,padding:"10px 12px",cursor:"pointer",font:"inherit"}},h("b",{style:{display:"block",fontSize:13}},t),h("span",{style:{fontSize:12,color:colors.muted}},d));
+      return box("Edit "+r.quote_no+" \u00b7 "+(r.customer_name||""), h("div",{style:{display:"grid",gap:8}},
+        opt("Details only","Enquiry No, dates, customer, city \u2014 the number stays."+(r.enquiry_id?" The enquiry follows the change.":""),()=>{ setEdPick(null); startEdit(r); }),
+        opt("The number","Wrong tab or wrong number: a new number on the tab you pick, carried into everything that uses "+r.quote_no+" (quote and revisions, documents, follow-ups, cards). Needs an Admin code. The old number stays struck off.",()=>{ setEdPick(null); openRn(r); })),
+        [h("button",{key:"c",onClick:()=>setEdPick(null),style:btnSmall},"Cancel")], ()=>setEdPick(null)); }
+    if(delL){ const r = delL.line;
+      return box("Delete "+r.quote_no+" \u00b7 "+(r.customer_name||""), h("div",{style:{display:"grid",gap:8}},
+        h("div",{style:{fontSize:12.5,color:colors.muted}},"The line stays in the register struck off with your reason, so "+r.quote_no+" is never used again. Only possible while no enquiry is logged and no quote exists."),
+        fl("Reason (required)",h("input",{value:delL.why,autoFocus:true,onChange:e=>{ const v=e.target.value; setDelL(x=>({...x,why:v})); },placeholder:"e.g. duplicate of FEX260562",style:{...inputStyle,padding:"6px 8px"}}))),
+        [h("button",{key:"c",onClick:()=>setDelL(null),disabled:delL.busy,style:btnSmall},"Cancel"),h("button",{key:"d",onClick:delDo,disabled:delL.busy,style:{...btnPrimary,padding:"6px 14px",background:colors.danger}},delL.busy?"Deleting\u2026":"Delete (strike off)")], ()=>{ if(!delL.busy) setDelL(null); }); }
+    if(rn){ const x = rn; const set = (p)=> setRn(o=>({...o,...p,preview:null,err:""}));
+      const pv = x.preview; const total = pv ? Object.values(pv).reduce((a,b)=>a+Number(b||0),0) : 0;
+      return h(React.Fragment,null, box("New number for "+x.line.quote_no+" \u00b7 "+(x.line.customer_name||""), h("div",{style:{display:"grid",gap:8}},
+        h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}},
+          fl("Tab",h("select",{value:x.tab,onChange:async e=>{ const v = e.target.value; const t1 = tabs.find(tt=>tt.tab_name===v); set({ tab:v, no: t1 ? await nextNo(t1) : "" }); },style:{...inputStyle,padding:"6px 8px"}},
+            tabs.filter(tt=>tt.is_open).map(tt=>h("option",{key:tt.tab_name,value:tt.tab_name},regTabLabel(tt.tab_name)+(tt.prefix?" ("+regNorm(tt.prefix)+")":""))))),
+          fl("New number (next free on that tab)",h("input",{value:x.no,onChange:e=>set({no:e.target.value}),style:{...inputStyle,padding:"6px 8px",fontWeight:700}}))),
+        x.line.country ? h("div",{style:{fontSize:12,color:colors.muted}},"Customer: "+(x.line.customer_name||"")+" \u2014 "+[x.line.city,x.line.state,x.line.country].filter(Boolean).join(", ")) : null,
+        fl("Why is the number changing (required)",h("input",{value:x.why,onChange:e=>set({why:e.target.value}),placeholder:"e.g. wrong tab \u2014 customer is in the UAE",style:{...inputStyle,padding:"6px 8px"}})),
+        x.err ? h("div",{style:{background:"#fdecea",color:"#a3312a",borderRadius:6,padding:"7px 9px",fontSize:12.5}},x.err) : null,
+        pv ? h("div",{style:{border:"1px solid #ebe8dd",borderRadius:7,overflow:"hidden",fontSize:12.5}},
+          h("div",{style:{background:"#efece2",padding:"6px 10px",fontWeight:700,display:"flex",justifyContent:"space-between"}},h("span",null,x.line.quote_no+" \u2192 "+regNorm(x.no)+" \u2014 what will change"),h("span",null,total+" rows")),
+          Object.entries(pv).map(([k,v])=>h("div",{key:k,style:{display:"flex",justifyContent:"space-between",padding:"5px 10px",borderTop:"1px solid #f0eee6"}},h("span",null,rnLabel(k)),h("b",null,v))),
+          h("div",{style:{padding:"6px 10px",background:"#fff4d6",fontSize:12}},"All of it moves in one step, or none of it. Afterwards nothing may point at "+x.line.quote_no+" except the struck-off line and the history. If the quote was already sent, the customer has the old number \u2014 the next revision carries the new one.")) : null),
+        [h("button",{key:"c",onClick:()=>setRn(null),disabled:x.busy,style:btnSmall},"Cancel"),
+         !pv ? h("button",{key:"p",onClick:rnPreview,disabled:x.busy,style:{...btnPrimary,padding:"6px 14px"}},x.busy?"Checking\u2026":"Show what will change")
+             : h("button",{key:"g",onClick:()=>{ if(isQuoteLocked("Locked",user)) setRnGate(true); else rnDo(); },disabled:x.busy,style:{...btnPrimary,padding:"6px 14px",background:"#0f7a5c"}},x.busy?"Changing\u2026":"Change the number")], ()=>{ if(!x.busy) setRn(null); }),
+        rnGate ? h(AuthCodeGate,{ requiredType:"edit", user, message:"Changing a quote number moves it everywhere. Ask an Admin or Super Admin for a one-time code (Admin \u2192 Authorization Codes).", onClose:()=>setRnGate(false), onAuthorized:async()=>{ setRnGate(false); await rnDo(); } }) : null); }
+    return null;
+  };
   const lastPage = Math.max(0, Math.ceil(total/REG_PAGE)-1); const pg = page<0 ? (sortBy==="excel" ? lastPage : 0) : page;
   const groups = []; tabs.forEach(t=>{ const g = t.group_label||""; if(!groups.includes(g)) groups.push(g); });
   return h("div",{style: fs ? {position:"fixed",inset:0,zIndex:900,background:"#f4f2ea",padding:"10px 16px",overflow:"auto"} : {padding:20}},
@@ -34184,6 +34355,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
     ask ? h(UnsavedAsk,{ what:"Quote Register line", onStay:()=>setAsk(null),
       onDiscard:()=>{ const t = ask.then; setAsk(null); setEdit(null); setChk({bad:[],warn:[],ok:false}); setUnsavedGuard(false); t(); },
       onSave:async()=>{ const t = ask.then; setAsk(null); if(await save()) t(); } }) : null,
+    regLineModals(),   // 155
     custForm ? h(CustomerCompanyForm,{ user, initial:custForm.initial||undefined, onCancel:()=>setCustForm(null),
       onSaved:async(co)=>{ setCustForm(null); if(co && co.company_name) await pickCustomer({ company_name:co.company_name }); } }) : null,
     logFor ? h(LogEnquiryModal,{ user, allocation:null, pkg:null, project:null, regLine:logFor, onCancel:()=>setLogFor(null),
@@ -34807,6 +34979,55 @@ function pgExportPdf(plan, rows, today){
 }
 function pgCertPill(c){ if(!c) return null; const st = c==="3.2" ? {background:"#fbe4ee",color:"#c2185b"} : c==="3.1" ? {background:"#e6f1fb",color:"#2a6db0"} : {background:"linear-gradient(90deg,#e6f1fb 50%,#fbe4ee 50%)",color:colors.text};
   return h("span",{style:{fontSize:10,fontWeight:700,borderRadius:8,padding:"1px 6px",whiteSpace:"nowrap",...st}},c); }
+// ---- 154 (Build Y): planned-date changes keep the first plan (baseline) and every revision ----
+const PG_MOVE_REASONS = ["Vendor delay","Client change / hold","Payment / approval delay","Transport","Re-planned internally","Other"];
+const pgChgOf = (chg, planId, key, field)=> (chg||[]).filter(c=>c.plan_id===planId && c.line_key===key && (!field || c.field===field)).sort((a,b)=>String(a.changed_at).localeCompare(String(b.changed_at)));
+const pgBase = (chg, planId, key, field, cur)=>{ const l = pgChgOf(chg, planId, key, field); return l.length ? (l[0].old_date ? String(l[0].old_date).slice(0,10) : "") : cur; };
+// The holder of a material: its sub-task's holder, else the procurement card's (General: the card's).
+function pgHolder(tasks, planId, form){
+  const ok = (t)=> t && t.assignee && t.assignee!=="Unassigned";
+  const sub = (tasks||[]).find(t=>t.proc_plan_id===planId && t.parent_id && (t.proc_form||"")===(form||"") && ok(t));
+  if(sub) return sub.assignee;
+  const card = (tasks||[]).find(t=>t.proc_plan_id===planId && !t.parent_id && ok(t));
+  return card ? card.assignee : "";
+}
+// One line item's bars: for each step the planned band on top and the actual band below, with their text.
+function PgStrip({ row, range, today, delivery, baseOf }){
+  const span = Math.max(1, pgDd(range.a, range.b) + 1);
+  const x = (d)=> (pgDd(range.a, d) / span) * 100;
+  const w1 = 100/span;
+  const ticks = []; for(let d = pgWs(range.a); d <= range.b; d = pgAdd(d,7)) if(d >= range.a) ticks.push(d);
+  const lbl = (L, R, txt, tag, top)=>{ const inside = (R-L) > 24; return h("div",{style:{position:"absolute",top,left:"calc("+(inside?L:R)+"% + "+(inside?0:2)+"px)",fontSize:10.5,fontWeight:600,lineHeight:"15px",whiteSpace:"nowrap",padding:"0 4px",pointerEvents:"none",color:inside?"#fff":colors.text,textShadow:inside?"0 0 2px rgba(0,0,0,.45)":"none"}},txt,tag); };
+  const tag = (t, k)=> h("span",{style:{display:"inline-block",borderRadius:7,padding:"0 5px",marginLeft:4,fontSize:10,lineHeight:"13px",textShadow:"none",...(k==="late"?{background:"#fde2df",color:"#a3312a"}:k==="ok"?{background:"#dff3ea",color:"#0f6e52"}:k==="run"?{background:"#e1ecfa",color:"#1f5fa8"}:{background:"#eeece4",color:"#6c716d"})}},t);
+  const dm = (d)=> pgDmy(d).slice(0,5);
+  return h("div",{style:{padding:"4px 0 6px"}},
+    h("div",{style:{position:"relative",height:14,marginLeft:150,fontSize:10,color:colors.muted}},ticks.map(d=>h("span",{key:d,style:{position:"absolute",left:x(d)+"%",transform:"translateX(-50%)",whiteSpace:"nowrap"}},dm(d)))),
+    row.steps.map(st=>{
+      const ps = pgDue(st.plan.s), pe = pgDue(st.plan.e), as = pgDue(st.act.s), ae = pgDue(st.act.e);
+      const kids = [];
+      const bp = baseOf ? baseOf(st.key) : null;   // original planned end, when the plan has moved
+      if(ps && pe){ const L = x(ps), R = x(pe)+w1;
+        if(bp && bp!==pe){ const bL = x(ps), bR = x(bp)+w1; kids.push(h("div",{key:"b",title:"Original plan ended "+pgDmy(bp),style:{position:"absolute",top:1,height:15,left:bL+"%",width:Math.max(0.5,bR-bL)+"%",border:"2px dashed "+st.color,borderRadius:3,boxSizing:"border-box"}})); }
+        kids.push(h("div",{key:"p",style:{position:"absolute",top:1,height:15,left:L+"%",width:(R-L)+"%",background:st.color,opacity:.6,borderRadius:3,backgroundImage:"repeating-linear-gradient(45deg,rgba(255,255,255,.45) 0 3px,transparent 3px 6px)"}}));
+        const moved = bp && bp!==pe ? pgDd(bp,pe) : 0;
+        kids.push(lbl(L,R,"Planned "+dm(ps)+(pe!==ps?" \u2013 "+dm(pe):""), moved ? tag("moved "+(moved>0?"+":"")+moved+" d","wait") : null, 1)); }
+      if(as){ const end = ae || (today > as ? today : as); const L = x(as), R = x(end)+w1;
+        const late = (!ae && pe && pe < today) || (ae && pe && ae > pe);
+        kids.push(h("div",{key:"a",style:{position:"absolute",top:19,height:15,left:L+"%",width:(R-L)+"%",borderRadius:3,boxSizing:"border-box",
+          ...(ae ? {background:st.color} : {background:"repeating-linear-gradient(90deg,"+st.color+" 0 6px,transparent 6px 9px)",border:"1px solid "+st.color}), ...(late?{outline:"2px solid #b3261e"}:{})}}));
+        let t, g;
+        if(ae){ const dl = pe ? pgDd(pe,ae) : 0; t = "Actual "+dm(as)+(ae!==as?" \u2013 "+dm(ae):""); g = dl>0 ? tag("Delayed "+dl+" d","late") : tag("On time","ok"); }
+        else { const left = pe ? pgDd(today,pe) : null; t = "Started "+dm(as); g = left!=null && left<0 ? tag("Delayed "+(-left)+" d","late") : tag("Running"+(left!=null?" \u00b7 "+left+" d left":""),"run"); }
+        kids.push(lbl(L,R,t,g,19)); }
+      else if(ps || pe){ const s0 = ps || pe; const sl = pgDd(s0, today);
+        kids.push(h("div",{key:"n",style:{position:"absolute",top:19,left:x(s0)+"%",fontSize:10.5,lineHeight:"15px",whiteSpace:"nowrap"}},sl>0 ? tag("Not started \u00b7 "+sl+" d late","late") : tag("Not started \u00b7 starts "+dm(s0),"wait"))); }
+      if(today >= range.a && today <= range.b) kids.push(h("div",{key:"t",style:{position:"absolute",top:0,bottom:0,left:x(today)+"%",borderLeft:"2px solid #b3261e"}}));
+      if(delivery && delivery >= range.a && delivery <= range.b) kids.push(h("div",{key:"d",style:{position:"absolute",top:0,bottom:0,left:x(delivery)+"%",borderLeft:"2px dashed #1c1f1a"}}));
+      return h("div",{key:st.key,style:{display:"grid",gridTemplateColumns:"150px minmax(0,1fr)",alignItems:"center",height:38}},
+        h("div",{style:{fontSize:11,color:colors.muted,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",paddingRight:6}},st.label),
+        h("div",{style:{position:"relative",height:36,borderLeft:"1px solid "+colors.border,background:"#faf9f5",overflow:"hidden"}},kids));
+    }));
+}
 function PgWhen({ value, onChange, weeks, kind }){
   const x = value || PG_NONE;
   const wv = (w)=> kind==="start" ? pgAdd(w,-6) : w;
@@ -34891,6 +35112,223 @@ function ProcListScreen({ user, onOpenCard, onOpenGantt }){
             td(h("div",{style:{display:"flex",gap:4}}, r.card && onOpenCard ? act("Open card",()=>onOpenCard(r.card.id, r.p.contract_number),true) : null, onOpenGantt ? act("Open Gantt",()=>onOpenGantt(r.p.contract_number)) : null)));
         })))));
 }
+// ---- 154 (Build Y): PROCUREMENT REPORTS (Reports → Purchase) ------------------------------------------------------
+// Five reports from the Procurement Gantt, each for One contract or All contracts and for one Purchase engineer
+// (the holder of the material's card) or everyone: Materials past planned date, Pending supply, Contract summary,
+// Plan history (every planned-date change) and the Purchase engineer KPI. Table on screen, Download PDF.
+const PR_KPI_TARGETS = {   // general purchasing norms (on-time delivery / schedule adherence)
+  ot:   { g:90, a:75, label:"Steps on time", unit:" %", hi:true },
+  avg:  { g:2,  a:5,  label:"Average delay", unit:" d", hi:false },
+  open: { g:0,  a:3,  label:"Open late steps", unit:"", hi:false },
+  rot:  { g:95, a:85, label:"Received on time", unit:" %", hi:true },
+  mv:   { g:1,  a:2,  label:"Plan dates moved per 10 steps", unit:"", hi:false } };
+function prTone(k, v){ const t = PR_KPI_TARGETS[k]; if(v==null || isNaN(v)) return "n"; return t.hi ? (v>=t.g?"g":v>=t.a?"a":"r") : (v<=t.g?"g":v<=t.a?"a":"r"); }
+function prPeriod(kind, today){
+  const y = Number(today.slice(0,4)), m = Number(today.slice(5,7));
+  const iso = (Y,M,D)=> Y+"-"+String(M).padStart(2,"0")+"-"+String(D).padStart(2,"0");
+  const last = (Y,M)=> new Date(Date.UTC(Y,M,0)).getUTCDate();
+  if(kind==="last"){ const Y = m===1?y-1:y, M = m===1?12:m-1; return { a:iso(Y,M,1), b:iso(Y,M,last(Y,M)), t:"last month" }; }
+  if(kind==="q"){ const q0 = Math.floor((m-1)/3)*3+1; return { a:iso(y,q0,1), b:today, t:"this quarter" }; }
+  if(kind==="12"){ return { a:pgAdd(today,-365), b:today, t:"last 12 months" }; }
+  return { a:iso(y,m,1), b:today, t:"this month" };
+}
+// Every material of every plan, worked out once: current step, delay, supply dates, holder.
+function prMaterials(plans, lines, tasks, chg, today){
+  const out = [];
+  plans.forEach(p=>{
+    const { d, extra } = pgFromRows(lines.filter(l=>l.plan_id===p.id));
+    pgRows(p, d, extra).forEach(r=>{
+      const rs = pgRowState(r, today); const cur = rs.step;
+      const fac = r.steps.find(s=>String(s.key).indexOf("fac|")===0) || r.steps[r.steps.length-1];
+      const supP = fac ? pgDue(fac.plan.e) : "", rec = fac ? pgDue(fac.act.e) : "";
+      const delay = rs.s.k==="late" ? (rs.s.l||0) : 0;
+      const exp = rec ? "" : (supP ? pgAdd(supP, delay) : "");
+      const base = fac ? pgBase(chg, p.id, fac.key, "pe", supP) : supP;
+      out.push({ plan:p, cn:String(p.contract_number), client:p.client||"", deliv:p.delivery_date?String(p.delivery_date).slice(0,10):"",
+        gen:!!r.gen, form:r.form||"", title:r.title, row:r, cur, st:rs.s, curPe: cur ? pgDue(cur.plan.e) : "", curAs: cur ? pgDue(cur.act.s) : "",
+        late:delay, supP, supBase:base, exp, rec, holder: pgHolder(tasks, p.id, r.form||"") });
+    });
+  });
+  return out;
+}
+function ProcReportsScreen({ user, onOpenGantt }){
+  const today = toISODate(new Date());
+  const [data,setData] = useState(null);       // {plans, lines, tasks, chg, chgOk}
+  const [rep,setRep] = useState(()=>{ if(window.__prEng) return "kpi"; try{ return localStorage.getItem("pr_rep")||"past"; }catch(e){ return "past"; } });
+  const [scope,setScope] = useState("all");
+  const [ct,setCt] = useState("");
+  const [eng,setEng] = useState(()=>{ const e = window.__prEng || ""; window.__prEng = ""; return e; });   // 154: opened from Performance
+  const [minLate,setMinLate] = useState(1);
+  const [show,setShow] = useState("pending");  // pending supply: pending | recent | all
+  const [within,setWithin] = useState("");     // pending supply: "" | 7 | 14
+  const [incDone,setIncDone] = useState(false);
+  const [per,setPer] = useState("this");
+  const [busy,setBusy] = useState(false);
+  useEffect(()=>{ (async()=>{
+    const { data: plans, error } = await sb.from("proc_plan_tbl").select("*").order("contract_number",{ascending:false});
+    if(error){ setData({ err:error.message }); return; }
+    const lines = await fetchPaged(()=>sb.from("proc_line_tbl").select("*").order("id"));
+    const tasks = await fetchPaged(()=>sb.from("task_tbl").select("id,proc_plan_id,parent_id,proc_form,assignee,status,title").not("proc_plan_id","is",null).order("id"));
+    let chg = [], chgOk = true; try{ const { data: c, error: ce } = await sb.from("proc_date_change_tbl").select("*").order("changed_at").limit(20000); if(ce) chgOk = false; else chg = c||[]; }catch(e){ chgOk = false; }
+    setData({ plans:plans||[], lines, tasks, chg, chgOk });
+    if((plans||[]).length) setCt(String(plans[0].contract_number));
+  })(); },[]);
+  useEffect(()=>{ try{ localStorage.setItem("pr_rep",rep); }catch(e){} },[rep]);
+  if(!data) return h("div",{style:{padding:20,color:colors.muted}},"Reading the procurement plans…");
+  if(data.err) return h("div",{style:{padding:20,color:colors.danger}},"The Procurement Gantt tables are not there yet — run the build-139 SQL. ("+data.err+")");
+  const allM = prMaterials(data.plans, data.lines, data.tasks, data.chg, today);
+  const people = Array.from(new Set([...allM.map(m=>m.holder), ...data.chg.map(c=>c.changed_by)].filter(Boolean))).sort();
+  const inScope = (m)=> (scope==="all" || m.cn===ct) && (!eng || m.holder===eng);
+  const M = allM.filter(inScope);
+  const mats = M.filter(m=>!m.gen);
+  const scopeText = (scope==="all" ? "All contracts" : "Contract "+ct+((data.plans.find(p=>String(p.contract_number)===ct)||{}).client?" · "+(data.plans.find(p=>String(p.contract_number)===ct)||{}).client:"")) + " · " + (eng ? "Purchase engineer: "+eng : "All purchase engineers");
+  const dm = (s)=> s ? pgDmy(s) : "—";
+  const pill = (t,k)=> h("span",{style:{display:"inline-block",fontSize:10.5,fontWeight:700,borderRadius:9,padding:"1px 8px",whiteSpace:"nowrap",
+    ...(k==="r"?{background:"#fdecea",color:"#a3312a"}:k==="a"?{background:"#fff4d6",color:"#854f0b"}:k==="g"?{background:"#e4f3ed",color:"#0f6b4f"}:k==="b"?{background:"#e6f1fb",color:"#2a6db0"}:{background:"#eeece4",color:colors.muted})}},t);
+  const go = (m)=> onOpenGantt && onOpenGantt(m.cn, m.form);
+  // ---- the five reports: each gives {count, head, rows:[{cells, pdf, group?, onClick}]} ----
+  let R = { count:"", head:[], rows:[] };
+  if(rep==="past"){
+    const xs = mats.filter(m=>m.st.k==="late" && m.late>=minLate).sort((a,b)=>b.late-a.late || a.cn.localeCompare(b.cn));
+    R.count = xs.length+" material"+(xs.length===1?"":"s")+" past their planned date · "+new Set(xs.map(m=>m.cn)).size+" contract(s) · worst first · as on "+pgDmy(today);
+    R.head = ["Contract","Client","Material","Step it is on","Planned end","Actual","Days late","At factory — planned","Delivery","Holder"];
+    R.rows = xs.map(m=>({ onClick:()=>go(m), cells:[m.cn, m.client, m.title, m.cur?m.cur.label:"—", dm(m.curPe), m.curAs?"started "+pgDmy(m.curAs).slice(0,5):"not started", h("b",{style:{color:"#a3312a"}},m.late), dm(m.supP), dm(m.deliv), m.holder||"Unassigned"],
+      pdf:[m.cn, m.client, m.title, m.cur?m.cur.label:"", dm(m.curPe), m.curAs?"started "+pgDmy(m.curAs):"not started", String(m.late), dm(m.supP), dm(m.deliv), m.holder||"Unassigned"] }));
+  }
+  if(rep==="pend"){
+    let xs = mats.filter(m=> show==="all" ? true : show==="recent" ? (!m.rec || pgDd(m.rec,today)<=30) : !m.rec);
+    if(within) xs = xs.filter(m=>!m.rec && (m.exp||m.supP) && pgDd(today, m.exp||m.supP) <= Number(within));
+    xs.sort((a,b)=> (!!a.rec - !!b.rec) || String(a.exp||a.supP||"9").localeCompare(String(b.exp||b.supP||"9")));
+    const pend = xs.filter(m=>!m.rec);
+    R.count = pend.length+" pending supply · "+pend.filter(m=>m.late).length+" late · "+pend.filter(m=>(m.exp||m.supP) && pgDd(today,m.exp||m.supP)<=7).length+" due in the next 7 days"+(xs.length>pend.length?" · "+(xs.length-pend.length)+" received":"");
+    R.head = ["Contract","Client","Material","Step it is on","Supply — planned","Supply — expected","Received on","Status","Holder"];
+    R.rows = xs.map(m=>{ let stt, k;
+      if(m.rec){ const dl = m.supP ? pgDd(m.supP, m.rec) : 0; stt = dl>0 ? "received · "+dl+" d late" : dl<0 ? "received · "+(-dl)+" d early" : "received on time"; k = dl>0?"a":"g"; }
+      else if(m.late){ stt = m.late+" d late"; k = "r"; }
+      else if(m.exp && pgDd(today,m.exp)<=7){ stt = "due in "+pgDd(today,m.exp)+" d"; k = "b"; }
+      else { stt = m.supP ? "on plan" : "needs dates"; k = m.supP?"n":"a"; }
+      const moved = m.supBase && m.supP && m.supBase!==m.supP ? pgDd(m.supBase,m.supP) : 0;
+      return { onClick:()=>go(m), cells:[m.cn, m.client, m.title, m.rec?"received":(m.cur?m.cur.label:"—"), h("span",null,dm(m.supP), moved?h("span",{style:{marginLeft:5}},pill("moved "+(moved>0?"+":"")+moved+" d","a")):null), dm(m.exp), dm(m.rec), pill(stt,k), m.holder||"Unassigned"],
+        pdf:[m.cn, m.client, m.title, m.rec?"received":(m.cur?m.cur.label:""), dm(m.supP)+(moved?" (moved "+(moved>0?"+":"")+moved+" d)":""), dm(m.exp), dm(m.rec), stt, m.holder||"Unassigned"] }; });
+  }
+  if(rep==="sum"){
+    const cns = Array.from(new Set(mats.map(m=>m.cn)));
+    let late=0, risk=0, ok=0;
+    R.head = ["Material","Step it is on","Status","Planned end of step","At factory — planned","At factory — expected","Received on","Days late","Holder"];
+    cns.forEach(cn=>{ const g = mats.filter(m=>m.cn===cn); const done = g.every(m=>m.rec); if(done && !incDone) return;
+      const lastExp = g.map(m=>m.rec||m.exp||m.supP).filter(Boolean).sort().pop() || "";
+      const deliv = g[0].deliv; const spare = deliv && lastExp ? pgDd(lastExp, deliv) : null;
+      const anyLate = g.some(m=>m.late>0);
+      const status = done ? ["Received","g"] : anyLate ? ["Late","r"] : (spare!=null && spare<7) ? ["At risk","a"] : ["On track","g"];
+      if(!done){ if(status[0]==="Late") late++; else if(status[0]==="At risk") risk++; else ok++; }
+      const head = g[0].cn+" · "+g[0].client+(deliv?" · delivery "+pgDmy(deliv):"")+(lastExp?" · all material at factory "+pgDmy(lastExp):"")+(spare!=null?" · "+(spare<0?(-spare)+" day"+(spare===-1?"":"s")+" after delivery":spare+" day"+(spare===1?"":"s")+" spare"):"")+" · "+g.length+" materials, "+g.filter(m=>m.rec).length+" received, "+g.filter(m=>m.late).length+" late";
+      R.rows.push({ group:true, cells:[h("span",null,h("b",null,head)," ",pill(status[0],status[1]))], pdf:[head+" — "+status[0]] });
+      g.forEach(m=>R.rows.push({ onClick:()=>go(m), cells:[m.title, m.rec?"received":(m.cur?m.cur.label:"—"), m.rec?pill("received","g"):m.late?pill(m.late+" d late","r"):m.st.k==="run"?pill("running","b"):pill(m.st.t,"n"),
+        dm(m.curPe), dm(m.supP), dm(m.exp), dm(m.rec), m.late?h("b",{style:{color:"#a3312a"}},m.late):"—", m.holder||"Unassigned"],
+        pdf:[m.title, m.rec?"received":(m.cur?m.cur.label:""), m.rec?"received":m.late?m.late+" d late":m.st.t, dm(m.curPe), dm(m.supP), dm(m.exp), dm(m.rec), m.late?String(m.late):"", m.holder||"Unassigned"] })); });
+    R.count = (late+risk+ok)+" contract(s) · "+late+" late · "+risk+" at risk · "+ok+" on track · at risk = less than 7 days between all material at the factory and delivery";
+  }
+  if(rep==="hist"){
+    const hold = (c)=> pgHolder(data.tasks, c.plan_id, c.form||"");
+    const xs = data.chg.filter(c=>(scope==="all" || String(c.contract_number)===ct) && (!eng || c.changed_by===eng || hold(c)===eng));
+    const byR = {}; xs.forEach(c=>{ byR[c.reason] = (byR[c.reason]||0) + Math.abs(c.days||0); });
+    R.count = (data.chgOk ? "" : "The history table is not there yet (run structure_proc_date_change_154) · ")+xs.length+" planned-date change(s) · "+xs.reduce((n,c)=>n+Math.abs(c.days||0),0)+" days moved"+(Object.keys(byR).length?" · "+Object.entries(byR).map(([k,v])=>k+" "+v+" d").join(" · "):"");
+    const fdl = (c)=> "Planned "+(c.field==="ps"?"start":"end");
+    const chgTxt = (c)=> (c.old_date?pgDmy(String(c.old_date).slice(0,10)):"—")+" → "+(c.new_date?pgDmy(String(c.new_date).slice(0,10)):"cleared");
+    const days = (c)=> c.days==null?"":(c.days>0?"+":"")+c.days+" d";
+    if(scope==="one"){
+      R.head = ["Step","Date","Original","Revision","Moved","Reason","Note","By · when"];
+      const forms = Array.from(new Set(xs.map(c=>c.form||"")));
+      forms.forEach(f=>{ R.rows.push({ group:true, cells:[h("b",null,f||"General")], pdf:[f||"General"] });
+        const fx = xs.filter(c=>(c.form||"")===f).sort((a,b)=>String(a.line_key+a.field+a.changed_at).localeCompare(String(b.line_key+b.field+b.changed_at)));
+        const seen = {};
+        fx.forEach(c=>{ const k = c.line_key+"|"+c.field; seen[k] = (seen[k]||0)+1; const orig = pgChgOf(data.chg, c.plan_id, c.line_key, c.field)[0];
+          R.rows.push({ cells:[c.step_label||c.line_key, fdl(c), orig&&orig.old_date?pgDmy(String(orig.old_date).slice(0,10)):"—", h("span",null,"rev "+seen[k]+" → ",h("b",null,c.new_date?pgDmy(String(c.new_date).slice(0,10)):"cleared")), h("b",{style:{color:(c.days||0)>0?"#a3312a":"#0f6b4f"}},days(c)), c.reason, c.note||"—"+(c.cascade_from?" (followed an earlier step)":""), (c.changed_by||"")+" · "+fmtDMYTime(c.changed_at)],
+            pdf:[c.step_label||c.line_key, fdl(c), orig&&orig.old_date?pgDmy(String(orig.old_date).slice(0,10)):"", "rev "+seen[k]+" → "+(c.new_date?pgDmy(String(c.new_date).slice(0,10)):"cleared"), days(c), c.reason, (c.note||"")+(c.cascade_from?" (followed an earlier step)":""), (c.changed_by||"")+" · "+fmtDMYTime(c.changed_at)] }); }); });
+    } else {
+      R.head = ["When","Contract","Material","Step","Date","Old → new","Moved","Reason","Note","By"];
+      xs.slice().sort((a,b)=>String(b.changed_at).localeCompare(String(a.changed_at))).forEach(c=>R.rows.push({ cells:[fmtDMYTime(c.changed_at), c.contract_number||"", c.form||"General", c.step_label||c.line_key, fdl(c), chgTxt(c), h("b",{style:{color:(c.days||0)>0?"#a3312a":"#0f6b4f"}},days(c)), c.reason, (c.note||"—")+(c.cascade_from?" (followed an earlier step)":""), c.changed_by||""],
+        pdf:[fmtDMYTime(c.changed_at), c.contract_number||"", c.form||"General", c.step_label||c.line_key, fdl(c), chgTxt(c), days(c), c.reason, (c.note||"")+(c.cascade_from?" (followed an earlier step)":""), c.changed_by||""] }));
+    }
+  }
+  let kpiTiles = null;
+  if(rep==="kpi"){
+    const P = prPeriod(per, today);
+    const inP = (d)=> d && d>=P.a && d<=P.b;
+    const who = eng ? [eng] : people;
+    const rowsK = who.map(p=>{
+      const mine = allM.filter(m=>(scope==="all"||m.cn===ct) && m.holder===p);
+      let fin=0, ot=0, dsum=0, open=0, rf=0, rot=0;
+      mine.forEach(m=>m.row.steps.forEach(st=>{ const pe = pgDue(st.plan.e), ae = pgDue(st.act.e);
+        if(inP(ae)){ fin++; const dl = pe ? pgDd(pe,ae) : 0; if(dl<=0) ot++; dsum += Math.max(0,dl); if(String(st.key).indexOf("fac|")===0){ rf++; if(dl<=0) rot++; } }
+        if(pgStat(st,today).k==="late") open++; }));
+      const mv = data.chg.filter(c=>(scope==="all"||String(c.contract_number)===ct) && inP(String(c.changed_at).slice(0,10)) && (pgHolder(data.tasks,c.plan_id,c.form||"")===p || c.changed_by===p));
+      const byR = {}; mv.forEach(c=>{ byR[c.reason] = (byR[c.reason]||0) + Math.abs(c.days||0); });
+      const cards = data.tasks.filter(t=>t.assignee===p && t.status!=="done").length;
+      return { p, fin, ot: fin ? Math.round(ot/fin*100) : null, avg: fin ? Math.round(dsum/fin*10)/10 : null, open, mvN:mv.length, mvD:mv.reduce((n,c)=>n+Math.abs(c.days||0),0), byR,
+        mvRate: fin ? Math.round(mv.length/fin*10*10)/10 : (mv.length?mv.length:0), rot: rf ? Math.round(rot/rf*100) : null, rf, cards };
+    });
+    const cell = (k,v,txt)=>{ const t = prTone(k,v); return h("span",{style:{fontWeight:700,color:t==="g"?"#0f6b4f":t==="a"?"#854f0b":t==="r"?"#a3312a":colors.muted}},txt!=null?txt:(v==null?"—":v+PR_KPI_TARGETS[k].unit)); };
+    R.count = "Period: "+P.t+" ("+pgDmy(P.a)+" – "+pgDmy(P.b)+") · targets: steps on time ≥ 90 %, average delay ≤ 2 d, open late steps 0, received on time ≥ 95 %, plan dates moved ≤ 1 per 10 steps (green; amber up to 75 % / 5 d / 3 / 85 % / 2)";
+    R.head = ["Purchase engineer","Steps finished","On time","Average delay","Open late steps","Plan dates moved","Days moved (by reason)","Received on time","Cards held"];
+    R.rows = rowsK.map(k=>({ cells:[h("b",null,k.p), k.fin, cell("ot",k.ot), cell("avg",k.avg), cell("open",k.open), cell("mv",k.mvRate,k.mvN+(k.fin?" ("+k.mvRate+" / 10 steps)":"")), h("span",null,k.mvD+" d ",h("span",{style:{fontSize:11,color:colors.muted}},Object.entries(k.byR).map(([r,v])=>r+" "+v).join(" · "))), cell("rot",k.rot,k.rot==null?"—":k.rot+" % of "+k.rf), k.cards],
+      pdf:[k.p, String(k.fin), k.ot==null?"":k.ot+" %", k.avg==null?"":k.avg+" d", String(k.open), k.mvN+(k.fin?" ("+k.mvRate+" / 10 steps)":""), k.mvD+" d "+Object.entries(k.byR).map(([r,v])=>r+" "+v).join(", "), k.rot==null?"":k.rot+" % of "+k.rf, String(k.cards)] }));
+    if(eng && rowsK[0]){ const k = rowsK[0];
+      const tile = (key,v,l,txt)=>{ const t = prTone(key,v); return h("div",{key:l,style:{border:"1px solid "+colors.border,borderRadius:8,padding:"8px 10px",borderTop:"3px solid "+(t==="g"?"#0f7a5c":t==="a"?"#c08a1e":t==="r"?"#a3312a":colors.border)}},h("div",{style:{fontSize:20,fontWeight:700}},txt!=null?txt:(v==null?"—":v+PR_KPI_TARGETS[key].unit)),h("div",{style:{fontSize:11.5,color:colors.muted}},l)); };
+      kpiTiles = h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:8}},
+        h("div",{key:"f",style:{border:"1px solid "+colors.border,borderRadius:8,padding:"8px 10px"}},h("div",{style:{fontSize:20,fontWeight:700}},k.fin),h("div",{style:{fontSize:11.5,color:colors.muted}},"Steps finished")),
+        tile("ot",k.ot,"Steps on time (target 90 %)"), tile("avg",k.avg,"Average delay (target 2 d)"), tile("open",k.open,"Open late steps (target 0)"),
+        tile("mv",k.mvRate,"Plan dates moved per 10 steps (target 1)",k.mvN+" moved"), tile("rot",k.rot,"Received on time (target 95 %)"),
+        h("div",{key:"c",style:{border:"1px solid "+colors.border,borderRadius:8,padding:"8px 10px"}},h("div",{style:{fontSize:20,fontWeight:700}},k.cards),h("div",{style:{fontSize:11.5,color:colors.muted}},"Cards held"))); }
+  }
+  const titles = { past:"Materials past planned date", pend:"Pending supply", sum:"Contract summary", hist:"Plan history", kpi:"Purchase engineer KPI" };
+  const pdf = async()=>{
+    setBusy(true);
+    try{
+      const co = await pdfCompanyFor(null);
+      const { jsPDF } = window.jspdf; const doc = new jsPDF({ orientation:"landscape", unit:"mm", format:"a4" }); const W = doc.internal.pageSize.getWidth();
+      drawPdfLetterhead(doc, W, co, {logoW:40,logoH:20});
+      doc.setDrawColor(200,197,185); doc.setLineWidth(0.4); doc.line(10, 27, W-10, 27);
+      doc.setFontSize(12); doc.setFont(undefined,"bold"); doc.setTextColor(28,31,26); doc.text("Procurement — "+titles[rep], 12, 35);
+      doc.setFontSize(8.5); doc.setFont(undefined,"normal"); doc.text(scopeText, 12, 40.5);
+      doc.text(doc.splitTextToSize(R.count, W-24), 12, 45);
+      doc.text("Printed "+fmtDMYTime(new Date().toISOString())+" by "+(user?.username||""), W-12, 40.5, {align:"right"});
+      const body = R.rows.length ? R.rows.map(r=> r.group ? [{ content:r.pdf[0], colSpan:R.head.length, styles:{ fillColor:[239,236,226], fontStyle:"bold", halign:"left" } }] : r.pdf)
+                                 : [[{ content:"Nothing for this choice.", colSpan:R.head.length, styles:{halign:"left"} }]];
+      doc.autoTable({ startY:52, head:[R.head], body, theme:"grid", headStyles:{ fillColor:[29,58,51], textColor:255, fontSize:8 }, bodyStyles:{ fontSize:7.8, lineColor:[216,212,197], lineWidth:0.2 }, margin:{ left:12, right:12 }, rowPageBreak:"avoid" });
+      const pages = doc.internal.getNumberOfPages();
+      for(let pg=1; pg<=pages; pg++){ doc.setPage(pg); doc.setFontSize(7.5); doc.setTextColor(140,140,140); doc.text(pdfFooterCompanyName(co)+" · Procurement — "+titles[rep]+" · page "+pg+" of "+pages, W/2, doc.internal.pageSize.getHeight()-6, {align:"center"}); }
+      doc.save(("Procurement_"+titles[rep]+"_"+(scope==="one"?ct:"all")+(eng?"_"+eng:"")+"_"+today).replace(/[^A-Za-z0-9_-]+/g,"_")+".pdf");
+    }catch(err){ alert("Could not make the PDF:\n\n"+(err&&err.message||err)); }
+    finally{ setBusy(false); }
+  };
+  const seg = (opts, val, set)=> h("span",{style:{display:"inline-flex",border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden",background:"#fff"}},
+    opts.map(([v,l])=>h("button",{key:v,onClick:()=>set(v),style:{border:0,padding:"5px 10px",fontSize:12,cursor:"pointer",background:val===v?colors.dark:"#fff",color:val===v?"#fff":colors.text}},l)));
+  const lab = (l,c)=> h("label",{style:{fontSize:12,color:colors.muted,display:"inline-flex",gap:5,alignItems:"center"}},l,c);
+  const sel = (v,on,opts,dis)=> h("select",{value:v,disabled:!!dis,onChange:e=>on(e.target.value),style:{...inputStyle,width:"auto",padding:"5px 8px",opacity:dis?0.5:1}},opts);
+  return h("div",{style:{padding:"14px 18px"}},
+    h("div",{style:{fontSize:11.5,color:colors.muted}},"Reports → Purchase"),
+    h("h2",{style:{fontSize:19,margin:"2px 0 8px"}},"Procurement reports"),
+    h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}},
+      Object.entries(titles).map(([k,l])=>h("button",{key:k,onClick:()=>setRep(k),style:{...btnSmall,fontSize:12.5,padding:"6px 11px",background:rep===k?colors.dark:"#fff",color:rep===k?"#fff":colors.text,borderColor:rep===k?colors.dark:colors.border}},l))),
+    h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",background:"#efece2",borderRadius:8,padding:"8px 10px",marginBottom:8}},
+      seg([["one","One contract"],["all","All contracts"]], scope, setScope),
+      lab("Contract", sel(ct, setCt, data.plans.map(p=>h("option",{key:p.id,value:String(p.contract_number)},p.contract_number+" · "+(p.client||""))), scope!=="one")),
+      lab("Purchase engineer", sel(eng, setEng, [h("option",{key:"",value:""},"Everyone"), ...people.map(p=>h("option",{key:p,value:p},p))])),
+      rep==="past" ? lab("Late by at least", sel(String(minLate), v=>setMinLate(Number(v)), [1,3,7,14].map(n=>h("option",{key:n,value:String(n)},n+" day"+(n===1?"":"s"))))) : null,
+      rep==="pend" ? lab("Show", sel(show, setShow, [h("option",{key:"p",value:"pending"},"Pending only"),h("option",{key:"r",value:"recent"},"Pending + received in the last 30 days"),h("option",{key:"a",value:"all"},"Everything")])) : null,
+      rep==="pend" ? lab("Expected", sel(within, setWithin, [h("option",{key:"",value:""},"Any date"),h("option",{key:"7",value:"7"},"Next 7 days"),h("option",{key:"14",value:"14"},"Next 14 days")])) : null,
+      rep==="sum" ? h("label",{style:{fontSize:12,display:"inline-flex",gap:5,alignItems:"center"}},h("input",{type:"checkbox",checked:incDone,onChange:e=>setIncDone(e.target.checked)}),"Include contracts fully received") : null,
+      rep==="kpi" ? lab("Period", sel(per, setPer, [h("option",{key:"t",value:"this"},"This month"),h("option",{key:"l",value:"last"},"Last month"),h("option",{key:"q",value:"q"},"This quarter"),h("option",{key:"y",value:"12"},"Last 12 months")])) : null,
+      h("button",{onClick:pdf,disabled:busy,style:{...btnPrimary,marginLeft:"auto",padding:"6px 14px"}},busy?"Making PDF…":"Download PDF")),
+    h("div",{style:{fontSize:12.5,color:colors.muted,marginBottom:8}},R.count),
+    kpiTiles ? h("div",{style:{marginBottom:10}},kpiTiles) : null,
+    h("div",{style:{overflowX:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8}},h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:900,fontSize:12.5}},
+      h("thead",null,h("tr",null,R.head.map(x=>h("th",{key:x,style:{textAlign:"left",padding:"7px 9px",fontSize:11.5,color:colors.muted,borderBottom:"2px solid "+colors.dark,whiteSpace:"nowrap"}},x)))),
+      h("tbody",null, R.rows.length===0 ? h("tr",null,h("td",{colSpan:R.head.length||1,style:{padding:12,color:colors.mutedLight}},"Nothing for this choice.")) :
+        R.rows.map((r,i)=> r.group ? h("tr",{key:i},h("td",{colSpan:R.head.length,style:{background:"#efece2",padding:"7px 9px",fontSize:12.5}},r.cells[0]))
+          : h("tr",{key:i,onClick:r.onClick,style:{cursor:r.onClick?"pointer":"default"}},r.cells.map((c,j)=>h("td",{key:j,style:{padding:"6px 9px",borderBottom:"1px solid "+colors.border,verticalAlign:"top"}},c))))))));
+}
 function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
   const today = pgToday();
   const [plans,setPlans] = useState([]);
@@ -34915,6 +35353,12 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
   const [chartScale,setChartScale] = useState(()=>{ try{ return localStorage.getItem("pg_scale")||"w"; }catch(e){ return "w"; } });
   const [fullScreen,setFullScreen] = useState(false);
   const [exporting,setExporting] = useState("");
+  const [chg,setChg] = useState([]);          // 154: planned-date change log
+  const [chgOk,setChgOk] = useState(true);     // 154: the change-log table exists
+  const [ptasks,setPtasks] = useState([]);     // 154: procurement cards AND sub-tasks (holder of each material)
+  const [rsn,setRsn] = useState(null);         // 154: {moves, reason, note, cascade} asked at Save dates
+  const [hist,setHist] = useState(null);       // 154: {key, label, form} history box
+  const [stripOpen,setStripOpen] = useState({});   // 154: bars under each line item, folded unless opened
   const chartRef = useRef(null);
   const jumpToday = ()=>{ const box = chartRef.current; if(!box) return; const th = box.querySelector('[data-pgtoday="1"]'); if(th) box.scrollLeft = Math.max(0, th.offsetLeft - 334 - box.clientWidth/4); };
   useEffect(()=>{ const t = setTimeout(jumpToday,60); return ()=>clearTimeout(t); },[cur, chartScale, chartMode, fullScreen, view]);
@@ -34927,7 +35371,8 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
     if(error){ setSqlErr(error.message); setLoading(false); return; }
     let rows = [], from = 0;
     while(true){ const { data, error: e2 } = await sb.from("proc_line_tbl").select("*").range(from, from+999); if(e2) break; rows = rows.concat(data||[]); if(!data || data.length<1000) break; from += 1000; }
-    const { data: tk } = await sb.from("task_tbl").select("id,proc_plan_id,parent_id,assignee,status").not("proc_plan_id","is",null);
+    const { data: tk } = await sb.from("task_tbl").select("id,proc_plan_id,parent_id,assignee,status,proc_form").not("proc_plan_id","is",null);
+    try{ const { data: cl, error: ce } = await sb.from("proc_date_change_tbl").select("*").order("changed_at").limit(20000); setChgOk(!ce); setChg(ce ? [] : (cl||[])); }catch(e){ setChgOk(false); }
     // 142: a plan made before its Sale Order takes the P O No, delivery date and contract date from the Sale Order once it exists (blanks only).
     try{ const need = (ps||[]).filter(p=>!p.po_no || !p.delivery_date || !p.contract_date);
       if(need.length){ const cns = need.map(p=>p.contract_number);
@@ -34936,7 +35381,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
           const patch = {}; if(!p.po_no && so && so.basis_number) patch.po_no = so.basis_number; if(!p.delivery_date && dv && dv.delivery_date) patch.delivery_date = dv.delivery_date; if(!p.contract_date && so && (so.oa_issued_on||so.basis_date)) patch.contract_date = so.oa_issued_on||so.basis_date;
           if(Object.keys(patch).length){ const { error: ue } = await sb.from("proc_plan_tbl").update(patch).eq("id",p.id); if(!ue){ Object.assign(p,patch); await logAudit("UPDATE","proc_plan_tbl",p.contract_number,"Procurement Gantt filled from the Sale Order: "+Object.keys(patch).join(", "),"App"); } } } }
     }catch(e){ console.warn("Procurement: Sale Order fill", e); }
-    setPlans(ps||[]); setAllRows(rows); setCards((tk||[]).filter(t=>!t.parent_id)); setLoading(false);
+    setPlans(ps||[]); setAllRows(rows); setCards((tk||[]).filter(t=>!t.parent_id)); setPtasks(tk||[]); setLoading(false);
     if((ps||[]).length && !(ps||[]).some(p=>p.contract_number===cur)) setCur(ps[0].contract_number);
   };
   useEffect(()=>{ load(); },[]);
@@ -34955,6 +35400,9 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
   const card = plan ? cards.find(c=>c.proc_plan_id===plan.id) : null;
   const certSummary = (p)=>{ const c = [...new Set(pgForms(p).map(f=>f.cert))]; return c.length===1 ? c[0] : c.length ? "Mixed (3.1 / 3.2)" : (p.cert||"3.1"); };
 
+  // 154: a planned date already set may be moved only by the holder of that material's card (or an Admin)
+  const isAdminU = user && (user.role==="admin" || user.role==="super_admin");
+  const mayMove = (form)=> isAdminU || (!!me && pgHolder(ptasks, plan && plan.id, form)===me);
   const leave = (then)=>{ if(dirty) setAsk({ what:"Procurement Gantt dates", onSave:async()=>{ if(await saveEdit()) then(); }, then }); else then(); };
   const pick = (cn)=> leave(()=>{ setEd(null); setCur(cn); });
 
@@ -34968,11 +35416,24 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
       const pv = prev && pgDue((d[prev.key]||{}).pe); r.ps = pv && pv<=val.v ? { t:"d", v:pv } : { t:val.t, v:val.t==="w" ? pgWs(val.v) : val.v }; }
     d[key] = r; return {...x, d}; });
   const setRfi = (form, on)=> setEd(x=>({...x, forms:x.forms.map(f=>f.form===form ? {...f, rfi:on, cert: on ? (f.cert==="3.1" ? "3.2" : f.cert) : (f.cert==="3.1 + 3.2" ? f.cert : "3.1") } : f)}));
-  const saveEdit = async()=>{
+  const saveEdit = async(opts)=>{
     if(!ed || !plan) return true;
-    const R = pgRows({...plan, forms:ed.forms}, ed.d, ed.extra);
+    const D = (opts && opts.d) || ed.d;
+    // 154: planned dates that were set and are now different are MOVES — they need a reason, and are logged
+    if(!(opts && opts.reason)){
+      const old = dataOf(plan).d; const moves = [];
+      pgRows({...plan, forms:ed.forms}, D, ed.extra).forEach(r=>r.steps.forEach(st=>["ps","pe"].forEach(k=>{
+        const o = pgDue((old[st.key]||{})[k]), n = pgDue((D[st.key]||{})[k]);
+        if(o && o!==n) moves.push({ key:st.key, form:st.group||"", label:st.label, title:r.title, field:k, o, n, days: n ? pgDd(o,n) : null });
+      })));
+      const notMine = moves.filter(m=>!mayMove(m.form));
+      if(notMine.length){ alert("Only the holder of the material's card can move a planned date that is already set:\n\n"+notMine.map(m=>"\u2022 "+m.title+" \u2014 "+m.label+" (held by "+(pgHolder(ptasks,plan.id,m.form)||"nobody yet")+")").join("\n")+"\n\nPut those dates back, or ask the holder."); return false; }
+      if(moves.length){ if(!chgOk){ alert("Moving a planned date needs the build-154 SQL (structure_proc_date_change_154, both companies) so its history is kept. Run it first; new dates can still be filled."); return false; }
+        setRsn({ moves, reason:"", note:"", cascade:true }); return false; }
+    }
+    const R = pgRows({...plan, forms:ed.forms}, D, ed.extra);
     for(const r of R){ let prev = null;
-      for(const s of r.steps){ const ps = pgDue((ed.d[s.key]||{}).ps), pe = pgDue((ed.d[s.key]||{}).pe), as = pgDue((ed.d[s.key]||{}).as), ae = pgDue((ed.d[s.key]||{}).ae);
+      for(const s of r.steps){ const ps = pgDue((D[s.key]||{}).ps), pe = pgDue((D[s.key]||{}).pe), as = pgDue((D[s.key]||{}).as), ae = pgDue((D[s.key]||{}).ae);
         if(ps && pe && pe<ps){ alert(r.title+" — "+s.label+": the planned end ("+pgDmy(pe)+") is before its start ("+pgDmy(ps)+")."); return false; }
         if(as && ae && ae<as){ alert(r.title+" — "+s.label+": the actual end ("+pgDmy(ae)+") is before its actual start ("+pgDmy(as)+")."); return false; }
         if(prev && pe && prev.pe && pe<prev.pe){ alert(r.title+": "+s.label+" (ends "+pgDmy(pe)+") is planned to end before "+prev.label+" (ends "+pgDmy(prev.pe)+").\n\nSteps go in order: PO Draft → PO Approval → PO Release → RFI → at Our Factory."); return false; }
@@ -34980,7 +35441,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
     setBusy(true);
     try{
       const now = new Date().toISOString(); const ups = [];
-      R.forEach(r=>r.steps.forEach(s=>{ const v = ed.d[s.key]; if(!v && !s.custom) return; const g = (k)=> (v&&v[k])||PG_NONE;
+      R.forEach(r=>r.steps.forEach(s=>{ const v = D[s.key]; if(!v && !s.custom) return; const g = (k)=> (v&&v[k])||PG_NONE;
         ups.push({ plan_id:plan.id, line_key:s.key, label:s.label, stage:s.custom?"Inserted":s.label, form:s.group||null, pred_key:s.pred||null, is_custom:!!s.custom,
           plan_start_type:g("ps").t, plan_start:g("ps").v||null, plan_type:g("pe").t, plan_date:g("pe").v||null, act_start_type:g("as").t, act_start:g("as").v||null, act_type:g("ae").t, act_date:g("ae").v||null, updated_by:me, updated_at:now }); }));
       if(ups.length){ const { error } = await sb.from("proc_line_tbl").upsert(ups,{onConflict:"plan_id,line_key"}); if(error){ alert("Could not save the dates:\n\n"+error.message+"\n\nHas the build-139 SQL been run?"); return false; } }
@@ -34990,9 +35451,33 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
       const info = ed.info ? { po_no:String(ed.info.po||"").trim()||null, delivery_date:ed.info.deliv||null } : {};   // 142
       await sb.from("proc_plan_tbl").update({ ...(formsChanged?{ forms:ed.forms, cert: cs.length===1 ? cs[0] : "Mixed" }:{}), ...info, updated_by:me, updated_at:now }).eq("id",plan.id);
       await logAudit("UPDATE","proc_line_tbl",plan.contract_number,"Procurement Gantt dates saved ("+ups.length+" steps"+(ed.removed.length?", "+ed.removed.length+" inserted step(s) removed":"")+(formsChanged?", RFI / certification changed":"")+")",user?.username||"");
+      // 154: the moves, logged with their reason (the first one of a step keeps the original plan)
+      if(opts && opts.reason && (opts.moves||[]).length){
+        const { error: lgErr } = await sb.from("proc_date_change_tbl").insert(opts.moves.map(m=>({ plan_id:plan.id, contract_number:plan.contract_number, line_key:m.key, form:m.form||null, step_label:m.label, field:m.field,
+          old_date:m.o||null, new_date:m.n||null, days:m.days, reason:opts.reason, note:opts.note||null, cascade_from:m.cascade||null, changed_by:me, changed_at:now })));
+        if(lgErr) alert("The dates are saved, but the history of the moved dates could not be kept:\n\n"+lgErr.message+"\n\nHas structure_proc_date_change_154 been run?");
+        else await logAudit("UPDATE","proc_line_tbl",plan.contract_number,"Procurement Gantt: "+opts.moves.length+" planned date(s) moved \u2014 "+opts.reason+(opts.note?" ("+opts.note+")":""),user?.username||"");
+      }
       await pgSyncTasks(plan.id, me);
-      setEd(null); await load(); return true;
+      setEd(null); setRsn(null); await load(); return true;
     } finally { setBusy(false); }
+  };
+  // 154: the reason box — on Save, apply the cascade (later steps of the same line item that have not started move by the same days)
+  const confirmMoves = async()=>{
+    if(!rsn) return;
+    if(!rsn.reason){ alert("Pick why the date is moving."); return; }
+    const D = JSON.parse(JSON.stringify(ed.d)); const moves = rsn.moves.slice();
+    if(rsn.cascade){
+      const R = pgRows({...plan, forms:ed.forms}, D, ed.extra);
+      rsn.moves.filter(m=>m.field==="pe" && m.n && m.days).forEach(m=>{
+        const row = R.find(r=>r.steps.some(s=>s.key===m.key)); if(!row) return;
+        const i = row.steps.findIndex(s=>s.key===m.key);
+        row.steps.slice(i+1).forEach(s=>{ const v = D[s.key]; if(!v || pgDue(v.as) || pgDue(v.ae)) return;
+          ["ps","pe"].forEach(k=>{ const o = pgDue(v[k]); if(!o || moves.some(x=>x.key===s.key && x.field===k)) return;
+            const n = pgAdd(o, m.days); v[k] = { t:"d", v:n }; moves.push({ key:s.key, form:s.group||"", label:s.label, title:row.title, field:k, o, n, days:m.days, cascade:m.key }); }); });
+      });
+    }
+    await saveEdit({ reason:rsn.reason, note:rsn.note.trim(), d:D, moves });
   };
   const weeksFor = (p)=>{ const a = pgWe(pgAdd(p&&p.contract_date?String(p.contract_date).slice(0,10):today,-35)); const b = pgAdd(pgWe(p&&p.delivery_date?String(p.delivery_date).slice(0,10):pgAdd(today,60)),84); const out = []; for(let w=a; w<=b; w=pgAdd(w,7)) out.push(w); return out; };
 
@@ -35090,9 +35575,18 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
 
   const table = ()=>{ const weeks = weeksFor(plan); const td = (x,s)=> h("td",{style:{padding:"5px 7px",borderBottom:"1px solid #ebe8dd",fontSize:12,...(s||{})}},x);
     const out = [];
+    // 154: one date scale for every line item's bars
+    const allD = []; shown.forEach(r=>r.steps.forEach(st=>[st.plan.s,st.plan.e,st.act.s,st.act.e].forEach(x=>{ const v = pgDue(x); if(v) allD.push(v); })));
+    const deliv = plan.delivery_date ? String(plan.delivery_date).slice(0,10) : "";
+    allD.push(today); if(deliv) allD.push(deliv); allD.sort();
+    const range = { a: pgAdd(allD[0],-2), b: pgAdd(allD[allD.length-1],3) };
+    const oldD = dataOf(plan).d;
+    const revChip = (key, field, label, title)=>{ const n = pgChgOf(chg, plan.id, key, field).length; return n ? h("span",{key:"rv"+field,title:"Planned "+(field==="ps"?"start":"end")+" moved "+n+" time"+(n===1?"":"s")+" \u2014 click for the history",onClick:ev=>{ ev.stopPropagation(); setHist({ key, label, title }); },
+      style:{display:"inline-block",fontSize:10,fontWeight:700,border:"1px solid #854f0b",color:"#854f0b",background:"#fff4d6",borderRadius:8,padding:"0 5px",marginLeft:4,cursor:"pointer"}},"rev "+n) : null; };
     shown.forEach(r=>{ const f = ed ? (ed.forms.find(x=>x.form===r.form)||null) : r.f;
       out.push(h("tr",{key:"g"+r.form,"data-pgform":r.form||"General"},h("td",{colSpan:6,style:{background:"#efece2",padding:"6px 8px",fontSize:12}},
         h("b",null,r.title)," ",f ? pgCertPill(f.cert) : null,
+        h("span",{onClick:()=>setStripOpen(o=>({...o,[r.form||"General"]:!o[r.form||"General"]})),title:"Show or fold the bars of this line item",style:{fontSize:11,color:"#0f7a5c",fontWeight:700,marginLeft:8,cursor:"pointer"}},(stripOpen[r.form||"General"]?"\u25be":"\u25b8")+" Bars"),   // 154
         f && f.lines ? h("span",{style:{fontSize:11,color:colors.muted,marginLeft:6,cursor:"pointer",textDecoration:"underline dotted"},onClick:()=>setOpenForm(o=>o===r.form?"":r.form)},f.lines.length+" BOM lines "+(openForm===r.form?"▾":"▸")) : null,
         ed && f && !PG_NO_RFI.includes(f.form) ? h("label",{style:{marginLeft:12,fontSize:11.5,display:"inline-flex",gap:4,alignItems:"center"}},h("input",{type:"checkbox",checked:!!f.rfi,onChange:e=>setRfi(f.form,e.target.checked)}),"3.2 — RFI Stamping and RFI Test") : null)));
       if(f && f.lines && openForm===r.form) f.lines.forEach((l,i)=>out.push(h("tr",{key:"l"+r.form+i},h("td",{colSpan:6,style:{padding:"3px 8px 3px 24px",fontSize:11,color:colors.muted,background:"#faf9f5",borderBottom:"1px solid #f0eee6"}},
@@ -35102,9 +35596,14 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
           td([h("span",{key:"c",style:{display:"inline-block",width:10,height:10,borderRadius:2,background:s.color,marginRight:6,verticalAlign:"middle"}}),s.label,
             s.custom ? h("span",{key:"i",style:{fontSize:10,fontWeight:700,borderRadius:8,padding:"1px 6px",background:"#eeece4",color:colors.muted,marginLeft:5}},"inserted") : null,
             ed && s.custom ? h("button",{key:"x",title:"Remove this inserted step",onClick:()=>setEd(x=>({...x, extra:x.extra.filter(y=>y.key!==s.key), removed:[...x.removed,s.key]})),style:{...btnSmall,fontSize:11,padding:"1px 6px",marginLeft:6,color:colors.danger,borderColor:colors.danger}},"✕") : null],{paddingLeft:16}),
-          ...[["ps","start","plan","s"],["pe","end","plan","e"],["as","start","act","s"],["ae","end","act","e"]].map(([k,kind,g,se])=>
-            td(ed ? h(PgWhen,{value:v[k],weeks,kind,onChange:val=>setWhen(s.key,k,val)}) : (pgShow(s[g][se]) || h("span",{style:{color:g==="plan"?"#854f0b":colors.mutedLight}},"—")),{whiteSpace:"nowrap",borderLeft:k==="ps"||k==="as"?"1px solid #ebe8dd":"none"})),
-          td(h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:9,padding:"2px 7px",background:ss.bg,color:ss.fg,whiteSpace:"nowrap"}},ss.t)))); }); });
+          ...[["ps","start","plan","s"],["pe","end","plan","e"],["as","start","act","s"],["ae","end","act","e"]].map(([k,kind,g,se])=>{
+            const locked = ed && g==="plan" && pgDue((oldD[s.key]||{})[k]) && !mayMove(s.group||"");   // 154: only the holder moves a planned date
+            return td(ed && !locked ? [h(PgWhen,{key:"w",value:v[k],weeks,kind,onChange:val=>setWhen(s.key,k,val)}), g==="plan" ? revChip(s.key,k,s.label,r.title) : null]
+              : [locked ? h("span",{key:"l",title:"Only "+(pgHolder(ptasks,plan.id,s.group||"")||"the holder of this material's card")+" can move this planned date",style:{color:colors.muted}},"\ud83d\udd12 ") : null,
+                 pgShow(s[g][se]) || h("span",{key:"e",style:{color:g==="plan"?"#854f0b":colors.mutedLight}},"—"), g==="plan" ? revChip(s.key,k,s.label,r.title) : null],{whiteSpace:"nowrap",borderLeft:k==="ps"||k==="as"?"1px solid #ebe8dd":"none"}); }),
+          td(h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:9,padding:"2px 7px",background:ss.bg,color:ss.fg,whiteSpace:"nowrap"}},ss.t)))); });
+      if(stripOpen[r.form||"General"]) out.push(h("tr",{key:"bars"+r.form},h("td",{colSpan:6,style:{padding:"2px 10px 8px",borderBottom:"1px solid #ebe8dd"}},
+        h(PgStrip,{ row:r, range, today, delivery:deliv, baseOf:(key)=>{ const cur = pgDue((r.steps.find(x=>x.key===key)||{plan:{e:PG_NONE}}).plan.e); const b = pgBase(chg, plan.id, key, "pe", cur); return b; } })))); });
     const th = (x,s)=> h("th",{style:{textAlign:"left",fontSize:11,color:colors.muted,padding:"6px 7px",borderBottom:"1px solid "+colors.border,background:"#faf9f5",whiteSpace:"nowrap",...(s||{})}},x);
     return h("div",{style:{overflowX:"auto",borderTop:"1px solid "+colors.border}},h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:ed?1100:760}},
       h("thead",null,h("tr",null,th("Step"),th("Planned start",{borderLeft:"1px solid #ebe8dd"}),th("Planned end"),th("Actual start",{borderLeft:"1px solid #ebe8dd"}),th("Actual end"),th("Status"))),
@@ -35209,6 +35708,28 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
       [h("button",{key:"c",style:btnSecondary,onClick:closeIns},"Cancel"),h("button",{key:"s",style:{...btnPrimary,background:"#0f7a5c"},onClick:saveIns},"Insert Step")], closeIns) : null,
     up ? modal("Upload BOM for a contract", upBody(),
       [h("button",{key:"c",style:btnSecondary,onClick:closeUp},"Cancel"),h("button",{key:"s",style:{...btnPrimary,background:"#0f7a5c"},disabled:busy,onClick:saveUp},busy?"Making…":"Make the Gantt")], closeUp, true) : null,
+    // 154: why are the planned dates moving
+    rsn && plan ? modal("Planned dates moved \u2014 contract "+plan.contract_number,
+      h("div",{style:{display:"grid",gap:10}},
+        h("div",{style:{maxHeight:220,overflowY:"auto",border:"1px solid #ebe8dd",borderRadius:6}},h("table",{style:{borderCollapse:"collapse",width:"100%",fontSize:12}},
+          h("tbody",null,rsn.moves.map((m,i)=>h("tr",{key:i},h("td",{style:{padding:"4px 8px",borderBottom:"1px solid #f0eee6"}},h("b",null,m.title)," \u00b7 ",m.label," \u00b7 planned "+(m.field==="ps"?"start":"end")),
+            h("td",{style:{padding:"4px 8px",borderBottom:"1px solid #f0eee6",whiteSpace:"nowrap"}},pgDmy(m.o)+" \u2192 "+(m.n?pgDmy(m.n):"cleared")),
+            h("td",{style:{padding:"4px 8px",borderBottom:"1px solid #f0eee6",whiteSpace:"nowrap",fontWeight:700,color:m.days>0?"#a3312a":"#0f6b4f"}},m.days==null?"":(m.days>0?"+":"")+m.days+" d")))))),
+        fl("Why are they moving (required)",h("select",{value:rsn.reason,onChange:e=>{ const v=e.target.value; setRsn(x=>({...x,reason:v})); },style:inputStyle},h("option",{value:""},"\u2014 pick \u2014"),PG_MOVE_REASONS.map(r=>h("option",{key:r,value:r},r)))),
+        fl("Note",h("input",{value:rsn.note,onChange:e=>{ const v=e.target.value; setRsn(x=>({...x,note:v})); },placeholder:"e.g. vendor mail 07/10 \u2014 mill dispatch slipped",style:inputStyle})),
+        h("label",{style:{fontSize:12.5,display:"flex",gap:6,alignItems:"center"}},h("input",{type:"checkbox",checked:rsn.cascade,onChange:e=>{ const v=e.target.checked; setRsn(x=>({...x,cascade:v})); }}),"Move the later steps of the same line item by the same days (those not started yet)"),
+        h("div",{style:{fontSize:11.5,color:colors.muted}},"The first plan of each step stays on record; this change is kept as its next revision, with your name and the reason. It counts in your Purchase engineer KPI.")),
+      [h("button",{key:"c",style:btnSecondary,onClick:()=>setRsn(null)},"Back to the dates"),h("button",{key:"s",style:{...btnPrimary,background:"#0f7a5c"},disabled:busy,onClick:confirmMoves},busy?"Saving\u2026":"Save the new dates")], ()=>setRsn(null)) : null,
+    // 154: the history of one step's planned dates
+    hist && plan ? modal("History of the planned dates \u2014 "+hist.title+" \u00b7 "+hist.label,
+      h("div",{style:{display:"grid",gap:6,fontSize:12.5}}, ["ps","pe"].map(fd=>{ const l = pgChgOf(chg, plan.id, hist.key, fd); if(!l.length) return null;
+        return h("div",{key:fd,style:{border:"1px solid #ebe8dd",borderRadius:7,overflow:"hidden"}},
+          h("div",{style:{background:"#efece2",padding:"6px 10px",fontWeight:700}},"Planned "+(fd==="ps"?"start":"end")),
+          h("div",{style:{padding:"6px 10px",borderBottom:"1px solid #f0eee6"}},h("b",null,"Original "),l[0].old_date?pgDmy(String(l[0].old_date).slice(0,10)):"\u2014"," (the first plan \u2014 never overwritten)"),
+          l.map((c,i)=>h("div",{key:c.id||i,style:{padding:"6px 10px",borderBottom:"1px solid #f0eee6"}},h("b",null,"Rev "+(i+1)+" "),
+            (c.old_date?pgDmy(String(c.old_date).slice(0,10)):"\u2014")+" \u2192 ",h("b",null,c.new_date?pgDmy(String(c.new_date).slice(0,10)):"cleared"),
+            c.days!=null?" ("+(c.days>0?"+":"")+c.days+" d)":""," \u00b7 "+c.reason+(c.note?" \u2014 \u201c"+c.note+"\u201d":"")+(c.cascade_from?" \u00b7 followed an earlier step":"")+" \u00b7 "+(c.changed_by||"")+", "+fmtDMYTime(c.changed_at)))); })),
+      [h("button",{key:"c",style:btnSecondary,onClick:()=>setHist(null)},"Close")], ()=>setHist(null)) : null,
     ask ? h(UnsavedAsk,{ what:ask.what, onStay:()=>setAsk(null), onDiscard:()=>{ const a = ask; setAsk(null); a.then(); }, onSave:async()=>{ const a = ask; setAsk(null); await a.onSave(); } }) : null);
 }
 
@@ -35927,8 +36448,10 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters }){
         load();
       } finally { setFuBusy(false); }
     };
-    const allowed = await canEditFreely(row.customer_name);
-    if(!allowed){ setAuthGate({ requiredType:"edit", action: proceed }); return; }
+    // 153: anyone may log a follow-up and move the stage; back to Draft never, out of Won with a code
+    const rule = changing ? stageMoveRule(row.status, f.stage, user) : "ok";
+    if(rule==="draft"){ alert(stageDraftMsg(row.reference_number)); return; }
+    if(rule==="code"){ setAuthGate({ requiredType:"edit", action: proceed }); return; }
     await proceed();
   };
   const [filters,setFilters] = useState(saved ? saved.filters : {
@@ -37322,7 +37845,9 @@ function CrmFunnelKanban({ user }){
   const [outcomeTarget,setOutcomeTarget]=useState(null); // {card, newStatus} | null
   const moveCard = (card, newStatus)=>{
     if(card.quote_status===newStatus) return;
-    if(isQuoteLocked(card.quote_status,user)){ setAuthGate({requiredType:"edit",action:()=>moveCardChecked(card,newStatus)}); return; }
+    const rule = stageMoveRule(card.quote_status, newStatus, user);   // 153
+    if(rule==="draft"){ alert(stageDraftMsg(card.reference_number)); return; }
+    if(rule==="code"){ setAuthGate({requiredType:"edit",action:()=>moveCardChecked(card,newStatus)}); return; }
     moveCardChecked(card,newStatus);
   };
   const moveCardChecked = (card, newStatus)=>{
@@ -37642,7 +38167,9 @@ function QuoteStatusReview({ user }){
   const [outcomeTarget,setOutcomeTarget]=useState(null); // {referenceNumber, newStatus} | null
   const changeStatus = (row,newStatus)=>{
     if(row.quote_status===newStatus) return;
-    if(isQuoteLocked(row.quote_status,user)){ setAuthGate({requiredType:"edit",action:()=>changeStatusChecked(row,newStatus)}); return; }
+    const rule = stageMoveRule(row.quote_status, newStatus, user);   // 153
+    if(rule==="draft"){ alert(stageDraftMsg(row.reference_number)); return; }
+    if(rule==="code"){ setAuthGate({requiredType:"edit",action:()=>changeStatusChecked(row,newStatus)}); return; }
     changeStatusChecked(row,newStatus);
   };
   const changeStatusChecked = (row,newStatus)=>{
@@ -43976,6 +44503,7 @@ function App() {
     tab==="permissions"?h(PermissionsEditor,null):
     tab==="dashboards"?h(DashboardsScreen,{user}):
     tab==="proc_gantt"?h(ProcGanttScreen,{user, onGoToTab:setTab, initial:pgNav, onOpenCard:(id,cn)=>{ setNavBack({label:"\u2190 Back to the Gantt", go:()=>{ setPgNav({contract:cn}); setTab("proc_gantt"); }}); setMyDayTaskId(id); setTab("task_board"); }}):
+    tab==="proc_reports"?h(ProcReportsScreen,{user, onOpenGantt:(cn,form)=>{ setNavBack({label:"\u2190 Back to the Procurement reports", go:()=>setTab("proc_reports")}); setPgNav({contract:cn, form}); setTab("proc_gantt"); }}):   // 154
     tab==="proc_list"?h(ProcListScreen,{user, onOpenCard:(id,cn)=>{ setNavBack({label:"\u2190 Back to the Procurement list", go:()=>setTab("proc_list")}); setMyDayTaskId(id); setTab("task_board"); },
       onOpenGantt:(cn)=>{ setNavBack({label:"\u2190 Back to the Procurement list", go:()=>setTab("proc_list")}); setPgNav({contract:cn}); setTab("proc_gantt"); }}):   // 147   // 138 Build A
     (tab==="valve_price"||tab==="valve_price_purchase")?(canSeeValvePrice(user)?h(ValvePriceScreen,{user}):h("div",{style:{padding:24,fontSize:13,color:colors.muted}},"Valve Price is for admins on this site.")):
@@ -46850,6 +47378,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
   const [expanded,setExpanded] = useState({});     // 128: card id -> true when "more" is open
   const [dueEd,setDueEd] = useState(null);         // 151: id of the card / sub-task whose due date is being changed in place
   const [dueOk,setDueOk] = useState(null);
+  const [cardAct,setCardAct] = useState(null);   // { kind:"move"|"copy", t, dept, to, due, why, title, people:{}, chk, sub, lnk, busy }
   // 151: All boards — every department's board as a band; folded / open and the band order are kept per person in this browser
   const [abOpen,setAbOpen] = useState(()=>{ try{ return JSON.parse(localStorage.getItem("ab_open")||"null"); }catch(e){ return null; } });
   const [abOrder,setAbOrder] = useState(()=>{ try{ return JSON.parse(localStorage.getItem("ab_order")||"[]"); }catch(e){ return []; } });
@@ -47110,6 +47639,98 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
   const sharedChip = (t)=> taskShared(t) ? h("span",{title:"One card on several boards \u2014 a change made anywhere shows everywhere. Home board: "+taskDept(t)+" (approval and reports count it there, once).",
       style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#efe8fb",color:"#5b3a99",marginBottom:3,marginRight:4}},
       "\ud83d\udd17 "+(dept && mode==="assign" && dept!==taskDept(t) ? "Shared from "+taskDept(t) : "Also on "+taskAlso(t).join(", "))) : null;
+  // ---- 154 (Build X): Move, Copy and Due date right on the card ----
+  const actStrip = (t, small)=>{
+    const b = (icon, label, on, title, dis)=> h("button",{onClick:ev=>{ ev.stopPropagation(); if(dis){ alert(dis); return; } on(); },onMouseDown:ev=>ev.stopPropagation(),title:dis||title,
+      style:{font:"inherit",fontSize:small?10.5:11,fontWeight:600,border:"1px solid "+colors.border,background:"#fff",color:dis?colors.mutedLight:colors.text,borderRadius:6,padding:small?"1px 6px":"2px 8px",cursor:"pointer",display:"inline-flex",gap:3,alignItems:"center"}},icon,small?null:label);
+    const noMove = canEdit(t) ? null : "Only "+(t.assignee||"its holder")+", whoever created it, the board's approver or an Admin can move this card.";
+    const noDue = (t.proc_plan_id && t.parent_id) ? "This date comes from the Procurement Gantt \u2014 change it there." : noMove;
+    return h("div",{onClick:ev=>ev.stopPropagation(),style:{display:"flex",gap:5,flexWrap:"wrap",borderTop:small?"none":"1px dashed "+colors.border,marginTop:small?0:6,paddingTop:small?0:6,cursor:"default"}},
+      b("\ud83d\udcc5","Due",()=>setDueEd(t.id),"Change the due date",noDue),
+      b("\u21c4","Move",()=>openCardMove(t),"Move to another person, pile or department",noMove),
+      b("\u29c9","Copy",()=>openCardCopy(t),"Make a copy (or several) of this card",null));
+  };
+  const allDeptsList = Array.from(new Set([...deptMaster, ...emps.flatMap(x=>empBoards(x)), ...emps.map(x=>x.department)].filter(x=>x && !isInterDept(x)))).sort();
+  const peopleIn = (d)=> emps.filter(e=>e.employee_name!=="Unassigned" && empInDept(e,d)).map(e=>e.employee_name).sort();
+  const openCardMove = (t)=> setCardAct({ kind:"move", t, dept:taskDept(t)||allDeptsList[0]||"", to:t.assignee||TASK_PILE, due:d10(t.due_date)&&d10(t.due_date)>=today?d10(t.due_date):"", why:"", busy:false });
+  const openCardCopy = (t)=> setCardAct({ kind:"copy", t, dept:taskDept(t)||allDeptsList[0]||"", title:t.title||"", people:{ [t.assignee||TASK_PILE]:true }, due:d10(t.due_date)&&d10(t.due_date)>=today?d10(t.due_date):"", chk:true, sub:false, lnk:true, busy:false });
+  const cardActModal = ()=>{
+    if(!cardAct) return null;
+    const a = cardAct, t = a.t; const set = (p)=> setCardAct(x=>({...x,...p}));
+    const close = ()=>{ if(!a.busy) setCardAct(null); };
+    const lab = (l,c)=> h("label",{style:{display:"grid",gap:3,fontSize:11.5,color:colors.muted}},l,c);
+    const sel = (v,on,opts)=> h("select",{value:v,onChange:e=>on(e.target.value),style:{...inputStyle,padding:"5px 8px"}},opts);
+    const ppl = peopleIn(a.dept);
+    const crossMove = a.kind==="move" && a.dept!==taskDept(t) && !(a.to!==TASK_PILE && empInDept(empOf(a.to), taskDept(t)));
+    const goMove = async()=>{
+      const toPile = a.to===TASK_PILE;
+      if(!toPile && (!a.due || a.due<today)){ alert("Give a due date (today or later)."); return; }
+      if(crossMove && !a.why.trim()){ alert("Moving to another department needs a reason \u2014 it goes into the card's history."); return; }
+      if(toPile ? (taskIsPile(t) && taskDept(t)===a.dept) : (t.assignee===a.to && taskDept(t)===a.dept && d10(t.due_date)===a.due)){ alert("Nothing to change \u2014 it is already there."); return; }
+      set({busy:true});
+      const due = a.due || (t.due_date||null);
+      const what = taskWho(t)+" \u2192 "+(toPile?a.dept+" Unassigned pile":a.to)+(due?", due "+fmtDMY(due):"")+(crossMove?" (moved from "+(taskDept(t)||"no department")+" to "+a.dept+" \u2014 "+a.why.trim()+")":"")+" (on the card)";
+      const ok = await move(t,{ assignee:toPile?null:a.to, due_date:due, department:a.dept }, what);
+      if(ok!==false && crossMove){
+        for(const s2 of tasks.filter(k=>k.parent_id===t.id && k.status!=="done" && (k.assignee||null)===(t.assignee||null))){
+          const { error } = await sb.from("task_tbl").update({ assignee:toPile?null:a.to, department:a.dept, moved_by:me, moved_at:new Date().toISOString(), moved_what:"Moved with its card \u2014 "+a.why.trim() }).eq("id",s2.id);
+          if(!error) await taskLog(s2.id, me, "Moved with its card \u201c"+t.title+"\u201d to "+a.dept+" \u2014 "+a.why.trim()); }
+        try{ const to = toPile ? approvers.filter(x=>x.department===a.dept).map(x=>x.employee_name) : [a.to];
+          if(to.length) await sb.from("notifications_tbl").insert(to.map(n=>({ employee_name:n, message:"\u201c"+t.title+"\u201d moved to "+(toPile?"the "+a.dept+" Unassigned pile":"you")+" by "+(me||"")+" \u2014 "+a.why.trim() }))); }catch(e){}
+      }
+      if(ok!==false){ setCardAct(null); await load(false); } else set({busy:false});
+    };
+    const untick = (items)=> (items||[]).map(i=>{ const c = {...i, done:false}; delete c.done_by; delete c.done_at; if(c.items) c.items = untick(c.items); return c; });
+    const goCopy = async()=>{
+      const to = Object.keys(a.people).filter(k=>a.people[k]);
+      if(!a.title.trim()){ alert("Give the copy a title."); return; }
+      if(!to.length){ alert("Tick who gets the copy (or the Unassigned pile)."); return; }
+      if(to.some(p=>p!==TASK_PILE) && (!a.due || a.due<today)){ alert("Give a due date (today or later)."); return; }
+      set({busy:true});
+      const made = [];
+      for(const p of to){
+        const toPile = p===TASK_PILE;
+        const row = { title:a.title.trim(), assignee:toPile?null:p, department:a.dept||null, due_date:a.due||null, status:"open", created_by:me,
+          labels: a.lnk ? (t.labels||[]) : [], links: a.lnk ? (t.links||[]) : [], checklists: a.chk ? (t.checklists||[]).map(c=>({...c, items:untick(c.items)})) : [],
+          ref: a.lnk ? (t.ref||null) : null, customer: a.lnk ? (t.customer||null) : null, notes: t.notes||null, ...(t.task_type ? { task_type:t.task_type } : {}) };
+        const { data, error } = await sb.from("task_tbl").insert(row).select().single();
+        if(error){ alert("Could not make the copy"+(to.length>1?" for "+(toPile?"the pile":p):"")+":\n\n"+error.message); continue; }
+        await taskLog(data.id, me, "Copied from #"+t.id+" \u201c"+t.title+"\u201d \u2014 "+(toPile?"to the "+a.dept+" Unassigned pile":"to "+p)+(a.due?", due "+fmtDMY(a.due):""));
+        if(a.sub){ for(const k of tasks.filter(x=>x.parent_id===t.id)){
+          const { data: sd } = await sb.from("task_tbl").insert({ title:k.title, assignee:toPile?null:p, department:a.dept||null, due_date:a.due||null, status:"open", created_by:me, parent_id:data.id,
+            labels:k.labels||[], links:k.links||[], checklists:(k.checklists||[]).map(c=>({...c, items:untick(c.items)})), notes:k.notes||null }).select().single();
+          if(sd) await taskLog(sd.id, me, "Copied with its card from sub-task #"+k.id); } }
+        made.push({ id:data.id, to:toPile?"the "+a.dept+" pile":p });
+        if(!toPile && p!==me){ try{ await sb.from("notifications_tbl").insert({ employee_name:p, message:"A copy of \u201c"+t.title+"\u201d was given to you by "+(me||"")+(a.due?", due "+fmtDMY(a.due):"") }); }catch(e){} }
+      }
+      if(made.length) await taskLog(t.id, me, "Copied to "+made.map(m=>"#"+m.id+" ("+m.to+")").join(", "));
+      setCardAct(null); await load(false);
+      if(made.length) alert(made.length+" cop"+(made.length===1?"y":"ies")+" made: "+made.map(m=>m.to).join(", ")+".");
+    };
+    const ticked = Object.keys(a.people||{}).filter(k=>a.people[k]).length;
+    return h("div",{onClick:e=>{ if(e.target===e.currentTarget) close(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.35)",zIndex:1170,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"70px 12px",overflowY:"auto"}},
+      h("div",{style:{background:"#fff",borderRadius:10,width:460,maxWidth:"100%",padding:"14px 16px",display:"grid",gap:10,border:"1px solid #0f7a5c"}},
+        h("b",{style:{fontSize:14}},(a.kind==="move"?"Move":"Copy")+" \u201c"+t.title+"\u201d"),
+        a.kind==="copy" ? lab("Title of the copy",h("input",{value:a.title,onChange:e=>set({title:e.target.value}),style:{...inputStyle,padding:"5px 8px"}})) : null,
+        h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}},
+          lab("Department",sel(a.dept,v=>set(a.kind==="move" ? {dept:v, to:TASK_PILE} : {dept:v, people:{ [TASK_PILE]:true }}),allDeptsList.map(d=>h("option",{key:d,value:d},d)))),
+          a.kind==="move" ? lab("To",sel(a.to,v=>set({to:v}),[h("option",{key:"p",value:TASK_PILE},"\ud83d\udce5 Unassigned pile"),...ppl.map(p=>h("option",{key:p,value:p},p))]))
+            : lab("Due date",h("input",{type:"date",value:a.due,min:today,onChange:e=>set({due:e.target.value}),style:{...inputStyle,padding:"5px 8px"}}))),
+        a.kind==="move" ? lab("Due date",h("input",{type:"date",value:a.due,min:today,onChange:e=>set({due:e.target.value}),style:{...inputStyle,padding:"5px 8px"}})) : null,
+        crossMove ? lab("Reason (another department \u2014 goes into the history)",h("input",{value:a.why,onChange:e=>set({why:e.target.value}),placeholder:"e.g. Purchase to follow up",style:{...inputStyle,padding:"5px 8px"}})) : null,
+        a.kind==="copy" ? h("div",{style:{display:"grid",gap:4}},
+          h("div",{style:{fontSize:11.5,color:colors.muted}},"Who gets a copy \u2014 tick several to make one copy each ("+ticked+" ticked)"),
+          h("div",{style:{maxHeight:170,overflowY:"auto",border:"1px solid #ebe8dd",borderRadius:6,padding:"4px 8px",display:"grid",gap:2}},
+            [TASK_PILE, ...ppl].map(p=>h("label",{key:p,style:{display:"flex",gap:6,alignItems:"center",fontSize:12.5}},h("input",{type:"checkbox",checked:!!a.people[p],onChange:e=>set({people:{...a.people,[p]:e.target.checked}})}),p===TASK_PILE?"\ud83d\udce5 "+a.dept+" Unassigned pile":p)))) : null,
+        a.kind==="copy" ? h("div",{style:{display:"grid",gap:3,fontSize:12.5}},
+          h("label",null,h("input",{type:"checkbox",checked:a.chk,onChange:e=>set({chk:e.target.checked})})," Checklists (all items unticked)"),
+          h("label",null,h("input",{type:"checkbox",checked:a.sub,onChange:e=>set({sub:e.target.checked})})," Sub-tasks (as new, open)"),
+          h("label",null,h("input",{type:"checkbox",checked:a.lnk,onChange:e=>set({lnk:e.target.checked})})," Labels, links, reference and customer"),
+          (t.proc_plan_id || t.enquiry_id) ? h("div",{style:{fontSize:11.5,color:"#854f0b",background:"#fff4d6",borderRadius:6,padding:"5px 8px"}},"The copy is a plain task \u2014 not tied to the "+(t.proc_plan_id?"Procurement Gantt":"enquiry")+".") : null) : null,
+        h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end"}},
+          h("button",{onClick:close,disabled:a.busy,style:btnSmall},"Cancel"),
+          h("button",{onClick:a.kind==="move"?goMove:goCopy,disabled:a.busy,style:{...btnPrimary,padding:"6px 14px",background:"#0f7a5c"}},a.busy?"Working\u2026":a.kind==="move"?"Move":(ticked>1?"Make "+ticked+" copies":"Make the copy")))));
+  };
   // 151: the due date changed right on the card (or sub-task, or table row). A procurement sub-task's date comes from the Gantt.
   const dueChip = (t, small)=>{
     const st = taskStage(t,today); if(st==="done") return null;
@@ -47180,7 +47801,8 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
               k.status==="done" ? null : dueChip(k,true))) : null) : null,   // 151
         h("div",{style:{marginTop:6,fontSize:10.5,color:colors.mutedLight,lineHeight:1.45}},
           h("div",null,"Created by ",h("b",{style:{color:colors.muted}},t.created_by||"—")," · "+(t.created_at?fmtDMY(t.created_at):"")),
-          t.moved_by ? h("div",null,"Moved by ",h("b",{style:{color:colors.muted}},t.moved_by)," · "+(t.moved_at?fmtDMYTime(t.moved_at):""),h("div",null,t.moved_what||"")) : h("div",null,"Not moved yet"))) : null);
+          t.moved_by ? h("div",null,"Moved by ",h("b",{style:{color:colors.muted}},t.moved_by)," · "+(t.moved_at?fmtDMYTime(t.moved_at):""),h("div",null,t.moved_what||"")) : h("div",null,"Not moved yet"))) : null,
+      st!=="done" ? actStrip(t) : null);   // 154 (Build X)
   };
   // A sub-task shown on its own, as a slim strip naming the card it belongs to.
   const strip = (t, keyx)=>{ const p = parentOf(t); const st = taskOverdue(t,today) ? "overdue" : taskStage(t,today);
@@ -47437,7 +48059,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
             rows.map(t=>{ const e=enqOf(t); const st=TASK_STAGES.find(x=>x.key===taskStage(t,today)); const od=taskOverdue(t,today);
               return h("tr",{key:t.id,onClick:()=>setOpenId(t.id),style:{cursor:"pointer",background:od?"#fbefec":"transparent"}},
                 listTbl.pile ? td(h("input",{type:"checkbox",checked:!!ltSel[t.id],onClick:ev=>ev.stopPropagation(),onChange:ev=>setLtSel(m=>({...m,[t.id]:ev.target.checked}))})) : null,
-                td(e?h("b",null,e.enquiry_number):"—"), td(custOf(t)||"—"), td(quoteOf(t)||"—"), td(t.title), td(t.task_type||"—"),
+                td(e?h("b",null,e.enquiry_number):"—"), td(custOf(t)||"—"), td(quoteOf(t)||"—"), td(h("div",{style:{display:"grid",gap:3}},t.title,t.status!=="done"?actStrip(t,true):null)), td(t.task_type||"—"),   // 154
                 td(closeOf(t)?fmtDMY(closeOf(t)):"—",{color:closeOf(t)&&closeOf(t)<today&&t.status!=="done"?colors.danger:colors.text}),
                 td(t.status==="done" ? (t.due_date?fmtDMY(t.due_date):"—") : h("span",{style:{display:"inline-flex",gap:4,alignItems:"center",flexWrap:"wrap"}},dueChip(t,true),od?h("span",{style:{color:colors.danger,fontWeight:700,fontSize:11}},taskDaysOver(t,today)+"d over"):null),{whiteSpace:"nowrap"}),   // 151
                 td(h("span",{style:{fontSize:10.5,fontWeight:700,color:"#fff",background:st.color,borderRadius:9,padding:"2px 8px",whiteSpace:"nowrap"}},st.label)),
@@ -47735,6 +48357,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
               h("td",{style:{padding:"6px 8px",borderBottom:"1px solid #ece9df"}},m?m[1]:r.action));
           }))))),
     listTableModal(),
+    cardActModal(),   // 154
     xferModal(),   // 145
     dateAsk && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center"}},
       h("div",{style:{background:"#fff",borderRadius:8,padding:"18px 20px",width:360}},
@@ -48036,7 +48659,8 @@ function EmployeePerformance({ name, tasks, emps, onBack, onOpenBoard, onGoToTab
       h("b",{style:{fontSize:15}},name), h("span",{style:{fontSize:12,color:colors.muted}},[emp.department, emp.crm_role].filter(Boolean).join(" · ")),
       h("select",{value:per,onChange:e=>setPer(e.target.value),style:{...inputStyle,width:190,padding:"5px 8px",marginLeft:"auto"}},Object.keys(PL).map(k=>h("option",{key:k,value:k},PL[k]))),
       onOpenBoard ? h("button",{onClick:()=>onOpenBoard(name),style:btnSmall},"Open board") : null,
-      onGoToTab ? h("button",{onClick:()=>{ window.__reportPerson = name; onGoToTab("period_reports"); },style:btnSmall},"Weekly reports") : null),
+      onGoToTab ? h("button",{onClick:()=>{ window.__reportPerson = name; onGoToTab("period_reports"); },style:btnSmall},"Weekly reports") : null,
+      onGoToTab ? h("button",{onClick:()=>{ window.__prEng = name; onGoToTab("proc_reports"); },title:"Procurement KPI of "+name+" (when he holds procurement cards)",style:btnSmall},"Procurement KPI") : null),   // 154
     h("div",{style:{display:"grid",gridTemplateColumns:"repeat(4,minmax(0,1fr))",gap:10,marginBottom:12}},
       kpi(open.length,"Open now"), kpi(overdue.length,"Overdue now",overdue.length?"#a3312a":null), kpi(week.length,"Due in the next 7 days","#854f0b"), kpi(appr.length,"Waiting approval"),
       kpi(doneP.length,"Completed · "+PL[per].toLowerCase()), kpi(doneP.length?Math.round(100*(doneP.length-late.length)/doneP.length)+"%":"—",(doneP.length-late.length)+" of "+doneP.length+" on time","#0f6e56"),
@@ -48612,9 +49236,10 @@ function PendingActionsScreen({ user }){
     }catch(e){ console.error("Procurement items not read", e); }
     // 151: a quote number forced in from Log Follow-ups whose enquiry is not logged yet — the Sales Coordinator logs it
     try{
-      const { data: ql, error: qErr } = await sb.from("register_line_tbl").select("id,quote_no,customer_name,created_at,created_by").eq("source","Log Follow-ups").is("enquiry_id",null);
+      const { data: ql, error: qErr } = await sb.from("register_line_tbl").select("*").eq("source","Log Follow-ups").is("enquiry_id",null);
       if(!qErr && ql && ql.length){
         const { data: scs } = await sb.from("post_holder_tbl").select("employee_name").eq("post_key","sales_coordinator");
+        for(let i=ql.length-1;i>=0;i--){ if(ql[i].struck_kind) ql.splice(i,1); }   // 155
         const who = (scs||[]).map(r=>r.employee_name).filter(Boolean);
         ql.forEach(l=>{ const days = l.created_at ? Math.max(0,Math.floor((Date.now()-new Date(l.created_at).getTime())/86400000)) : null;
           const base = { what:"Quote without enquiry: "+l.quote_no+" ("+(l.customer_name||"no customer")+") — added from Log Follow-ups"+(l.created_by?" by "+l.created_by:"")+". Log its enquiry on the Quote Register line.",
