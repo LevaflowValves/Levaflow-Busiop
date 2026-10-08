@@ -861,7 +861,7 @@ const MASTER_TABLES = [
   // State -> Country -> Zone (see resolveOwnerForAddress) — this only
   // ever fires once the more specific two have both missed.
   // 137: the Quote Register tabs (Super Admin) - which customers each tab takes. Who covers a tab: Register Tabs & People.
-  { key: "register_tab_tbl", label: "Register Tabs (rules)", columns: ["tab_name","prefix","group_label","sort_order","is_open","is_emf","is_catchall","accepts_countries","accepts_states","accepts_zone"], colLabels:{tab_name:"Tab (as in Excel)",group_label:"Group",sort_order:"Order",is_open:"Open",is_emf:"EMF",is_catchall:"Catch-all (any other country outside India)",accepts_countries:"Countries (comma list)",accepts_states:"States / emirates (comma list; blank = whole country)",accepts_zone:"India zone (south / north / west / east)"}, addLabel:"New register tab", freeText:["tab_name","prefix","group_label","sort_order","accepts_countries","accepts_states","accepts_zone"], boolCols:["is_open","is_emf","is_catchall"], nullableCols:["prefix","group_label","accepts_countries","accepts_states","accepts_zone"] },
+  { key: "register_tab_tbl", label: "Register Tabs (rules)", columns: ["tab_name","prefix","group_label","sort_order","is_open","is_emf","is_catchall","owner_per_line","accepts_countries","accepts_states","accepts_zone"], colLabels:{owner_per_line:"Owner on each line (FSE / Telecaller asked per line, e.g. Tenders)",tab_name:"Tab (as in Excel)",group_label:"Group",sort_order:"Order",is_open:"Open",is_emf:"EMF",is_catchall:"Catch-all (any other country outside India)",accepts_countries:"Countries (comma list)",accepts_states:"States / emirates (comma list; blank = whole country)",accepts_zone:"India zone (south / north / west / east)"}, addLabel:"New register tab", freeText:["tab_name","prefix","group_label","sort_order","accepts_countries","accepts_states","accepts_zone"], boolCols:["is_open","is_emf","is_catchall","owner_per_line"], nullableCols:["prefix","group_label","accepts_countries","accepts_states","accepts_zone"] },
   { key: "territory_rule_zone_tbl", label: "Territory Rules — Zones", columns: ["employee_name","zone"], addLabel:"New rule", cascade:[{col:"employee_name",from:"employee_tbl",field:"employee_name"},{col:"zone",from:"zone_tbl",field:"value"}], groupBy:["employee_name"], editAllEnabled:true },
   { key: "sale_order_status_tbl", label: "Sale Order Status", columns: ["status","sort_order"], addLabel:"New status", freeText:["status","sort_order"] },
 ];
@@ -11611,7 +11611,6 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
   const [sel,setSel] = useState(null);           // "d<id>" | "r<id>" | "+"
   const [busy,setBusy] = useState(false);
   const [dirMissing,setDirMissing] = useState(false);
-  const [quoteStatus,setQuoteStatus] = useState(null);   // 149: entries lock once the quote leaves Draft
 
   const load = useCallback(async(keepSel)=>{
     if(!entityRef) return;
@@ -11619,14 +11618,13 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
     const [{data:c},st,{data:sl},r,d,pk] = await Promise.all([
       sb.from("doc_category_tbl").select("*"),
       loadDocStatuses(),
-      sb.from("estimates").select("item_sl_no,item,quote_status").eq("reference_number",entityRef).order("item_sl_no"),
+      sb.from("estimates").select("item_sl_no,item").eq("reference_number",entityRef).order("item_sl_no"),
       fetchDocumentRequirements(entityRef),
       fetchDocumentHistory(entityRef),
       myPostKeys(user)
     ]);
     setCats((c||[]).slice().sort((a,b)=>String(a.value||"").localeCompare(String(b.value||""))));
     setStatuses(st||[]);
-    setQuoteStatus(((sl||[]).find(x=>x.quote_status)||{}).quote_status || "Draft");
     const seen = new Set(); setSlNos((sl||[]).filter(x=>{ const k=String(x.item_sl_no); if(seen.has(k)) return false; seen.add(k); return true; }));
     setReqs(r||[]);
     setDocs((d||[]).filter(x=>!x.is_archived));
@@ -11831,33 +11829,10 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
   const blankNx = { dir:"", status:"", link:"", file:null, what:"", notes:"", fulfil:"" };
   const [nx,setNx] = useState(blankNx);
   const [override,setOverride] = useState(null);   // {rev} once a Super Admin has unlocked the sequence
-  // 149: the trail is the record. Quote: entries editable while the quote is in Draft; Sale Order: until the next entry
-  // is logged. Otherwise a Super Admin's code unlocks this document's entries (flagged and audited).
-  const [nxOpen,setNxOpen] = useState(false);
-  const [unlockedDoc,setUnlockedDoc] = useState(null);
-  const [ed,setEd] = useState(null);   // {row, d, dir, link, what, notes, file, why}
-  const rowLocked = (d, row)=>{
-    if(unlockedDoc===d.id) return false;
-    if(isContract){ const revs = d.revisions||[]; return revs.length>0 && revs[0].id!==row.id; }
-    return !!quoteStatus && quoteStatus!=="Draft";
-  };
-  const lockWhy = (d)=> isContract ? "A later entry has been logged on "+d.doc_number+"." : "Quote "+entityRef+" has left Draft ("+quoteStatus+").";
-  const unlockDoc = async(d)=>{
-    if(user?.role!=="super_admin"){ alert("Locked — "+lockWhy(d)+"\n\nLog a new revision instead, or ask a Super Admin to unlock it with a code."); return false; }
-    const code = prompt("Locked — "+lockWhy(d)+"\n\nEnter a Deletion Code to unlock the entries of "+d.doc_number+" (the document will be flagged):");
-    if(code===null) return false;
-    const res = await verifyAndConsumeDeletionCode(code, user?.username||"unknown");
-    if(!res.ok){ alert(res.reason); return false; }
-    setUnlockedDoc(d.id);
-    const note = "Entries of "+d.doc_number+" unlocked with a code by Super Admin "+(user?.username||"unknown")+" ("+lockWhy(d)+")";
-    await sb.from("universal_documents_tbl").update({sequence_flagged:true, sequence_flag_note:note}).eq("id",d.id);
-    await logAudit("UPDATE","universal_documents_tbl",entityRef,note,user?.username||"unknown",null,null);
-    return true;
-  };
   const [notes,setNotes] = useState([]);
   const [noteText,setNoteText] = useState("");
   useEffect(()=>{
-    setOverride(null); setNxOpen(false); setEd(null);
+    setOverride(null);
     if(current && current.kind==="doc"){
       const last = (current.doc.revisions||[])[0];
       setNx({ ...blankNx, link: last ? (last.link||"") : "" });
@@ -11903,55 +11878,17 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
         await logAudit("UPDATE","universal_documents_tbl",entityRef,"New entry on "+d.doc_number+" — Rev"+rev+"-"+nx.dir+": "+String(nx.what).trim(),user?.username||"unknown",null,null);
       }
       const superseded = await supersedeHandovers(d.id, rev, user?.username);
-      setNx(blankNx); setOverride(null); setDirMissing(false); setNxOpen(false);
+      setNx(blankNx); setOverride(null); setDirMissing(false);
       await refresh();
       if(superseded) alert(d.doc_number+" was handed over to production at an earlier revision. The work order now shows Rev "+rev+" as current, and the Technical Head has been flagged to reissue it.");
     }catch(e){ alert(documentSaveErrorText(e, d.doc_number)); }
     finally{ setBusy(false); }
   };
   const changeStatus = async(row, value)=>{
-    const d = current && current.doc;
-    if(d && rowLocked(d,row)){ const ok = await unlockDoc(d); if(!ok) return; }   // 149
     const { error } = await sb.from("universal_document_history_tbl").update({status:value}).eq("id",row.id);
     if(error){ alert("Couldn't change the status: "+error.message); return; }
     await logAudit("UPDATE","universal_document_history_tbl",entityRef,"Status of "+row.doc_number+" Rev"+row.rev_number+"-"+row.direction+" changed to "+value,user?.username||"unknown",null,null);
     await refresh();
-  };
-  // 149: Edit an entry — link, Out / In, what changed, notes, PDF; a reason is required; the change is kept on the row.
-  const openEdit = async(d, row)=>{
-    if(rowLocked(d,row)){ const ok = await unlockDoc(d); if(!ok) return; }
-    setEd({ row, d, dir:row.direction||"", link:row.link||"", what:row.reason||row.what_changed||"", notes:row.notes||"", file:null, why:"" });
-  };
-  const saveEdit = async()=>{
-    const e = ed; if(!e) return; const row = e.row, d = e.d;
-    if(!String(e.why).trim()){ alert("Give the reason for the edit."); return; }
-    if(!confirmDocumentLink(e.link, "Document "+d.doc_number)) return;
-    const patch = {}, changes = [];
-    if(String(e.link).trim()!==String(row.link||"")){ patch.link = String(e.link).trim(); changes.push("link "+(row.link||"—")+" → "+patch.link); }
-    if(e.dir && e.dir!==(row.direction||"")){ patch.direction = e.dir; changes.push("Out/In "+(row.direction||"—")+" → "+e.dir); }
-    if(String(e.what).trim()!==String(row.reason||row.what_changed||"")){ patch.reason = String(e.what).trim(); changes.push("what changed"); }
-    if(String(e.notes).trim()!==String(row.notes||"")){ patch.notes = String(e.notes).trim(); changes.push("notes"); }
-    const breaksSeq = !!patch.direction && (d.revisions||[]).length>1;
-    if(breaksSeq && unlockedDoc!==d.id){
-      if(user?.role!=="super_admin"){ alert("Changing Out / In on a document with more than one entry breaks the Out / In sequence — only a Super Admin can do it."); return; }
-      const ok = await unlockDoc(d); if(!ok) return;
-    }
-    setBusy(true);
-    try{
-      if(e.file){ const path = await uploadDocFile(entityRef, e.file); if(path){ patch.file_path = path; patch.lives_in_supabase = true; changes.push("PDF replaced"); } }
-      if(!changes.length){ setEd(null); return; }
-      const entry = { at:new Date().toISOString(), by:user?.username||"unknown", why:String(e.why).trim(), changes, unlocked: unlockedDoc===d.id };
-      let { error } = await sb.from("universal_document_history_tbl").update({ ...patch, edited_log:[...(Array.isArray(row.edited_log)?row.edited_log:[]), entry] }).eq("id",row.id);
-      if(error && /edited_log/.test(error.message||"")) ({ error } = await sb.from("universal_document_history_tbl").update(patch).eq("id",row.id));   // structure_document_entry_edit not run yet
-      if(error) throw error;
-      const txt = "Rev "+row.rev_number+" "+(row.direction||"")+" of "+d.doc_number+" edited by "+(user?.username||"unknown")+": "+changes.join("; ")+" — "+String(e.why).trim()+(unlockedDoc===d.id?" (unlocked with a code)":"");
-      try{ await sb.from("universal_document_notes_tbl").insert({ document_id:d.id, note_text:"✎ "+txt, created_by:user?.username||"unknown" }); }catch(x){}
-      if(breaksSeq) await sb.from("universal_documents_tbl").update({sequence_flagged:true, sequence_flag_note:"Out/In of "+d.doc_number+" Rev"+row.rev_number+" changed — "+String(e.why).trim()}).eq("id",d.id);
-      await logAudit("UPDATE","universal_document_history_tbl",entityRef,txt,user?.username||"unknown",{link:row.link,direction:row.direction,reason:row.reason,notes:row.notes},patch);
-      setEd(null);
-      await refresh();
-    }catch(x){ alert(documentSaveErrorText(x, d.doc_number)); }
-    finally{ setBusy(false); }
   };
   const fixDirection = async(d, row)=>{
     const oldDir = row.direction||"";
@@ -12146,41 +12083,29 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
           "Fulfils: "+r.category+(r.item_sl_no!=null?" Sl "+r.item_sl_no:""),
           r.is_mandatory ? h("span",{style:{marginLeft:5,fontSize:10,padding:"1px 6px",borderRadius:9,background:"#fff4d6",color:"#854f0b",fontWeight:700}},"Mandatory") : null,
           isContract ? h("button",{onClick:()=>toggleMandatory(r),style:{marginLeft:6,border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:11}},r.is_mandatory?"Not mandatory":"Make mandatory") : null))),
-      h("div",{style:{fontSize:13,fontWeight:800,color:"#0c447c",textTransform:"uppercase",letterSpacing:".03em",margin:"12px 0 6px",paddingBottom:4,borderBottom:"2px solid #0c447c",display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},"This is the trail of the document already submitted",h("span",{style:{fontFamily:"monospace",textTransform:"none",letterSpacing:0,background:"#e6f1fb",borderRadius:5,padding:"1px 7px",fontSize:12.5}},d.doc_number)),   // 149
-      (!isContract && quoteStatus && quoteStatus!=="Draft" && unlockedDoc!==d.id) ? h("div",{style:{fontSize:11.5,color:"#854f0b",background:"#fff4d6",borderRadius:6,padding:"5px 10px",marginBottom:6}},"\ud83d\udd12 Quote "+entityRef+" has left Draft ("+quoteStatus+") — these entries are locked. Change something by adding a revision below, or a Super Admin unlocks them with a code.") : null,
-      unlockedDoc===d.id ? h("div",{style:{fontSize:11.5,color:"#a3312a",background:"#fdecea",borderRadius:6,padding:"5px 10px",marginBottom:6}},"Unlocked with a code — edits on this document are flagged.") : null,
+      h("div",{style:{fontSize:12,fontWeight:700,margin:"6px 0 4px"}},"Revision trail"),
       h("div",{style:{overflowX:"auto",border:"1px solid "+colors.border,borderRadius:6}},
         h("table",{style:{borderCollapse:"collapse",width:"100%"}},
-          h("thead",null,h("tr",{style:{background:"#faf9f4"}},["Rev","Out / In","Status","When · who","What changed","Link / file",""].map(x=>h("th",{key:x,style:{textAlign:"left",padding:"6px 8px",fontSize:10.5,color:colors.muted,fontWeight:600}},x)))),
+          h("thead",null,h("tr",{style:{background:"#faf9f4"}},["Rev","Out / In","Status","When · who","What changed","Link / file"].map(x=>h("th",{key:x,style:{textAlign:"left",padding:"6px 8px",fontSize:10.5,color:colors.muted,fontWeight:600}},x)))),
           h("tbody",null,
-            revs.length===0 ? h("tr",null,h("td",{colSpan:7,style:{...cell,color:colors.mutedLight}},"No entries yet.")) :
-            revs.map((x,i)=>h("tr",{key:x.id,style:i===0?{background:"#f4faf6"}:null},
-              h("td",{style:{...cell,fontWeight:600}},"Rev "+x.rev_number, i===0 ? h("div",{style:{fontSize:10,fontWeight:400,color:colors.mutedLight}},"latest") : null),
+            revs.length===0 ? h("tr",null,h("td",{colSpan:6,style:{...cell,color:colors.mutedLight}},"No entries yet.")) :
+            revs.map((x,i)=>h("tr",{key:x.id},
+              h("td",{style:{...cell,fontWeight:600}},"Rev "+x.rev_number),
               h("td",{style:cell},
                 h("span",{style:{fontSize:10,padding:"1px 7px",borderRadius:9,background:x.direction==="Out"?"#fff4d6":"#e6f1fb",color:x.direction==="Out"?"#854f0b":"#0c447c"}},x.direction==="Out"?"Out: we sent":x.direction==="In"?"In: we received":"—"),
-                null),
+                i===0 && h("div",null,h("button",{onClick:()=>fixDirection(d,x),title:"Ticked the wrong one? Switch Out / In on this entry",style:{border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:10.5}},"Edit Out/In"))),
               h("td",{style:cell},
-                h("select",{value:x.status||"",disabled:rowLocked(d,x)&&user?.role!=="super_admin",title:rowLocked(d,x)?"Locked — "+lockWhy(d)+" A Super Admin's code unlocks it.":"",onChange:e=>changeStatus(x,e.target.value),style:{...chipStyle(x.status),fontSize:10.5,padding:"2px 4px",borderRadius:9,border:"none",maxWidth:200}},
+                h("select",{value:x.status||"",onChange:e=>changeStatus(x,e.target.value),style:{...chipStyle(x.status),fontSize:10.5,padding:"2px 4px",borderRadius:9,border:"none",maxWidth:200}},
                   h("option",{value:""},"— status —"),
                   statusNames.map(s=>h("option",{key:s,value:s},s)))),
               h("td",{style:{...cell,whiteSpace:"nowrap",color:colors.muted}},(x.changed_at||"").slice(0,10)+(x.changed_by?" · "+x.changed_by:"")),
-              h("td",{style:cell},(x.what_changed||x.reason||""),x.notes?h("div",{style:{color:colors.mutedLight,fontSize:10.5}},"Notes: "+x.notes):null,
-                (Array.isArray(x.edited_log)?x.edited_log:[]).map((g,j)=>h("div",{key:j,style:{color:"#854f0b",fontSize:10.5}},"\u270e "+String(g.at||"").slice(0,10)+" "+(g.by||"")+": "+(g.changes||[]).join("; ")+" — "+(g.why||"")+(g.unlocked?" (unlocked with code)":"")))),
+              h("td",{style:cell},(x.what_changed||x.reason||""),x.notes?h("div",{style:{color:colors.mutedLight,fontSize:10.5}},"Notes: "+x.notes):null),
               h("td",{style:{...cell,whiteSpace:"nowrap"}},
                 x.link ? h("a",{href:x.link,target:"_blank",rel:"noreferrer",style:{color:"#0c447c",fontSize:11}},"Open link") : h("span",{style:{color:colors.mutedLight}},"no link"),
-                x.lives_in_supabase && x.file_path ? h("button",{onClick:()=>viewFile(x),style:{marginLeft:8,border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:11}},"View file") : null),
-              h("td",{style:{...cell,whiteSpace:"nowrap"}}, rowLocked(d,x)
-                ? h("button",{onClick:()=>openEdit(d,x),title:"Locked — "+lockWhy(d),style:{...btnSmall,fontSize:10.5,padding:"2px 8px",color:colors.muted}},"\ud83d\udd12 Locked")
-                : h("button",{onClick:()=>openEdit(d,x),style:{...btnSmall,fontSize:10.5,padding:"2px 8px",color:"#1f5c40",borderColor:"#1f5c40"}},"Edit"))))))),
-      h("div",{style:{fontSize:13,fontWeight:800,color:"#0c447c",textTransform:"uppercase",letterSpacing:".03em",margin:"12px 0 6px",paddingBottom:4,borderBottom:"2px solid #0c447c",display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},"Add revisions on this doc here",h("span",{style:{fontFamily:"monospace",textTransform:"none",letterSpacing:0,background:"#e6f1fb",borderRadius:5,padding:"1px 7px",fontSize:12.5}},d.doc_number)),   // 149
-      !nxOpen ? h("div",{style:{border:"1px dashed #1f5c40",background:"#f4faf6",borderRadius:8,padding:"10px 14px",display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}},
-        h("div",{style:{flex:1,minWidth:220}},
-          h("div",{style:{fontSize:12.5,fontWeight:700}},"Next expected: Rev "+exp.rev+(exp.direction?" · "+(exp.direction==="In"?"In — the client's reply":"Out — we send it"):"")),
-          h("div",{style:{fontSize:11.5,color:colors.muted}}, !last ? "No entries yet." : exp.direction==="In" ? "The last entry was Rev "+last.rev_number+" Out, so the reply on it comes back as Rev "+last.rev_number+" In." : "The reply on Rev "+last.rev_number+" is in; the revised document goes Out as Rev "+exp.rev+".")),
-        h("button",{onClick:()=>{ setNx(x=>({...blankNx, link:x.link, dir:exp.direction||""})); setDirMissing(false); setNxOpen(true); },style:{...btnPrimary,background:"#1f5c40",padding:"8px 16px",fontSize:12.5}},"Log the next entry")) :
-      h("div",{style:{border:"1px solid #1f5c40",background:"#fff",borderRadius:8,padding:"10px 14px"}},
+                x.lives_in_supabase && x.file_path ? h("button",{onClick:()=>viewFile(x),style:{marginLeft:8,border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:11}},"View file") : null)))))),
+      h("div",{style:{border:"1px solid #cfe3d7",background:"#f4faf6",borderRadius:8,padding:"10px 14px",marginTop:12}},
         h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}},
-          h("div",{style:{fontSize:12.5,fontWeight:700}},"New entry — "+d.doc_number+" · Rev "+rev+(exp.direction&&!override?" — the sequence says "+exp.direction:"")),
+          h("div",{style:{fontSize:12.5,fontWeight:700}},"Next entry: Rev "+rev+(exp.direction&&!override?" — the sequence says "+exp.direction:"")),
           override ? h("span",{style:{fontSize:11,color:"#a3312a"}},"⚠ Override active — this document will be flagged.",
               h("input",{type:"number",min:0,value:override.rev,onChange:e=>setOverride({rev:Math.max(0,Number(e.target.value)||0)}),style:{...fld,width:70,marginLeft:8,padding:"3px 6px"}}))
             : user?.role==="super_admin" && h("button",{onClick:()=>unlockSequence(d),style:{...btnSmall,fontSize:10.5}},"Override sequence (code)")),
@@ -12198,8 +12123,7 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
             h("select",{value:nx.fulfil,onChange:e=>setNx(x=>({...x,fulfil:e.target.value})),style:fld},
               h("option",{value:""},"No"),
               openSame.map(r=>h("option",{key:r.id,value:r.id},r.category+(r.item_sl_no!=null?" · Sl "+r.item_sl_no:""))))) : h("div",null)),
-        h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:12}},
-          h("button",{onClick:()=>{ setNxOpen(false); setOverride(null); setDirMissing(false); },disabled:busy,style:btnSecondary},"Cancel"),
+        h("div",{style:{display:"flex",justifyContent:"flex-end",marginTop:12}},
           h("button",{onClick:saveNext,disabled:busy,style:{...btnPrimary,background:"#1f5c40",padding:"8px 16px",fontSize:12.5,opacity:busy?0.5:1}},busy?"Saving…":("Log Rev "+rev+(nx.dir?" — "+nx.dir:""))))),
       h("div",{style:{marginTop:14}},
         h("div",{style:{fontSize:12,fontWeight:700,marginBottom:6}},"Notes on this document"),
@@ -12238,21 +12162,6 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
           sel==="+" ? renderAdd() : current ? (current.kind==="doc" ? renderDoc(current) : renderReq(current)) : null)),
       h("div",{style:{padding:"10px 20px",borderTop:"1px solid "+colors.border,display:"flex",justifyContent:"flex-end"}},
         h("button",{onClick:onClose,style:btnSecondary},"Close")),
-      ed && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"40px 16px",overflowY:"auto"}},   // 149: Edit an entry
-        h("div",{style:{background:"#fff",borderRadius:10,padding:"16px 20px",width:620,maxWidth:"96vw"}},
-          h("div",{style:{fontWeight:700,fontSize:14}},"Edit Rev "+ed.row.rev_number+" "+(ed.row.direction||"")+" — "+ed.d.doc_number),
-          h("div",{style:{fontSize:11.5,color:colors.muted,margin:"2px 0 8px"}},"Logged "+String(ed.row.changed_at||"").slice(0,10)+(ed.row.changed_by?" by "+ed.row.changed_by:"")+". Every change is kept on the row (old \u2192 new, who, when) and in the document notes."+(unlockedDoc===ed.d.id?" Unlocked with a code \u2014 this edit is flagged.":"")),
-          twoCol(
-            h("div",null, lbl("Out / In"), h("select",{value:ed.dir,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,dir:v})); },style:fld},h("option",{value:"Out"},"Out: we sent"),h("option",{value:"In"},"In: we received"))),
-            h("div",null, lbl("Google Drive link",true), linkInput(ed.link, v=>setEd(x=>({...x,link:v}))), h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:2,wordBreak:"break-all"}},"was: "+(ed.row.link||"—")))),
-          twoCol(
-            h("div",null, lbl("What changed"), h("input",{value:ed.what,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,what:v})); },style:fld})),
-            h("div",null, lbl("Notes"), h("input",{value:ed.notes,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,notes:v})); },style:fld}))),
-          lbl("Replace the PDF (optional)"), fileInput(f=>setEd(x=>({...x,file:f}))),
-          lbl("Reason for the edit",true), h("input",{value:ed.why,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,why:v})); },placeholder:"e.g. Wrong link pasted",style:fld}),
-          h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:14}},
-            h("button",{onClick:()=>setEd(null),disabled:busy,style:btnSecondary},"Cancel"),
-            h("button",{onClick:saveEdit,disabled:busy,style:{...btnPrimary,background:"#1f5c40"}},busy?"Saving…":"Save the edit")))),
       clOpen && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
         h("div",{style:{background:"#fff",borderRadius:10,padding:"18px 22px",width:480,maxWidth:"94vw",maxHeight:"80vh",overflowY:"auto"}},
           h("div",{style:{fontWeight:700,fontSize:14,marginBottom:4}},"Pick several — "+entityRef),
@@ -22474,9 +22383,9 @@ async function updateQuoteStatusForQuote(referenceNumber, newStatus, changedBy, 
         const { data: co } = await sb.from("companies").select("owner_employee_name,billing_state,billing_country").eq("company_name",customerName).maybeSingle();
         // 137: with Register Tabs & People in use, every FSE on the quote's tab is told, not just the owner
         let owners = co?.owner_employee_name ? [co.owner_employee_name] : [];
-        try{ await regLoad(); if(regGridOn()){ const n = regNorm(referenceNumber).replace(/(REV|R)\d+$/,""); const { data: rl } = await sb.from("register_line_tbl").select("tab_name").eq("quote_norm",n).limit(1).maybeSingle();
+        try{ await regLoad(); if(regGridOn()){ const n = regNorm(referenceNumber).replace(/(REV|R)\d+$/,""); const { data: rl } = await sb.from("register_line_tbl").select("*").eq("quote_norm",n).limit(1).maybeSingle();
           const tabsQ = rl ? [rl.tab_name] : (co ? regTabsFor(co.billing_country, co.billing_state, false).map(t=>t.tab_name) : []);
-          const f = Array.from(new Set(tabsQ.flatMap(t=>regPeople(t,"FSE")))); if(f.length) owners = f; } }catch(e){}
+          const f = rl ? regPeopleOfLine(rl,"FSE") : Array.from(new Set(tabsQ.flatMap(t=>regPeople(t,"FSE")))); if(f.length) owners = f; } }catch(e){}   // 149: line owner first
         const { data: actingEmp } = owners.length ? await sb.from("employee_tbl").select("employee_name").eq("app_user_id",
           (await sb.from("app_users").select("id").eq("username",changedBy).limit(1).maybeSingle()).data?.id || -1
         ).limit(1).maybeSingle() : { data:null };
@@ -22790,8 +22699,8 @@ async function resolveWinCreditContext(referenceNumber){
     await regLoad();
     if(regGridOn()){
       const n0 = regNorm(referenceNumber).replace(/(REV|R)\d+$/,"");
-      const { data: rl0 } = await sb.from("register_line_tbl").select("tab_name").eq("quote_norm",n0).limit(1).maybeSingle();
-      if(rl0){ out.tabName = rl0.tab_name; out.tabFses = regPeople(rl0.tab_name,"FSE");
+      const { data: rl0 } = await sb.from("register_line_tbl").select("*").eq("quote_norm",n0).limit(1).maybeSingle();
+      if(rl0){ out.tabName = rl0.tab_name; out.tabFses = regPeopleOfLine(rl0,"FSE");   // 149: a tender's own FSE
         if(out.tabFses.length){ out.resolved = out.tabFses[0]; out.resolvedIsFse = out.tabFses.length===1; } }
     }
     let customerName = "";
@@ -26409,7 +26318,6 @@ const MANUAL_SECTIONS = [
               "The document number is suggested from the category's prefix (DWG-, ITP-\u2026) and checked as you type; a number already used anywhere is refused.",
               "Categories kept PER SL NO (e.g. GA drawings) can add one requirement for every Sl No in one go. Pick several\u2026 does the same for many categories at once.",
               "The link is mandatory everywhere; the PDF is optional.",
-              "Changed 8 October 2026 (build 149): a document tab has two bold blue headings with the document number — THIS IS THE TRAIL OF THE DOCUMENT ALREADY SUBMITTED (the record, read-only) and ADD REVISIONS ON THIS DOC HERE (Log the next entry opens the form). Edit on a row fixes the link, Out / In, what changed, notes or the PDF, with a reason; once a quote leaves Draft (or a later entry exists on a Sale Order document) the row is locked and only a Super Admin’s code unlocks it.",
               "On a document's tab: the revision trail (status changeable on any row, Edit Out/In on the latest), then the NEXT ENTRY pre-filled with the revision the Out/In sequence expects and the last link. Tick Out or In fresh each time."
             ]
           },
@@ -27611,7 +27519,6 @@ function downloadManualPdf(){
 // added to over time; not wired to a database table yet, so edits currently
 // mean updating this array directly.
 const FAQ_ENTRIES = [
-  { q:"I saved a document entry with the wrong link — how do I fix it?", a:"Press Edit on that row in the trail, correct the link and give the reason. While the quote is in Draft anyone who can open the box can do it; once the offer is sent the row shows \ud83d\udd12 Locked \u2014 add a revision, or ask a Super Admin to unlock it with a code. Every edit is kept on the row." },
   { q:"When is the weekly report made, and who sees it?", a:"Every Friday at 6 pm, for the week Saturday \u2013 Friday; the monthly one on the last day of the month at 6 pm. It is frozen when made. You see your own lines; a board head sees their board\u2019s people; Admins and Super Admins see everyone. Reports \u2192 Weekly & Monthly Reports." },
   { q:"What counts as Delayed in the weekly report?", a:"Something finished in that week after its due date: a task sent for approval late, a call or visit logged after its planned Next follow-up, or a procurement step finished after its planned end. Overdue is what is still open past due when the report is made; Proposed is what is due next week." },
   { q:"Who gets a new procurement card?", a:"Nobody at first: it waits in the Purchase Unassigned pile. The Purchase head sees it at log-in (My day \u2192 Waiting in the Purchase pile) and hands it to a buyer, or drags it on the Task Assignment Board in the daily review. Its sub-tasks go with it." },
@@ -27629,6 +27536,7 @@ const FAQ_ENTRIES = [
   { q:"Can I put a step on the Procurement Gantt that is not there?", a:"Yes \u2014 Insert Step. Pick the form's row (or General), the step it comes after, and its planned start and end (date or week). It shows on the row and in that form's sub-task checklist." },
   { q:"How do I move a list on my board?", a:"Drag it by the \u283f grip on its header, or pick its # number. The order is yours and is kept for next time; Reset order puts it back. Go to list above the board jumps to any list. The Task Assignment Board, Quote Funnel, Order Status and Document Control boards are not changed." },
   { q:"Make New Quote says the Quote# is not in the Quote Register \u2014 why?", a:"From build 137 every new Quote# is first made as a line in Sales \u2192 Enquiry \u2192 Quote Register (by the Sales Coordinator or an Admin), on the tab for the customer's territory. Then Make New Quote or Log Enquiry takes it." },
+  { q:"Tenders \u2014 who owns a tender quote?", a:"Tenders come from every part of India, so the Tenders tab does not follow a region. When the Sales Coordinator adds a TD line the app asks for the FSE (required) and the Telecaller (optional). Both start as the FSE / telecaller of the customer's region and can be changed before saving. After saving the owner is fixed; only the Super Admin or the Sales Head can change it (\ud83d\udc64 on the line), and the change is logged. The tender never changes who owns the customer." },
   { q:"The Quote Register refuses my line \u2014 \u201cuse the \u2026 tab\u201d.", a:"Each tab takes customers from its own countries / emirates / India zone. The message names the tab for that customer; open that tab and add the line there. If no tab takes the country, the Super Admin adds it in CRM \u2192 CRM Setup \u2192 Register Tabs (rules)." },
   { q:"Why do I see customers I don't own in My Worklist?", a:"Once the Super Admin ticks people in Register Tabs & People, every FSE and telecaller on a tab sees all of that tab's customers. The owner of a customer is the first FSE ticked on its tab." },
   { q:"Why is a line item showing \"no rate match\"?", a:"The Material spec + Grade combination you picked has no row in Material Rates master. Add it there, or pick a different grade." },
@@ -27660,7 +27568,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
-  { date:"8 Oct 2026 (149)", summary:"Documents box: the record and the next entry kept apart, Edit, and locking. SQL: structure_document_entry_edit_2026-10-08 (both companies: universal_document_history_tbl.edited_log). Each document tab now has two headings in bold blue with the document number: THIS IS THE TRAIL OF THE DOCUMENT ALREADY SUBMITTED (read-only, the latest entry marked) and ADD REVISIONS ON THIS DOC HERE \u2014 a closed box \u201cNext expected: Rev 0 \u00b7 In \u2014 the client\u2019s reply\u201d with Log the next entry; the form opens empty with Out / In picked from the sequence, has Cancel, and closes after saving. EDIT on every entry (replaces Edit Out/In): link, Out / In, what changed, notes, replace the PDF; a reason is required; each edit is kept on the row (\u270e old \u2192 new, who, when, why), in the document notes and the audit log. LOCKING: a quote\u2019s entries (and their Status) can be changed only while the quote is in Draft; a Sale Order\u2019s entry only until the next entry is logged on that document. After that \u2014 add a revision, or a Super Admin unlocks the document with a Deletion Code (the document is flagged, like a sequence override). Changing Out / In on a document with more than one entry still needs a Super Admin." },
+  { date:"8 Oct 2026 (149)", summary:"Quote Register \u2014 owner on each line (Tenders). SQL: structure_register_line_owner_149 (both companies): register_tab_tbl.owner_per_line, register_line_tbl.line_fse / line_tc / line_owner_set_by / line_owner_set_at. A tab with \u201cOwner on each line\u201d ticked (CRM Setup \u2192 Register Tabs (rules); Levaflow: Tenders (GeM)) asks for the FSE (required) and the Telecaller (optional, \u201cNo telecaller\u201d) on every new line, both starting from the region of the customer's state. Once saved the owner is fixed: the Sales Coordinator cannot change it; Super Admin and the Sales Head can (\ud83d\udc64 on the line), and every change is in the audit log. The line's owner, not the tab's people, gets the quote's stage alerts and win credit, and counts for the Owner filter of the Quotes Report and CRM Funnel. Such a tab never decides who owns a customer and adds nobody's customers to worklists; it takes any customer from its countries (no wrong-zone refusal)." },
   { date:"8 Oct 2026 (148)", summary:"Employee performance and weekly / monthly reports. SQL: structure_period_reports_2026-10-08 (both companies; needs the build-146 SQL first): period_report_tbl, make_period_report() and a pg_cron timer \u2014 weekly report every Friday 6 pm for the week Saturday \u2013 Friday, monthly report on the last day of the month 6 pm (India time). If the timer cannot be set, the app makes the report the first time anyone opens it after 6 pm. Each report is frozen and lists per person: DELAYED (finished late in the period, with days late), OVERDUE (still open past due when made) and PROPOSED (due / planned in the next week or month) \u2014 tasks, calls & visits (Next by) and procurement Gantt steps (owed by the form\u2019s holder). Bell to everyone in it and to Super Admins. REPORTS \u2192 Weekly & Monthly Reports: past reports on the left, Show everyone / a department / a person, summary then the three lists, Download Excel and PDF; Super Admins can make the latest one now if the timer missed it. Who sees what: yourself; board heads their boards; Admins and Super Admins everyone. PERFORMANCE PAGE: Tasks \u2192 Dashboards \u2192 My performance, or Performance beside a name \u2014 open now, overdue, due in 7 days, waiting approval, completed on time vs late, average days late, the last 12 weeks (Sat \u2013 Fri) on time and late, the lists behind them, calls & visits (FSE / Telecaller) or late procurement steps; links to the person\u2019s board and weekly reports." },
   { date:"8 Oct 2026 (147)", summary:"Purchase task manager. SQL: data_purchase_head_post_FLOMETRIQ (Flometriq only: Aragan Keerthi gets the Purchase Manager post if he does not hold it). NEW CARDS TO THE PILE: a Procurement Gantt (Upload BOM or Approve Production BOM) now puts its card \u2014 one per contract, a sub-task per material form with the due date of that form\u2019s current step \u2014 in the Purchase Unassigned pile, not on whoever made the plan; the daily review hands it to a buyer and its sub-tasks follow (one form can still go to another buyer). DEPARTMENT HEADS: anyone who heads a board (post or Task Approvers) sees that board\u2019s Unassigned pile in My day \u2014 Hand to + Due + Hand over (bell to the receiver) \u2014 and a \u201cPurchase pile N waiting\u201d flag in the top bar. OPEN GANTT on a procurement card / sub-task (opens the contract, the form\u2019s lines unfolded) and OPEN CARD on the Gantt, each with a back button at the bottom right. PROCUREMENT LIST (Purchase \u2192 Procurement list): every contract\u2019s plan \u2014 buyer, forms done, next step and due, late steps, delivery, status; filters All / Unassigned / Mine / Late / Dates to fill. PENDING ACTIONS: a card handed to a buyer whose planned dates are still blank after 2 days. UPLOAD BOM reads all 8 team BOM formats (rules from the batch-1 load): heading row by S.No / Material form + Item code / Material spec / Changed item name / Description; Changed item name over Item code; RM Req Qty; contract / customer / BOM date from the top (contract from the file name if missing); service and labour lines (testing, PMI, PWHT, TPI, gas cylinder \u2026) and lines without quantity left out; new forms Welding consumables and Bought-out items; a sheet with no MTC note asks 3.1 / 3.2 before the plan is made." },
   { date:"7 Oct 2026 (146)", summary:"My day — status box and flags. SQL: structure_followup_next_by_2026-10-07 (both companies: activity_log_tbl.next_followup_by). NEXT BY: every follow-up form (Log Follow-ups grid, Quotes Report Log follow-up, quote screen, My Worklist, Customers, Major Projects) has Next by: Call / Visit beside Next follow-up; older entries count as Call. MY DAY POPUP at log-in: FSE / Telecaller \u2014 a status box Calls / Visits \u00d7 Overdue / Today / Proposed (next 7 days), click a count to list only those; per customer + reference the latest entry decides (a call logged today clears an older date); then My tasks (own open cards and sub-tasks overdue or due today) and Major Projects gaps (folded). Everyone else \u2014 My tasks only, shown after the older overdue prompt and only when something is overdue or due today. BUTTONS on each row: Log call / Log visit (Log Follow-ups filled in, Save returns to My day), Open quote, History, Customer history; on a task Open card, Open quote (enquiry cards), My board. \u201c\u2190 Back to My day\u201d stays at the bottom right while you are away. TOP BAR FLAGS all day: Calls & visits (FSE / Telecaller) and Tasks \u2014 red when anything is overdue, amber when only today\u2019s are left, green when clear; click to open My day. HOME shows the same counts. Reloads every 5 minutes and whenever a follow-up is logged or a task changes. Replaces the FSE / Telecaller overdue-calls screen." },
@@ -33541,7 +33449,8 @@ function regTabMatches(tab, country, state){
 }
 // Open tabs that take this customer. A specific tab always beats the catch-all (Exports - OTHERS).
 function regTabsFor(country, state, emf){
-  const open = REG.tabs.filter(t=>t.is_open && !!t.is_emf===!!emf);
+  // 149: a tab whose owner is picked on each line (Tenders) never decides who owns a customer
+  const open = REG.tabs.filter(t=>t.is_open && !t.owner_per_line && !!t.is_emf===!!emf);
   const spec = open.filter(t=>!t.is_catchall && regTabMatches(t,country,state));
   return spec.length ? spec : open.filter(t=>t.is_catchall && regTabMatches(t,country,state));
 }
@@ -33558,6 +33467,7 @@ const regCompanyInTabs = (co, tabNames)=> regAnyTabsFor(co.billing_country, co.b
 const regTabLabel = (n)=> String(n||"").trim().replace(/,\s*$/,"");
 function regTabDescribe(t){
   if(!t) return "";
+  if(t.owner_per_line){ const cs = String(t.accepts_countries||"").split(",").map(x=>x.trim()).filter(Boolean); return (cs.length ? "customers from "+cs.join(", ") : "any customer")+" \u2014 the FSE / telecaller is picked on each line"; }
   if(t.is_catchall) return "any country outside India that no other tab takes";
   if(t.accepts_zone) return "India – "+String(t.accepts_zone).replace(/^./,c=>c.toUpperCase())+" zone states";
   const cs = String(t.accepts_countries||"").split(",").map(s=>s.trim()).filter(Boolean);
@@ -33569,10 +33479,30 @@ function regTabDescribe(t){
 async function regQuoteTabMap(){
   const m = new Map();
   try{
-    const rows = await fetchPaged(()=>sb.from("register_line_tbl").select("quote_norm,tab_name").order("id"));
-    rows.forEach(r=>m.set(r.quote_norm, r.tab_name));
+    const rows = await fetchPaged(()=>sb.from("register_line_tbl").select("*").order("id"));
+    REG.lineOwn = new Map();   // 149: quote -> the owner picked on its line (tabs that ask per line)
+    rows.forEach(r=>{ m.set(r.quote_norm, r.tab_name); if(r.line_fse || r.line_tc) REG.lineOwn.set(r.quote_norm, { fse:r.line_fse||"", tc:r.line_tc||"" }); });
   }catch(e){}
   return m;
+}
+// 149: who a register line belongs to. A line with its own owner (Tenders) -> that FSE / telecaller;
+// otherwise everyone ticked on its tab.
+function regPeopleOfLine(rl, role){
+  if(!rl) return [];
+  if(rl.line_fse || rl.line_tc){
+    const out = [];
+    if((!role || role==="FSE") && rl.line_fse) out.push(rl.line_fse);
+    if((!role || role==="TC") && rl.line_tc) out.push(rl.line_tc);
+    return out;
+  }
+  return regPeople(rl.tab_name, role);
+}
+// 149: does this person cover the quote (its line owner, or its tab when the line has none)?
+function regCoversQuote(ref, tabName, name){
+  if(!name) return false;
+  const n = regNorm(ref); const own = REG.lineOwn && (REG.lineOwn.get(n) || REG.lineOwn.get(n.replace(/(REV|R)\d+$/,"")));
+  if(own) return own.fse===name || own.tc===name;
+  return !!tabName && regPeople(tabName).includes(name);
 }
 function regTabOfQuote(map, ref){
   if(!map || !ref) return "";
@@ -33637,7 +33567,11 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
   const [enqOpen,setEnqOpen] = useState(null);  // enquiry id shown inline
   const [custForm,setCustForm] = useState(null);// {initial} for Add New Customer / Edit Customer
   const [err,setErr] = useState("");
+  // 149: tabs that ask the owner on each line (Tenders) — FSEs / telecallers to pick from, and who may change a fixed owner
+  const [staff,setStaff] = useState({ fse:[], tc:[] });
+  const [ownEdit,setOwnEdit] = useState(null);  // {id, fse, tc, line}
   const tab = tabs.find(t=>t.tab_name===cur) || null;
+  const perLine = !!(tab && tab.owner_per_line);
 
   useEffect(()=>{ (async()=>{
     await regLoad(true);
@@ -33649,7 +33583,17 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
     const { data: emp } = name ? await sb.from("employee_tbl").select("*").eq("employee_name",name).limit(1).maybeSingle() : { data:null };
     const isSc = !!name && (sc||[]).some(r=>r.employee_name===name);
     const sales = isAdmin || isSc || /sales/i.test(emp?.department||"") || (emp ? empBoards(emp).some(b=>/sales/i.test(b)) : false);
-    setMe({ name, canEdit: isAdmin || isSc, sales });
+    const { data: sh } = await sb.from("post_holder_tbl").select("employee_name").eq("post_key","sales_head");
+    const isSh = !!name && (sh||[]).some(r=>r.employee_name===name);
+    setMe({ name, canEdit: isAdmin || isSc, sales, canOwner: isSuper || isSh });   // 149: Super Admin / Sales Head change a fixed owner
+    try{
+      const { data: emps } = await sb.from("employee_tbl").select("employee_name,crm_role,status").order("employee_name");
+      const live = (emps||[]).filter(e=>e.employee_name && !/inactive|left|relieved|resigned/i.test(e.status||""));
+      const tick = (role)=> new Set(REG.people.filter(p=>p.role===role).map(p=>p.employee_name));
+      const tF = tick("FSE"), tT = tick("TC");
+      setStaff({ fse: live.filter(e=>/fse|field/i.test(e.crm_role||"") || tF.has(e.employee_name)).map(e=>e.employee_name),
+                 tc:  live.filter(e=>/tele|inside/i.test(e.crm_role||"") || tT.has(e.employee_name)).map(e=>e.employee_name) });
+    }catch(e){}
     const cs = {};
     await Promise.all(ts.map(async t=>{ const { count } = await sb.from("register_line_tbl").select("id",{count:"exact",head:true}).eq("tab_name",t.tab_name); cs[t.tab_name]=count||0; }));
     setCounts(cs);
@@ -33693,7 +33637,9 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
     let mx = 0; (data||[]).forEach(r=>{ const m = String(r.quote_norm).match(new RegExp("^"+px+yy+"(\\d+)$")); if(m) mx = Math.max(mx, parseInt(m[1],10)); });
     return px+yy+String(mx+1).padStart(4,"0");
   };
-  const blank = { quote_no:"", offer_date:"", enquiry_no:"", edate:today, customer_name:"", company_id:null, city:"", state:"", country:"" };
+  const blank = { quote_no:"", offer_date:"", enquiry_no:"", edate:today, customer_name:"", company_id:null, city:"", state:"", country:"", line_fse:"", line_tc:"" };
+  // 149: the region's FSE / first telecaller, offered as the starting choice on a per-line tab
+  const regionOwners = (country, state)=>{ const ts = regTabsFor(country, state, false); const f = ts.flatMap(t=>regPeople(t.tab_name,"FSE")); const c = ts.flatMap(t=>regPeople(t.tab_name,"TC")); return { fse:f[0]||"", tc:c[0]||"" }; };
   const startNew = ()=> guard(async()=>{
     if(!tab || !tab.is_open) return;
     const no = await nextNo(tab);
@@ -33702,7 +33648,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
     setPage(-1); setQ("");
   });
   const startEdit = (r)=> guard(async()=>{
-    const d = { quote_no:r.quote_no||"", offer_date:r.offer_date?String(r.offer_date).slice(0,10):"", enquiry_no:r.enquiry_no||"", edate:r.edate?String(r.edate).slice(0,10):"", customer_name:r.customer_name||"", company_id:r.company_id||null, city:r.city||"", state:r.state||"", country:r.country||"" };
+    const d = { quote_no:r.quote_no||"", offer_date:r.offer_date?String(r.offer_date).slice(0,10):"", enquiry_no:r.enquiry_no||"", edate:r.edate?String(r.edate).slice(0,10):"", customer_name:r.customer_name||"", company_id:r.company_id||null, city:r.city||"", state:r.state||"", country:r.country||"", line_fse:r.line_fse||"", line_tc:r.line_tc||"" };
     let co = null; if(r.company_id){ const { data } = await sb.from("companies").select("*").eq("id",r.company_id).maybeSingle(); co = data||null; }
     setEdit({ id:r.id, d, orig:{...d}, co, line:r }); setChk({bad:[],warn:[],ok:false});
   });
@@ -33712,7 +33658,10 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
     if(!nm){ setD({ customer_name:"", company_id:null, city:"", state:"", country:"" }); setEdit(e=>({...e, co:null})); return; }
     const { data: co } = await sb.from("companies").select("*").eq("company_name",nm).limit(1).maybeSingle();
     setD({ customer_name:nm, company_id:co?.id||null, city:co?.billing_city||"", state:co?.billing_state||"", country:co?.billing_country||"" });
-    setEdit(e=>({ ...e, co:co||null }));
+    setEdit(e=>{ const n = { ...e, co:co||null };
+      // 149: on a per-line tab a new line starts with the region's FSE / telecaller (still to be confirmed)
+      if(perLine && co && !(e.orig && e.orig.line_fse)){ const ro = regionOwners(co.billing_country, co.billing_state); n.d = { ...n.d, line_fse: n.d.line_fse || ro.fse, line_tc: n.d.line_tc || ro.tc }; n.suggested = ro; }
+      return n; });
   };
 
   // ---- the checks (refuse = bad, warn = needs the tick)
@@ -33754,8 +33703,14 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
         if(hit) warn.push("A quote "+n+" already exists in Quotes ("+(hit.customer_name||"")+"). Saving registers that quote here.");
       }
     }
+    // 149: a tab with an owner on each line (Tenders): the FSE is compulsory; any customer from its countries
+    if(t && t.owner_per_line){
+      if(!String(d.line_fse||"").trim()) bad.push("Pick the FSE who owns this "+regTabLabel(t.tab_name)+" line (Telecaller is optional).");
+      if(d.company_id && d.country && String(t.accepts_countries||"").trim() && !regTabMatches({ ...t, accepts_zone:"", accepts_states:t.accepts_states }, d.country, d.state))
+        bad.push(d.customer_name+" is in "+[d.state, d.country].filter(Boolean).join(", ")+". This tab, "+regTabLabel(t.tab_name)+", takes "+regTabDescribe(t)+".");
+    }
     // wrong tab
-    if(t && d.company_id && d.country){
+    if(t && !t.owner_per_line && d.company_id && d.country){
       const allowed = regTabsFor(d.country, d.state, t.is_emf);
       if(!allowed.some(x=>x.tab_name===t.tab_name)){
         const where = [d.state, d.country].filter(Boolean).join(", ");
@@ -33782,6 +33737,12 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
       const d = edit.d, by = me?.name || user?.username || "";
       const row = { tab_name:cur, quote_no:regNorm(d.quote_no), quote_norm:regNorm(d.quote_no), offer_date:d.offer_date||null, enquiry_no:String(d.enquiry_no).trim(), edate:d.edate||null,
         customer_name:d.customer_name, company_id:d.company_id, city:d.city||null, state:d.state||null, country:d.country||null };
+      // 149: owner of the line (per-line tabs). Once set it stays — only Super Admin / Sales Head change it.
+      const ownerFixed = !!(edit.orig && edit.orig.line_fse) && !me?.canOwner;
+      if(tab && tab.owner_per_line && !ownerFixed){
+        row.line_fse = d.line_fse || null; row.line_tc = d.line_tc || null;
+        if(!edit.id || d.line_fse!==edit.orig.line_fse || d.line_tc!==edit.orig.line_tc){ row.line_owner_set_by = by; row.line_owner_set_at = new Date().toISOString(); }
+      }
       if(!edit.id){
         const { data: mx } = await sb.from("register_line_tbl").select("row_order").eq("tab_name",cur).order("row_order",{ascending:false}).limit(1);
         row.row_order = ((mx&&mx[0]&&mx[0].row_order)||0)+1;
@@ -33792,7 +33753,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
       } else {
         const { error } = await sb.from("register_line_tbl").update({ ...row, updated_by:by, updated_at:new Date().toISOString() }).eq("id",edit.id);
         if(error){ alert("Could not save the line:\n\n"+error.message); return false; }
-        await logAudit("UPDATE","register_line_tbl",row.quote_no,"Quote Register line edited",by,edit.line,row);
+        await logAudit("UPDATE","register_line_tbl",row.quote_no,"Quote Register line edited"+(row.line_owner_set_at && edit.orig.line_fse ? " \u2014 owner changed from "+(edit.orig.line_fse||"\u2014")+(edit.orig.line_tc?" / "+edit.orig.line_tc:"")+" to "+(row.line_fse||"\u2014")+(row.line_tc?" / "+row.line_tc:"") : ""),by,edit.line,row);
         // the enquiry follows the line (customer, RFQ ref, date received)
         const eid = edit.line && edit.line.enquiry_id;
         if(eid && (edit.orig.customer_name!==d.customer_name || edit.orig.enquiry_no!==d.enquiry_no || edit.orig.edate!==d.edate)){
@@ -33805,6 +33766,27 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
       return true;
     } finally { setBusy(false); }
   };
+
+  const saveOwner = async()=>{
+    if(!ownEdit || busy) return;
+    if(!String(ownEdit.fse||"").trim()){ alert("Pick the FSE — it can't be blank."); return; }
+    setBusy(true);
+    try{
+      const by = me?.name || user?.username || "";
+      const upd = { line_fse:ownEdit.fse, line_tc:ownEdit.tc||null, line_owner_set_by:by, line_owner_set_at:new Date().toISOString(), updated_by:by, updated_at:new Date().toISOString() };
+      const { error } = await sb.from("register_line_tbl").update(upd).eq("id",ownEdit.id);
+      if(error){ alert("Could not change the owner:\n\n"+error.message); return; }
+      const L = ownEdit.line||{};
+      await logAudit("UPDATE","register_line_tbl",L.quote_no||"","Quote Register "+(L.quote_no||"")+" owner changed from "+(L.line_fse||"\u2014")+(L.line_tc?" / "+L.line_tc:"")+" to "+ownEdit.fse+(ownEdit.tc?" / "+ownEdit.tc:""),by,{line_fse:L.line_fse,line_tc:L.line_tc},upd);
+      setOwnEdit(null); await load();
+    } finally { setBusy(false); }
+  };
+  const ownerPick = (fse, tc, onF, onT, sugg)=> h("div",{style:{display:"flex",flexDirection:"column",gap:3,minWidth:190}},
+    h("select",{value:fse||"",onChange:e=>onF(e.target.value),style:{...inputStyle,padding:"3px 5px",fontSize:11.5,borderColor:fse?undefined:"#e0a000",background:fse?undefined:"#fff8e0"}},
+      h("option",{value:""},"FSE \u2014 pick (required)"), ...Array.from(new Set([...(staff.fse||[]), ...(fse?[fse]:[])])).map(n=>h("option",{key:n,value:n},n+(sugg&&sugg.fse===n?" (region)":"")))),
+    h("select",{value:tc||"",onChange:e=>onT(e.target.value),style:{...inputStyle,padding:"3px 5px",fontSize:11.5}},
+      h("option",{value:""},"No telecaller"), ...Array.from(new Set([...(staff.tc||[]), ...(tc?[tc]:[])])).map(n=>h("option",{key:n,value:n},n+(sugg&&sugg.tc===n?" (region)":"")))));
+  const ownerShow = (r)=> (r.line_fse||r.line_tc) ? h("div",{style:{fontSize:10.5,color:"#085041",marginTop:2}},"\ud83d\udc64 "+(r.line_fse||"\u2014")+(r.line_tc?" \u00b7 TC "+r.line_tc:"")) : h("div",{style:{fontSize:10.5,color:"#a3312a",marginTop:2}},"no owner yet");
 
   if(!ready) return h("div",{style:{padding:20,color:colors.muted}},"Loading the Quote Register…");
   if(enqOpen) return h(EnquiryDetailScreen,{ user, me:{ name:me?.name, sales:!!me?.sales }, enquiryId:enqOpen, pos:1, total:1,
@@ -33823,7 +33805,11 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
       td("cu",h("div",{style:{minWidth:300}},h(CustomerSelect,{value:d.customer_name,onSelect:pickCustomer,user,compact:true})),
         edit.co ? h("button",{onClick:()=>setCustForm({initial:edit.co}),style:{...btnSmall,marginTop:4,fontSize:11}},"Edit Customer") : null),
       td("ci",lock(d.city)), td("st",lock(d.state)), td("co",lock(d.country)),
-      td("x",h("span",{style:{fontSize:11,color:colors.muted}},edit.id?"editing":"new line")),
+      td("x", perLine
+        ? ((edit.orig && edit.orig.line_fse && !me?.canOwner)
+            ? h("div",null,h("span",{style:{fontSize:11,color:colors.muted}},"editing"),ownerShow(edit.orig),h("div",{style:{fontSize:10,color:colors.mutedLight}},"owner fixed \u2014 Super Admin / Sales Head can change it"))
+            : ownerPick(d.line_fse, d.line_tc, v=>setD({line_fse:v}), v=>setD({line_tc:v}), edit.suggested))
+        : h("span",{style:{fontSize:11,color:colors.muted}},edit.id?"editing":"new line")),
       td("b",h("div",{style:{display:"flex",gap:5}},
         h("button",{onClick:save,disabled:busy,style:{...btnPrimary,padding:"5px 10px",fontSize:12}},busy?"Saving…":"Save"),
         h("button",{onClick:()=>guard(()=>{ setEdit(null); setChk({bad:[],warn:[],ok:false}); }),style:{...btnSmall}},"Cancel"))));
@@ -33841,15 +33827,26 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard }){
       body.push(h("tr",{key:"m"+r.id},h("td",{colSpan:10,style:{background:"#eceae0",fontWeight:700,fontSize:11.5,color:colors.muted,padding:"4px 8px",border:"1px solid #e3e0d4"}},dt.toLocaleString("en-GB",{month:"long",year:"numeric"})))); }
     if(edit && edit.id===r.id){ body.push(editRow("e"+r.id)); const cr = chkRow("c"+r.id); if(cr) body.push(cr); return; }
     const t = tabs.find(x=>x.tab_name===r.tab_name);
+    if(ownEdit && ownEdit.id===r.id){
+      body.push(h("tr",{key:r.id,style:{background:"#eef6f2"}},
+        td("n",h("b",{style:{color:"#1f4e8c"}},r.quote_no)), td("od",dmyOrNote(r.offer_date,r.offer_date_note)), td("en",r.enquiry_no||""), td("ed",dmyOrNote(r.edate,r.edate_note)),
+        td("cu",r.customer_name||""), td("ci",r.city||""), td("st",r.state||""), td("co",r.country||""),
+        td("x",ownerPick(ownEdit.fse, ownEdit.tc, v=>setOwnEdit(o=>({...o,fse:v})), v=>setOwnEdit(o=>({...o,tc:v})), null)),
+        td("b",h("div",{style:{display:"flex",gap:5}},h("button",{onClick:saveOwner,disabled:busy,style:{...btnPrimary,padding:"5px 10px",fontSize:12}},busy?"Saving…":"Save owner"),h("button",{onClick:()=>setOwnEdit(null),style:{...btnSmall}},"Cancel")))));
+      return;
+    }
+    const rowPerLine = !!(t && t.owner_per_line);
     body.push(h("tr",{key:r.id},
       td("n",h("b",{style:{color:"#1f4e8c"}},r.quote_no), q.trim()&&qAll ? h("span",{style:{fontSize:10.5,color:colors.mutedLight}}," ("+regTabLabel(r.tab_name)+")") : null),
       td("od",dmyOrNote(r.offer_date,r.offer_date_note)), td("en",r.enquiry_no||""), td("ed",dmyOrNote(r.edate,r.edate_note)),
-      td("cu",r.customer_name||""), td("ci",r.city||""), td("st",r.state||""), td("co",r.country||""),
+      td("cu",r.customer_name||"", rowPerLine ? ownerShow(r) : null), td("ci",r.city||""), td("st",r.state||""), td("co",r.country||""),
       td("x", r.enquiry_id
         ? h("span",{style:{display:"inline-flex",gap:5,alignItems:"center"}},h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:9,padding:"2px 8px",background:"#e4f3ed",color:"#085041"}},"✓ Enquiry"),
             h("button",{onClick:()=>guard(()=>{ setEdit(null); setEnqOpen(r.enquiry_id); }),style:{...btnSmall,fontSize:11}},"Edit"))
         : (me?.sales && t && t.is_open ? h("button",{onClick:()=>guard(()=>{ setEdit(null); setLogFor(r); }),style:{...btnSmall,fontSize:11}},"Log Enquiry") : null)),
-      td("b", me?.canEdit && t && t.is_open ? h("button",{onClick:()=>startEdit(r),title:"Edit this line",style:{...btnSmall,fontSize:11}},"✎") : null)));
+      td("b", h("span",{style:{display:"inline-flex",gap:4}},
+        me?.canEdit && t && t.is_open ? h("button",{onClick:()=>startEdit(r),title:"Edit this line",style:{...btnSmall,fontSize:11}},"✎") : null,
+        rowPerLine && me?.canOwner && !edit ? h("button",{onClick:()=>setOwnEdit({ id:r.id, fse:r.line_fse||"", tc:r.line_tc||"", line:r }),title:"Change who owns this line (Super Admin / Sales Head)",style:{...btnSmall,fontSize:11}},"\ud83d\udc64") : null))));
   });
   if(edit && !edit.id){ body.push(editRow("new")); const cr = chkRow("cnew"); if(cr) body.push(cr); }
 
@@ -37045,7 +37042,7 @@ function CrmFunnelKanban({ user }){
   const setF = (k,v)=> setFilters(f=>({...f,[k]:v}));
   const filteredCards = cards.filter(c=>{
     if(!filters.includeLegacy && c.is_legacy) return false;
-    if(filters.owner && c.owner!==filters.owner && !(c.regTab && regPeople(c.regTab).includes(filters.owner))) return false;   // 137: anyone covering its tab too
+    if(filters.owner && c.owner!==filters.owner && !regCoversQuote(c.reference_number, c.regTab, filters.owner)) return false;   // 137: anyone covering its tab too; 149: a tender's own owner
     if(filters.regTab && c.regTab!==filters.regTab) return false;
     if(filters.zone && c.zone!==filters.zone) return false;
     if(filters.nature && c.quote_nature!==filters.nature) return false;
@@ -37327,7 +37324,7 @@ function QuoteStatusReview({ user }){
   useEffect(()=>{ load(); },[load]);
 
   const filtered = rows.filter(r=>{
-    if(fOwner && r.owner!==fOwner && !(r.regTab && regPeople(r.regTab).includes(fOwner))) return false;   // 137: anyone covering its tab too
+    if(fOwner && r.owner!==fOwner && !regCoversQuote(r.reference_number, r.regTab, fOwner)) return false;   // 137: anyone covering its tab too; 149: a tender's own owner
     if(fTab && r.regTab!==fTab) return false;
     if(fZone && r.zone!==fZone) return false;
     if(fState && (r.state||"").toLowerCase()!==fState.toLowerCase()) return false;
