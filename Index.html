@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-08T05:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-08T07:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -11611,6 +11611,7 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
   const [sel,setSel] = useState(null);           // "d<id>" | "r<id>" | "+"
   const [busy,setBusy] = useState(false);
   const [dirMissing,setDirMissing] = useState(false);
+  const [quoteStatus,setQuoteStatus] = useState(null);   // 149: entries lock once the quote leaves Draft
 
   const load = useCallback(async(keepSel)=>{
     if(!entityRef) return;
@@ -11618,13 +11619,14 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
     const [{data:c},st,{data:sl},r,d,pk] = await Promise.all([
       sb.from("doc_category_tbl").select("*"),
       loadDocStatuses(),
-      sb.from("estimates").select("item_sl_no,item").eq("reference_number",entityRef).order("item_sl_no"),
+      sb.from("estimates").select("item_sl_no,item,quote_status").eq("reference_number",entityRef).order("item_sl_no"),
       fetchDocumentRequirements(entityRef),
       fetchDocumentHistory(entityRef),
       myPostKeys(user)
     ]);
     setCats((c||[]).slice().sort((a,b)=>String(a.value||"").localeCompare(String(b.value||""))));
     setStatuses(st||[]);
+    setQuoteStatus(((sl||[]).find(x=>x.quote_status)||{}).quote_status || "Draft");
     const seen = new Set(); setSlNos((sl||[]).filter(x=>{ const k=String(x.item_sl_no); if(seen.has(k)) return false; seen.add(k); return true; }));
     setReqs(r||[]);
     setDocs((d||[]).filter(x=>!x.is_archived));
@@ -11829,10 +11831,33 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
   const blankNx = { dir:"", status:"", link:"", file:null, what:"", notes:"", fulfil:"" };
   const [nx,setNx] = useState(blankNx);
   const [override,setOverride] = useState(null);   // {rev} once a Super Admin has unlocked the sequence
+  // 149: the trail is the record. Quote: entries editable while the quote is in Draft; Sale Order: until the next entry
+  // is logged. Otherwise a Super Admin's code unlocks this document's entries (flagged and audited).
+  const [nxOpen,setNxOpen] = useState(false);
+  const [unlockedDoc,setUnlockedDoc] = useState(null);
+  const [ed,setEd] = useState(null);   // {row, d, dir, link, what, notes, file, why}
+  const rowLocked = (d, row)=>{
+    if(unlockedDoc===d.id) return false;
+    if(isContract){ const revs = d.revisions||[]; return revs.length>0 && revs[0].id!==row.id; }
+    return !!quoteStatus && quoteStatus!=="Draft";
+  };
+  const lockWhy = (d)=> isContract ? "A later entry has been logged on "+d.doc_number+"." : "Quote "+entityRef+" has left Draft ("+quoteStatus+").";
+  const unlockDoc = async(d)=>{
+    if(user?.role!=="super_admin"){ alert("Locked — "+lockWhy(d)+"\n\nLog a new revision instead, or ask a Super Admin to unlock it with a code."); return false; }
+    const code = prompt("Locked — "+lockWhy(d)+"\n\nEnter a Deletion Code to unlock the entries of "+d.doc_number+" (the document will be flagged):");
+    if(code===null) return false;
+    const res = await verifyAndConsumeDeletionCode(code, user?.username||"unknown");
+    if(!res.ok){ alert(res.reason); return false; }
+    setUnlockedDoc(d.id);
+    const note = "Entries of "+d.doc_number+" unlocked with a code by Super Admin "+(user?.username||"unknown")+" ("+lockWhy(d)+")";
+    await sb.from("universal_documents_tbl").update({sequence_flagged:true, sequence_flag_note:note}).eq("id",d.id);
+    await logAudit("UPDATE","universal_documents_tbl",entityRef,note,user?.username||"unknown",null,null);
+    return true;
+  };
   const [notes,setNotes] = useState([]);
   const [noteText,setNoteText] = useState("");
   useEffect(()=>{
-    setOverride(null);
+    setOverride(null); setNxOpen(false); setEd(null);
     if(current && current.kind==="doc"){
       const last = (current.doc.revisions||[])[0];
       setNx({ ...blankNx, link: last ? (last.link||"") : "" });
@@ -11878,17 +11903,55 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
         await logAudit("UPDATE","universal_documents_tbl",entityRef,"New entry on "+d.doc_number+" — Rev"+rev+"-"+nx.dir+": "+String(nx.what).trim(),user?.username||"unknown",null,null);
       }
       const superseded = await supersedeHandovers(d.id, rev, user?.username);
-      setNx(blankNx); setOverride(null); setDirMissing(false);
+      setNx(blankNx); setOverride(null); setDirMissing(false); setNxOpen(false);
       await refresh();
       if(superseded) alert(d.doc_number+" was handed over to production at an earlier revision. The work order now shows Rev "+rev+" as current, and the Technical Head has been flagged to reissue it.");
     }catch(e){ alert(documentSaveErrorText(e, d.doc_number)); }
     finally{ setBusy(false); }
   };
   const changeStatus = async(row, value)=>{
+    const d = current && current.doc;
+    if(d && rowLocked(d,row)){ const ok = await unlockDoc(d); if(!ok) return; }   // 149
     const { error } = await sb.from("universal_document_history_tbl").update({status:value}).eq("id",row.id);
     if(error){ alert("Couldn't change the status: "+error.message); return; }
     await logAudit("UPDATE","universal_document_history_tbl",entityRef,"Status of "+row.doc_number+" Rev"+row.rev_number+"-"+row.direction+" changed to "+value,user?.username||"unknown",null,null);
     await refresh();
+  };
+  // 149: Edit an entry — link, Out / In, what changed, notes, PDF; a reason is required; the change is kept on the row.
+  const openEdit = async(d, row)=>{
+    if(rowLocked(d,row)){ const ok = await unlockDoc(d); if(!ok) return; }
+    setEd({ row, d, dir:row.direction||"", link:row.link||"", what:row.reason||row.what_changed||"", notes:row.notes||"", file:null, why:"" });
+  };
+  const saveEdit = async()=>{
+    const e = ed; if(!e) return; const row = e.row, d = e.d;
+    if(!String(e.why).trim()){ alert("Give the reason for the edit."); return; }
+    if(!confirmDocumentLink(e.link, "Document "+d.doc_number)) return;
+    const patch = {}, changes = [];
+    if(String(e.link).trim()!==String(row.link||"")){ patch.link = String(e.link).trim(); changes.push("link "+(row.link||"—")+" → "+patch.link); }
+    if(e.dir && e.dir!==(row.direction||"")){ patch.direction = e.dir; changes.push("Out/In "+(row.direction||"—")+" → "+e.dir); }
+    if(String(e.what).trim()!==String(row.reason||row.what_changed||"")){ patch.reason = String(e.what).trim(); changes.push("what changed"); }
+    if(String(e.notes).trim()!==String(row.notes||"")){ patch.notes = String(e.notes).trim(); changes.push("notes"); }
+    const breaksSeq = !!patch.direction && (d.revisions||[]).length>1;
+    if(breaksSeq && unlockedDoc!==d.id){
+      if(user?.role!=="super_admin"){ alert("Changing Out / In on a document with more than one entry breaks the Out / In sequence — only a Super Admin can do it."); return; }
+      const ok = await unlockDoc(d); if(!ok) return;
+    }
+    setBusy(true);
+    try{
+      if(e.file){ const path = await uploadDocFile(entityRef, e.file); if(path){ patch.file_path = path; patch.lives_in_supabase = true; changes.push("PDF replaced"); } }
+      if(!changes.length){ setEd(null); return; }
+      const entry = { at:new Date().toISOString(), by:user?.username||"unknown", why:String(e.why).trim(), changes, unlocked: unlockedDoc===d.id };
+      let { error } = await sb.from("universal_document_history_tbl").update({ ...patch, edited_log:[...(Array.isArray(row.edited_log)?row.edited_log:[]), entry] }).eq("id",row.id);
+      if(error && /edited_log/.test(error.message||"")) ({ error } = await sb.from("universal_document_history_tbl").update(patch).eq("id",row.id));   // structure_document_entry_edit not run yet
+      if(error) throw error;
+      const txt = "Rev "+row.rev_number+" "+(row.direction||"")+" of "+d.doc_number+" edited by "+(user?.username||"unknown")+": "+changes.join("; ")+" — "+String(e.why).trim()+(unlockedDoc===d.id?" (unlocked with a code)":"");
+      try{ await sb.from("universal_document_notes_tbl").insert({ document_id:d.id, note_text:"✎ "+txt, created_by:user?.username||"unknown" }); }catch(x){}
+      if(breaksSeq) await sb.from("universal_documents_tbl").update({sequence_flagged:true, sequence_flag_note:"Out/In of "+d.doc_number+" Rev"+row.rev_number+" changed — "+String(e.why).trim()}).eq("id",d.id);
+      await logAudit("UPDATE","universal_document_history_tbl",entityRef,txt,user?.username||"unknown",{link:row.link,direction:row.direction,reason:row.reason,notes:row.notes},patch);
+      setEd(null);
+      await refresh();
+    }catch(x){ alert(documentSaveErrorText(x, d.doc_number)); }
+    finally{ setBusy(false); }
   };
   const fixDirection = async(d, row)=>{
     const oldDir = row.direction||"";
@@ -12083,29 +12146,41 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
           "Fulfils: "+r.category+(r.item_sl_no!=null?" Sl "+r.item_sl_no:""),
           r.is_mandatory ? h("span",{style:{marginLeft:5,fontSize:10,padding:"1px 6px",borderRadius:9,background:"#fff4d6",color:"#854f0b",fontWeight:700}},"Mandatory") : null,
           isContract ? h("button",{onClick:()=>toggleMandatory(r),style:{marginLeft:6,border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:11}},r.is_mandatory?"Not mandatory":"Make mandatory") : null))),
-      h("div",{style:{fontSize:12,fontWeight:700,margin:"6px 0 4px"}},"Revision trail"),
+      h("div",{style:{fontSize:13,fontWeight:800,color:"#0c447c",textTransform:"uppercase",letterSpacing:".03em",margin:"12px 0 6px",paddingBottom:4,borderBottom:"2px solid #0c447c",display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},"This is the trail of the document already submitted",h("span",{style:{fontFamily:"monospace",textTransform:"none",letterSpacing:0,background:"#e6f1fb",borderRadius:5,padding:"1px 7px",fontSize:12.5}},d.doc_number)),   // 149
+      (!isContract && quoteStatus && quoteStatus!=="Draft" && unlockedDoc!==d.id) ? h("div",{style:{fontSize:11.5,color:"#854f0b",background:"#fff4d6",borderRadius:6,padding:"5px 10px",marginBottom:6}},"\ud83d\udd12 Quote "+entityRef+" has left Draft ("+quoteStatus+") — these entries are locked. Change something by adding a revision below, or a Super Admin unlocks them with a code.") : null,
+      unlockedDoc===d.id ? h("div",{style:{fontSize:11.5,color:"#a3312a",background:"#fdecea",borderRadius:6,padding:"5px 10px",marginBottom:6}},"Unlocked with a code — edits on this document are flagged.") : null,
       h("div",{style:{overflowX:"auto",border:"1px solid "+colors.border,borderRadius:6}},
         h("table",{style:{borderCollapse:"collapse",width:"100%"}},
-          h("thead",null,h("tr",{style:{background:"#faf9f4"}},["Rev","Out / In","Status","When · who","What changed","Link / file"].map(x=>h("th",{key:x,style:{textAlign:"left",padding:"6px 8px",fontSize:10.5,color:colors.muted,fontWeight:600}},x)))),
+          h("thead",null,h("tr",{style:{background:"#faf9f4"}},["Rev","Out / In","Status","When · who","What changed","Link / file",""].map(x=>h("th",{key:x,style:{textAlign:"left",padding:"6px 8px",fontSize:10.5,color:colors.muted,fontWeight:600}},x)))),
           h("tbody",null,
-            revs.length===0 ? h("tr",null,h("td",{colSpan:6,style:{...cell,color:colors.mutedLight}},"No entries yet.")) :
-            revs.map((x,i)=>h("tr",{key:x.id},
-              h("td",{style:{...cell,fontWeight:600}},"Rev "+x.rev_number),
+            revs.length===0 ? h("tr",null,h("td",{colSpan:7,style:{...cell,color:colors.mutedLight}},"No entries yet.")) :
+            revs.map((x,i)=>h("tr",{key:x.id,style:i===0?{background:"#f4faf6"}:null},
+              h("td",{style:{...cell,fontWeight:600}},"Rev "+x.rev_number, i===0 ? h("div",{style:{fontSize:10,fontWeight:400,color:colors.mutedLight}},"latest") : null),
               h("td",{style:cell},
                 h("span",{style:{fontSize:10,padding:"1px 7px",borderRadius:9,background:x.direction==="Out"?"#fff4d6":"#e6f1fb",color:x.direction==="Out"?"#854f0b":"#0c447c"}},x.direction==="Out"?"Out: we sent":x.direction==="In"?"In: we received":"—"),
-                i===0 && h("div",null,h("button",{onClick:()=>fixDirection(d,x),title:"Ticked the wrong one? Switch Out / In on this entry",style:{border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:10.5}},"Edit Out/In"))),
+                null),
               h("td",{style:cell},
-                h("select",{value:x.status||"",onChange:e=>changeStatus(x,e.target.value),style:{...chipStyle(x.status),fontSize:10.5,padding:"2px 4px",borderRadius:9,border:"none",maxWidth:200}},
+                h("select",{value:x.status||"",disabled:rowLocked(d,x)&&user?.role!=="super_admin",title:rowLocked(d,x)?"Locked — "+lockWhy(d)+" A Super Admin's code unlocks it.":"",onChange:e=>changeStatus(x,e.target.value),style:{...chipStyle(x.status),fontSize:10.5,padding:"2px 4px",borderRadius:9,border:"none",maxWidth:200}},
                   h("option",{value:""},"— status —"),
                   statusNames.map(s=>h("option",{key:s,value:s},s)))),
               h("td",{style:{...cell,whiteSpace:"nowrap",color:colors.muted}},(x.changed_at||"").slice(0,10)+(x.changed_by?" · "+x.changed_by:"")),
-              h("td",{style:cell},(x.what_changed||x.reason||""),x.notes?h("div",{style:{color:colors.mutedLight,fontSize:10.5}},"Notes: "+x.notes):null),
+              h("td",{style:cell},(x.what_changed||x.reason||""),x.notes?h("div",{style:{color:colors.mutedLight,fontSize:10.5}},"Notes: "+x.notes):null,
+                (Array.isArray(x.edited_log)?x.edited_log:[]).map((g,j)=>h("div",{key:j,style:{color:"#854f0b",fontSize:10.5}},"\u270e "+String(g.at||"").slice(0,10)+" "+(g.by||"")+": "+(g.changes||[]).join("; ")+" — "+(g.why||"")+(g.unlocked?" (unlocked with code)":"")))),
               h("td",{style:{...cell,whiteSpace:"nowrap"}},
                 x.link ? h("a",{href:x.link,target:"_blank",rel:"noreferrer",style:{color:"#0c447c",fontSize:11}},"Open link") : h("span",{style:{color:colors.mutedLight}},"no link"),
-                x.lives_in_supabase && x.file_path ? h("button",{onClick:()=>viewFile(x),style:{marginLeft:8,border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:11}},"View file") : null)))))),
-      h("div",{style:{border:"1px solid #cfe3d7",background:"#f4faf6",borderRadius:8,padding:"10px 14px",marginTop:12}},
+                x.lives_in_supabase && x.file_path ? h("button",{onClick:()=>viewFile(x),style:{marginLeft:8,border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:11}},"View file") : null),
+              h("td",{style:{...cell,whiteSpace:"nowrap"}}, rowLocked(d,x)
+                ? h("button",{onClick:()=>openEdit(d,x),title:"Locked — "+lockWhy(d),style:{...btnSmall,fontSize:10.5,padding:"2px 8px",color:colors.muted}},"\ud83d\udd12 Locked")
+                : h("button",{onClick:()=>openEdit(d,x),style:{...btnSmall,fontSize:10.5,padding:"2px 8px",color:"#1f5c40",borderColor:"#1f5c40"}},"Edit"))))))),
+      h("div",{style:{fontSize:13,fontWeight:800,color:"#0c447c",textTransform:"uppercase",letterSpacing:".03em",margin:"12px 0 6px",paddingBottom:4,borderBottom:"2px solid #0c447c",display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},"Add revisions on this doc here",h("span",{style:{fontFamily:"monospace",textTransform:"none",letterSpacing:0,background:"#e6f1fb",borderRadius:5,padding:"1px 7px",fontSize:12.5}},d.doc_number)),   // 149
+      !nxOpen ? h("div",{style:{border:"1px dashed #1f5c40",background:"#f4faf6",borderRadius:8,padding:"10px 14px",display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}},
+        h("div",{style:{flex:1,minWidth:220}},
+          h("div",{style:{fontSize:12.5,fontWeight:700}},"Next expected: Rev "+exp.rev+(exp.direction?" · "+(exp.direction==="In"?"In — the client's reply":"Out — we send it"):"")),
+          h("div",{style:{fontSize:11.5,color:colors.muted}}, !last ? "No entries yet." : exp.direction==="In" ? "The last entry was Rev "+last.rev_number+" Out, so the reply on it comes back as Rev "+last.rev_number+" In." : "The reply on Rev "+last.rev_number+" is in; the revised document goes Out as Rev "+exp.rev+".")),
+        h("button",{onClick:()=>{ setNx(x=>({...blankNx, link:x.link, dir:exp.direction||""})); setDirMissing(false); setNxOpen(true); },style:{...btnPrimary,background:"#1f5c40",padding:"8px 16px",fontSize:12.5}},"Log the next entry")) :
+      h("div",{style:{border:"1px solid #1f5c40",background:"#fff",borderRadius:8,padding:"10px 14px"}},
         h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}},
-          h("div",{style:{fontSize:12.5,fontWeight:700}},"Next entry: Rev "+rev+(exp.direction&&!override?" — the sequence says "+exp.direction:"")),
+          h("div",{style:{fontSize:12.5,fontWeight:700}},"New entry — "+d.doc_number+" · Rev "+rev+(exp.direction&&!override?" — the sequence says "+exp.direction:"")),
           override ? h("span",{style:{fontSize:11,color:"#a3312a"}},"⚠ Override active — this document will be flagged.",
               h("input",{type:"number",min:0,value:override.rev,onChange:e=>setOverride({rev:Math.max(0,Number(e.target.value)||0)}),style:{...fld,width:70,marginLeft:8,padding:"3px 6px"}}))
             : user?.role==="super_admin" && h("button",{onClick:()=>unlockSequence(d),style:{...btnSmall,fontSize:10.5}},"Override sequence (code)")),
@@ -12123,7 +12198,8 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
             h("select",{value:nx.fulfil,onChange:e=>setNx(x=>({...x,fulfil:e.target.value})),style:fld},
               h("option",{value:""},"No"),
               openSame.map(r=>h("option",{key:r.id,value:r.id},r.category+(r.item_sl_no!=null?" · Sl "+r.item_sl_no:""))))) : h("div",null)),
-        h("div",{style:{display:"flex",justifyContent:"flex-end",marginTop:12}},
+        h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:12}},
+          h("button",{onClick:()=>{ setNxOpen(false); setOverride(null); setDirMissing(false); },disabled:busy,style:btnSecondary},"Cancel"),
           h("button",{onClick:saveNext,disabled:busy,style:{...btnPrimary,background:"#1f5c40",padding:"8px 16px",fontSize:12.5,opacity:busy?0.5:1}},busy?"Saving…":("Log Rev "+rev+(nx.dir?" — "+nx.dir:""))))),
       h("div",{style:{marginTop:14}},
         h("div",{style:{fontSize:12,fontWeight:700,marginBottom:6}},"Notes on this document"),
@@ -12162,6 +12238,21 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
           sel==="+" ? renderAdd() : current ? (current.kind==="doc" ? renderDoc(current) : renderReq(current)) : null)),
       h("div",{style:{padding:"10px 20px",borderTop:"1px solid "+colors.border,display:"flex",justifyContent:"flex-end"}},
         h("button",{onClick:onClose,style:btnSecondary},"Close")),
+      ed && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"40px 16px",overflowY:"auto"}},   // 149: Edit an entry
+        h("div",{style:{background:"#fff",borderRadius:10,padding:"16px 20px",width:620,maxWidth:"96vw"}},
+          h("div",{style:{fontWeight:700,fontSize:14}},"Edit Rev "+ed.row.rev_number+" "+(ed.row.direction||"")+" — "+ed.d.doc_number),
+          h("div",{style:{fontSize:11.5,color:colors.muted,margin:"2px 0 8px"}},"Logged "+String(ed.row.changed_at||"").slice(0,10)+(ed.row.changed_by?" by "+ed.row.changed_by:"")+". Every change is kept on the row (old \u2192 new, who, when) and in the document notes."+(unlockedDoc===ed.d.id?" Unlocked with a code \u2014 this edit is flagged.":"")),
+          twoCol(
+            h("div",null, lbl("Out / In"), h("select",{value:ed.dir,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,dir:v})); },style:fld},h("option",{value:"Out"},"Out: we sent"),h("option",{value:"In"},"In: we received"))),
+            h("div",null, lbl("Google Drive link",true), linkInput(ed.link, v=>setEd(x=>({...x,link:v}))), h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:2,wordBreak:"break-all"}},"was: "+(ed.row.link||"—")))),
+          twoCol(
+            h("div",null, lbl("What changed"), h("input",{value:ed.what,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,what:v})); },style:fld})),
+            h("div",null, lbl("Notes"), h("input",{value:ed.notes,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,notes:v})); },style:fld}))),
+          lbl("Replace the PDF (optional)"), fileInput(f=>setEd(x=>({...x,file:f}))),
+          lbl("Reason for the edit",true), h("input",{value:ed.why,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,why:v})); },placeholder:"e.g. Wrong link pasted",style:fld}),
+          h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:14}},
+            h("button",{onClick:()=>setEd(null),disabled:busy,style:btnSecondary},"Cancel"),
+            h("button",{onClick:saveEdit,disabled:busy,style:{...btnPrimary,background:"#1f5c40"}},busy?"Saving…":"Save the edit")))),
       clOpen && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
         h("div",{style:{background:"#fff",borderRadius:10,padding:"18px 22px",width:480,maxWidth:"94vw",maxHeight:"80vh",overflowY:"auto"}},
           h("div",{style:{fontWeight:700,fontSize:14,marginBottom:4}},"Pick several — "+entityRef),
@@ -26318,6 +26409,7 @@ const MANUAL_SECTIONS = [
               "The document number is suggested from the category's prefix (DWG-, ITP-\u2026) and checked as you type; a number already used anywhere is refused.",
               "Categories kept PER SL NO (e.g. GA drawings) can add one requirement for every Sl No in one go. Pick several\u2026 does the same for many categories at once.",
               "The link is mandatory everywhere; the PDF is optional.",
+              "Changed 8 October 2026 (build 149): a document tab has two bold blue headings with the document number — THIS IS THE TRAIL OF THE DOCUMENT ALREADY SUBMITTED (the record, read-only) and ADD REVISIONS ON THIS DOC HERE (Log the next entry opens the form). Edit on a row fixes the link, Out / In, what changed, notes or the PDF, with a reason; once a quote leaves Draft (or a later entry exists on a Sale Order document) the row is locked and only a Super Admin’s code unlocks it.",
               "On a document's tab: the revision trail (status changeable on any row, Edit Out/In on the latest), then the NEXT ENTRY pre-filled with the revision the Out/In sequence expects and the last link. Tick Out or In fresh each time."
             ]
           },
@@ -27519,6 +27611,7 @@ function downloadManualPdf(){
 // added to over time; not wired to a database table yet, so edits currently
 // mean updating this array directly.
 const FAQ_ENTRIES = [
+  { q:"I saved a document entry with the wrong link — how do I fix it?", a:"Press Edit on that row in the trail, correct the link and give the reason. While the quote is in Draft anyone who can open the box can do it; once the offer is sent the row shows \ud83d\udd12 Locked \u2014 add a revision, or ask a Super Admin to unlock it with a code. Every edit is kept on the row." },
   { q:"When is the weekly report made, and who sees it?", a:"Every Friday at 6 pm, for the week Saturday \u2013 Friday; the monthly one on the last day of the month at 6 pm. It is frozen when made. You see your own lines; a board head sees their board\u2019s people; Admins and Super Admins see everyone. Reports \u2192 Weekly & Monthly Reports." },
   { q:"What counts as Delayed in the weekly report?", a:"Something finished in that week after its due date: a task sent for approval late, a call or visit logged after its planned Next follow-up, or a procurement step finished after its planned end. Overdue is what is still open past due when the report is made; Proposed is what is due next week." },
   { q:"Who gets a new procurement card?", a:"Nobody at first: it waits in the Purchase Unassigned pile. The Purchase head sees it at log-in (My day \u2192 Waiting in the Purchase pile) and hands it to a buyer, or drags it on the Task Assignment Board in the daily review. Its sub-tasks go with it." },
@@ -27567,6 +27660,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"8 Oct 2026 (149)", summary:"Documents box: the record and the next entry kept apart, Edit, and locking. SQL: structure_document_entry_edit_2026-10-08 (both companies: universal_document_history_tbl.edited_log). Each document tab now has two headings in bold blue with the document number: THIS IS THE TRAIL OF THE DOCUMENT ALREADY SUBMITTED (read-only, the latest entry marked) and ADD REVISIONS ON THIS DOC HERE \u2014 a closed box \u201cNext expected: Rev 0 \u00b7 In \u2014 the client\u2019s reply\u201d with Log the next entry; the form opens empty with Out / In picked from the sequence, has Cancel, and closes after saving. EDIT on every entry (replaces Edit Out/In): link, Out / In, what changed, notes, replace the PDF; a reason is required; each edit is kept on the row (\u270e old \u2192 new, who, when, why), in the document notes and the audit log. LOCKING: a quote\u2019s entries (and their Status) can be changed only while the quote is in Draft; a Sale Order\u2019s entry only until the next entry is logged on that document. After that \u2014 add a revision, or a Super Admin unlocks the document with a Deletion Code (the document is flagged, like a sequence override). Changing Out / In on a document with more than one entry still needs a Super Admin." },
   { date:"8 Oct 2026 (148)", summary:"Employee performance and weekly / monthly reports. SQL: structure_period_reports_2026-10-08 (both companies; needs the build-146 SQL first): period_report_tbl, make_period_report() and a pg_cron timer \u2014 weekly report every Friday 6 pm for the week Saturday \u2013 Friday, monthly report on the last day of the month 6 pm (India time). If the timer cannot be set, the app makes the report the first time anyone opens it after 6 pm. Each report is frozen and lists per person: DELAYED (finished late in the period, with days late), OVERDUE (still open past due when made) and PROPOSED (due / planned in the next week or month) \u2014 tasks, calls & visits (Next by) and procurement Gantt steps (owed by the form\u2019s holder). Bell to everyone in it and to Super Admins. REPORTS \u2192 Weekly & Monthly Reports: past reports on the left, Show everyone / a department / a person, summary then the three lists, Download Excel and PDF; Super Admins can make the latest one now if the timer missed it. Who sees what: yourself; board heads their boards; Admins and Super Admins everyone. PERFORMANCE PAGE: Tasks \u2192 Dashboards \u2192 My performance, or Performance beside a name \u2014 open now, overdue, due in 7 days, waiting approval, completed on time vs late, average days late, the last 12 weeks (Sat \u2013 Fri) on time and late, the lists behind them, calls & visits (FSE / Telecaller) or late procurement steps; links to the person\u2019s board and weekly reports." },
   { date:"8 Oct 2026 (147)", summary:"Purchase task manager. SQL: data_purchase_head_post_FLOMETRIQ (Flometriq only: Aragan Keerthi gets the Purchase Manager post if he does not hold it). NEW CARDS TO THE PILE: a Procurement Gantt (Upload BOM or Approve Production BOM) now puts its card \u2014 one per contract, a sub-task per material form with the due date of that form\u2019s current step \u2014 in the Purchase Unassigned pile, not on whoever made the plan; the daily review hands it to a buyer and its sub-tasks follow (one form can still go to another buyer). DEPARTMENT HEADS: anyone who heads a board (post or Task Approvers) sees that board\u2019s Unassigned pile in My day \u2014 Hand to + Due + Hand over (bell to the receiver) \u2014 and a \u201cPurchase pile N waiting\u201d flag in the top bar. OPEN GANTT on a procurement card / sub-task (opens the contract, the form\u2019s lines unfolded) and OPEN CARD on the Gantt, each with a back button at the bottom right. PROCUREMENT LIST (Purchase \u2192 Procurement list): every contract\u2019s plan \u2014 buyer, forms done, next step and due, late steps, delivery, status; filters All / Unassigned / Mine / Late / Dates to fill. PENDING ACTIONS: a card handed to a buyer whose planned dates are still blank after 2 days. UPLOAD BOM reads all 8 team BOM formats (rules from the batch-1 load): heading row by S.No / Material form + Item code / Material spec / Changed item name / Description; Changed item name over Item code; RM Req Qty; contract / customer / BOM date from the top (contract from the file name if missing); service and labour lines (testing, PMI, PWHT, TPI, gas cylinder \u2026) and lines without quantity left out; new forms Welding consumables and Bought-out items; a sheet with no MTC note asks 3.1 / 3.2 before the plan is made." },
   { date:"7 Oct 2026 (146)", summary:"My day — status box and flags. SQL: structure_followup_next_by_2026-10-07 (both companies: activity_log_tbl.next_followup_by). NEXT BY: every follow-up form (Log Follow-ups grid, Quotes Report Log follow-up, quote screen, My Worklist, Customers, Major Projects) has Next by: Call / Visit beside Next follow-up; older entries count as Call. MY DAY POPUP at log-in: FSE / Telecaller \u2014 a status box Calls / Visits \u00d7 Overdue / Today / Proposed (next 7 days), click a count to list only those; per customer + reference the latest entry decides (a call logged today clears an older date); then My tasks (own open cards and sub-tasks overdue or due today) and Major Projects gaps (folded). Everyone else \u2014 My tasks only, shown after the older overdue prompt and only when something is overdue or due today. BUTTONS on each row: Log call / Log visit (Log Follow-ups filled in, Save returns to My day), Open quote, History, Customer history; on a task Open card, Open quote (enquiry cards), My board. \u201c\u2190 Back to My day\u201d stays at the bottom right while you are away. TOP BAR FLAGS all day: Calls & visits (FSE / Telecaller) and Tasks \u2014 red when anything is overdue, amber when only today\u2019s are left, green when clear; click to open My day. HOME shows the same counts. Reloads every 5 minutes and whenever a follow-up is logged or a task changes. Replaces the FSE / Telecaller overdue-calls screen." },
