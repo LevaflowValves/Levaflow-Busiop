@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-08T16:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-08T17:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -9671,6 +9671,7 @@ function CustomDatasheetCapture({ openRef, itemName, user, onClose, onSaved }){
         field_values: {}, overrides: {},
         updated_by: user.username, updated_at: new Date().toISOString()
       };
+      await dsGuard(payload.reference_number, payload.item_sl_no);   // 156
       const { error } = await sb.from("datasheets").upsert(payload,{onConflict:"reference_number,item_sl_no,template_key"});
       if(error) throw error;
       await sb.from("estimates").update({datasheet_skipped:false}).eq("reference_number",openRef.reference_number).eq("item_sl_no",openRef.item_sl_no);
@@ -10385,6 +10386,7 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
       const persistedList = persistedExtraRows[sectionNo] || [];
       const mergedFieldValues = {...persistedValues, __extraRows:{...persistedExtraRows,[sectionNo]:[...persistedList,newRow]}};
       const payload = { reference_number: openRef.reference_number, item_sl_no: openRef.item_sl_no, template_key: templateKey, field_values: mergedFieldValues, overrides: (existingRow&&existingRow.overrides)||{}, updated_by: user.username, updated_at: new Date().toISOString() };
+      await dsGuard(payload.reference_number, payload.item_sl_no);   // 156
       const{error:saveErr} = await sb.from("datasheets").upsert(payload,{onConflict:"reference_number,item_sl_no,template_key"});
       if(saveErr) throw saveErr;
     } catch(e){
@@ -10409,6 +10411,7 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
       const persistedValues = (existingRow && existingRow.field_values) || {};
       const mergedFieldValues = {...persistedValues, __mocChoices: updatedChoices};
       const payload = { reference_number: openRef.reference_number, item_sl_no: openRef.item_sl_no, template_key: templateKey, field_values: mergedFieldValues, overrides: (existingRow&&existingRow.overrides)||{}, updated_by: user.username, updated_at: new Date().toISOString() };
+      await dsGuard(payload.reference_number, payload.item_sl_no);   // 156
       const{error:saveErr} = await sb.from("datasheets").upsert(payload,{onConflict:"reference_number,item_sl_no,template_key"});
       if(saveErr) throw saveErr;
     } catch(e){
@@ -10421,6 +10424,7 @@ function DatasheetModal({ openRef, openLines, model, modelItemMap, user, session
     setSaving(true);
     try {
       const payload = { reference_number: openRef.reference_number, item_sl_no: openRef.item_sl_no, template_key: normalizeItemName(itemName), field_values: values, overrides, updated_by: user.username, updated_at: new Date().toISOString() };
+      await dsGuard(payload.reference_number, payload.item_sl_no);   // 156
       const { error } = await sb.from("datasheets").upsert(payload, { onConflict: "reference_number,item_sl_no,template_key" });
       if(error) throw error;
       await sb.from("estimates").update({datasheet_skipped:false}).eq("reference_number",openRef.reference_number).eq("item_sl_no",openRef.item_sl_no);
@@ -14431,17 +14435,17 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       await clearLeftoversForRef(newRef);   // 152
       let newEstRows = [];
       if(estRows?.length){ const { data: ne, error: neErr } = await sb.from("estimates").insert(estRows.map(r=>({...stripId(r), reference_number:newRef, quote_status:"Draft"}))).select(); if(neErr) throw neErr; newEstRows = ne||[]; }
-      if(lineRows?.length){ const { error: lnErr } = await sb.from("estimate_lines").insert(remapEstimateIds(lineRows, estRows, newEstRows).map(r=>({...stripId(r), reference_number:newRef}))); if(lnErr) throw lnErr; }
+      if(lineRows?.length){ const { error: lnErr } = await sb.from("estimate_lines").insert(remapEstimateIds(onlyLiveSl(lineRows, estRows), estRows, newEstRows).map(r=>({...stripId(r), reference_number:newRef}))); if(lnErr) throw lnErr; }
       if(termsRows?.length) await sb.from("quote_commercial_terms").insert(termsRows.map(r=>({...stripId(r), reference_number:newRef})));
       if(noteRows?.length) await sb.from("quote_notes").insert(noteRows.map(r=>({...stripId(r), reference_number:newRef})));
-      if(dsRows?.length) await sb.from("datasheets").insert(dsRows.map(r=>({...stripId(r), reference_number:newRef})));
+      if(onlyLiveSl(dsRows, estRows).length) await sb.from("datasheets").insert(onlyLiveSl(dsRows, estRows).map(r=>({...stripId(r), reference_number:newRef})));   // 156
       // Extra Price lines clone forward like everything else, but the
       // "declined" flag deliberately does NOT — a new revision gets its own
       // fresh Yes/No prompt cycle even if the previous revision declined.
       if(epRows?.length) await sb.from("quote_extra_price_tbl").insert(epRows.map(r=>({...stripId(r), reference_number:newRef})));
       // Sl No-level Extra Price and Testing clone forward too, same idea.
-      if(slEpRows?.length) await sb.from("quote_sl_extra_price_tbl").insert(slEpRows.map(r=>({...stripId(r), reference_number:newRef})));
-      if(slTestRows?.length) await sb.from("quote_sl_testing_tbl").insert(slTestRows.map(r=>({...stripId(r), reference_number:newRef})));
+      if(onlyLiveSl(slEpRows, estRows).length) await sb.from("quote_sl_extra_price_tbl").insert(onlyLiveSl(slEpRows, estRows).map(r=>({...stripId(r), reference_number:newRef})));   // 156
+      if(onlyLiveSl(slTestRows, estRows).length) await sb.from("quote_sl_testing_tbl").insert(onlyLiveSl(slTestRows, estRows).map(r=>({...stripId(r), reference_number:newRef})));
       // Global testing clones forward too — but quote_testing_mode_tbl
       // (the remembered Pro-rata/Separate choice) deliberately does NOT,
       // same reasoning as the Extra Price declined flag above.
@@ -14450,7 +14454,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       // describe. Office-use notes deliberately do NOT clone — each
       // revision gets its own note thread, and the old one stays readable
       // on the revision it was written against.
-      if(slJobAttrRows?.length) await sb.from("quote_sl_job_attribute_tbl").insert(slJobAttrRows.map(r=>({...stripId(r), reference_number:newRef})));
+      if(onlyLiveSl(slJobAttrRows, estRows).length) await sb.from("quote_sl_job_attribute_tbl").insert(onlyLiveSl(slJobAttrRows, estRows).map(r=>({...stripId(r), reference_number:newRef})));   // 156
       if(amendAreas.documents){
         // 31 Aug — now calls the shared carryForwardDocuments helper
         // instead of its own inline copy of the same logic; behavior is
@@ -22379,16 +22383,22 @@ async function deleteQuoteReferenceEverywhere(referenceNumber, performedBy){
 // Sl-No level, not the whole-revision-level tables (Commercial Terms,
 // Documents, Notes, Outcomes stay untouched — they belong to the revision,
 // not to any single Sl No).
+// 156: a datasheet is saved only while its Sl No still exists (an open datasheet could otherwise write back a removed Sl No's row)
+async function dsGuard(referenceNumber, itemSlNo){
+  const { data, error } = await sb.from("estimates").select("id").eq("reference_number",referenceNumber).eq("item_sl_no",itemSlNo).limit(1);
+  if(!error && !(data||[]).length) throw new Error("Sl No "+itemSlNo+" of "+referenceNumber+" was removed \u2014 this datasheet can't be saved. Close it and reopen the quote.");
+}
+// 156: only the rows of Sl Nos that exist are copied forward (Amend, Sale Order) — an orphan can't spread
+function onlyLiveSl(rows, estRows){ const ok = new Set((estRows||[]).map(e=>String(e.item_sl_no))); return (rows||[]).filter(r=>r.item_sl_no==null || ok.has(String(r.item_sl_no))); }
 async function deleteSlNoEverywhere(referenceNumber, itemSlNo, estimateId, performedBy){
   const {data:linesData} = await sb.from("estimate_lines").select("*").eq("reference_number",referenceNumber).eq("item_sl_no",itemSlNo);
-  await Promise.all([
-    sb.from("estimate_lines").delete().eq("reference_number",referenceNumber).eq("item_sl_no",itemSlNo),
-    sb.from("datasheets").delete().eq("reference_number",referenceNumber).eq("item_sl_no",itemSlNo),
-    sb.from("quote_sl_extra_price_tbl").delete().eq("reference_number",referenceNumber).eq("item_sl_no",itemSlNo),
-    sb.from("quote_sl_testing_tbl").delete().eq("reference_number",referenceNumber).eq("item_sl_no",itemSlNo)
-  ]);
+  // 156: one table at a time, each checked — the Sl No itself goes only when all its pieces went (no orphans left behind)
+  for(const tb of ["estimate_lines","datasheets","quote_sl_extra_price_tbl","quote_sl_testing_tbl","quote_sl_job_attribute_tbl"]){
+    const { error } = await sb.from(tb).delete().eq("reference_number",referenceNumber).eq("item_sl_no",itemSlNo);
+    if(error && !(tb==="quote_sl_job_attribute_tbl" && /does not exist|schema cache/i.test(error.message||""))) throw new Error("Sl No "+itemSlNo+" was not removed \u2014 its "+tb.replace(/_tbl$/,"").replace(/_/g," ")+" could not be cleared: "+error.message);
+  }
   await sb.from("audit_log").delete().eq("record_id",referenceNumber+"-"+itemSlNo);
-  await sb.from("estimates").delete().eq("id",estimateId);
+  { const { error } = await sb.from("estimates").delete().eq("id",estimateId); if(error) throw new Error("Could not remove Sl No "+itemSlNo+": "+error.message); }
   await logAudit("DELETE","estimates",referenceNumber+"-"+itemSlNo,"Deleted Sl No "+itemSlNo+" from Quote# "+referenceNumber+" ("+(linesData?.length||0)+" BOM lines) and all related records",performedBy||"unknown",{lines:linesData},null);
 }
 
@@ -23056,18 +23066,18 @@ async function cloneQuoteIntoContract(quoteRef, contractNumber, customerName, us
   await clearLeftoversForRef(contractNumber);   // 152
   let newEstRows = [];
   if(estRows?.length){ const { data: ne, error: neErr } = await sb.from("estimates").insert(estRows.map(r=>({...stripId(r), reference_number:contractNumber}))).select(); if(neErr) throw neErr; newEstRows = ne||[]; }
-  if(lineRows?.length){ const { error: lnErr } = await sb.from("estimate_lines").insert(remapEstimateIds(lineRows, estRows, newEstRows).map(r=>({...stripId(r), reference_number:contractNumber}))); if(lnErr) throw lnErr; }
+  if(lineRows?.length){ const { error: lnErr } = await sb.from("estimate_lines").insert(remapEstimateIds(onlyLiveSl(lineRows, estRows), estRows, newEstRows).map(r=>({...stripId(r), reference_number:contractNumber}))); if(lnErr) throw lnErr; }
   if(termsRows?.length) await sb.from("quote_commercial_terms").insert(termsRows.map(r=>({...stripId(r), reference_number:contractNumber})));
   if(noteRows?.length) await sb.from("quote_notes").insert(noteRows.map(r=>({...stripId(r), reference_number:contractNumber})));
-  if(dsRows?.length) await sb.from("datasheets").insert(dsRows.map(r=>({...stripId(r), reference_number:contractNumber})));
+  if(onlyLiveSl(dsRows, estRows).length) await sb.from("datasheets").insert(onlyLiveSl(dsRows, estRows).map(r=>({...stripId(r), reference_number:contractNumber})));   // 156
   if(epRows?.length) await sb.from("quote_extra_price_tbl").insert(epRows.map(r=>({...stripId(r), reference_number:contractNumber})));
-  if(slEpRows?.length) await sb.from("quote_sl_extra_price_tbl").insert(slEpRows.map(r=>({...stripId(r), reference_number:contractNumber})));
-  if(slTestRows?.length) await sb.from("quote_sl_testing_tbl").insert(slTestRows.map(r=>({...stripId(r), reference_number:contractNumber})));
+  if(onlyLiveSl(slEpRows, estRows).length) await sb.from("quote_sl_extra_price_tbl").insert(onlyLiveSl(slEpRows, estRows).map(r=>({...stripId(r), reference_number:contractNumber})));
+  if(onlyLiveSl(slTestRows, estRows).length) await sb.from("quote_sl_testing_tbl").insert(onlyLiveSl(slTestRows, estRows).map(r=>({...stripId(r), reference_number:contractNumber})));
   if(globalTestRows?.length) await sb.from("quote_global_testing_tbl").insert(globalTestRows.map(r=>({...stripId(r), reference_number:contractNumber})));
   // Per-Sl-No compliance attributes carry into the Contract with their
   // lines. End user rides along on the estimates rows themselves and is
   // deliberately not copied onto sale_order_tbl as a second stored copy.
-  if(slJobAttrRows?.length) await sb.from("quote_sl_job_attribute_tbl").insert(slJobAttrRows.map(r=>({...stripId(r), reference_number:contractNumber})));
+  if(onlyLiveSl(slJobAttrRows, estRows).length) await sb.from("quote_sl_job_attribute_tbl").insert(onlyLiveSl(slJobAttrRows, estRows).map(r=>({...stripId(r), reference_number:contractNumber})));
   // Documents (31 Aug) — no longer cloned automatically here. The old
   // version only ever copied the parent "shell" row, not its actual
   // revision/link/status data, which meant a "carried forward" document
@@ -27708,6 +27718,7 @@ function downloadManualPdf(){
 // added to over time; not wired to a database table yet, so edits currently
 // mean updating this array directly.
 const FAQ_ENTRIES = [
+  { q:"My datasheet won't save \u2014 it says the Sl No was removed.", a:"Someone removed that Sl No (or the cart changed) while the datasheet was open. Close the datasheet and reopen the quote; if the Sl No should exist, add it again first. This stops datasheets being saved for a Sl No that no longer exists." },
   { q:"How do I delete a Quote Register line?", a:"Press \ud83d\uddd1 on the line and give the reason. It works only while no enquiry is logged and no quote exists; the line then stays struck off with the reason, so the number is never used again. With an enquiry, use \u270e Edit instead." },
   { q:"A quote number was made on the wrong tab \u2014 how do I fix it?", a:"\u270e Edit \u2192 The number: pick the right tab (fix the customer's state / emirate first if it is not offered), take the next free number, give the reason, check the list of what will change and press Change the number (non-admins need an Admin code). Everything \u2014 quote, revisions, documents, follow-ups, enquiry, cards \u2014 moves to the new number at once; the old one stays struck off." },
   { q:"How do I copy a task to several people at once?", a:"On the card press \u29c9 Copy, pick the department and tick everyone who should get it \u2014 each gets a copy of their own. Choose the due date and whether the checklists (unticked), sub-tasks and labels / links come along." },
@@ -27774,6 +27785,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"8 Oct 2026 (156)", summary:"No more stray datasheets. No SQL. REMOVING A SL NO: its BOM lines, datasheet, Sl No extra price, testing and attributes are cleared one table at a time and each is checked; the Sl No itself goes only when all of them went \u2014 otherwise it stays and the reason is shown (before, a failed piece was ignored and the Sl No vanished, leaving that piece behind). DATASHEET SAVE (all four save paths): refused when its Sl No no longer exists (an open datasheet used to write a removed Sl No's row back). AMEND and CREATE SALE ORDER: BOM lines, datasheets, Sl No extra price, testing and attributes are copied only for Sl Nos that exist, so an orphan can't spread to the next revision (how FEX260461 Sl No 3 reached Rev-2). The 3 rows already found are removed by data_orphan_datasheets_FLOMETRIQ_2026-10-08; check_quote_orphans now skips Sale Orders." },
   { date:"8 Oct 2026 (155)", summary:"Quote Register \u2014 Delete, Edit with number change, struck-off lines. SQL: structure_register_renumber_155 (both companies: register_line_tbl struck_kind / struck_reason / struck_by / struck_at / moved_to / moved_from, and renumber_quote()). Read-only check: check_quote_orphans_2026-10-08. DELETE only without enquiry and quote (reason; line kept struck off). EDIT asks Details only or The number; the number field of an existing line is locked. NUMBER CHANGE: tab (suggested from the customer's state / country, wrong tab refused), next free number, reason, dry-run list of every table and row count it touches, Admin code for non-admins, then renumber_quote() moves the quote and its revisions (every table with reference_number), follow-ups (chase_reference), the enquiry link, task cards (ref), Documents box (entity_id, document numbers) in one transaction, creates the new line (with the enquiry) and strikes the old one, and verifies nothing still points at the old number or undoes everything. Refused when a Sale Order exists. STRUCK-OFF lines always shown with a reason badge (hover: who, when); new line shows \u201cwas \u2026\u201d. Struck-off numbers are skipped by Log Follow-ups references and Pending Actions. The code box can now carry its own wording." },
   { date:"8 Oct 2026 (154)", summary:"Build X and Build Y. SQL: structure_proc_date_change_154 (both companies: proc_date_change_tbl). BUILD X \u2014 every card has \ud83d\udcc5 Due, \u21c4 Move and \u29c9 Copy (cards on all boards, All boards, piles; icons in the \u229e table). Move: department \u2192 person or pile, due date; cross-department asks the reason, sub-tasks follow, bell to the receiver; history \u201c(on the card)\u201d. Copy: title, department, one copy per ticked person (or the pile), due date, optional checklists (unticked), sub-tasks (new, open), labels / links / ref / customer; histories both ways (\u201cCopied from #\u201d, \u201cCopied to #\u201d); procurement / enquiry cards copy as plain tasks; bell to each receiver. BUILD Y \u2014 PROCUREMENT GANTT: \u25b8 Bars under each line item (folded) in the Table and Edit dates, planned top / actual bottom with text and On time / Delayed / Running / Not started tags, original plan as a dashed outline once moved. Planned dates already set are moved only by the material's card holder (or Admin; others see \ud83d\udd12); Save asks the reason + note, optional cascade of later not-started steps by the same days; every change logged (original kept, rev N chips, history box). PROCUREMENT REPORTS (Reports \u2192 Purchase, and Purchase \u2192 Procurement): Materials past planned date, Pending supply, Contract summary (Late / At risk < 7 d spare / On track), Plan history, Purchase engineer KPI (steps finished, on time %, average delay, open late steps, plan dates moved and days moved by reason, received on time %, cards held; targets by purchasing norms with green / amber / red) \u2014 all with One contract / All contracts and Purchase engineer, Download PDF; rows open the Gantt at that material. Performance: Procurement KPI button." },
   { date:"8 Oct 2026 (153)", summary:"The funnel is open to everyone, the quote is locked to revisions. No SQL. STAGE MOVES (quote screen stage track, Quotes Report log follow-up, Funnel board, Quote Stage Review, Log Follow-ups): no code for anyone \u2014 before, a non-admin was asked for a code for any move past Draft (on the Quotes Report unless he was the customer's owner, so tab FSEs were blocked). Exceptions: back to Draft is refused everywhere (use Amend \u2014 also enforced inside the stage update itself), and Won \u2192 any other stage needs an Admin / Super Admin code (Log Follow-ups saves the call and leaves the stage, saying so). Content after Draft unchanged: price, lines, Sf, header, terms and documents need a new revision or a code. AMEND QUOTE: owner, tab FSE / TC, Sales Coordinator and Admins directly; others a one-time code (before: every non-admin)." },
