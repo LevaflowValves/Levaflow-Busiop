@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-08T17:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-09T03:15:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -5566,6 +5566,7 @@ function UsersEditor({ user }) {
   const [revealed,setRevealed]=useState(new Set()); // ids currently showing their real password
   const [resetTarget,setResetTarget]=useState(null); // row being reset
   const [resetVal,setResetVal]=useState("");
+  const [roleEd,setRoleEd]=useState(null);   // 158: {row, role, why, ask, busy} — Super Admin changes a user's role, with a reason
   const load = useCallback(async()=>{ setLoading(true); const {data}=await sb.from("app_users").select("*").order("id"); setRows(data||[]); setLoading(false); },[]);
   useEffect(()=>{load();},[load]);
   useEffect(()=>{ (async()=>{ const {data}=await sb.from("company_master").select("id,company_name").order("company_name"); setCompanies(data||[]); })(); },[]);
@@ -5637,7 +5638,9 @@ function UsersEditor({ user }) {
               )
             : h("span",{style:{fontSize:12,color:colors.muted}},r.employee_name||"— none —")
         ),
-        h("td",{style:{padding:"8px 10px"}},r.role),
+        h("td",{style:{padding:"8px 10px",whiteSpace:"nowrap"}},r.role,
+          (isSuperAdmin && r.role!=="super_admin" && r.username!=="Babu" && String(r.id)!==String(user?.id)) ? h("button",{"data-roleedit":r.username,onClick:()=>setRoleEd({ row:r, role:r.role, why:"" }),style:{...btnSmall,marginLeft:8,fontSize:11,padding:"1px 8px"},title:"Change "+r.username+"'s role (Super Admin only, with a reason)"},"Edit")
+          : r.role==="super_admin" ? h("span",{title:"A Super Admin cannot be demoted",style:{marginLeft:6,fontSize:11,color:colors.mutedLight}},"\ud83d\udd12") : null),
         isSuperAdmin && h("td",{style:{padding:"8px 10px",whiteSpace:"nowrap"}},
           h("span",{style:{fontFamily:"monospace",fontSize:12,marginRight:8}},revealed.has(r.id)?r.password:"••••••••"),
           h("button",{onClick:()=>toggleReveal(r),style:{...btnSmall,fontSize:10.5,padding:"3px 8px",marginRight:4}},revealed.has(r.id)?"Hide":"Show"),
@@ -5659,7 +5662,37 @@ function UsersEditor({ user }) {
       )))
     ),
     isSuperAdmin && h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:10,lineHeight:1.6}},"Every reveal and every reset is logged to the Audit Log, including who did it and which account it was."),
-    !isSuperAdmin && h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:10}},"Only a Super Admin can change which company is assigned to a user."),
+    !isSuperAdmin && h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:10}},"Only a Super Admin can change which company is assigned to a user, or a user's role."),
+    isSuperAdmin && h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:4}},"Role: Edit beside it, with a reason (logged). A Super Admin (\ud83d\udd12) cannot be demoted."),
+    roleEd && (()=>{ const x = roleEd; const set = (p)=>setRoleEd(v=>({...v,...p})); const changed = x.role!==x.row.role || !!x.why.trim();
+      const ROLE_LIST = [["user","user — ordinary login"],["admin","admin"],["hr_admin","hr_admin"],["accounts_admin","accounts_admin"],["qc","qc"],["technical_head","technical_head"],["super_admin","super_admin — cannot be undone from the app"]];
+      const save = async()=>{
+        if(x.role===x.row.role){ alert("Pick a different role, or Cancel."); return false; }
+        if(!x.why.trim()){ alert("Give the reason — it goes into the Audit Log."); return false; }
+        if(x.row.role==="super_admin"){ alert("A Super Admin cannot be demoted."); return false; }
+        if(x.role==="super_admin" && !confirm("Make "+x.row.username+" a Super Admin?\n\nA Super Admin cannot be demoted from the app afterwards.")) return false;
+        set({ busy:true });
+        const { error:err } = await sb.from("app_users").update({ role:x.role }).eq("id",x.row.id);
+        if(err){ set({ busy:false }); alert("Could not change the role:\n\n"+err.message); return false; }
+        await logAudit("UPDATE","app_users",x.row.username,"Role of \""+x.row.username+"\" changed from "+x.row.role+" to "+x.role+" by "+(user?.username||"unknown")+" \u2014 reason: "+x.why.trim(),user?.username||"unknown",{role:x.row.role},{role:x.role});
+        setRoleEd(null); load(); return true; };
+      const close = ()=>{ if(changed) set({ ask:true }); else setRoleEd(null); };
+      return h("div",{style:{position:"fixed",inset:0,background:"rgba(20,20,20,0.55)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center"}},
+        h("div",{"data-rolemodal":"1",style:{background:"#fff",borderRadius:8,padding:"18px 20px",width:420,maxWidth:"94vw"}},
+          h("div",{style:{fontSize:14,fontWeight:700,marginBottom:4}},"Change role \u2014 "+x.row.username),
+          h("div",{style:{fontSize:12,color:colors.muted,marginBottom:12}},"Now: "+x.row.role+(x.row.employee_name?" \u00b7 "+x.row.employee_name:"")+". The new role applies when the page next loads for them."),
+          h("label",{style:{display:"block",fontSize:11.5,color:colors.muted,marginBottom:3}},"New role"),
+          h("select",{value:x.role,onChange:e=>set({role:e.target.value}),style:{...inputStyle,width:"100%",marginBottom:10}},ROLE_LIST.map(([v,l])=>h("option",{key:v,value:v},l))),
+          h("label",{style:{display:"block",fontSize:11.5,color:colors.muted,marginBottom:3}},"Reason (required \u2014 goes into the Audit Log)"),
+          h("textarea",{rows:2,value:x.why,onChange:e=>set({why:e.target.value}),placeholder:"e.g. made Purchase head",style:{...inputStyle,width:"100%",resize:"vertical",marginBottom:12}}),
+          x.ask ? h("div",{style:{background:"#fff4d6",color:"#854f0b",borderRadius:6,padding:"8px 10px",fontSize:12,marginBottom:10,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}},
+              h("b",{style:{flex:1}},"The role change is not saved."),
+              h("button",{onClick:()=>{ set({ask:false}); save(); },style:btnSmall},"Save"),
+              h("button",{onClick:()=>setRoleEd(null),style:btnSmall},"Discard"),
+              h("button",{onClick:()=>set({ask:false}),style:btnSmall},"Stay")) : null,
+          h("div",{style:{display:"flex",gap:8}},
+            h("button",{onClick:save,disabled:x.busy,style:{...btnPrimary,flex:1}},x.busy?"Saving\u2026":"Save role"),
+            h("button",{onClick:close,disabled:x.busy,style:{...btnSecondary,flex:1}},"Cancel")))); })(),
     resetTarget && h("div",{style:{position:"fixed",inset:0,background:"rgba(20,20,20,0.55)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center"}},
       h("div",{style:{background:"#fff",borderRadius:8,padding:"20px 22px",width:340}},
         h("div",{style:{fontSize:14,fontWeight:700,marginBottom:10}},"Reset password — "+resetTarget.username),
@@ -27050,6 +27083,8 @@ const MANUAL_SECTIONS = [
         "title": "Procurement Gantt \u2014 Purchase plan for each contract",
         "tag": "Purchase \u2192 Procurement \u2192 Procurement Gantt",
         "blocks": [
+          {"type": "p", "text": "Changed 9 October 2026 (build 158). The four dates of a step are called Plan: start, Plan: finish (what you expect \u2014 pale yellow header) and Started on, Finished on (what has happened \u2014 green header, \u201cfill on the day it happens\u201d). Started on / Finished on cannot be after today. Stores see Arrived on and Received in full on for at Our Factory."},
+          {"type": "p", "text": "Changed 9 October 2026 (build 157). THE CHART IS YOUR GANTT TEMPLATE \u2014 plan and progress in one place. Every material form (General first) is a Planned row over an Actual row, one cell per day (or per week with Weeks), the month written in full above the day numbers. Planned cells are pale yellow with the step's letter (B BOM, P Purchase BOM, D Draft, A Approval, R Release, S / T RFI Stamping / Test, F at Our Factory). Actual cells are dark green while they sit inside the yellow span, and dark red ONLY on days after the material's last planned day. Planned days whose step has not started are very light pink on the Actual row, and \u201cnot started\u201d in the Dates column is red. The Dates columns give the first planned start and last planned end, and the actual start and end (\u201crunning\u201d while open). \u201cat Our Factory\u201d planned as a single day is drawn from the day after the step before it, so the supply wait shows \u2014 the stored dates do not change. Rows: One row per material, or Show the steps (a Planned / Actual pair per step under each material). Today is a red edge, delivery a black edge. Download Excel writes the same sheet (\u201cGantt\u201d, merged material cells, same colours) plus the Steps list; Download PDF prints the same grid (A3). ACTUAL DATES cannot be after today \u2014 they are entered on the day things happen (an actual start already in the future is not counted). STORES: the Stores In Charge (or anyone in the Stores department) has Enter receipt dates \u2014 only the Actual start / end of \u201cat Our Factory\u201d; every other date stays with Purchase. A material due at our factory today or earlier and not received appears in Pending Actions for Stores (\u201cReceipt due\u201d)."},
           {
             "type": "p",
             "text": "Changed 8 October 2026 (build 154). BARS UNDER EACH LINE ITEM: in the Table (and while editing dates) each line item (General, Pipe, Fittings \u2026) has \u25b8 Bars beside its name \u2014 folded until you open it. For every step the planned band is on top (striped) and the actual band below (solid; dashed while running), each with its text: \u201cPlanned 06/10 \u2013 10/10\u201d, \u201cActual 02/10 \u2013 05/10\u201d with On time / Delayed N d, \u201cStarted 07/10 \u00b7 Running \u00b7 N d left\u201d, or Not started \u00b7 N d late. One date scale for the whole plan; red line today, dashed line delivery; a dashed outline shows the original plan when it has moved. MOVING A PLANNED DATE: a planned date that is already set can be moved only by the holder of that material's card (sub-task, else the procurement card) or an Admin; others see it locked \ud83d\udd12. Save dates then asks why (Vendor delay, Client change / hold, Payment / approval delay, Transport, Re-planned internally, Other) and a note, and offers to move the later steps of the same line item (those not started) by the same days. The first plan of each step stays on record and every change is kept as rev 1, rev 2 \u2026 with old \u2192 new, days, reason, note, who and when \u2014 the \u201crev N\u201d chip on the date opens it. Needs structure_proc_date_change_154. Every moved day counts in the holder's Purchase engineer KPI. REPORTS: Reports \u2192 Purchase \u2192 Procurement reports (also under Purchase \u2192 Procurement): Materials past planned date, Pending supply (planned, expected and received supply dates), Contract summary (Late / At risk < 7 days spare / On track), Plan history and Purchase engineer KPI \u2014 each for One contract or All contracts and for one Purchase engineer or everyone, with Download PDF. KPI targets (general purchasing norms): steps on time \u2265 90 %, average delay \u2264 2 days, open late steps 0, received on time \u2265 95 %, plan dates moved \u2264 1 per 10 steps \u2014 green; amber down to 75 % / 5 d / 3 / 85 % / 2; red beyond."
@@ -27743,7 +27778,14 @@ const FAQ_ENTRIES = [
   { q:"How do I clear an overdue call from My day?", a:"Log the call or visit for that customer and reference \u2014 the newest entry decides. Use the Log call / Log visit button on the row: the form opens filled in, and Save brings you back to My day with the list refreshed." },
   { q:"A job needs two departments \u2014 do I make two cards?", a:"No. Open the card and tick the other department under Also on boards. It is the same card on both boards (and on the Inter-Department board), so a note, checklist tick or move made on one shows on the other. While nobody has it, it waits in both Unassigned piles; whoever hands it out first takes it out of both. It is approved on its home board and counted once there." },
   { q:"Someone is on leave \u2014 how do I move all their cards?", a:"Task Assignment Board \u2192 the \u21c4 on that person's list. All their open cards come ticked; untick any that stay, pick who gets them (or the Unassigned pile), give the reason and press Transfer. To move work to another department, pick that department under To. Admins can do any department; approvers only their own." },
-  { q:"How do I see whether procurement is on time?", a:"Purchase \u2192 Procurement Gantt, pick the contract, View: Progress. Solid cells are done or running (from the actual dates), striped cells are planned but not started, a red outline is late. The Progress column gives steps done and how many days late. Actual dates come from ticking steps on the task card, or from Edit dates." },
+  { q:"How do I see whether procurement is on time?", a:"Purchase \u2192 Procurement Gantt, pick the contract. Each material has a Planned row (pale yellow) over an Actual row: dark green while inside the yellow span, dark red on days after the last planned day (late), very light pink where a planned step has not started. \u201cnot started\u201d in red in the Dates column means nothing has begun on that material. Actual dates come from ticking steps on the task card, or from Edit dates." },
+  { q:"Why is an Actual cell red on the Procurement Gantt?", a:"Red is used only for days after that material's last planned (yellow) day \u2014 the work is running past its plan. A step that is behind but still inside the yellow span stays green; compare the letters on the Planned and Actual rows to see which step it is on." },
+  { q:"Where do I see the tasks someone has completed?", a:"Tasks \u2192 Task Assignment Board (or All boards): each person's column has \u201c\u2713 N done this week\u201d. Click it for the list \u2014 This week, This month or Last 90 days \u2014 with the date completed and whether it was on time. Click a row to open the card, or Open board for their Completed lists. Tasks \u2192 Tasks Completed Report gives a PDF." },
+  { q:"How do I change a user from user to admin (or another role)?", a:"Admin \u2192 Users, Edit beside the role. Only a Super Admin can do it; pick the new role and give the reason (logged in the Audit Log). A Super Admin cannot be demoted. The new role applies the next time the app loads for that person." },
+  { q:"What do Plan: start, Plan: finish, Started on and Finished on mean on the Procurement Gantt?", a:"Plan: start / Plan: finish are what you expect (fill them when the card comes to you). Started on / Finished on are what has happened \u2014 fill them on the day, never in advance; the app refuses a date after today. For at Our Factory, Stores see Arrived on / Received in full on." },
+  { q:"Why can't I enter an actual date after today?", a:"Actual dates record what has happened, on the day it happens. Put what you expect in the planned dates. An actual start already saved in the future is not counted until that day (the build-157 SQL clears those)." },
+  { q:"How does Stores enter the receipt of material?", a:"Purchase \u2192 Procurement Gantt, pick the contract, Enter receipt dates. Stores fill only the Actual start / end of \u201cat Our Factory\u201d (arrived / received in full); the rest is Purchase's. A material due at our factory and not received shows in Pending Actions as \u201cReceipt due\u201d." },
+  { q:"Can I download the Gantt as in our Excel template?", a:"Yes \u2014 Download Excel on the Procurement Gantt writes the \u201cGantt\u201d sheet in the template layout (month, day numbers, Planned / Actual rows, same colours) plus a Steps sheet. Weeks / Days and One row per material / Show the steps are followed. Download PDF prints the same grid." },
   { q:"Follow-up History shows only the latest revision's calls.", a:"Fixed in build 143: a quote's history now lists the calls logged on every revision (Rev-0, Rev-1 \u2026) together, with a Rev column saying which one each call was on." },
   { q:"Why must I fill both Discussed What and Notes?", a:"Discussed What is what the customer said; Notes are your own notes and next steps. Both are kept in the quote's history. If you leave Notes empty, the app offers to use the Discussed What text for it." },
   { q:"Why does the Quotes Report show only Rev-2 of my quote?", a:"A quote and its revisions are one quote: the latest revision is shown and counted, so values are not added twice. Click the blue \u201cRev-2 \u00b7 2 earlier\u201d tag to see the earlier ones, or switch to All revisions." },
@@ -27785,6 +27827,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"9 Oct 2026 (158)", summary:"Three changes. No SQL. (1) GANTT WORDING \u2014 the four dates are now Plan: start, Plan: finish, Started on, Finished on (Stores see Arrived on / Received in full on). The plan columns have a pale yellow header (the planned colour on the chart) and the done columns a green header with \u201cfill on the day it happens\u201d. Banner, Insert Step, Steps sheet of the Excel and the future-date message use the same words. The chart keeps Planned / Actual rows. Reason: \u201cActual start\u201d was read as the intended start and filled in advance. (2) COMPLETED TASKS on the boards \u2014 every person's column on the Task Assignment Board and on All boards has a chip \u201c\u2713 N done this week\u201d; clicking it lists their completed cards (This week / This month / Last 90 days) with completed on, customer / ref, task due and on time or N d late; a row opens the card; Open board goes to their board's Completed lists. (3) ROLE CHANGE \u2014 Admin \u2192 Users: Edit beside a user's role, Super Admin only; pick the new role and give a reason (required); logged to the Audit Log with old and new role. A Super Admin cannot be demoted (\ud83d\udd12, no Edit), nor the primary admin, nor your own row; making someone Super Admin asks to confirm because it cannot be undone from the app. Unsaved change asks Save / Discard / Stay. The app reads the role again whenever it loads, so the change applies without logging out." },
+  { date:"9 Oct 2026 (157)", summary:"Procurement Gantt in the user's GANTT_Template layout \u2014 plan and progress in one place. SQL: data_gantt_future_actuals_FLOMETRIQ (clears actual dates after today, kept in proc_line_future_act_bak_157; rollback included) and data_stores_incharge_ravikumar_FLOMETRIQ (Stores department / designation / post, employee and login Ravikumar). CHART (PgTplChart, replaces the Plan / Progress cell charts): per material a Planned row (pale yellow #FFF6A8, step letter) over an Actual row (dark green #375623 inside the planned span, dark red #C00000 only on days after the material's last planned day, very light pink #FFF4F6 under planned days whose step has not started); Dates columns = first planned start / last planned end and actual start / end, \u201cnot started\u201d on red; month in full, day numbers or week numbers; Rows: one per material or with the steps; today red edge, delivery black edge. pgTplPair works out a pair; \u201cat Our Factory\u201d planned as one day is drawn from the day after the step before (drawing only). An actual start after today is ignored (pgTplPair, pgStat). DOWNLOADS: Excel \u201cGantt\u201d sheet in the template (merged material cells, same fills, frozen at E5) + Steps; PDF A3 in the same grid. RULES: actual dates may not be after today (setWhen and Save; a future date already saved is not re-checked unless changed). STORES (pgStoresCan: Stores department, Stores board or the stores post): Enter receipt dates \u2014 only the Actual start / end of at Our Factory are editable (others locked, no RFI tick, no P O / delivery, no Insert Step). PENDING ACTIONS: \u201cReceipt due\u201d to the stores post holder(s) for a material due at our factory today or earlier and not received." },
   { date:"8 Oct 2026 (156)", summary:"No more stray datasheets. No SQL. REMOVING A SL NO: its BOM lines, datasheet, Sl No extra price, testing and attributes are cleared one table at a time and each is checked; the Sl No itself goes only when all of them went \u2014 otherwise it stays and the reason is shown (before, a failed piece was ignored and the Sl No vanished, leaving that piece behind). DATASHEET SAVE (all four save paths): refused when its Sl No no longer exists (an open datasheet used to write a removed Sl No's row back). AMEND and CREATE SALE ORDER: BOM lines, datasheets, Sl No extra price, testing and attributes are copied only for Sl Nos that exist, so an orphan can't spread to the next revision (how FEX260461 Sl No 3 reached Rev-2). The 3 rows already found are removed by data_orphan_datasheets_FLOMETRIQ_2026-10-08; check_quote_orphans now skips Sale Orders." },
   { date:"8 Oct 2026 (155)", summary:"Quote Register \u2014 Delete, Edit with number change, struck-off lines. SQL: structure_register_renumber_155 (both companies: register_line_tbl struck_kind / struck_reason / struck_by / struck_at / moved_to / moved_from, and renumber_quote()). Read-only check: check_quote_orphans_2026-10-08. DELETE only without enquiry and quote (reason; line kept struck off). EDIT asks Details only or The number; the number field of an existing line is locked. NUMBER CHANGE: tab (suggested from the customer's state / country, wrong tab refused), next free number, reason, dry-run list of every table and row count it touches, Admin code for non-admins, then renumber_quote() moves the quote and its revisions (every table with reference_number), follow-ups (chase_reference), the enquiry link, task cards (ref), Documents box (entity_id, document numbers) in one transaction, creates the new line (with the enquiry) and strikes the old one, and verifies nothing still points at the old number or undoes everything. Refused when a Sale Order exists. STRUCK-OFF lines always shown with a reason badge (hover: who, when); new line shows \u201cwas \u2026\u201d. Struck-off numbers are skipped by Log Follow-ups references and Pending Actions. The code box can now carry its own wording." },
   { date:"8 Oct 2026 (154)", summary:"Build X and Build Y. SQL: structure_proc_date_change_154 (both companies: proc_date_change_tbl). BUILD X \u2014 every card has \ud83d\udcc5 Due, \u21c4 Move and \u29c9 Copy (cards on all boards, All boards, piles; icons in the \u229e table). Move: department \u2192 person or pile, due date; cross-department asks the reason, sub-tasks follow, bell to the receiver; history \u201c(on the card)\u201d. Copy: title, department, one copy per ticked person (or the pile), due date, optional checklists (unticked), sub-tasks (new, open), labels / links / ref / customer; histories both ways (\u201cCopied from #\u201d, \u201cCopied to #\u201d); procurement / enquiry cards copy as plain tasks; bell to each receiver. BUILD Y \u2014 PROCUREMENT GANTT: \u25b8 Bars under each line item (folded) in the Table and Edit dates, planned top / actual bottom with text and On time / Delayed / Running / Not started tags, original plan as a dashed outline once moved. Planned dates already set are moved only by the material's card holder (or Admin; others see \ud83d\udd12); Save asks the reason + note, optional cascade of later not-started steps by the same days; every change logged (original kept, rev N chips, history box). PROCUREMENT REPORTS (Reports \u2192 Purchase, and Purchase \u2192 Procurement): Materials past planned date, Pending supply, Contract summary (Late / At risk < 7 d spare / On track), Plan history, Purchase engineer KPI (steps finished, on time %, average delay, open late steps, plan dates moved and days moved by reason, received on time %, cards held; targets by purchasing norms with green / amber / red) \u2014 all with One contract / All contracts and Purchase engineer, Download PDF; rows open the Gantt at that material. Performance: Procurement KPI button." },
@@ -34528,7 +34572,7 @@ function pgRows(plan, d, extra){
     rows.push({ form:f.form, title:f.form, f, steps: place(S.map(([k,l,c],i)=>mk(k+"|"+f.form,l,c,f.form,i ? S[i-1][0]+"|"+f.form : "pbom")), f.form) }); });
   return rows;
 }
-function pgStat(st, today){ const ps = pgDue(st.plan.s), pe = pgDue(st.plan.e), as = pgDue(st.act.s), ae = pgDue(st.act.e);
+function pgStat(st, today){ const ps = pgDue(st.plan.s), pe = pgDue(st.plan.e), ae = pgDue(st.act.e); let as = pgDue(st.act.s); if(as && !ae && as>today) as = "";   // 157: an actual start after today does not count
   if(!pe) return {k:"miss",t:"needs dates",bg:"#fff4d6",fg:"#854f0b"};
   if(ae){ const l = pgDd(pe,ae); return l>0 ? {k:"donelate",t:"done "+l+" d late",bg:"#fff4d6",fg:"#854f0b"} : {k:"done",t:"done",bg:"#e4f3ed",fg:"#0f6b4f"}; }
   if(pe<today) return {k:"late",t:pgDd(pe,today)+" d late",l:pgDd(pe,today),bg:"#fdecea",fg:"#a3312a"};
@@ -34548,6 +34592,16 @@ async function pgCanEdit(user){
   const emp = await pgEmp(user); if(!emp) return false;
   return /purchase/i.test(emp.department||"") || (typeof empBoards==="function" && empBoards(emp).some(b=>/purchase/i.test(b)));
 }
+// 157: Stores (the Stores In Charge post, or anyone in the Stores department) enter the receipt dates only —
+// the Actual start / end of "at Our Factory". Everything else stays with Purchase.
+async function pgStoresCan(user){
+  const emp = await pgEmp(user); if(!emp) return false;
+  if(/store/i.test(emp.department||"") || (typeof empBoards==="function" && empBoards(emp).some(b=>/store/i.test(b)))) return true;
+  try{ const { data } = await sb.from("post_holder_tbl").select("post_key").eq("post_key","stores").eq("employee_name",emp.employee_name).limit(1); return !!(data && data.length); }catch(e){ return false; }
+}
+const pgStoresKey = (key, field)=> String(key).split("|")[0]==="fac" && (field==="as" || field==="ae");
+// 157: an actual date may not be in the future (a week counts from its Sunday)
+const pgFutureAct = (field, val, today)=> (field==="as" || field==="ae") && val && val.v && (val.t==="w" ? pgWs(val.v) : val.v) > today;
 // ---- reading a BOM -----------------------------------------------------------------------------------------------
 const PG_KEYS = [["name plate","Packing"],["name-plate","Packing"],["perforated","Perforated sheet"],["mesh","Wire mesh"],["tee","Fittings"],["elbow","Fittings"],["reducer","Fittings"],["coupling","Fittings"],["pipe","Pipe"],["flange","Flanges"],["gasket","Gaskets"],
   ["bolt","Fasteners"],["nut","Fasteners"],["washer","Fasteners"],["stud","Fasteners"],["casting","Castings"],["forging","Forgings"],["plate","Plate / Sheet"],["sheet","Plate / Sheet"],["channel","Bars & sections"],["square bar","Bars & sections"],["round bar","Bars & sections"],
@@ -34816,6 +34870,7 @@ function ProdBomApproveChip({ contractInfo, user }){
 // columns frozen on the left, each step filling whole cells. Plan view = planned dates; Progress view = actual dates
 // (solid = done / running, striped = planned not started, red outline = late). The Excel and PDF use the same rules.
 const PG_MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const PG_MONF = ["January","February","March","April","May","June","July","August","September","October","November","December"];   // 157: the template writes the month in full
 function pgRange(plan, rows, today){
   let lo = plan.contract_date ? String(plan.contract_date).slice(0,10) : today, hi = plan.delivery_date ? String(plan.delivery_date).slice(0,10) : pgAdd(today,42);
   rows.forEach(r=>r.steps.forEach(st=>[st.plan.s,st.plan.e,st.act.s,st.act.e].forEach(x=>{ const v = pgDue(x); if(v){ if(v<lo) lo=v; if(v>hi) hi=v; } })));
@@ -34842,6 +34897,84 @@ function pgCellStep(row, s, e, mode, today){
   return null;
 }
 function pgRowProgress(r, today){ const n = r.steps.length, done = r.steps.filter(st=>pgDue(st.act.e)).length; return { n, done, pct: n ? Math.round(done/n*100) : 0, rs: pgRowState(r,today) }; }
+// ---- 157: THE TEMPLATE GANTT — plan and progress in one place (the user's GANTT_Template.xlsx) -------------------
+// Every material form is a Planned row over an Actual row, one cell per day (or week).
+//   Planned  pale yellow, with the step's letter.
+//   Actual   dark green while inside the planned span; dark red ONLY on days after the material's last planned day;
+//            very light pink under planned days whose step has not started. "not started" in the Dates column is red.
+// An actual start after today is not counted (treated as not started). "at Our Factory" planned as a single day is
+// drawn from the day after the step before it (the supply wait) — only the drawing; the stored dates do not change.
+const PG_TPL = { plan:"#FFF6A8", act:"#375623", late:"#C00000", pend:"#FFF4F6" };
+const PG_LETTER = { bom:"B", pbom:"P", draft:"D", appr:"A", rel:"R", rs:"S", rt:"T", fac:"F" };
+const pgLetter = (st)=> st.custom ? String(st.label||"?").trim().charAt(0).toLowerCase() : (PG_LETTER[String(st.key).split("|")[0]] || "?");
+// one row pair: P[day] = {ch, st}, A[day] = {c:"A"|"L"|"N", ch}; PS/PE planned span; AS/AE actual span; done/started
+function pgTplPair(steps, today, ctx){   // ctx: the whole row's steps (a single-step pair still finds the step before)
+  const P = {}, A = {}; let PE = "", PS = "";
+  steps.forEach((st)=>{ let pe = pgDue(st.plan.e), ps = pgDue(st.plan.s) || pe; if(!pe) return;
+    if(st.plan.e.t==="w") pe = pgWe(pe); if(st.plan.s && st.plan.s.t==="w" && pgDue(st.plan.s)) ps = pgWs(ps);
+    const all = ctx || steps, j = all.indexOf(st); if(String(st.key).split("|")[0]==="fac" && ps===pe && j>0){ const pv = pgDue(all[j-1].plan.e); if(pv && pv<pe) ps = pgAdd(pv,1); }   // the supply wait
+    for(let d = ps; d<=pe; d = pgAdd(d,1)) P[d] = { ch:pgLetter(st), st };
+    if(!PS || ps<PS) PS = ps; if(pe>PE) PE = pe; });
+  const asOf = (st)=>{ let as = pgDue(st.act.s) || pgDue(st.act.e); if(as && st.act.s && st.act.s.t==="w" && pgDue(st.act.s)) as = pgWs(as); return as && as<=today ? as : ""; };
+  let AS = "", AE = "";
+  steps.forEach(st=>{ const as = asOf(st); if(!as) return; let ae = pgDue(st.act.e); if(ae && st.act.e.t==="w") ae = pgWe(ae); if(ae && ae>today) ae = today;
+    const end = ae || today; for(let d = as; d<=end; d = pgAdd(d,1)) A[d] = { c: PE && d>PE ? "L" : "A", ch:pgLetter(st) };
+    if(!AS || as<AS) AS = as; if(ae && ae>AE) AE = ae; });
+  Object.keys(P).forEach(d=>{ if(!A[d] && !asOf(P[d].st)) A[d] = { c:"N", ch:"" }; });
+  const done = steps.length>0 && steps.every(st=>pgDue(st.act.e));
+  return { P, A, PS, PE, AS, AE: done ? AE : "", done, started: !!AS };
+}
+// the days to show: from 2 days before the first date to 3 after the last (today and delivery included)
+function pgTplRange(plan, rows, today){
+  const all = [today]; const deliv = plan.delivery_date ? String(plan.delivery_date).slice(0,10) : ""; if(deliv) all.push(deliv);
+  rows.forEach(r=>{ const t = pgTplPair(r.steps, today); [t.PS,t.PE,t.AS].forEach(x=>{ if(x) all.push(x); }); });
+  all.sort(); return { from: pgAdd(all[0],-2), to: pgAdd(all[all.length-1],3) };
+}
+function pgTplCols(range, scale){
+  const out = [];
+  if(scale==="d"){ for(let d = range.from; d<=range.to; d = pgAdd(d,1)){ const wd = new Date(pgP(d)).getUTCDay(); out.push({ s:d, e:d, days:[d], top:String(Number(d.slice(8,10))), mid:d, wkend:wd===0||wd===6 }); } return out; }
+  for(let s = pgWs(range.from); s<=range.to; s = pgAdd(s,7)){ const e = pgAdd(s,6), days = []; for(let d = s; d<=e; d = pgAdd(d,1)) days.push(d); out.push({ s, e, days, top:"W"+pgWk(e), mid:pgAdd(s,3), wkend:false }); }
+  return out;
+}
+// a cell's look for a column: planned row -> {fill, ch}; actual row -> {kind A|L|N, ch}
+function pgTplCell(t, c, planned, daily){
+  if(planned){ const d = c.days.find(x=>t.P[x]); return d ? { kind:"P", ch: daily ? t.P[d].ch : "" } : null; }
+  const hs = c.days.map(x=>t.A[x]).filter(Boolean); if(!hs.length) return null;
+  const x = hs.find(y=>y.c==="L") || hs.find(y=>y.c==="A") || hs[0]; return { kind:x.c, ch: daily ? x.ch : "" };
+}
+function pgTplPairs(rows, lvl){ const out = []; rows.forEach(r=>{ out.push({ r, title:r.title, steps:r.steps, sub:false }); if(lvl==="step") r.steps.forEach(st=>out.push({ r, title:st.label, steps:[st], ctx:r.steps, sub:true })); }); return out; }
+function PgTplChart({ plan, rows, today, onRow, scale, lvl, full, scrollRef }){
+  const range = pgTplRange(plan, rows, today), cols = pgTplCols(range, scale), bands = pgMonthBands(cols), daily = scale==="d";
+  const deliv = plan.delivery_date ? String(plan.delivery_date).slice(0,10) : "";
+  const cw = daily ? 24 : 40, W0 = 150, W1 = 64, W2 = 84, W3 = 92;
+  const bd = "1px solid #e4e1d6";
+  const fix = (left, w, extra)=> ({ position:"sticky", left, zIndex:2, background:"#fff", width:w, minWidth:w, maxWidth:w, padding:"0 6px", borderRight:bd, borderBottom:bd, fontSize:11.5, whiteSpace:"nowrap", ...(extra||{}) });
+  const mark = (c)=> ({ ...(c.days.includes(today) ? { boxShadow:"inset 2px 0 0 #b3261e" } : {}), ...(deliv && c.days.includes(deliv) ? { borderRight:"2px solid #1c1f1a" } : {}) });
+  const colour = { P:PG_TPL.plan, A:PG_TPL.act, L:PG_TPL.late, N:PG_TPL.pend };
+  const head = h("thead",null,
+    h("tr",null, h("th",{colSpan:4,style:{...fix(0,W0+W1+W2+W3),top:0,zIndex:6,background:"#faf9f5"}}),
+      bands.map((b,i)=>h("th",{key:"m"+i,colSpan:b.n,style:{position:"sticky",top:0,zIndex:4,background:"#faf9f5",textAlign:"left",padding:"3px 6px",fontSize:12,fontWeight:700,borderBottom:bd,borderRight:bd,whiteSpace:"nowrap"}},h("span",{style:{position:"sticky",left:W0+W1+W2+W3+6}},PG_MONF[PG_MON.indexOf(b.lab.split(" ")[0])]+" "+b.lab.split(" ")[1])))),
+    h("tr",null, h("th",{style:{...fix(0,W0),top:24,zIndex:6,background:"#faf9f5",textAlign:"left",fontWeight:700}},"Material Form"), h("th",{style:{...fix(W0,W1),top:24,zIndex:6,background:"#faf9f5"}}),
+      h("th",{style:{...fix(W0+W1,W2),top:24,zIndex:6,background:"#faf9f5",textAlign:"left",fontWeight:700}},"Dates"), h("th",{style:{...fix(W0+W1+W2,W3),top:24,zIndex:6,background:"#faf9f5",borderRight:"2px solid "+colors.border}}),
+      cols.map(c=>h("th",{key:c.s,"data-pgtoday":c.days.includes(today)?"1":undefined,style:{position:"sticky",top:24,zIndex:4,width:cw,minWidth:cw,maxWidth:cw,height:22,textAlign:"center",fontSize:10,fontWeight:700,color:c.days.includes(today)?"#b3261e":colors.muted,background:c.wkend?"#f3f1ea":"#faf9f5",borderBottom:bd,borderRight:bd,...mark(c)}},c.top))));
+  const body = []; pgTplPairs(rows, lvl).forEach((p,pi)=>{ const t = pgTplPair(p.steps, today, p.ctx);
+    const cell = (c, planned)=>{ const x = pgTplCell(t, c, planned, daily);
+      return h("td",{key:c.s,style:{width:cw,minWidth:cw,maxWidth:cw,height:22,padding:0,textAlign:"center",fontSize:9.5,fontWeight:700,borderRight:bd,borderBottom:planned?bd:"2px solid #d9d6cc",
+        background: x ? colour[x.kind] : c.wkend ? "#f7f6f1" : "#fff", color: x && (x.kind==="A"||x.kind==="L") ? "#fff" : "rgba(0,0,0,.6)", ...mark(c)}}, x ? x.ch : ""); };
+    const k = (p.r.form||"General")+(p.sub?"|"+p.steps[0].key:"");
+    const go = { onClick:()=>onRow && onRow(p.r), title:"Click to see / fill the dates of "+p.r.title, style:{cursor:onRow?"pointer":"default"} };
+    const notStarted = !t.started;
+    body.push(h("tr",{key:"p"+k,"data-pgtpl":k,...go},
+      h("td",{rowSpan:2,style:{...fix(0,W0,{textAlign:p.sub?"left":"center",fontWeight:p.sub?400:700,color:p.sub?colors.muted:colors.text,fontSize:p.sub?11:12,whiteSpace:"normal",lineHeight:1.2,borderBottom:"2px solid #d9d6cc",paddingLeft:p.sub?16:6})}},p.sub?"↳ "+p.title:p.title),
+      h("td",{style:fix(W0,W1)},"Planned"), h("td",{style:fix(W0+W1,W2)},t.PS?pgDmy(t.PS):"—"), h("td",{style:fix(W0+W1+W2,W3,{borderRight:"2px solid "+colors.border})},t.PE?pgDmy(t.PE):"no dates"),
+      cols.map(c=>cell(c,true))));
+    body.push(h("tr",{key:"a"+k,"data-pgtplact":k,...go},
+      h("td",{style:fix(W0,W1,{borderBottom:"2px solid #d9d6cc"})},"Actual"), h("td",{style:fix(W0+W1,W2,{borderBottom:"2px solid #d9d6cc"})},t.AS?pgDmy(t.AS):"—"),
+      h("td",{"data-pgns":notStarted?"1":undefined,style:fix(W0+W1+W2,W3,{borderRight:"2px solid "+colors.border,borderBottom:"2px solid #d9d6cc",...(notStarted?{background:PG_TPL.late,color:"#fff",fontWeight:700}:{})})},notStarted?"not started":t.done?pgDmy(t.AE):"running"),
+      cols.map(c=>cell(c,false)))); });
+  return h("div",{ref:scrollRef,style:{overflow:"auto",maxHeight:full?"calc(100vh - 150px)":"64vh",borderTop:"1px solid "+colors.border}},
+    h("table",{style:{borderCollapse:"separate",borderSpacing:0,fontSize:12,fontVariantNumeric:"tabular-nums"}}, head, h("tbody",null,body)));
+}
 function PgChart({ plan, rows, today, onRow, mode, scale, full, scrollRef }){
   const range = pgRange(plan, rows, today), cols = pgCols(range, scale), bands = pgMonthBands(cols);
   const cw = scale==="d" ? 28 : 56, LW = 230, PW = 104;
@@ -34890,101 +35023,112 @@ function pgStepRows(plan, rows, today){
     out.push([r.title, r.f ? (r.f.cert||"") : "", st.label, pgShow(st.plan.s), pgShow(st.plan.e), pgShow(st.act.s), pgShow(st.act.e), ss.t]); }));
   return out;
 }
-async function pgExportExcel(plan, rows, today, scale){
+// ---- 157: downloads in the template (Excel: "Gantt" sheet = the user's GANTT_Template layout + "Steps"; PDF: the same grid) ----
+function pgTplGrid(plan, rows, today, scale, lvl){
+  const cols = pgTplCols(pgTplRange(plan, rows, today), scale), daily = scale==="d";
+  const pairs = pgTplPairs(rows, lvl||"mat").map(p=>({ ...p, t: pgTplPair(p.steps, today, p.ctx) }));
+  return { cols, daily, pairs, bands: pgMonthBands(cols), deliv: plan.delivery_date ? String(plan.delivery_date).slice(0,10) : "" };
+}
+const pgTplEnd = (t)=> !t.started ? "not started" : t.done ? pgDmy(t.AE) : "running";
+async function pgExportExcel(plan, rows, today, scale, lvl){
   const head = [["Procurement Gantt — contract "+plan.contract_number],["Client: "+(plan.client||"—")+"   ·   P O No: "+(plan.po_no||"to follow")+"   ·   Delivery: "+(plan.delivery_date?pgDmy(String(plan.delivery_date).slice(0,10)):"—")+"   ·   Printed "+pgDmy(today)]];
-  const stepHdr = ["Material form","Certification","Step","Planned start","Planned end","Actual start","Actual end","Status"];
+  const stepHdr = ["Material form","Certification","Step","Plan: start","Plan: finish","Started on","Finished on","Status"];
   const steps = pgStepRows(plan, rows, today);
-  const cols = pgCols(pgRange(plan, rows, today), scale);
+  const G = pgTplGrid(plan, rows, today, scale, lvl);
   let EJ = null; try{ await pgLoadScript("https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js", ()=>!!window.ExcelJS); EJ = window.ExcelJS; }catch(e){ EJ = null; }
-  if(!EJ){   // plain workbook (no colours) if the styled one cannot load
-    const wb = XLSX.utils.book_new();
+  if(!EJ){   // plain workbook (no colours) if the styled one cannot load: letters, "late" and "not started" spelt out
+    const wb = XLSX.utils.book_new(); const aoa = [...head, [], ["Material Form","","Dates","",...G.cols.map(c=>c.top)]];
+    G.pairs.forEach(p=>{ const t = p.t;
+      aoa.push([p.sub?"  ↳ "+p.title:p.title,"Planned",t.PS?pgDmy(t.PS):"",t.PE?pgDmy(t.PE):"no dates",...G.cols.map(c=>{ const x = pgTplCell(t,c,true,G.daily); return x ? (x.ch||"■") : ""; })]);
+      aoa.push(["","Actual",t.AS?pgDmy(t.AS):"",pgTplEnd(t),...G.cols.map(c=>{ const x = pgTplCell(t,c,false,G.daily); return !x ? "" : x.kind==="L" ? "LATE" : x.kind==="N" ? "·" : (x.ch||"■"); })]); });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "Gantt");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([...head,[],stepHdr,...steps]), "Steps");
-    ["plan","prog"].forEach(m=>{ const aoa = [...head,[], ["Material form","Progress",...cols.map(c=>c.top+" ("+c.sub+")")]];
-      rows.forEach(r=>{ const pr = pgRowProgress(r,today); aoa.push([r.title, pr.done+" of "+pr.n+" done", ...cols.map(c=>{ const f = pgCellStep(r,c.s,c.e,m,today); return f ? f.st.label+(f.kind==="todo"?" (planned)":"")+(f.late?" LATE":"") : ""; })]); });
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), m==="plan"?"Gantt Plan":"Gantt Progress"); });
     XLSX.writeFile(wb, pgFileBase(plan)+".xlsx"); return;
   }
   const wb = new EJ.Workbook(); wb.creator = "BOM Estimator";
+  const solid = (argb)=> ({ type:"pattern", pattern:"solid", fgColor:{ argb } });
+  const thin = { style:"thin", color:{ argb:"FFD9D6CC" } };
+  const F = { P:"FFFFF6A8", A:"FF375623", L:"FFC00000", N:"FFFFF4F6" };
+  const g = wb.addWorksheet("Gantt",{ views:[{ state:"frozen", xSplit:4, ySplit:4 }], pageSetup:{ orientation:"landscape", fitToPage:true, fitToWidth:1, fitToHeight:0, paperSize:8 } });
+  g.getCell(1,1).value = head[0][0]; g.getCell(1,1).font = { bold:true, size:13 }; g.getCell(2,1).value = head[1][0]; g.getCell(2,1).font = { color:{argb:"FF6B6F60"} };
+  // row 3: the month over its days (as in the template); row 4: Material Form · Dates · day numbers
+  let ci = 5; G.bands.forEach(b=>{ const c = g.getCell(3,ci); c.value = PG_MONF[PG_MON.indexOf(b.lab.split(" ")[0])]+" "+b.lab.split(" ")[1]; c.font = { bold:true }; if(b.n>1) g.mergeCells(3,ci,3,ci+b.n-1); ci += b.n; });
+  const hr = g.getRow(4); hr.getCell(1).value = "Material Form"; hr.getCell(3).value = "Dates"; hr.font = { bold:true };
+  G.cols.forEach((c,i)=>{ const cell = hr.getCell(i+5); cell.value = G.daily ? Number(c.top) : c.top; cell.alignment = { horizontal:"center" }; cell.border = { top:thin, left:thin, bottom:thin, right:thin };
+    if(c.days.includes(today)) cell.font = { bold:true, color:{ argb:"FFB3261E" } }; if(c.wkend) cell.fill = solid("FFF3F1EA"); });
+  let r0 = 5;
+  G.pairs.forEach(p=>{ const t = p.t; const rp = g.getRow(r0), ra = g.getRow(r0+1);
+    rp.getCell(1).value = p.sub ? "↳ "+p.title : p.title; g.mergeCells(r0,1,r0+1,1);
+    rp.getCell(1).alignment = { vertical:"middle", horizontal:p.sub?"left":"center", wrapText:true, indent:p.sub?1:0 }; rp.getCell(1).font = { bold:!p.sub, italic:!!p.sub, size:p.sub?9:11 };
+    rp.getCell(2).value = "Planned"; rp.getCell(3).value = t.PS ? pgDmy(t.PS) : ""; rp.getCell(4).value = t.PE ? pgDmy(t.PE) : "no dates";
+    ra.getCell(2).value = "Actual"; ra.getCell(3).value = t.AS ? pgDmy(t.AS) : "—"; ra.getCell(4).value = pgTplEnd(t);
+    if(!t.started){ ra.getCell(4).fill = solid(F.L); ra.getCell(4).font = { bold:true, color:{ argb:"FFFFFFFF" } }; }
+    [rp,ra].forEach((row,k)=>{ for(let c=1;c<=4;c++) row.getCell(c).border = { top:thin, left:thin, right:thin, bottom: k ? { style:"medium", color:{ argb:"FFB4B0A2" } } : thin };
+      G.cols.forEach((c,i)=>{ const x = pgTplCell(t, c, k===0, G.daily); const cell = row.getCell(i+5);
+        cell.border = { top:thin, left:thin, bottom: k ? { style:"medium", color:{ argb:"FFB4B0A2" } } : thin, right: G.deliv && c.days.includes(G.deliv) ? { style:"medium", color:{ argb:"FF1C1F1A" } } : thin };
+        if(x){ cell.fill = solid(F[x.kind]); if(x.ch){ cell.value = x.ch; cell.alignment = { horizontal:"center" }; cell.font = { size:8, bold:true, color:{ argb: x.kind==="A"||x.kind==="L" ? "FFFFFFFF" : "FF3A3A3A" } }; } }
+        else if(c.wkend) cell.fill = solid("FFF7F6F1");
+        if(c.days.includes(today)) cell.border = { ...cell.border, left:{ style:"medium", color:{ argb:"FFB3261E" } } }; }); });
+    r0 += 2; });
+  const kr = g.getRow(r0+1); kr.getCell(1).value = "Key:"; kr.getCell(1).font = { bold:true };
+  [["P","Planned"],["A","Actual inside the planned span"],["L","Actual after the last planned day"],["N","Planned, not started"]].forEach(([k,t],i)=>{ const c = g.getRow(r0+2+i); c.getCell(2).fill = solid(F[k]); c.getCell(3).value = t; });
+  g.getRow(r0+6).getCell(1).value = "B BOM · P Purchase BOM · D Draft · A Approval · R Release · S / T RFI Stamping / Test · F at Our Factory · red edge = today · black edge = delivery";
+  g.getColumn(1).width = 22; g.getColumn(2).width = 9; g.getColumn(3).width = 11.5; g.getColumn(4).width = 11.5;
+  for(let i=5;i<G.cols.length+5;i++) g.getColumn(i).width = G.daily ? 3.6 : 5.5;
   const ws = wb.addWorksheet("Steps",{views:[{state:"frozen",ySplit:4}]});
   ws.addRow(head[0]).font = { bold:true, size:13 }; ws.addRow(head[1]); ws.addRow([]);
-  const hr = ws.addRow(stepHdr); hr.font = { bold:true }; hr.eachCell(c=>{ c.fill = { type:"pattern", pattern:"solid", fgColor:{argb:"FFEBE7DA"} }; });
+  const sh = ws.addRow(stepHdr); sh.font = { bold:true }; sh.eachCell(c=>{ c.fill = solid("FFEBE7DA"); });
   steps.forEach(s=>ws.addRow(s)); [22,14,22,14,14,14,14,22].forEach((w,i)=>ws.getColumn(i+1).width = w);
-  ["plan","prog"].forEach(m=>{
-    const g = wb.addWorksheet(m==="plan"?"Gantt Plan":"Gantt Progress",{views:[{state:"frozen",xSplit:2,ySplit:5}]});
-    g.addRow([head[0][0]+(m==="plan"?" — Plan":" — Progress")]).font = { bold:true, size:13 }; g.addRow(head[1]);
-    g.addRow([m==="plan"?"Cells = planned weeks of each step.":"Solid = done / running (actual dates) · light = planned, not started · red border = late."]).font = { italic:true, color:{argb:"FF6B6F60"} };
-    const mr = g.addRow(["","",...cols.map(()=>"")]); let ci = 3;
-    pgMonthBands(cols).forEach(b=>{ g.getCell(4,ci).value = b.lab; if(b.n>1) g.mergeCells(4,ci,4,ci+b.n-1); ci += b.n; });
-    mr.font = { bold:true }; mr.eachCell(c=>{ c.fill = { type:"pattern", pattern:"solid", fgColor:{argb:"FFEBE7DA"} }; });
-    const wr = g.addRow(["Material form","Progress",...cols.map(c=>c.top+"\n"+c.sub)]); wr.height = 30; wr.font = { bold:true, size:9 };
-    wr.eachCell((c,i)=>{ c.alignment = { wrapText:true, horizontal: i>2?"center":"left", vertical:"middle" }; c.fill = { type:"pattern", pattern:"solid", fgColor:{argb:"FFF7F5EE"} }; });
-    rows.forEach(r=>{ const pr = pgRowProgress(r,today);
-      const row = g.addRow([r.title+(r.f&&r.f.cert?"  ("+r.f.cert+")":""), pr.done+" of "+pr.n+" · "+pr.rs.s.t, ...cols.map(()=>"")]); row.height = 22;
-      cols.forEach((c,i)=>{ const f = pgCellStep(r,c.s,c.e,m,today); const cell = row.getCell(i+3);
-        const now = today>=c.s && today<=c.e;
-        if(f){ cell.fill = f.kind==="todo" ? { type:"pattern", pattern:"lightUp", fgColor:{argb:"FF"+pgHex(f.st.color)}, bgColor:{argb:"FFFFFFFF"} } : { type:"pattern", pattern:"solid", fgColor:{argb:"FF"+pgHex(f.st.color)} };
-          if(f.late) cell.border = { top:{style:"medium",color:{argb:"FFB3261E"}}, bottom:{style:"medium",color:{argb:"FFB3261E"}}, left:{style:"medium",color:{argb:"FFB3261E"}}, right:{style:"medium",color:{argb:"FFB3261E"}} };
-          const p = i>0 ? pgCellStep(r,cols[i-1].s,cols[i-1].e,m,today) : null; if(!p || p.st.key!==f.st.key){ cell.value = f.st.label; cell.font = { size:8, bold:true, color:{argb:f.kind==="todo"?"FF1C1F1A":"FFFFFFFF"} }; } }
-        else if(now) cell.fill = { type:"pattern", pattern:"solid", fgColor:{argb:"FFFFF8E0"} }; }); });
-    g.getColumn(1).width = 30; g.getColumn(2).width = 18; for(let i=3;i<cols.length+3;i++) g.getColumn(i).width = scale==="d" ? 4 : 8;
-  });
   const buf = await wb.xlsx.writeBuffer();
   const url = URL.createObjectURL(new Blob([buf],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}));
   const a = document.createElement("a"); a.href = url; a.download = pgFileBase(plan)+".xlsx"; document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); },1500);
 }
-function pgExportPdf(plan, rows, today){
+function pgExportPdf(plan, rows, today, scale, lvl){
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation:"landscape", unit:"mm", format:"a3" });
-  const W = 420, H = 297, M = 10, LW = 62, PW = 26, CW = 7, RH = 9;
-  const cols = pgCols(pgRange(plan, rows, today), "w");
-  const perPage = Math.max(4, Math.floor((W-2*M-LW-PW)/CW));
+  const W = 420, H = 297, M = 10, C0 = 44, C1 = 15, C2 = 20, C3 = 22, LW = C0+C1+C2+C3, RH = 6;
+  const G = pgTplGrid(plan, rows, today, scale==="d" ? "d" : "w", lvl), CW = G.daily ? 4.6 : 8;
+  const perPage = Math.max(4, Math.floor((W-2*M-LW)/CW));
   const rgb = (hex)=>{ const x = pgHex(hex); return [parseInt(x.slice(0,2),16),parseInt(x.slice(2,4),16),parseInt(x.slice(4,6),16)]; };
-  const tint = (hex,a)=> rgb(hex).map(v=>Math.round(255-(255-v)*a));
-  let first = true, page = 0;
-  ["plan","prog"].forEach(m=>{
-    for(let c0 = 0; c0<cols.length; c0 += perPage){
-      const cs = cols.slice(c0, c0+perPage);
-      if(!first) doc.addPage(); first = false; page++;
-      doc.setFont(undefined,"bold"); doc.setFontSize(14); doc.setTextColor(28,31,26);
-      doc.text("Procurement Gantt — "+plan.contract_number+" · "+(plan.client||"")+"   ("+(m==="plan"?"Plan":"Progress")+")", M, M+5);
+  const FILL = { P:rgb(PG_TPL.plan), A:rgb(PG_TPL.act), L:rgb(PG_TPL.late), N:rgb(PG_TPL.pend) };
+  let first = true;
+  for(let c0 = 0; c0<G.cols.length; c0 += perPage){
+    const cs = G.cols.slice(c0, c0+perPage), gx = M+LW;
+    const header = ()=>{
+      doc.setFont(undefined,"bold"); doc.setFontSize(14); doc.setTextColor(28,31,26); doc.text("Procurement Gantt — "+plan.contract_number+" · "+(plan.client||""), M, M+5);
       doc.setFont(undefined,"normal"); doc.setFontSize(9); doc.setTextColor(107,111,96);
-      doc.text("P O No: "+(plan.po_no||"to follow")+"   ·   Delivery: "+(plan.delivery_date?pgDmy(String(plan.delivery_date).slice(0,10)):"—")+"   ·   Printed "+pgDmy(today)+"   ·   Weeks "+cs[0].top+" to "+cs[cs.length-1].top, M, M+10);
-      // legend
-      let lx = M; const ly = M+16;
-      [...PG_STEPS.filter(s=>s[0]!=="rt").map(s=>[s[2],s[0]==="rs"?"RFI Stamping / Test (3.2)":s[1]]),[PG_CUSTOM_COLOR,"inserted step"]].forEach(([c,t])=>{ doc.setFillColor(...rgb(c)); doc.rect(lx,ly-3,5,3.5,"F"); doc.setTextColor(60,60,60); doc.text(t,lx+6.5,ly); lx += 10+doc.getTextWidth(t); });
-      doc.text(m==="plan"?"Cells = planned weeks":"Solid = done / running · light = planned, not started · red outline = late", lx+4, ly);
-      // header rows
-      let y = M+22; const gx = M+LW+PW;
-      doc.setFillColor(235,231,218); doc.rect(M,y,LW+PW+cs.length*CW,6,"F");
-      let bx = gx; pgMonthBands(cs).forEach(b=>{ doc.setFont(undefined,"bold"); doc.setFontSize(8); doc.setTextColor(28,31,26); doc.text(b.lab, bx+1, y+4.2); doc.setDrawColor(216,212,197); doc.line(bx,y,bx,y+6); bx += b.n*CW; });
-      y += 6; doc.setFillColor(247,245,238); doc.rect(M,y,LW+PW+cs.length*CW,8,"F");
-      doc.setFontSize(8); doc.text("Material form", M+1.5, y+5.5); doc.text("Progress", M+LW+1.5, y+5.5);
-      cs.forEach((c,i)=>{ const x = gx+i*CW; const now = today>=c.s && today<=c.e; doc.setTextColor(...(now?[179,38,30]:[28,31,26])); doc.setFont(undefined,now?"bold":"normal"); doc.setFontSize(6.3); doc.text(c.top.replace("Wk ","W"), x+CW/2, y+3.4, {align:"center"}); doc.setFontSize(5.4); doc.text(c.sub, x+CW/2, y+6.6, {align:"center"}); });
-      y += 8;
-      rows.forEach(r=>{
-        if(y+RH > H-M-6){ doc.addPage(); page++; y = M+10; }
-        const pr = pgRowProgress(r,today);
-        doc.setDrawColor(235,232,221); doc.line(M,y+RH,gx+cs.length*CW,y+RH);
-        doc.setTextColor(28,31,26); doc.setFont(undefined,"bold"); doc.setFontSize(8.5); doc.text(r.title+(r.f&&r.f.cert?"  ("+r.f.cert+")":""), M+1.5, y+4);
-        doc.setFont(undefined,"normal"); doc.setFontSize(6.8); doc.setTextColor(107,111,96); doc.text(pr.rs.step?"on "+pr.rs.step.label:"all steps done", M+1.5, y+7.6);
-        doc.setTextColor(28,31,26); doc.text(pr.done+" of "+pr.n+" done", M+LW+1.5, y+4); doc.setTextColor(...(pr.rs.s.k==="late"?[163,49,42]:[107,111,96])); doc.text(pr.rs.s.t, M+LW+1.5, y+7.6);
-        let prev = null;
-        cs.forEach((c,i)=>{ const x = gx+i*CW; const f = pgCellStep(r,c.s,c.e,m,today);
-          if(today>=c.s && today<=c.e){ doc.setFillColor(255,248,224); doc.rect(x,y,CW,RH,"F"); }
-          if(f){ doc.setFillColor(...(f.kind==="todo"?tint(f.st.color,0.35):f.kind==="plan"?tint(f.st.color,0.85):rgb(f.st.color))); doc.rect(x,y+1.2,CW,RH-2.4,"F");
-            if(f.late){ doc.setDrawColor(179,38,30); doc.setLineWidth(0.5); doc.rect(x+0.25,y+1.45,CW-0.5,RH-2.9,"S"); doc.setLineWidth(0.2); } }
-          prev = f; });
-        // step names, drawn after the cells so they sit on top
-        const fl = cs.map(c=>pgCellStep(r,c.s,c.e,m,today));
-        fl.forEach((f,i)=>{ if(!f || (i>0 && fl[i-1] && fl[i-1].st.key===f.st.key)) return; let n = 0; while(i+n<fl.length && fl[i+n] && fl[i+n].st.key===f.st.key) n++;
-          doc.setFont(undefined,"bold"); doc.setFontSize(5.6); doc.setTextColor(...(f.kind==="todo"?[28,31,26]:[255,255,255]));
-          let t = f.st.label; const room = n*CW-1.4; while(t.length>2 && doc.getTextWidth(t)>room) t = t.slice(0,-1); if(t!==f.st.label) t = t.slice(0,-1)+"…";
-          if(doc.getTextWidth(t)<=room) doc.text(t, gx+i*CW+0.8, y+RH/2+1); });
-        // today line
-        cs.forEach((c,i)=>{ if(today>=c.s && today<=c.e){ const x = gx+i*CW+(pgDd(c.s,today)+0.5)/7*CW; doc.setDrawColor(179,38,30); doc.setLineWidth(0.5); doc.line(x,y,x,y+RH); doc.setLineWidth(0.2); } });
-        y += RH; });
-    }
-  });
+      doc.text("P O No: "+(plan.po_no||"to follow")+"   ·   Delivery: "+(G.deliv?pgDmy(G.deliv):"—")+"   ·   Printed "+pgDmy(today)+"   ·   "+pgDmy(cs[0].s)+" to "+pgDmy(cs[cs.length-1].e), M, M+10);
+      let lx = M; const ly = M+16; doc.setFontSize(8);
+      [["P","Planned"],["A","Actual inside the planned span"],["L","Actual after the last planned day"],["N","Planned, not started"]].forEach(([k,t])=>{ doc.setFillColor(...FILL[k]); doc.setDrawColor(200,196,185); doc.rect(lx,ly-3,6,3.5,"FD"); doc.setTextColor(60,60,60); doc.text(t,lx+7.5,ly); lx += 12+doc.getTextWidth(t); });
+      doc.text("B BOM · P Purchase BOM · D Draft · A Approval · R Release · S/T RFI · F at Our Factory", lx+2, ly);
+      let y = M+21; doc.setFillColor(250,249,245); doc.rect(M,y,LW+cs.length*CW,5,"F");
+      let bx = gx; pgMonthBands(cs).forEach(b=>{ doc.setFont(undefined,"bold"); doc.setFontSize(8); doc.setTextColor(28,31,26); doc.text(b.lab, bx+1, y+3.6); doc.setDrawColor(216,212,197); doc.line(bx,y,bx,y+5); bx += b.n*CW; });
+      y += 5; doc.setFillColor(250,249,245); doc.rect(M,y,LW+cs.length*CW,5,"F");
+      doc.setFontSize(8); doc.text("Material Form", M+1.5, y+3.6); doc.text("Dates", M+C0+C1+1.5, y+3.6);
+      cs.forEach((c,i)=>{ const x = gx+i*CW; const now = c.days.includes(today); doc.setTextColor(...(now?[179,38,30]:[60,60,60])); doc.setFont(undefined,now?"bold":"normal"); doc.setFontSize(G.daily?6:6.5); doc.text(c.top, x+CW/2, y+3.6, {align:"center"}); });
+      return y+5; };
+    if(!first) doc.addPage(); first = false; let y = header();
+    G.pairs.forEach(p=>{ const t = p.t;
+      if(y+2*RH > H-M-6){ doc.addPage(); y = header(); }
+      doc.setDrawColor(217,214,204); doc.setLineWidth(0.15);
+      [0,1].forEach(k=>{ const yy = y+k*RH;
+        doc.setTextColor(28,31,26); doc.setFont(undefined,"normal"); doc.setFontSize(7.5);
+        doc.text(k?"Actual":"Planned", M+C0+1.2, yy+4.1);
+        doc.text(k ? (t.AS?pgDmy(t.AS):"—") : (t.PS?pgDmy(t.PS):"—"), M+C0+C1+1.2, yy+4.1);
+        if(k && !t.started){ doc.setFillColor(...FILL.L); doc.rect(M+C0+C1+C2,yy,C3,RH,"F"); doc.setTextColor(255,255,255); doc.setFont(undefined,"bold"); }
+        doc.text(k ? pgTplEnd(t) : (t.PE?pgDmy(t.PE):"no dates"), M+C0+C1+C2+1.2, yy+4.1);
+        cs.forEach((c,i)=>{ const x = gx+i*CW; const cx = pgTplCell(t, c, k===0, G.daily);
+          if(cx){ doc.setFillColor(...FILL[cx.kind]); doc.rect(x,yy,CW,RH,"F"); if(cx.ch){ doc.setFont(undefined,"bold"); doc.setFontSize(6); doc.setTextColor(...(cx.kind==="A"||cx.kind==="L"?[255,255,255]:[60,60,60])); doc.text(cx.ch, x+CW/2, yy+4, {align:"center"}); } }
+          else if(c.wkend){ doc.setFillColor(247,246,241); doc.rect(x,yy,CW,RH,"F"); }
+          doc.setDrawColor(228,225,214); doc.rect(x,yy,CW,RH,"S"); });
+        doc.setDrawColor(217,214,204); doc.line(M+C0,yy+RH,gx,yy+RH); });
+      doc.setTextColor(28,31,26); doc.setFont(undefined,p.sub?"normal":"bold"); doc.setFontSize(p.sub?7:8.5);
+      const tl = doc.splitTextToSize(p.sub ? "↳ "+p.title : p.title, C0-3); doc.text(tl.slice(0,2), M+1.5, y+RH-(tl.length>1?1.6:-1.2));
+      doc.setDrawColor(180,176,162); doc.setLineWidth(0.4); doc.line(M,y+2*RH,gx+cs.length*CW,y+2*RH); doc.setLineWidth(0.15);
+      cs.forEach((c,i)=>{ if(c.days.includes(today)){ const x = gx+i*CW+(G.daily?0:(pgDd(c.s,today)+0.5)/7*CW); doc.setDrawColor(179,38,30); doc.setLineWidth(0.5); doc.line(x,y,x,y+2*RH); doc.setLineWidth(0.15); }
+        if(G.deliv && c.days.includes(G.deliv)){ const x = gx+(i+1)*CW; doc.setDrawColor(28,31,26); doc.setLineWidth(0.5); doc.line(x,y,x,y+2*RH); doc.setLineWidth(0.15); } });
+      y += 2*RH; });
+  }
   const n = doc.internal.getNumberOfPages();
   for(let i=1;i<=n;i++){ doc.setPage(i); doc.setFontSize(7); doc.setTextColor(150); doc.text("Page "+i+" of "+n, W-M, H-5, {align:"right"}); doc.text(pdfFooterCompanyName(null)+" | Procurement Gantt "+plan.contract_number, M, H-5); }
   doc.save(pgFileBase(plan)+".pdf");
@@ -35351,6 +35495,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
   const [cur,setCur] = useState(()=>{ try{ return localStorage.getItem("pg_cur")||""; }catch(e){ return ""; } });
   const [view,setView] = useState(()=>{ try{ return localStorage.getItem("pg_view")||"chart"; }catch(e){ return "chart"; } });
   const [canEdit,setCanEdit] = useState(false);
+  const [storesOnly,setStoresOnly] = useState(false);   // 157: Stores enter the receipt dates only
   const [me,setMe] = useState("");
   const [ed,setEd] = useState(null);       // {d, extra, forms, removed:[keys], o, focus}
   const [ins,setIns] = useState(null);
@@ -35361,7 +35506,8 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
   const [q,setQ] = useState("");
   const [openForm,setOpenForm] = useState((initial && initial.form) || "");
   useEffect(()=>{ if(initial && initial.contract){ setCur(String(initial.contract)); try{ localStorage.setItem("pg_cur",String(initial.contract)); }catch(e){} } },[initial && initial.contract]);   // 147: opened from a card
-  const [chartMode,setChartMode] = useState("plan");   // 144: opens in Plan every time
+  const [chartMode,setChartMode] = useState("plan");   // 144: opens in Plan every time (157: the old Plan / Progress charts are replaced by the template chart)
+  const [tplLvl,setTplLvl] = useState("mat");   // 157: one row pair per material, or the steps too
   const [chartScale,setChartScale] = useState(()=>{ try{ return localStorage.getItem("pg_scale")||"w"; }catch(e){ return "w"; } });
   const [fullScreen,setFullScreen] = useState(false);
   const [exporting,setExporting] = useState("");
@@ -35372,11 +35518,11 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
   const [hist,setHist] = useState(null);       // 154: {key, label, form} history box
   const [stripOpen,setStripOpen] = useState({});   // 154: bars under each line item, folded unless opened
   const chartRef = useRef(null);
-  const jumpToday = ()=>{ const box = chartRef.current; if(!box) return; const th = box.querySelector('[data-pgtoday="1"]'); if(th) box.scrollLeft = Math.max(0, th.offsetLeft - 334 - box.clientWidth/4); };
-  useEffect(()=>{ const t = setTimeout(jumpToday,60); return ()=>clearTimeout(t); },[cur, chartScale, chartMode, fullScreen, view]);
+  const jumpToday = ()=>{ const box = chartRef.current; if(!box) return; const th = box.querySelector('[data-pgtoday="1"]'); if(th) box.scrollLeft = Math.max(0, th.offsetLeft - 390 - box.clientWidth/4); };
+  useEffect(()=>{ const t = setTimeout(jumpToday,60); return ()=>clearTimeout(t); },[cur, chartScale, chartMode, tplLvl, fullScreen, view]);
   useEffect(()=>{ if(!fullScreen) return; const k = (e)=>{ if(e.key==="Escape") setFullScreen(false); }; window.addEventListener("keydown",k); return ()=>window.removeEventListener("keydown",k); },[fullScreen]);
 
-  useEffect(()=>{ (async()=>{ const emp = await pgEmp(user); setMe((emp&&emp.employee_name)||user?.username||""); setCanEdit(await pgCanEdit(user)); })(); },[user && user.id]);
+  useEffect(()=>{ (async()=>{ const emp = await pgEmp(user); setMe((emp&&emp.employee_name)||user?.username||""); const ce = await pgCanEdit(user); setCanEdit(ce); setStoresOnly(!ce && await pgStoresCan(user)); })(); },[user && user.id]);
   const load = async()=>{
     setLoading(true);
     const { data: ps, error } = await sb.from("proc_plan_tbl").select("*").order("contract_number",{ascending:false});
@@ -35422,7 +35568,8 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
     x.info = { po:plan.po_no||"", deliv:plan.delivery_date?String(plan.delivery_date).slice(0,10):"" };   // 142: P O No and delivery editable here
     x.o = JSON.stringify({d:x.d,extra:x.extra,forms:x.forms,info:x.info}); setEd(x); setView("table");
     if(focus!==undefined) setTimeout(()=>{ const el = document.querySelector('[data-pgform="'+(focus||"General")+'"]'); if(el) el.scrollIntoView({behavior:"smooth",block:"start"}); },80); };
-  const setWhen = (key, which, val)=> setEd(x=>{ const d = {...x.d}; const r = {...(d[key]||{})}; r[which] = val;
+  const setWhen = (key, which, val)=>{ if(pgFutureAct(which, val, today)){ alert((which==="as"?"Started on":"Finished on")+" cannot be after today ("+pgDmy(today)+").\n\nFill it on the day it happens. What you expect goes in Plan: start / Plan: finish."); return; } setWhenOk(key, which, val); };
+  const setWhenOk = (key, which, val)=> setEd(x=>{ const d = {...x.d}; const r = {...(d[key]||{})}; r[which] = val;
     if(which==="pe" && val.v && !(r.ps && r.ps.v)){   // planned start left empty -> the step before's planned end
       const R = pgRows({...plan, forms:x.forms}, d, x.extra); let prev = null; R.forEach(rw=>rw.steps.forEach((s,i)=>{ if(s.key===key) prev = i ? rw.steps[i-1] : (rw.gen ? null : R[0].steps[R[0].steps.length-1]); }));
       const pv = prev && pgDue((d[prev.key]||{}).pe); r.ps = pv && pv<=val.v ? { t:"d", v:pv } : { t:val.t, v:val.t==="w" ? pgWs(val.v) : val.v }; }
@@ -35448,6 +35595,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
       for(const s of r.steps){ const ps = pgDue((D[s.key]||{}).ps), pe = pgDue((D[s.key]||{}).pe), as = pgDue((D[s.key]||{}).as), ae = pgDue((D[s.key]||{}).ae);
         if(ps && pe && pe<ps){ alert(r.title+" — "+s.label+": the planned end ("+pgDmy(pe)+") is before its start ("+pgDmy(ps)+")."); return false; }
         if(as && ae && ae<as){ alert(r.title+" — "+s.label+": the actual end ("+pgDmy(ae)+") is before its actual start ("+pgDmy(as)+")."); return false; }
+        { const o = dataOf(plan).d[s.key]||{}; for(const k of ["as","ae"]){ const v = (D[s.key]||{})[k]; if(pgFutureAct(k, v, today) && JSON.stringify(v)!==JSON.stringify(o[k]||PG_NONE)){ alert(r.title+" — "+s.label+": "+(k==="as"?"Started on":"Finished on")+" ("+pgShow(v)+") is after today. It is filled on the day it happens."); return false; } } }   // 157
         if(prev && pe && prev.pe && pe<prev.pe){ alert(r.title+": "+s.label+" (ends "+pgDmy(pe)+") is planned to end before "+prev.label+" (ends "+pgDmy(prev.pe)+").\n\nSteps go in order: PO Draft → PO Approval → PO Release → RFI → at Our Factory."); return false; }
         if(pe) prev = { pe, label:s.label }; } }
     setBusy(true);
@@ -35576,13 +35724,16 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
     !plans.length ? h("div",{style:{padding:12,fontSize:12,color:colors.mutedLight}},"No plans yet. A plan is made when the Technical Head approves a contract's Production BOM (on the Sale Order), or with Upload BOM.") : null);
 
   const hb = (l,v)=> h("div",{style:{padding:"8px 12px",borderRight:"1px solid #ebe8dd",borderBottom:"1px solid #ebe8dd"}},h("div",{style:{fontSize:10.5,color:colors.muted,textTransform:"uppercase",letterSpacing:".05em"}},l),h("div",{style:{fontSize:13.5,fontWeight:700,marginTop:2}},v));
-  const banner = !plan ? null : ed ? h("div",{style:{margin:"10px 12px 0",borderRadius:7,padding:"8px 12px",fontSize:12.5,background:"#fff4d6",color:"#854f0b"}},h("b",null,"Editing dates."),"  Each step: planned start and end, actual start and end — a date or a week (start = its Sunday, end = its Saturday). A planned start left empty takes the end of the step before. Save dates when done.")
+  const banner = !plan ? null : ed ? h("div",{style:{margin:"10px 12px 0",borderRadius:7,padding:"8px 12px",fontSize:12.5,background:"#fff4d6",color:"#854f0b"}},h("b",null,storesOnly && !canEdit ? "Entering receipt dates." : "Editing dates."),storesOnly && !canEdit ? "  Stores fill \u201cat Our Factory\u201d: Arrived on (the day the material first comes in) and Received in full on. Other dates are Purchase\u2019s. Save dates when done." : "  Each step: Plan: start and finish (what you expect), Started on and Finished on (what has happened \u2014 filled on the day, never in advance). A date or a week (start = its Sunday, finish = its Saturday). A Plan: start left empty takes the finish of the step before. Save dates when done.")
     : st.miss ? h("div",{style:{margin:"10px 12px 0",borderRadius:7,padding:"8px 12px",fontSize:12.5,background:"#fff4d6",color:"#854f0b",display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}},h("b",null,"⚠ "+st.miss+" steps need dates."),"Fill them so we can see where we are behind.",canEdit?h("button",{style:{...btnSmall,marginLeft:"auto",background:"#1c1f1a",color:"#fff",borderColor:"#1c1f1a",fontWeight:700},onClick:()=>openEdit()},"Fill dates now"):null)
     : st.late ? h("div",{style:{margin:"10px 12px 0",borderRadius:7,padding:"8px 12px",fontSize:12.5,background:"#fdecea",color:"#a3312a"}},h("b",null,st.late+" step"+(st.late>1?"s are":" is")+" behind"),"  — worst by "+st.maxl+" days: "+shown.map(r=>{ const rs = pgRowState(r,today); return rs.s.k==="late" ? r.title+" ("+rs.step.label+", "+rs.s.t+")" : null; }).filter(Boolean).join(", "))
     : h("div",{style:{margin:"10px 12px 0",borderRadius:7,padding:"8px 12px",fontSize:12.5,background:"#e4f3ed",color:"#0f6b4f"}},h("b",null,"On track."));
-  const legend = h("div",{style:{display:"flex",gap:12,flexWrap:"wrap",fontSize:11,color:colors.muted,padding:"8px 12px"}},
+  const sw = (bg, t, extra)=> h("span",{key:t},h("span",{style:{display:"inline-block",width:16,height:10,border:"1px solid #d9d6cc",background:bg,verticalAlign:"middle",marginRight:4,...(extra||{})}}),t);
+  const legend = (!ed && view==="chart") ? h("div",{style:{display:"flex",gap:12,flexWrap:"wrap",fontSize:11,color:colors.muted,padding:"8px 12px"}},
+    sw(PG_TPL.plan,"Planned"), sw(PG_TPL.act,"Actual — inside the planned span"), sw(PG_TPL.late,"Actual — after the last planned day"), sw(PG_TPL.pend,"Planned, not started"),
+    h("span",{style:{borderLeft:"2px solid #b3261e",paddingLeft:4}},"today"), h("span",{style:{borderRight:"2px solid #1c1f1a",paddingRight:4}},"delivery"),
+    h("span",null,"B BOM · P Purchase BOM · D Draft · A Approval · R Release · S / T RFI Stamping / Test · F at Our Factory")) : h("div",{style:{display:"flex",gap:12,flexWrap:"wrap",fontSize:11,color:colors.muted,padding:"8px 12px"}},
     [...PG_STEPS.filter(s=>s[0]!=="rt").map(s=>[s[2],s[0]==="rs"?"RFI Stamping / Test (3.2)":s[1]]),[PG_CUSTOM_COLOR,"inserted step"]].map(([c,t])=>h("span",{key:t},h("span",{style:{display:"inline-block",width:14,height:9,borderRadius:2,background:c,verticalAlign:"middle",marginRight:4}}),t)),
-    h("span",null, chartMode==="prog" ? "solid = done / running (actual dates) · striped = planned, not started · red outline = late" : "cells = planned weeks of each step"),
     h("span",{style:{borderLeft:"2px solid #b3261e",paddingLeft:4}},"today"),h("span",{style:{borderLeft:"2px dashed #1c1f1a",paddingLeft:4}},"delivery"));
 
   const table = ()=>{ const weeks = weeksFor(plan); const td = (x,s)=> h("td",{style:{padding:"5px 7px",borderBottom:"1px solid #ebe8dd",fontSize:12,...(s||{})}},x);
@@ -35600,25 +35751,30 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
         h("b",null,r.title)," ",f ? pgCertPill(f.cert) : null,
         h("span",{onClick:()=>setStripOpen(o=>({...o,[r.form||"General"]:!o[r.form||"General"]})),title:"Show or fold the bars of this line item",style:{fontSize:11,color:"#0f7a5c",fontWeight:700,marginLeft:8,cursor:"pointer"}},(stripOpen[r.form||"General"]?"\u25be":"\u25b8")+" Bars"),   // 154
         f && f.lines ? h("span",{style:{fontSize:11,color:colors.muted,marginLeft:6,cursor:"pointer",textDecoration:"underline dotted"},onClick:()=>setOpenForm(o=>o===r.form?"":r.form)},f.lines.length+" BOM lines "+(openForm===r.form?"▾":"▸")) : null,
-        ed && f && !PG_NO_RFI.includes(f.form) ? h("label",{style:{marginLeft:12,fontSize:11.5,display:"inline-flex",gap:4,alignItems:"center"}},h("input",{type:"checkbox",checked:!!f.rfi,onChange:e=>setRfi(f.form,e.target.checked)}),"3.2 — RFI Stamping and RFI Test") : null)));
+        ed && canEdit && f && !PG_NO_RFI.includes(f.form) ? h("label",{style:{marginLeft:12,fontSize:11.5,display:"inline-flex",gap:4,alignItems:"center"}},h("input",{type:"checkbox",checked:!!f.rfi,onChange:e=>setRfi(f.form,e.target.checked)}),"3.2 — RFI Stamping and RFI Test") : null)));
       if(f && f.lines && openForm===r.form) f.lines.forEach((l,i)=>out.push(h("tr",{key:"l"+r.form+i},h("td",{colSpan:6,style:{padding:"3px 8px 3px 24px",fontSize:11,color:colors.muted,background:"#faf9f5",borderBottom:"1px solid #f0eee6"}},
         (l.sheet?l.sheet+" · ":"")+(l.part?l.part+" · ":"")+l.desc+(l.qty!==""&&l.qty!=null?" · "+l.qty+" "+(l.uom||""):"")," ",pgCertPill(l.cert)))));
       r.steps.forEach(s=>{ const ss = pgStat(s,today); const v = ed ? (ed.d[s.key]||{}) : null;
         out.push(h("tr",{key:s.key,"data-pgline":s.key,style:{boxShadow:ss.k==="late"?"inset 3px 0 0 #b3261e":"none"}},
           td([h("span",{key:"c",style:{display:"inline-block",width:10,height:10,borderRadius:2,background:s.color,marginRight:6,verticalAlign:"middle"}}),s.label,
             s.custom ? h("span",{key:"i",style:{fontSize:10,fontWeight:700,borderRadius:8,padding:"1px 6px",background:"#eeece4",color:colors.muted,marginLeft:5}},"inserted") : null,
-            ed && s.custom ? h("button",{key:"x",title:"Remove this inserted step",onClick:()=>setEd(x=>({...x, extra:x.extra.filter(y=>y.key!==s.key), removed:[...x.removed,s.key]})),style:{...btnSmall,fontSize:11,padding:"1px 6px",marginLeft:6,color:colors.danger,borderColor:colors.danger}},"✕") : null],{paddingLeft:16}),
+            ed && canEdit && s.custom ? h("button",{key:"x",title:"Remove this inserted step",onClick:()=>setEd(x=>({...x, extra:x.extra.filter(y=>y.key!==s.key), removed:[...x.removed,s.key]})),style:{...btnSmall,fontSize:11,padding:"1px 6px",marginLeft:6,color:colors.danger,borderColor:colors.danger}},"✕") : null],{paddingLeft:16}),
           ...[["ps","start","plan","s"],["pe","end","plan","e"],["as","start","act","s"],["ae","end","act","e"]].map(([k,kind,g,se])=>{
-            const locked = ed && g==="plan" && pgDue((oldD[s.key]||{})[k]) && !mayMove(s.group||"");   // 154: only the holder moves a planned date
+            const locked = ed && ((g==="plan" && pgDue((oldD[s.key]||{})[k]) && !mayMove(s.group||"")) || (storesOnly && !canEdit && !pgStoresKey(s.key,k)));   // 154: only the holder moves a planned date; 157: Stores only the receipt dates
             return td(ed && !locked ? [h(PgWhen,{key:"w",value:v[k],weeks,kind,onChange:val=>setWhen(s.key,k,val)}), g==="plan" ? revChip(s.key,k,s.label,r.title) : null]
-              : [locked ? h("span",{key:"l",title:"Only "+(pgHolder(ptasks,plan.id,s.group||"")||"the holder of this material's card")+" can move this planned date",style:{color:colors.muted}},"\ud83d\udd12 ") : null,
+              : [locked ? h("span",{key:"l",title:storesOnly && !canEdit ? "Purchase enter this date — Stores enter the receipt dates (at Our Factory, actual)" : "Only "+(pgHolder(ptasks,plan.id,s.group||"")||"the holder of this material's card")+" can move this planned date",style:{color:colors.muted}},"\ud83d\udd12 ") : null,
                  pgShow(s[g][se]) || h("span",{key:"e",style:{color:g==="plan"?"#854f0b":colors.mutedLight}},"—"), g==="plan" ? revChip(s.key,k,s.label,r.title) : null],{whiteSpace:"nowrap",borderLeft:k==="ps"||k==="as"?"1px solid #ebe8dd":"none"}); }),
           td(h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:9,padding:"2px 7px",background:ss.bg,color:ss.fg,whiteSpace:"nowrap"}},ss.t)))); });
       if(stripOpen[r.form||"General"]) out.push(h("tr",{key:"bars"+r.form},h("td",{colSpan:6,style:{padding:"2px 10px 8px",borderBottom:"1px solid #ebe8dd"}},
         h(PgStrip,{ row:r, range, today, delivery:deliv, baseOf:(key)=>{ const cur = pgDue((r.steps.find(x=>x.key===key)||{plan:{e:PG_NONE}}).plan.e); const b = pgBase(chg, plan.id, key, "pe", cur); return b; } })))); });
     const th = (x,s)=> h("th",{style:{textAlign:"left",fontSize:11,color:colors.muted,padding:"6px 7px",borderBottom:"1px solid "+colors.border,background:"#faf9f5",whiteSpace:"nowrap",...(s||{})}},x);
     return h("div",{style:{overflowX:"auto",borderTop:"1px solid "+colors.border}},h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:ed?1100:760}},
-      h("thead",null,h("tr",null,th("Step"),th("Planned start",{borderLeft:"1px solid #ebe8dd"}),th("Planned end"),th("Actual start",{borderLeft:"1px solid #ebe8dd"}),th("Actual end"),th("Status"))),
+      // 158: plan columns pale yellow, done columns green with "fill on the day it happens" (Started on / Finished on — never in advance)
+      h("thead",null,h("tr",null,th("Step"),
+        th("Plan: start",{borderLeft:"1px solid #ebe8dd",background:PG_TPL.plan}),th("Plan: finish",{background:PG_TPL.plan}),
+        th([storesOnly && !canEdit ? "Arrived on" : "Started on",h("div",{key:"n",style:{fontSize:9.5,fontWeight:400,color:"#0f6b4f"}},"fill on the day it happens")],{borderLeft:"1px solid #ebe8dd",background:"#dcebd5",color:"#1d3a14"}),
+        th([storesOnly && !canEdit ? "Received in full on" : "Finished on",h("div",{key:"n",style:{fontSize:9.5,fontWeight:400,color:"#0f6b4f"}},"fill on the day it happens")],{background:"#dcebd5",color:"#1d3a14"}),
+        th("Status"))),
       h("tbody",null,out))); };
 
   const seg = (opts, val, set)=> h("span",{style:{display:"inline-flex",border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden"}},
@@ -35626,8 +35782,8 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
   const main = !plan ? h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:20,fontSize:12.5,color:colors.muted}},loading?"Loading…":"Pick a contract on the left.")
     : h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,overflow:"hidden",minWidth:0}},
       h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",borderBottom:"1px solid "+colors.border}},
-        hb("Client",plan.client||"—"), hb("Contract",plan.contract_number), hb("P O No", ed ? h("input",{value:ed.info.po,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,info:{...x.info,po:v}})); },placeholder:"to follow",style:{...inputStyle,padding:"3px 6px",fontSize:12.5,width:150}}) : (plan.po_no||h("span",{style:{color:"#854f0b",fontWeight:400}},"to follow"))), hb("Date",plan.contract_date?pgDmy(String(plan.contract_date).slice(0,10)):"—"),
-        hb("Certification", certSummary(plan)), hb("Delivery", ed ? h("input",{type:"date",value:ed.info.deliv,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,info:{...x.info,deliv:v}})); },style:{...inputStyle,padding:"3px 6px",fontSize:12.5,width:150}}) : (plan.delivery_date?pgDmy(String(plan.delivery_date).slice(0,10)):h("span",{style:{color:"#854f0b",fontWeight:400}},"to follow"))),
+        hb("Client",plan.client||"—"), hb("Contract",plan.contract_number), hb("P O No", ed && canEdit ? h("input",{value:ed.info.po,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,info:{...x.info,po:v}})); },placeholder:"to follow",style:{...inputStyle,padding:"3px 6px",fontSize:12.5,width:150}}) : (plan.po_no||h("span",{style:{color:"#854f0b",fontWeight:400}},"to follow"))), hb("Date",plan.contract_date?pgDmy(String(plan.contract_date).slice(0,10)):"—"),
+        hb("Certification", certSummary(plan)), hb("Delivery", ed && canEdit ? h("input",{type:"date",value:ed.info.deliv,onChange:e=>{ const v=e.target.value; setEd(x=>({...x,info:{...x.info,deliv:v}})); },style:{...inputStyle,padding:"3px 6px",fontSize:12.5,width:150}}) : (plan.delivery_date?pgDmy(String(plan.delivery_date).slice(0,10)):h("span",{style:{color:"#854f0b",fontWeight:400}},"to follow"))),
         hb("Task card", card ? (card.assignee||"Unassigned pile") : "—"),
         h("div",{style:{padding:"8px 12px",gridColumn:"span 2",borderBottom:"1px solid #ebe8dd"}},h("div",{style:{fontSize:10.5,color:colors.muted,textTransform:"uppercase",letterSpacing:".05em"}},"Source"),
           h("div",{style:{fontSize:12.5,marginTop:2}},plan.source==="Uploaded BOM" ? ["Uploaded BOM — ",h("a",{key:"f",href:"#",onClick:e=>{ e.preventDefault(); openFile(plan); }},plan.bom_file_name||"file")] : "Production BOM approved "+(plan.prod_bom_approved_at?fmtDMY(plan.prod_bom_approved_at):"")+(plan.prod_bom_approved_by?" · "+plan.prod_bom_approved_by:""),
@@ -35642,18 +35798,20 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
               (onOpenCard && card) ? h("button",{key:"t",style:{...btnSmall,fontWeight:700,color:"#0f7a5c",borderColor:"#0f7a5c"},onClick:()=>onOpenCard(card.id, plan.contract_number),title:"Open the procurement card ("+((card&&card.assignee)||"Unassigned pile")+")"},"Open card") :
               onGoToTab ? h("button",{key:"t",style:btnSmall,onClick:()=>onGoToTab("task_board"),title:"The procurement card is on "+((card&&card.assignee)||"the")+" board"},"Task card ↗") : null,
               h("button",{key:"i",style:btnSecondary,onClick:openIns},"Insert Step"),
-              h("button",{key:"e",style:btnPrimary,onClick:()=>openEdit()},"Edit dates")] : h("span",{style:{fontSize:11.5,color:colors.mutedLight}},"Read only — Purchase edit this plan")),
+              h("button",{key:"e",style:btnPrimary,onClick:()=>openEdit()},"Edit dates")]
+          : storesOnly ? [h("span",{key:"n",style:{fontSize:11.5,color:colors.muted}},"Stores enter the receipt dates"), h("button",{key:"e",style:btnPrimary,onClick:()=>openEdit()},"Enter receipt dates")]
+          : h("span",{style:{fontSize:11.5,color:colors.mutedLight}},"Read only — Purchase edit this plan")),
       banner, legend,
       // 144: chart controls — Plan / Progress, Weeks / Days, Jump to today, Full screen, downloads
       (!ed && view==="chart") ? h("div",{style:{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",padding:"0 12px 8px",fontSize:11.5,color:colors.muted}},
-        "View:", seg([["plan","Plan"],["prog","Progress"]], chartMode, setChartMode),
+        "Rows:", seg([["mat","One row per material"],["step","Show the steps"]], tplLvl, setTplLvl),
         h("span",{style:{marginLeft:8}},"Show:"), seg([["w","Weeks"],["d","Days"]], chartScale, (v)=>{ setChartScale(v); try{ localStorage.setItem("pg_scale",v); }catch(e){} }),
         h("button",{style:{...btnSmall,marginLeft:8},onClick:jumpToday},"Jump to today"),
         h("span",{style:{marginLeft:"auto",display:"inline-flex",gap:6}},
-          h("button",{style:btnSmall,disabled:!!exporting,onClick:async()=>{ setExporting("x"); try{ await pgExportExcel(plan, shown, today, chartScale); }catch(e){ alert("Could not make the Excel file:\n\n"+(e.message||e)); } finally{ setExporting(""); } }},exporting==="x"?"Making Excel…":"Download Excel"),
-          h("button",{style:btnSmall,disabled:!!exporting,onClick:()=>{ setExporting("p"); setTimeout(()=>{ try{ pgExportPdf(plan, shown, today); }catch(e){ alert("Could not make the PDF:\n\n"+(e.message||e)); } finally{ setExporting(""); } },30); }},exporting==="p"?"Making PDF…":"Download PDF"),
+          h("button",{style:btnSmall,disabled:!!exporting,onClick:async()=>{ setExporting("x"); try{ await pgExportExcel(plan, shown, today, chartScale, tplLvl); }catch(e){ alert("Could not make the Excel file:\n\n"+(e.message||e)); } finally{ setExporting(""); } }},exporting==="x"?"Making Excel…":"Download Excel"),
+          h("button",{style:btnSmall,disabled:!!exporting,onClick:()=>{ setExporting("p"); setTimeout(()=>{ try{ pgExportPdf(plan, shown, today, chartScale, tplLvl); }catch(e){ alert("Could not make the PDF:\n\n"+(e.message||e)); } finally{ setExporting(""); } },30); }},exporting==="p"?"Making PDF…":"Download PDF"),
           h("button",{style:{...btnSmall,fontWeight:700},onClick:()=>setFullScreen(f=>!f)},fullScreen?"Exit full screen":"Full screen"))) : null,
-      (!ed && view==="chart") ? h(PgChart,{plan, rows:shown, today, mode:chartMode, scale:chartScale, full:fullScreen, scrollRef:chartRef, onRow:(r)=>{ if(canEdit) openEdit(r.form); }}) : table());
+      (!ed && view==="chart") ? h(PgTplChart,{plan, rows:shown, today, scale:chartScale, lvl:tplLvl, full:fullScreen, scrollRef:chartRef, onRow:(canEdit||storesOnly) ? (r)=>openEdit(r.form) : null}) : table());
 
   const modal = (title, body, foot, onClose, wide)=> h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:1300,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"30px 16px",overflow:"auto"}},
     h("div",{style:{background:"#fff",borderRadius:10,width:wide?1100:600,maxWidth:"100%",padding:"16px 18px"}},
@@ -35715,8 +35873,8 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
         fl("On the row of",h("select",{value:ins.form,onChange:e=>setIns(x=>({...x,form:e.target.value,pred:""})),style:inputStyle},h("option",{value:""},"General"),pgFormNames(plan).map(f=>h("option",{key:f,value:f},f)))),
         fl("Comes after",h("select",{value:ins.pred,onChange:e=>setIns(x=>({...x,pred:e.target.value})),style:inputStyle},h("option",{value:""},"the last step of the row"),
           ((rowsOf(plan).find(r=>(r.form||"")===ins.form)||{steps:[]}).steps).map(s=>h("option",{key:s.key,value:s.key},s.label)))),
-        fl("Planned start (empty = same as the end)",h(PgWhen,{value:ins.ps,weeks:weeksFor(plan),kind:"start",onChange:v=>setIns(x=>({...x,ps:v}))})),
-        fl("Planned end *",h(PgWhen,{value:ins.pe,weeks:weeksFor(plan),kind:"end",onChange:v=>setIns(x=>({...x,pe:v}))}))),
+        fl("Plan: start (empty = same as the finish)",h(PgWhen,{value:ins.ps,weeks:weeksFor(plan),kind:"start",onChange:v=>setIns(x=>({...x,ps:v}))})),
+        fl("Plan: finish *",h(PgWhen,{value:ins.pe,weeks:weeksFor(plan),kind:"end",onChange:v=>setIns(x=>({...x,pe:v}))}))),
       [h("button",{key:"c",style:btnSecondary,onClick:closeIns},"Cancel"),h("button",{key:"s",style:{...btnPrimary,background:"#0f7a5c"},onClick:saveIns},"Insert Step")], closeIns) : null,
     up ? modal("Upload BOM for a contract", upBody(),
       [h("button",{key:"c",style:btnSecondary,onClick:closeUp},"Cancel"),h("button",{key:"s",style:{...btnPrimary,background:"#0f7a5c"},disabled:busy,onClick:saveUp},busy?"Making…":"Make the Gantt")], closeUp, true) : null,
@@ -44015,6 +44173,8 @@ function App() {
     setUser(u);
     try{ if(u) sessionStorage.setItem("flometriq_user",JSON.stringify(u)); else sessionStorage.removeItem("flometriq_user"); }catch(e){}
   };
+  // 158: the role is read again when the app loads, so a role changed by the Super Admin applies without logging out
+  useEffect(()=>{ if(!user || !user.id) return; (async()=>{ try{ const { data } = await sb.from("app_users").select("role").eq("id",user.id).maybeSingle(); if(data && data.role && data.role!==user.role) setUserPersisted({ ...user, role:data.role }); }catch(e){} })(); },[user && user.id]);
   const setSessionCompanyIdPersisted = (id)=>{
     setSessionCompanyId(id);
     try{ if(id) sessionStorage.setItem("flometriq_session_company",id); else sessionStorage.removeItem("flometriq_session_company"); }catch(e){}
@@ -47396,6 +47556,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
   const [abOrder,setAbOrder] = useState(()=>{ try{ return JSON.parse(localStorage.getItem("ab_order")||"[]"); }catch(e){ return []; } });
   const [abDrag,setAbDrag] = useState("");
   const [listTbl,setListTbl] = useState(null);     // 128: {key,title,pile} — one list shown as a table
+  const [doneList,setDoneList] = useState(null);   // 158: {name, span} — a person's completed cards, from the chip on their column
   const [xfer,setXfer] = useState(null);           // 145: transfer cards {fd, fp, td, tp, only, ticks:{id:true}, keep, due, why, busy}
   const SORT_KEY = "tb_sort_"+(user?.id||user?.username||"");
   const [sortPref,setSortPref] = useState(()=>{ try{ return JSON.parse(localStorage.getItem(SORT_KEY)||"null") || {global:"due",lists:{}}; }catch(e){ return {global:"due",lists:{}}; } });
@@ -48011,6 +48172,34 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
           h("button",{onClick:go,disabled:x.busy||!x.tp||same||!picked.length,style:{...btnPrimary,opacity:(x.busy||!x.tp||same||!picked.length)?0.5:1}},x.busy?"Transferring…":"Transfer "+(picked.length||"")+" card"+(picked.length===1?"":"s")),
           h("button",{onClick:close,disabled:x.busy,style:btnSmall},"Close"))));
   };
+  // 158: completed cards of a person — chip on the column, list on click (this week / this month / last 90 days)
+  const doneOf = (name, span)=>{ const from = span==="week" ? (()=>{ const td = new Date(today+"T12:00:00"); td.setDate(td.getDate()-((td.getDay()+6)%7)); return toISODate(td); })() : span==="month" ? today.slice(0,8)+"01" : addDaysISO(today,-90);
+    return tasks.filter(t=>t.assignee===name && t.status==="done" && !t.parent_id && String(t.approved_at||t.moved_at||"").slice(0,10)>=from)
+      .sort((a,b)=>String(b.approved_at||b.moved_at||"").localeCompare(String(a.approved_at||a.moved_at||""))); };
+  const doneChip = (name)=>{ const n = doneOf(name,"week").length;
+    return h("button",{"data-donechip":name,onClick:e=>{ e.stopPropagation(); setDoneList({ name, span:"week" }); },title:"Cards "+name+" completed — click for the list",
+      style:{display:"inline-flex",alignItems:"center",gap:4,fontSize:10.5,fontWeight:700,border:"1px solid #0f7a5c",background:n?"#e3f2ec":"#fff",color:"#0f7a5c",borderRadius:9,padding:"1px 8px",marginBottom:6,cursor:"pointer"}},"\u2713 "+n+" done this week"); };
+  const doneListModal = ()=>{
+    if(!doneList) return null;
+    const rows = doneOf(doneList.name, doneList.span);
+    const td = (x,st)=> h("td",{style:{padding:"6px 8px",borderBottom:"1px solid #ebe8dd",fontSize:12,verticalAlign:"top",...(st||{})}},x);
+    const th = (x)=> h("th",{style:{textAlign:"left",padding:"6px 8px",fontSize:11,color:colors.muted,background:"#faf9f5",borderBottom:"1px solid "+colors.border,whiteSpace:"nowrap"}},x);
+    return h("div",{onClick:e=>{ if(e.target===e.currentTarget) setDoneList(null); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1150,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"60px 12px",overflow:"auto"}},
+      h("div",{"data-donelist":"1",style:{background:"#fff",borderRadius:9,width:860,maxWidth:"100%",padding:"14px 16px"}},
+        h("div",{style:{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:10}},
+          h("b",{style:{fontSize:14,flex:1}},"Completed \u2014 "+doneList.name+" ("+rows.length+")"),
+          h("span",{style:{display:"inline-flex",border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden"}},
+            [["week","This week"],["month","This month"],["q","Last 90 days"]].map(([v,l])=>h("button",{key:v,onClick:()=>setDoneList(x=>({...x,span:v})),style:{border:0,padding:"4px 10px",fontSize:11.5,cursor:"pointer",background:doneList.span===v?"#1c1f1a":"#fff",color:doneList.span===v?"#fff":colors.text,fontWeight:doneList.span===v?700:400}},l))),
+          h("button",{onClick:()=>{ const n = doneList.name; setDoneList(null); openBoard(n); },style:btnSmall,title:"Open "+doneList.name+"'s board (Completed lists at the bottom)"},"Open board"),
+          h("button",{onClick:()=>setDoneList(null),style:btnSmall},"Close")),
+        rows.length ? h("div",{style:{maxHeight:"60vh",overflow:"auto"}},h("table",{style:{borderCollapse:"collapse",width:"100%"}},
+          h("thead",null,h("tr",null,th("Completed on"),th("Card"),th("Customer / ref"),th("Task due"),th("On time?"))),
+          h("tbody",null,rows.map(t=>{ const dn = String(t.approved_at||t.moved_at||"").slice(0,10), du = d10(t.due_date); const late = du && dn && dn>du ? Math.round((new Date(dn+"T12:00:00")-new Date(du+"T12:00:00"))/864e5) : 0;
+            return h("tr",{key:t.id,"data-donerow":t.id,onClick:()=>{ setDoneList(null); setOpenId(t.id); },style:{cursor:"pointer"},title:"Open the card"},
+              td(dn?fmtDMY(dn):"\u2014",{whiteSpace:"nowrap"}), td(h("b",null,t.title)), td([t.customer||"",t.ref?" \u00b7 "+t.ref:""].join("")||"\u2014",{color:colors.muted}),
+              td(du?fmtDMY(du):"\u2014",{whiteSpace:"nowrap"}), td(!du?"\u2014":late?h("span",{style:{color:"#a3312a",fontWeight:700}},late+" d late"):h("span",{style:{color:"#0f6b4f",fontWeight:700}},"on time"))); }))))
+          : h("div",{style:{fontSize:12.5,color:colors.mutedLight,padding:"18px 4px",textAlign:"center"}},"Nothing completed "+(doneList.span==="week"?"this week":doneList.span==="month"?"this month":"in the last 90 days")+".")));
+  };
   const listTableModal = ()=>{
     if(!listTbl) return null;
     // 151: Summary (one row per card, sub-tasks counted) or Detailed (each card, then its sub-tasks) — asked when the table opens
@@ -48158,6 +48347,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
               xferDepts.includes(dept) && list.length ? h("button",{onClick:e=>{ e.stopPropagation(); openXfer(dept, un ? TASK_PILE : p); },title:"Transfer this list to another person or department",style:{...btnSmall,fontSize:11,padding:"0 6px",lineHeight:"18px",color:"#0f7a5c"}},"\u21c4") : null),   // 145
             !un ? h("div",{style:{marginBottom:4}},(()=>{ const g = grpLabel(p); return h("span",{style:{fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",...(g==="Home"?{background:"#1f3b33",color:"#fff"}:g==="Post"?{border:"1px dashed #0f7a5c",color:"#0f7a5c"}:{background:"#e4f3ed",color:"#0f7a5c"})}},g); })()) : null,   // 133
             !un ? loadBadge(p) : null,
+            !un ? doneChip(p) : null,
             !un ? h("div",{style:{display:"flex",gap:5,flexWrap:"wrap",marginBottom:6}},
               [["today","today"],["overdue","overdue"],["progress","in progress"],["approval","for approval"]].filter(([k])=>cnt(k)).map(([k,l])=>h("span",{key:k,style:{fontSize:10.5,color:"#fff",background:TASK_STAGES.find(s=>s.key===k).color,borderRadius:8,padding:"1px 6px"}},cnt(k)+" "+l))) : null,
             listBar(lk, list, un ? "Unassigned \u2014 "+dept : p, un),
@@ -48207,6 +48397,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
         h("div",{style:{display:"flex",alignItems:"center",gap:6,fontWeight:700,fontSize:12,marginBottom:6}},
           isPile ? h("span",null,"📥 Unassigned") : h("span",{onDoubleClick:()=>openBoard(p),title:"Double-click to open "+p+"'s board",style:{cursor:"pointer"}},p),
           h("span",{style:{marginLeft:"auto",fontWeight:400,fontSize:11,background:"#fff",borderRadius:9,padding:"0 7px",color:colors.muted}},list.length)),
+        isPile ? null : doneChip(p),   // 158
         list.length ? sortList((isPile?"pile:":"p:")+p, list).map(t=>isPile ? card(t) : renderItem(t,p)) : h("div",{style:{fontSize:11,color:colors.mutedLight,textAlign:"center",padding:"10px 4px"}},isPile?"Nothing waiting":"No open tasks"));
       return h("div",{key:d,onDragOver:e=>{ if(abDrag) e.preventDefault(); },onDrop:e=>{ if(abDrag){ e.preventDefault(); moveBand(abDrag,d); setAbDrag(""); } },
           style:{border:"1px solid "+colors.border,borderRadius:9,background:"#fff",marginBottom:10,opacity:abDrag===d?0.5:1}},
@@ -48369,6 +48560,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
               h("td",{style:{padding:"6px 8px",borderBottom:"1px solid #ece9df"}},m?m[1]:r.action));
           }))))),
     listTableModal(),
+    doneListModal(),
     cardActModal(),   // 154
     xferModal(),   // 145
     dateAsk && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center"}},
@@ -49229,6 +49421,7 @@ function PendingActionsScreen({ user }){
       if(!pErr && plans && plans.length){
         const lines = await fetchPaged(()=>sb.from("proc_line_tbl").select("*").order("id"));
         const { data: ptk } = await sb.from("task_tbl").select("id,parent_id,proc_plan_id,proc_form,assignee,status,moved_at,created_at").not("proc_plan_id","is",null);
+        let storesWho = []; try{ const { data: sh } = await sb.from("post_holder_tbl").select("employee_name").eq("post_key","stores"); storesWho = (sh||[]).map(x=>x.employee_name).filter(Boolean); }catch(e){}   // 157
         plans.forEach(p=>{ const { d, extra:ex } = pgFromRows((lines||[]).filter(l=>l.plan_id===p.id)); const R = pgRows(p, d, ex);
           const card = (ptk||[]).find(t=>t.proc_plan_id===p.id && !t.parent_id);
           // 147: a card handed to a buyer whose planned dates are still blank after 2 days
@@ -49243,7 +49436,11 @@ function PendingActionsScreen({ user }){
             const who = (sub && sub.assignee) || (card && card.assignee) || "";
             const pe = pgDue(rs.step.plan.e), ps = pgDue(rs.step.plan.s);
             extra.push({ what:"Procurement late: "+p.contract_number+" · "+r.title+" — "+rs.step.label+" "+(pe && pe<today ? "was due "+pgDmy(pe) : "should have started "+pgDmy(ps))+" ("+rs.s.t+")",
-              entity_key:p.contract_number, detail_key:(r.form||"General")+"|"+rs.step.key, owed_by_role:"purchase", owed_by_person:who, days_waiting:rs.s.l||null, urgency:"overdue", client_side:true, source:"procurement_late" }); }); });
+              entity_key:p.contract_number, detail_key:(r.form||"General")+"|"+rs.step.key, owed_by_role:"purchase", owed_by_person:who, days_waiting:rs.s.l||null, urgency:"overdue", client_side:true, source:"procurement_late" }); });
+          // 157: material due at the factory today or earlier and not received — Stores enter the receipt date
+          R.forEach(r=>{ const fac = r.steps.find(st=>String(st.key).split("|")[0]==="fac"); if(!fac || pgDue(fac.act.e)) return; const pe = pgDue(fac.plan.e); if(!pe || pe>today) return;
+            (storesWho.length ? storesWho : [""]).forEach(nm=>extra.push({ what:"Receipt due: "+p.contract_number+" · "+r.title+" — expected at our factory "+pgDmy(pe)+". Enter the receipt date when it arrives (Procurement Gantt → Enter receipt dates).",
+              entity_key:p.contract_number, detail_key:"receipt|"+(r.form||""), owed_by_role:"stores", owed_by_person:nm, days_waiting:pgDd(pe,today)||null, urgency:pe<today?"overdue":"due", client_side:true, source:"procurement_receipt" })); }); });
       }
     }catch(e){ console.error("Procurement items not read", e); }
     // 151: a quote number forced in from Log Follow-ups whose enquiry is not logged yet — the Sales Coordinator logs it
