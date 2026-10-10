@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-10T11:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-10T15:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -513,7 +513,13 @@ function drawPdfLetterhead(doc, W, company, opts){
 // 128c — the company to print on a letterhead: the session company, else the first one in Company Master.
 async function pdfCompanyFor(company){
   if(company && (company.logo_data || company.company_name)) return company;
-  try{ const { data } = await sb.from("company_master").select("*").order("id").limit(1).maybeSingle(); return data || company || null; }catch(e){ return company || null; }
+  // 166: no company passed — the company picked at login, else the first one that has a logo, else the first one
+  try{
+    let sid = null; try{ sid = sessionStorage.getItem("flometriq_session_company"); }catch(e){}
+    const { data } = await sb.from("company_master").select("*").order("id");
+    const rows = data||[];
+    return rows.find(r=>sid && String(r.id)===String(sid) && r.logo_data) || rows.find(r=>r.logo_data) || rows.find(r=>sid && String(r.id)===String(sid)) || rows[0] || company || null;
+  }catch(e){ return company || null; }
 }
 function pdfFooterCompanyName(company){ return (company&&company.company_name)||COMPANY_NAME; }
 
@@ -2142,9 +2148,11 @@ function MenuTabs({ user, active, onChange }) {
     ]},
     ...(isAdmin?[{ label:"Setup", tabs:[{key:"doc_status_master",label:"Document Status Master"},...byKeys(["doc_category_tbl"])] }]:[]),
   ]};
+  const accountsGroup = { label:"Accounts", subgroups:[{ label:"Billing", tabs:[{key:"tax_invoices",label:"Tax Invoices"}] }] };   // 166
   const groups = [
     { label:"Sales", subgroups: salesSubgroups },
     orderStatusGroup,
+    accountsGroup,
     { label:"Engineering Calc", subgroups:[
       { label:"Engineering Calc", tabs:[
         {key:"calcs",label:"ASME VIII Thickness"},
@@ -2305,7 +2313,7 @@ function MenuTabs({ user, active, onChange }) {
   // approach as hr_admin, applied here rather than threading a
   // conditional through the entire groups literal above.
   const visibleGroups = (isApprovalRole && !isAdmin && !isHrAdmin)
-    ? [{ label:"Sales", subgroups:[{ label:"Sale Order", tabs:[{key:"sale_order_entry",label:"Sale Order"}] }] }, orderStatusGroup]   // 129: approval roles see Order Status too
+    ? [{ label:"Sales", subgroups:[{ label:"Sale Order", tabs:[{key:"sale_order_entry",label:"Sale Order"}] }] }, orderStatusGroup, accountsGroup]   // 129: approval roles see Order Status too
     : groups;
 
   const itemStyle = t => ({
@@ -27900,11 +27908,51 @@ const MANUAL_SECTIONS = [
           },
           {
             "type": "p",
-            "text": "Despatch Settings & LUT holds our GSTIN, the factory address, the bill prefix and the LUT number with its financial year. Every March, Accounts and the super admin get a Pending Action to enter next year's LUT; from 1 April it is overdue until done."
+            "text": "Despatch Settings & LUT keeps the LUT register \u2014 one row per financial year with the LUT number, ARN, filing date and a drive link to the acknowledgement; a wrong number is corrected with a reason and the old one is kept. It also holds our GSTIN, PAN, state, factory address, bill prefix, bank details and IEC; a change asks from which date it applies and why, and is kept as history. Each DC and invoice keeps its own copy of these details from the day it was approved, so a reprint never changes. Every March, Accounts and the super admin get a Pending Action to enter next year's LUT; from 1 April it is overdue until entered."
           },
           {
             "type": "warn",
             "text": "Cancelling an approved DC keeps its number used (no gaps are refilled). Cancelling frees its serial numbers; the history keeps them."
+          }
+        ]
+      },
+      {
+        "key": "tax_invoice",
+        "title": "Tax invoice from an approved DC",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "Accounts \u2192 Billing \u2192 Tax Invoices. Every invoice is made from an approved sale DC and carries the DC's number (e.g. FFI/0081/26-27). Domestic invoices charge GST from the contract's GST structure; export invoices are in the contract currency under the LUT, without IGST."
+          },
+          {
+            "type": "steps",
+            "items": [
+              "Under \u201cApproved DCs waiting for their invoice\u201d press Make invoice. The draft fills itself: Bill To, Deliver To (and notify / handoff for export) from the DC, PO and OA dates, terms, and each line's unit price from the contract (the PO price where there is one).",
+              "Check the prices, P&F, freight and insurance. P&F follows the contract: a percentage of this invoice's basic, or this shipment's share of a lumpsum (never more than what is left of it). Freight and insurance go on the bill only when we paid them and recover them.",
+              "Domestic: check the buyer GSTIN and the place of supply (taken from the GSTIN's first two digits). Export: check the exchange rate (\u20b9 per unit, from the contract), incoterm and ports.",
+              "Ready for IRN. The app checks HSN on every line, the GST structure (domestic) or the LUT for the invoice date's year (export), and warns if CGST + SGST is charged to another state or IGST within Tamil Nadu.",
+              "Upload the invoice to the IRP outside the app, then Enter IRN and issue: IRN (64 characters), Ack No, Ack date and, if you have it, the signed QR text (it prints as the QR). The invoice is now Issued and locked, and waits in the posting queue for the accounting module."
+            ]
+          },
+          {
+            "type": "tip",
+            "text": "A unit price changed from the contract asks for a reason; the line shows Edited with that reason and the change is in the Audit Log."
+          },
+          {
+            "type": "p",
+            "text": "Invoice PDF prints three copies: Original for Recipient, Duplicate for Transporter, Triplicate for Supplier (export: Original for Buyer). Before the IRN it prints DRAFT. Export copies carry the LUT line, bank details with SWIFT, and the INR equivalent. Download Excel gives the month's register (taxable, CGST, SGST, IGST, totals, IRN, e-way bill) for GSTR-1."
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "After issue only the e-way bill, vehicle and shipping bill can be added. A domestic invoice over \u20b950,000 without an e-way bill number, and an export invoice without a shipping bill after 7 days, show in Pending Actions.",
+              "Before the IRN: Back to draft, or Discard draft (the DC can be invoiced again with the same number).",
+              "After the IRN: Record IRN cancellation (cancel it on the IRP first, within 24 hours). The invoice stays as Cancelled and its posting is withdrawn. Any other correction is a credit note."
+            ]
+          },
+          {
+            "type": "warn",
+            "text": "An approved DC without its invoice for a day, a draft not made ready and an invoice waiting for its IRN all show in Pending Actions for Accounts."
           }
         ]
       }
@@ -28616,14 +28664,54 @@ const MANUAL_TA = {
    },
    {
     "type": "p",
-    "text": "Despatch Settings & LUT-\u0b87\u0bb2\u0bcd \u0ba8\u0bae\u0bcd GSTIN, factory \u0bae\u0bc1\u0b95\u0bb5\u0bb0\u0bbf, bill prefix, LUT \u0b8e\u0ba3\u0bcd \u0bae\u0bb1\u0bcd\u0bb1\u0bc1\u0bae\u0bcd \u0b85\u0ba4\u0ba9\u0bcd \u0ba8\u0bbf\u0ba4\u0bbf\u0baf\u0bbe\u0ba3\u0bcd\u0b9f\u0bc1. \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 \u0bae\u0bbe\u0bb0\u0bcd\u0b9a\u0bcd\u0b9a\u0bbf\u0bb2\u0bc1\u0bae\u0bcd Accounts, super admin-\u0b95\u0bcd\u0b95\u0bc1 \u0b85\u0b9f\u0bc1\u0ba4\u0bcd\u0ba4 \u0b86\u0ba3\u0bcd\u0b9f\u0bc1 LUT \u0ba8\u0bbf\u0bb0\u0baa\u0bcd\u0baa Pending Action; \u0b8f\u0baa\u0bcd\u0bb0\u0bb2\u0bcd 1 \u0bae\u0bc1\u0ba4\u0bb2\u0bcd overdue."
+    "text": "Despatch Settings & LUT-\u0b87\u0bb2\u0bcd LUT register \u0b89\u0bb3\u0bcd\u0bb3\u0ba4\u0bc1 \u2014 \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 \u0ba8\u0bbf\u0ba4\u0bbf\u0baf\u0bbe\u0ba3\u0bcd\u0b9f\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0b92\u0bb0\u0bc1 \u0bb5\u0bb0\u0bbf: LUT \u0b8e\u0ba3\u0bcd, ARN, \u0ba4\u0bbe\u0b95\u0bcd\u0b95\u0bb2\u0bcd \u0ba4\u0bc7\u0ba4\u0bbf, acknowledgement-\u0b87\u0ba9\u0bcd drive link. \u0ba4\u0bb5\u0bb1\u0bbe\u0ba9 \u0b8e\u0ba3\u0bcd\u0ba3\u0bc8 \u0b95\u0bbe\u0bb0\u0ba3\u0ba4\u0bcd\u0ba4\u0bc1\u0b9f\u0ba9\u0bcd \u0ba4\u0bbf\u0bb0\u0bc1\u0ba4\u0bcd\u0ba4\u0bb2\u0bbe\u0bae\u0bcd; \u0baa\u0bb4\u0bc8\u0baf \u0b8e\u0ba3\u0bcd \u0b9a\u0bc7\u0bae\u0bbf\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bc1\u0bae\u0bcd. \u0ba8\u0bae\u0bcd GSTIN, PAN, \u0bae\u0bbe\u0ba8\u0bbf\u0bb2\u0bae\u0bcd, factory \u0bae\u0bc1\u0b95\u0bb5\u0bb0\u0bbf, bill prefix, bank \u0bb5\u0bbf\u0bb5\u0bb0\u0b99\u0bcd\u0b95\u0bb3\u0bcd, IEC \u0b87\u0b99\u0bcd\u0b95\u0bc7; \u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bbf\u0ba9\u0bbe\u0bb2\u0bcd \u0b8e\u0ba8\u0bcd\u0ba4 \u0ba4\u0bc7\u0ba4\u0bbf\u0baf\u0bbf\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1, \u0b8f\u0ba9\u0bcd \u0b8e\u0ba9\u0bcd\u0bb1\u0bc1 \u0b95\u0bc7\u0b9f\u0bcd\u0b95\u0bc1\u0bae\u0bcd; history-\u0b87\u0bb2\u0bcd \u0b87\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd. \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 DC-\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd invoice-\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd approve \u0b86\u0ba9 \u0ba8\u0bbe\u0bb3\u0bbf\u0ba9\u0bcd \u0bb5\u0bbf\u0bb5\u0bb0\u0b99\u0bcd\u0b95\u0bb3\u0bbf\u0ba9\u0bcd \u0ba8\u0b95\u0bb2\u0bcd \u0b85\u0ba4\u0bbf\u0bb2\u0bc7\u0baf\u0bc7 \u0b87\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u2014 \u0bae\u0bc0\u0ba3\u0bcd\u0b9f\u0bc1\u0bae\u0bcd print \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbe\u0bb2\u0bc1\u0bae\u0bcd \u0bae\u0bbe\u0bb1\u0bbe\u0ba4\u0bc1. \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 \u0bae\u0bbe\u0bb0\u0bcd\u0b9a\u0bcd \u0bae\u0bbe\u0ba4\u0bae\u0bc1\u0bae\u0bcd Accounts \u0bae\u0bb1\u0bcd\u0bb1\u0bc1\u0bae\u0bcd super admin-\u0b95\u0bcd\u0b95\u0bc1 \u0b85\u0b9f\u0bc1\u0ba4\u0bcd\u0ba4 \u0b86\u0ba3\u0bcd\u0b9f\u0bc1 LUT-\u0b90 \u0b89\u0bb3\u0bcd\u0bb3\u0bbf\u0b9f Pending Action \u0bb5\u0bb0\u0bc1\u0bae\u0bcd; \u0b8f\u0baa\u0bcd\u0bb0\u0bb2\u0bcd 1 \u0bae\u0bc1\u0ba4\u0bb2\u0bcd \u0b89\u0bb3\u0bcd\u0bb3\u0bbf\u0b9f\u0bc1\u0bae\u0bcd \u0bb5\u0bb0\u0bc8 overdue."
    },
    {
     "type": "warn",
     "text": "Approve \u0b86\u0ba9 DC-\u0b90 cancel \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd \u0b85\u0ba4\u0ba9\u0bcd \u0b8e\u0ba3\u0bcd \u0baa\u0baf\u0ba9\u0bcd\u0baa\u0b9f\u0bcd\u0b9f\u0ba4\u0bbe\u0b95\u0bb5\u0bc7 \u0b87\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd. Cancel \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd serial \u0b8e\u0ba3\u0bcd\u0b95\u0bb3\u0bcd \u0bb5\u0bbf\u0b9f\u0bc1\u0bb5\u0bbf\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bc1\u0bae\u0bcd; history-\u0b87\u0bb2\u0bcd \u0b87\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd."
    }
   ],
-  "en_sig": "3c27f963"
+  "en_sig": "54e72b83"
+ },
+ "tax_invoice": {
+  "title": "\u0b85\u0b99\u0bcd\u0b95\u0bc0\u0b95\u0bb0\u0bbf\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bcd\u0b9f DC-\u0baf\u0bbf\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 Tax invoice",
+  "blocks": [
+   {
+    "type": "p",
+    "text": "Accounts \u2192 Billing \u2192 Tax Invoices. \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 invoice-\u0b89\u0bae\u0bcd approve \u0b86\u0ba9 sale DC-\u0baf\u0bbf\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0baa\u0bcd\u0baa\u0b9f\u0bc1\u0bae\u0bcd, DC-\u0baf\u0bbf\u0ba9\u0bcd \u0b85\u0ba4\u0bc7 \u0b8e\u0ba3\u0bcd (\u0b89.\u0ba4\u0bbe. FFI/0081/26-27). Domestic invoice-\u0b87\u0bb2\u0bcd contract-\u0b87\u0ba9\u0bcd GST structure \u0baa\u0b9f\u0bbf GST; export invoice contract currency-\u0b87\u0bb2\u0bcd, LUT-\u0b87\u0ba9\u0bcd \u0b95\u0bc0\u0bb4\u0bcd, IGST \u0b87\u0bb2\u0bcd\u0bb2\u0bbe\u0bae\u0bb2\u0bcd."
+   },
+   {
+    "type": "steps",
+    "items": [
+     "\u201cApproved DCs waiting for their invoice\u201d-\u0b87\u0bb2\u0bcd Make invoice \u0b85\u0bb4\u0bc1\u0ba4\u0bcd\u0ba4\u0bb5\u0bc1\u0bae\u0bcd. Draft \u0ba4\u0bbe\u0ba9\u0bbe\u0b95 \u0ba8\u0bbf\u0bb0\u0bae\u0bcd\u0baa\u0bc1\u0bae\u0bcd: DC-\u0baf\u0bbf\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 Bill To, Deliver To (export-\u0b95\u0bcd\u0b95\u0bc1 notify / handoff), PO, OA \u0ba4\u0bc7\u0ba4\u0bbf\u0b95\u0bb3\u0bcd, terms, contract-\u0b87\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 unit price (PO price \u0b87\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd \u0b85\u0ba4\u0bc1).",
+     "Price, P&F, freight, insurance-\u0b90\u0b9a\u0bcd \u0b9a\u0bb0\u0bbf\u0baa\u0bbe\u0bb0\u0bcd\u0b95\u0bcd\u0b95\u0bb5\u0bc1\u0bae\u0bcd. P&F contract \u0baa\u0b9f\u0bbf: \u0b87\u0ba8\u0bcd\u0ba4 invoice basic-\u0b87\u0ba9\u0bcd \u0b9a\u0ba4\u0bb5\u0bc0\u0ba4\u0bae\u0bcd, \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 lumpsum-\u0b87\u0bb2\u0bcd \u0b87\u0ba8\u0bcd\u0ba4 shipment-\u0b87\u0ba9\u0bcd \u0baa\u0b99\u0bcd\u0b95\u0bc1 (\u0bae\u0bc0\u0ba4\u0bae\u0bc1\u0bb3\u0bcd\u0bb3\u0ba4\u0bc8\u0bb5\u0bbf\u0b9f \u0b85\u0ba4\u0bbf\u0b95\u0bae\u0bbe\u0b95 \u0b87\u0bb2\u0bcd\u0bb2\u0bc8). Freight, insurance \u0ba8\u0bbe\u0bae\u0bcd \u0b9a\u0bc6\u0bb2\u0bc1\u0ba4\u0bcd\u0ba4\u0bbf \u0ba4\u0bbf\u0bb0\u0bc1\u0bae\u0baa\u0baa\u0bcd \u0baa\u0bc6\u0bb1\u0bc1\u0bae\u0bcd\u0baa\u0bcb\u0ba4\u0bc1 \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd bill-\u0b87\u0bb2\u0bcd.",
+     "Domestic: buyer GSTIN, place of supply (GSTIN-\u0b87\u0ba9\u0bcd \u0bae\u0bc1\u0ba4\u0bb2\u0bcd \u0b87\u0bb0\u0ba3\u0bcd\u0b9f\u0bc1 \u0b8e\u0ba3\u0bcd\u0b95\u0bb3\u0bbf\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1) \u0b9a\u0bb0\u0bbf\u0baa\u0bbe\u0bb0\u0bcd\u0b95\u0bcd\u0b95\u0bb5\u0bc1\u0bae\u0bcd. Export: exchange rate (contract-\u0b87\u0bb2\u0bcd\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 \u0b92\u0bb0\u0bc1 unit-\u0b95\u0bcd\u0b95\u0bc1 \u20b9), incoterm, ports.",
+     "Ready for IRN. \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 line-\u0b87\u0bb2\u0bc1\u0bae\u0bcd HSN, GST structure (domestic) \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 invoice \u0ba4\u0bc7\u0ba4\u0bbf\u0baf\u0bbf\u0ba9\u0bcd \u0b86\u0ba3\u0bcd\u0b9f\u0bc1\u0b95\u0bcd\u0b95\u0bbe\u0ba9 LUT (export) app \u0b9a\u0bb0\u0bbf\u0baa\u0bbe\u0bb0\u0bcd\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd; \u0bb5\u0bc7\u0bb1\u0bc1 \u0bae\u0bbe\u0ba8\u0bbf\u0bb2\u0ba4\u0bcd\u0ba4\u0bc1\u0b95\u0bcd\u0b95\u0bc1 CGST + SGST \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 \u0ba4\u0bae\u0bbf\u0bb4\u0bcd\u0ba8\u0bbe\u0b9f\u0bcd\u0b9f\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bb3\u0bcd IGST \u0bb5\u0ba8\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd \u0b8e\u0b9a\u0bcd\u0b9a\u0bb0\u0bbf\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd.",
+     "App-\u0b95\u0bcd\u0b95\u0bc1 \u0bb5\u0bc6\u0bb3\u0bbf\u0baf\u0bc7 IRP-\u0b87\u0bb2\u0bcd invoice-\u0b90 upload \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bc1, Enter IRN and issue: IRN (64 \u0b8e\u0bb4\u0bc1\u0ba4\u0bcd\u0ba4\u0bc1\u0b95\u0bcd\u0b95\u0bb3\u0bcd), Ack No, Ack \u0ba4\u0bc7\u0ba4\u0bbf, \u0b87\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd signed QR text (QR \u0b86\u0b95 \u0b85\u0b9a\u0bcd\u0b9a\u0bbe\u0b95\u0bc1\u0bae\u0bcd). Invoice Issued \u0b86\u0b95\u0bbf lock \u0b86\u0b95\u0bc1\u0bae\u0bcd; accounting module-\u0b95\u0bcd\u0b95\u0bbe\u0b95 posting queue-\u0b87\u0bb2\u0bcd \u0b95\u0bbe\u0ba4\u0bcd\u0ba4\u0bbf\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd."
+    ]
+   },
+   {
+    "type": "tip",
+    "text": "Contract-\u0b87\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 unit price-\u0b90 \u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bbf\u0ba9\u0bbe\u0bb2\u0bcd \u0b95\u0bbe\u0bb0\u0ba3\u0bae\u0bcd \u0b95\u0bc7\u0b9f\u0bcd\u0b95\u0bc1\u0bae\u0bcd; line-\u0b87\u0bb2\u0bcd Edited \u0b85\u0ba8\u0bcd\u0ba4\u0b95\u0bcd \u0b95\u0bbe\u0bb0\u0ba3\u0ba4\u0bcd\u0ba4\u0bc1\u0b9f\u0ba9\u0bcd \u0ba4\u0bc6\u0bb0\u0bbf\u0baf\u0bc1\u0bae\u0bcd, \u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bcd Audit Log-\u0b87\u0bb2\u0bcd."
+   },
+   {
+    "type": "p",
+    "text": "Invoice PDF \u0bae\u0bc2\u0ba9\u0bcd\u0bb1\u0bc1 \u0baa\u0bbf\u0bb0\u0ba4\u0bbf\u0b95\u0bb3\u0bcd: Original for Recipient, Duplicate for Transporter, Triplicate for Supplier (export: Original for Buyer). IRN-\u0b95\u0bcd\u0b95\u0bc1 \u0bae\u0bc1\u0ba9\u0bcd DRAFT \u0b8e\u0ba9\u0bcd\u0bb1\u0bc1 \u0b85\u0b9a\u0bcd\u0b9a\u0bbe\u0b95\u0bc1\u0bae\u0bcd. Export \u0baa\u0bbf\u0bb0\u0ba4\u0bbf\u0b95\u0bb3\u0bbf\u0bb2\u0bcd LUT \u0bb5\u0bb0\u0bbf, SWIFT \u0b89\u0b9f\u0ba9\u0bcd bank \u0bb5\u0bbf\u0bb5\u0bb0\u0b99\u0bcd\u0b95\u0bb3\u0bcd, INR \u0bae\u0ba4\u0bbf\u0baa\u0bcd\u0baa\u0bc1. Download Excel \u0bae\u0bbe\u0ba4\u0ba4\u0bcd\u0ba4\u0bbf\u0ba9\u0bcd register (taxable, CGST, SGST, IGST, totals, IRN, e-way bill) GSTR-1-\u0b95\u0bcd\u0b95\u0bbe\u0b95."
+   },
+   {
+    "type": "bullets",
+    "items": [
+     "Issue \u0b86\u0ba9 \u0baa\u0bbf\u0bb1\u0b95\u0bc1 e-way bill, vehicle, shipping bill \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bc7 \u0b9a\u0bc7\u0bb0\u0bcd\u0b95\u0bcd\u0b95\u0bb2\u0bbe\u0bae\u0bcd. \u20b950,000-\u0b95\u0bcd\u0b95\u0bc1 \u0bae\u0bc7\u0bb2\u0bcd e-way bill \u0b87\u0bb2\u0bcd\u0bb2\u0bbe\u0ba4 domestic invoice, 7 \u0ba8\u0bbe\u0b9f\u0bcd\u0b95\u0bb3\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0baa\u0bcd \u0baa\u0bbf\u0bb1\u0b95\u0bc1\u0bae\u0bcd shipping bill \u0b87\u0bb2\u0bcd\u0bb2\u0bbe\u0ba4 export invoice Pending Actions-\u0b87\u0bb2\u0bcd \u0bb5\u0bb0\u0bc1\u0bae\u0bcd.",
+     "IRN-\u0b95\u0bcd\u0b95\u0bc1 \u0bae\u0bc1\u0ba9\u0bcd: Back to draft, \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 Discard draft (DC-\u0b95\u0bcd\u0b95\u0bc1 \u0b85\u0ba4\u0bc7 \u0b8e\u0ba3\u0bcd\u0ba3\u0bbf\u0bb2\u0bcd \u0bae\u0bc0\u0ba3\u0bcd\u0b9f\u0bc1\u0bae\u0bcd invoice \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bb2\u0bbe\u0bae\u0bcd).",
+     "IRN-\u0b95\u0bcd\u0b95\u0bc1\u0baa\u0bcd \u0baa\u0bbf\u0bb1\u0b95\u0bc1: Record IRN cancellation (\u0bae\u0bc1\u0ba4\u0bb2\u0bbf\u0bb2\u0bcd IRP-\u0b87\u0bb2\u0bcd 24 \u0bae\u0ba3\u0bbf \u0ba8\u0bc7\u0bb0\u0ba4\u0bcd\u0ba4\u0bbf\u0bb1\u0bcd\u0b95\u0bc1\u0bb3\u0bcd cancel \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bb5\u0bc1\u0bae\u0bcd). Invoice Cancelled \u0b86\u0b95 \u0b87\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd, posting \u0ba4\u0bbf\u0bb0\u0bc1\u0bae\u0baa\u0baa\u0bcd \u0baa\u0bc6\u0bb1\u0baa\u0bcd\u0baa\u0b9f\u0bc1\u0bae\u0bcd. \u0bb5\u0bc7\u0bb1\u0bc1 \u0ba4\u0bbf\u0bb0\u0bc1\u0ba4\u0bcd\u0ba4\u0bae\u0bcd \u0b8e\u0ba9\u0bcd\u0bb1\u0bbe\u0bb2\u0bcd credit note."
+    ]
+   },
+   {
+    "type": "warn",
+    "text": "\u0b92\u0bb0\u0bc1 \u0ba8\u0bbe\u0bb3\u0bcd invoice \u0b87\u0bb2\u0bcd\u0bb2\u0bbe\u0ba4 approve \u0b86\u0ba9 DC, ready \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bbe\u0ba4 draft, IRN-\u0b95\u0bcd\u0b95\u0bbe\u0b95\u0b95\u0bcd \u0b95\u0bbe\u0ba4\u0bcd\u0ba4\u0bbf\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd invoice \u2014 \u0b87\u0bb5\u0bc8 Accounts-\u0b95\u0bcd\u0b95\u0bc1 Pending Actions-\u0b87\u0bb2\u0bcd \u0bb5\u0bb0\u0bc1\u0bae\u0bcd."
+   }
+  ],
+  "en_sig": "92f3d479"
  }
 };
 function manualSig(a){
@@ -28750,6 +28838,8 @@ function downloadManualPdf(){
 // added to over time; not wired to a database table yet, so edits currently
 // mean updating this array directly.
 const FAQ_ENTRIES = [
+  { q:"Where do I make a tax invoice?", a:"Accounts \u2192 Billing \u2192 Tax Invoices. An invoice is made only from an approved sale DC (Make invoice) and carries the DC's number. Check it, press Ready for IRN, upload it to the IRP, then Enter IRN and issue." },
+  { q:"An export invoice says there is no LUT.", a:"The invoice prints the LUT of its own date's financial year. Enter that year's LUT in Order Status \u2192 Despatch \u2192 Despatch Settings & LUT (+ LUT for the year), then save the invoice again." },
   { q:"Where do I make a Delivery Challan?", a:"Order Status \u2192 Despatch \u2192 Delivery Challans (DC) \u2192 + New DC (Stores). It then goes Production Manager \u2192 QC \u2192 Production Manager \u2192 Accounts, one after the other. Accounts gives it the bill number, which its invoice keeps." },
   { q:"A DC says the serial number is already used.", a:"A product serial number (YY-NNNNNNN) can be on one DC only, ever. Check QC's serial register for the right number. If the earlier DC was cancelled, its serials are free again." },
   { q:"Can I read the User Manual in Tamil?", a:"Yes. Open User Manual and press \u0ba4\u0bae\u0bbf\u0bb4\u0bcd at the top of the list; your choice is remembered on that computer. The staff sections (tasks and boards, Pending Actions, Document Control, enquiries, quotes, Quote Register, follow-ups, procurement, stores) are in Tamil; the rest show in English with a note until they are translated. Screen and button names stay in English so they match the screen. If the English page was changed after the Tamil was written, the Tamil page says the English is newer." },
@@ -28833,6 +28923,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"10 Oct 2026 (166)", summary:"Built on 2026-10-10T15:30:00Z (replaces 15:00, which printed DC / gate pass / invoice PDFs without the logo when the first company in Company Master had none: these PDFs now take the company picked at login, else the first company with a logo). SQL, in order, on BOTH companies unless marked: structure_despatch_dc_gatepass_2026-10-10.sql (if not yet run), structure_lut_register_settings_history_2026-10-10.sql, data_lut_register_settings_history_2026-10-10.sql (Flometriq only), structure_invoice_2026-10-10.sql, data_invoice_bank_2026-10-10.sql (Flometriq only). (1) TAX INVOICE, new menu Accounts → Billing → Tax Invoices (also for accounts_admin). Made only from an approved, numbered (not test) sale DC, one per DC, same number (invoice_tbl, invoice_line_tbl). Draft fills from the DC and contract: Bill To, Deliver To, notify / handoff (export), PO / OA dates, terms, unit price per Sl No from computeSlNoPricing (PO price exact in its own currency, else the offer rounding), HSN from the item. P&F per the contract: Percentage of this invoice's basic (follows a price edit), Lumpsum shared by value and capped by what is left, the rest on the last shipment. Freight / insurance recovered typed. Domestic: GST from sale_order_tbl.gst_components_snapshot on the taxable value, place of supply from the buyer GSTIN state code (GST_STATES), warning when CGST+SGST goes to another state or IGST within the state; round off to the rupee; HSN summary. Export: contract currency, ₹ rate from the contract (editable), no tax, LUT of the invoice date's financial year from lut_register_tbl, IEC, ports, destination, shipping bill. Amount in words (lakh / crore for INR, million for others). A unit price changed from the contract needs a reason (line Edited, audit log). (2) STATES: Draft → Ready for IRN (checks HSN, GST structure / LUT, fx, place of supply; B2C confirm without GSTIN) → Enter IRN and issue (IRN 64 hex, unique; Ack No; Ack date; signed QR text) → Issued and locked; e-way bill, vehicle and shipping bill stay editable. Back to draft / Discard draft before the IRN; Record IRN cancellation after (reason) → Cancelled. (3) POSTING QUEUE (posting_queue_tbl, SOP 4.3): each issued invoice → To post; cancellation → Withdrawn. (4) PDF: three copies (Original for Recipient / Duplicate for Transporter / Triplicate for Supplier; export Original for Buyer), letterhead, IRN block with QR from the signed QR (qrcode-generator 1.4.4, loaded only when needed), LUT endorsement, bank with SWIFT, INR equivalent, DRAFT / CANCELLED watermark. (5) REGISTER: Download Excel per month (taxable, CGST, SGST, IGST, round off, totals, IRN, e-way, shipping bill). (6) DESPATCH SETTINGS & LUT rebuilt: LUT register (one row per year, ARN, filed on, drive link to the acknowledgement, Correct with reason keeping the old number); our details now with bank and IEC; a change asks the effective date and reason and is kept in billing_settings_hist_tbl; documents take the details in force on their date (invSettingsAt). Each DC copies GSTIN / PAN / state / factory / LUT on approval (despSnapshotDc). (7) PENDING ACTIONS (Accounts): approved DC without invoice over 1 day; draft not made ready; waiting for IRN; domestic over ₹50,000 without e-way bill; export without shipping bill after 7 days; LUT from the register (current year missing = overdue; in March, next year missing = due) to Accounts + super admins. Manual: Sale Order → Tax invoice from an approved DC (English and Tamil); the Despatch article's LUT section updated; 2 FAQs." },
   { date:"10 Oct 2026 (165)", summary:"Built on 2026-10-10T08:45:00Z. SQL: structure_despatch_dc_gatepass_2026-10-10.sql (both companies; seeds Flometriq's GSTIN / LUT only on Flometriq). DESPATCH, Order Status \u2192 Despatch. (1) DESPATCH DETAILS per contract (contract_despatch_tbl, with history): ship-to contact / address / phone (default: the Sale Order's shipping address), export also mode of shipment (Sea / Air / Courier / Road) and notify / handoff (No skips; Yes asks contact and address). Panel on the Sale Order; asked on the first DC of a contract when missing; domestic = ship-to only. (2) ACCOUNTS HEAD CARD: approving the Commercial Terms creates \u201cDespatch details \u2014 contract\u201d for the Accounts Head post, due +3 days, with sub-tasks Confirm shipping address (+ mode, export) and Notify / handoff (export); they tick themselves when the details are saved (task_tbl.despatch_contract / despatch_part). (3) SALE DC (dc_tbl, dc_line_tbl, dc_serial_tbl, dc_box_tbl, dc_box_line_tbl, dc_history_tbl): lines from the contract Sl Nos with ordered / on other DCs / balance \u2014 never more than the balance (checked again when Accounts approves); product serials YY-NNNNNNN with Fill from a start number, each editable, No serial per line, unique across all DCs (database index); packing by box (mode, L\u00d7W\u00d7H mm, packing kg, contents with kg per item) = the packing slip; readiness tick in place of the stores / production gateway. Sequential: Stores \u2192 Production Manager (Present to QC) \u2192 QC (consents) \u2192 Production Manager (Send to Accounts) \u2192 Accounts (Approve and number); send back with a reason at any step; cancel with a reason (approved: number stays used; serials released). Posts decide who acts (stores, production_manager, qc, accounts; qc / accounts_admin logins too); admins may act at any step. (4) NUMBERS (doc_series_tbl): DC draft D/26-27/0001; on approval the bill number FFI/0081/26-27 (prefix in settings), the same number the invoice will carry; first time each year Accounts types the starting number (confirmed); \u201cIs this a test?\u201d asked on each approval until someone answers No \u2014 a test DC gets TEST-n, uses no number and can be rolled back. (5) GATE PASS (gate_pass_tbl): several approved DCs on one truck, vehicle / transporter / LR / driver, GP/26-27/0001, PDF with two copies (security and office); Record exit (time from the signed copy) makes the DCs Despatched; scan link can follow. (6) PDFs: DC (no values; Bill To / Deliver To / Notify-Handoff; serial ranges; DRAFT / TEST watermark), packing slip (landscape, serials split box by box, net / gross / volume, shipping marks for export), gate pass. (7) SETTINGS & LUT (billing_settings_tbl): GSTIN, PAN, state, factory address, bill prefix, LUT no and year; March: Pending Action to Accounts + super admins to renew; from April overdue if not entered. (8) PENDING ACTIONS: DCs at each step owed by that post; DC sent back \u2192 Stores; approved DC without gate pass \u2192 Stores; gate pass not exited / no scan link \u2192 Stores; LUT. Manual: Sale Order \u2192 Despatch (English and Tamil). The invoice comes next build." },
   { date:"10 Oct 2026 (164)", summary:"Built on 2026-10-10T06:30:00Z. No SQL. PROCUREMENT REPORTS \u2192 OVERDUE (ALL STEPS): Table / Bars switch (remembered per computer, pr_odview). Bars = overdue steps only, one red bar per step sized by days past plan (start-late steps marked (start)), contracts worst first, steps worst first; contracts with nothing overdue left out; each bar shows material \u2014 step, holder, planned date; the Every line / Include ticks apply to the Table only. Clicking a bar or a table row opens the Procurement Gantt at that line with Edit dates open (if the user may edit; otherwise just the Gantt) \u2014 contract-wide rows now click through too. NO MORE \u201cGENERAL\u201d: the BOM Received / Purchase BOM Approval line item is titled Contract-wide steps (pgRows), so the Gantt, the chart, the cards text, Pending Actions and the reports all say so; in Overdue (all steps) and Plan history it lists every material of the contract it holds (all names, never cut). Internal keys unchanged. Download PDF prints the table as before. Manual: Procurement Gantt note in English and Tamil." },
   { date:"10 Oct 2026 (163)", summary:"Built on 2026-10-10T03:55:00Z (never uploaded), so it also carries that build's three changes: version under the company name, no stage move on an unchecked Direct Price line, and the Draft-quote rule. No SQL. (1) DRAFT QUOTES \u2014 the pre-upload check found 34 drafts that would have blocked on day one. Two refinements: drafts that existed before the rule count from DRAFT_RULE_FROM (10/10/2026), not from their creation date, so everyone has three days to clear the backlog; and only the LATEST revision of a quote counts \u2014 a Draft revision with a newer revision of the same quote (any stage) is ignored (quoteBaseAndRev; only numbers carrying Rev/R are read for this). check_draft_quotes_before_deploy_v2.sql previews it. (2) USER MANUAL IN TAMIL \u2014 English / \u0ba4\u0bae\u0bbf\u0bb4\u0bcd switch at the top of the manual's list, remembered per computer (localStorage manual_lang). MANUAL_TA holds Tamil for the staff articles: navigation, Pending Actions, task boards, movable lists, Document Control, enquiries, My day, Log Follow-ups, Quote Register, quotes overview, Quote PDF, Direct Price lines, Procurement Gantt, PO Register, Material Inward, tagging, documents, Report an issue. Others show English with a note. Each Tamil article stores en_sig, a fingerprint of the English it was written from; when the English changes, the Tamil page says the English is newer (manualSig). Screen and button names stay in English. Not proofread, by decision. Search matches English and Tamil titles. The Download manual PDF stays English." },
@@ -45745,6 +45836,7 @@ function App() {
     tab==="despatch_dc"?h(DespatchScreen,{user}):
     tab==="gate_pass"?h(GatePassScreen,{user}):
     tab==="despatch_settings"?h(DespatchSettingsScreen,{user}):
+    tab==="tax_invoices"?h(InvoicesScreen,{user}):
     tab==="period_reports"?h(PeriodReportsScreen,{user}):   // 148
     tab==="reports_document_register"?h(DocumentRegisterReport,null):
     tab==="reports_grn_status"?h(GrnStatusReport,null):
@@ -51042,6 +51134,7 @@ function DcEditor({ user, me, P, S, dcId, contract, onClose, onChanged }){
       const billNo = despBillNo(S2.bill_prefix, r.no, fy);
       if(!S2.test_phase_done) await sb.from("billing_settings_tbl").update({ test_phase_done:true, updated_by:who(), updated_at:now() }).eq("id",1);
       setBusy(false);
+      await despSnapshotDc(dc.id, toISODate(new Date()));   // 166: what was in force today stays on this DC
       await step("Approved",{ acc_by:who(), acc_at:now(), bill_no:billNo, bill_seq:r.no, fy, dc_date:toISODate(new Date()) },"Approved by Accounts — "+billNo);
     }catch(e){ setBusy(false); setMsg("Could not number the DC: "+(e.message||e)); }
   };
@@ -51324,52 +51417,6 @@ function GatePassScreen({ user }){
         lab("Link to the signed, scanned copy (can be added later)", h("input",{value:ex.link,onChange:e=>setEx(x=>({...x,link:e.target.value})),style:inputStyle,placeholder:"https://…"})),
         h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}, h("button",{onClick:()=>setEx(null),style:btnSecondary},"Cancel"), h("button",{onClick:recordExit,disabled:busy,style:btnPrimary},busy?"Saving…":"Save")))) : null);
 }
-// ---- settings and LUT -------------------------------------------------------------------------------
-function DespatchSettingsScreen({ user }){
-  const [S,setS] = useState(null); const [f,setF] = useState(null); const [series,setSeries] = useState([]); const [can,setCan] = useState(false); const [busy,setBusy] = useState(false); const [msg,setMsg] = useState("");
-  const load = useCallback(async()=>{
-    const s = await despSettings(); setS(s);
-    setF({ our_gstin:s.our_gstin||"", our_pan:s.our_pan||"", our_state:s.our_state||"", our_state_code:s.our_state_code||"", factory_address:s.factory_address||"", bill_prefix:s.bill_prefix||"FFI", lut_no:s.lut_no||"", lut_fy:s.lut_fy||despFyLong() });
-    const { data } = await sb.from("doc_series_tbl").select("*").order("fy",{ascending:false}); setSeries(data||[]);
-    const me = await despMe(user); const P = await despPeople(); setCan(despCan("acc",user,me,P));
-  },[user && user.username]);
-  useEffect(()=>{ load(); },[load]);
-  if(!S || !f) return h("div",{style:{padding:20,color:colors.muted}},"Reading the settings…");
-  if(S._missing) return h("div",{style:{padding:20,color:colors.danger}},"Run structure_despatch_dc_gatepass_2026-10-10.sql first. ("+S._err+")");
-  const save = async()=>{
-    if(f.lut_no && !/^\d{4}-\d{2}$/.test(f.lut_fy)){ setMsg("LUT year must look like "+despFyLong()+"."); return; }
-    setBusy(true); setMsg("");
-    const row = { id:1, ...f, bill_prefix:(f.bill_prefix||"FFI").trim().toUpperCase(), updated_by:user?.username||"unknown", updated_at:new Date().toISOString() };
-    const { error } = await sb.from("billing_settings_tbl").upsert(row,{ onConflict:"id" });
-    setBusy(false); if(error){ setMsg("Could not save: "+error.message); return; }
-    const changed = Object.keys(f).filter(k=>String(S[k]||"")!==String(f[k]||""));
-    await logAudit("UPDATE","billing_settings_tbl","1","Despatch settings: "+(changed.join(", ")||"no change")+(changed.includes("lut_no")||changed.includes("lut_fy")?" · LUT "+f.lut_no+" for "+f.lut_fy:""),user?.username||"unknown",S,row);
-    setMsg("Saved."); load();
-  };
-  const fld = (k,l,ph,w)=> h("label",{style:{display:"flex",flexDirection:"column",gap:3,fontSize:11.5,color:colors.muted,flex:"1 1 "+(w||220)+"px"}},l,h("input",{value:f[k],disabled:!can,placeholder:ph||"",onChange:e=>setF(x=>({...x,[k]:e.target.value})),style:inputStyle}));
-  const nowFy = despFyLong(); const lutOk = f.lut_no && f.lut_fy===nowFy;
-  return h("div",{style:{padding:"14px 18px",maxWidth:900}},
-    h("div",{style:{fontSize:11.5,color:colors.muted}},"Order Status → Despatch"),
-    h("h2",{style:{fontSize:19,margin:"2px 0 8px"}},"Despatch Settings & LUT"),
-    !can ? h("div",{style:{fontSize:12,color:colors.muted,marginBottom:8}},"Only Accounts, admins and the super admin can change these.") : null,
-    h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px",marginBottom:10}},
-      h("b",null,"LUT — Letter of Undertaking for export without IGST"),
-      h("div",{style:{fontSize:12,color:lutOk?"#0f6b4f":"#a3312a",margin:"3px 0 6px",fontWeight:700}}, lutOk ? "Valid for the current financial year "+nowFy+"." : "Not valid for "+nowFy+" — enter the new LUT."),
-      h("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}}, fld("lut_no","LUT number","AD330723038449X"), fld("lut_fy","For financial year", nowFy, 120)),
-      h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:6}},"Every March, Accounts and the super admin get a Pending Action to renew the LUT for the next year. From 1 April it turns overdue until the new number is saved here.")),
-    h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px",marginBottom:10}},
-      h("b",null,"Our details on DCs, packing slips and invoices"),
-      h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",marginTop:6}}, fld("our_gstin","GSTIN"), fld("our_pan","PAN",null,140), fld("our_state","State",null,140), fld("our_state_code","State code",null,90)),
-      h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",marginTop:6}}, fld("factory_address","Despatched from (factory address)",null,500), fld("bill_prefix","Bill number prefix","FFI",90)),
-      h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:6}},"Bill numbers print as "+(f.bill_prefix||"FFI")+"/0081/"+despFy()+". A sale DC and its invoice carry the same number.")),
-    h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px",marginBottom:10}},
-      h("b",null,"Numbers used"),
-      h("div",{style:{fontSize:12,color:colors.muted,margin:"3px 0 6px"}}, S.test_phase_done ? "Test phase over — every DC now takes a real bill number." : "Test phase: Accounts is asked “Is this a test?” on each DC until someone answers No."),
-      series.length===0 ? h("div",{style:{fontSize:12.5,color:colors.mutedLight}},"No numbers used yet. The first bill number of each year is asked for when Accounts approves the first DC of that year.") :
-      h("table",{style:{borderCollapse:"collapse",fontSize:12.5}}, h("tbody",null, series.map(r=>h("tr",{key:r.series_key+r.fy},
-        h("td",{style:{padding:"3px 10px 3px 0"}},{BILL:"Bill (DC / invoice)",GP:"Gate pass",DCD:"DC draft"}[r.series_key]||r.series_key), h("td",{style:{padding:"3px 10px"}},r.fy), h("td",{style:{padding:"3px 10px"}},h("b",null,"last "+r.last_no)), h("td",{style:{padding:"3px 10px",color:colors.mutedLight}},"started by "+(r.start_set_by||"")+" · "+fmtDMY(r.start_set_at))))))),
-    can ? h("div",{style:{display:"flex",gap:8,alignItems:"center"}}, h("button",{onClick:save,disabled:busy,style:btnPrimary},busy?"Saving…":"Save"), msg ? h("span",{style:{fontSize:12.5,color:/Saved/.test(msg)?"#0f6b4f":colors.danger}},msg) : null) : null);
-}
 // ---- Pending Actions --------------------------------------------------------------------------------
 async function despPendingItems(){
   const out = [];
@@ -51397,14 +51444,611 @@ async function despPendingItems(){
     if(g.status==="Open" && days(g.created_at)>=2) to(P.stores, { what:"Gate pass "+g.gp_no+" ("+(g.vehicle_no||"")+") — has the truck left? Record the exit", entity_key:g.gp_no, detail_key:"gp-exit", owed_by_role:"stores", days_waiting:days(g.created_at), urgency:"overdue", source:"despatch_gp" });
     if(g.status==="Exited" && !g.scan_link) to(P.stores, { what:"Gate pass "+g.gp_no+" — paste the link to the signed, scanned security copy", entity_key:g.gp_no, detail_key:"gp-scan", owed_by_role:"stores", days_waiting:days(g.exit_at)||null, urgency: days(g.exit_at)>=2 ? "overdue" : "due", source:"despatch_gp" });
   });
-  // LUT: March = renew for next year (due); a new year without its LUT = overdue.
-  const S = await despSettings();
-  if(!S._missing && (S.lut_no || S.lut_fy)){
-    const nowFy = despFyLong(), m = new Date().getMonth()+1;
-    const who = Array.from(new Set([...P.acc, ...P.supers]));
-    if(S.lut_fy!==nowFy && S.lut_fy!==despNextFyLong()) to(who, { what:"LUT for "+nowFy+" not entered — export documents print the "+(S.lut_fy||"old")+" LUT (Despatch Settings & LUT)", entity_key:"LUT", detail_key:"lut|"+nowFy, owed_by_role:"accounts", days_waiting:null, urgency:"overdue", source:"despatch_lut" });
-    else if(m===3 && S.lut_fy===nowFy) to(who, { what:"Renew the LUT for "+despNextFyLong()+" before 1 April and enter it in Despatch Settings & LUT", entity_key:"LUT", detail_key:"lut|"+despNextFyLong(), owed_by_role:"accounts", days_waiting:null, urgency:"due", source:"despatch_lut" });
+  // 10 Oct 2026 (166): invoices + LUT register
+  try{ (await invPendingItems(P)).forEach(x=>out.push(x)); }catch(e){ console.error("Invoice pending items", e); }
+  try{ (await invLutPending(P)).forEach(x=>out.push(x)); }catch(e){ console.error("LUT pending items", e); }
+  return out;
+}
+
+// =====================================================================================================
+// TAX INVOICE (10 Oct 2026) — made from an approved sale DC, same number. Domestic (GST from the
+// contract's GST structure) and export (under LUT, in the contract currency). Draft -> Ready for IRN ->
+// Issued (IRN, Ack No, Ack date, signed QR entered back; then locked). Issued invoices go to the
+// posting queue for the accounting module. Also: the LUT register and dated settings history.
+// Needs structure_invoice_2026-10-10.sql (and the two LUT / settings files before it).
+// =====================================================================================================
+const GST_STATES = { "01":"Jammu and Kashmir","02":"Himachal Pradesh","03":"Punjab","04":"Chandigarh","05":"Uttarakhand","06":"Haryana","07":"Delhi","08":"Rajasthan","09":"Uttar Pradesh",
+  "10":"Bihar","11":"Sikkim","12":"Arunachal Pradesh","13":"Nagaland","14":"Manipur","15":"Mizoram","16":"Tripura","17":"Meghalaya","18":"Assam","19":"West Bengal","20":"Jharkhand","21":"Odisha",
+  "22":"Chhattisgarh","23":"Madhya Pradesh","24":"Gujarat","26":"Dadra and Nagar Haveli and Daman and Diu","27":"Maharashtra","29":"Karnataka","30":"Goa","31":"Lakshadweep","32":"Kerala",
+  "33":"Tamil Nadu","34":"Puducherry","35":"Andaman and Nicobar Islands","36":"Telangana","37":"Andhra Pradesh","38":"Ladakh","96":"Outside India (export)","97":"Other Territory" };
+const INV_FLOW = ["Draft","Ready for IRN","Issued"];
+const INV_TONE = { "Draft":["#eeece4","#5c5a50"], "Ready for IRN":["#fff4d6","#854f0b"], "Issued":["#e4f3ed","#0f6b4f"], "Cancelled":["#fdecea","#a3312a"] };
+const invPill = (s)=>{ const t = INV_TONE[s]||["#eeece4","#5c5a50"]; return h("span",{style:{display:"inline-block",fontSize:11,fontWeight:700,borderRadius:9,padding:"1px 9px",background:t[0],color:t[1],whiteSpace:"nowrap"}},s); };
+function invStateCodeFromGstin(g){ const m = String(g||"").trim().match(/^(\d{2})[A-Z0-9]{13}$/i); return m ? m[1] : ""; }
+function invStateCodeFromName(n){ const t = String(n||"").trim().toLowerCase(); if(!t) return ""; const hit = Object.entries(GST_STATES).find(([,v])=>v.toLowerCase()===t); return hit ? hit[0] : ""; }
+function invMoney(x, cur){ const v = r2(x); if(String(cur||"INR").toUpperCase()==="INR"){ const s = Math.abs(v).toFixed(2); const [a,b] = s.split("."); let head = a.slice(0,-3), tail = a.slice(-3); head = head.replace(/\B(?=(\d{2})+(?!\d))/g,","); return (v<0?"-":"")+(head?head+",":"")+tail+"."+b; }
+  return (v<0?"-":"")+Math.abs(v).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}); }
+// ---- amounts in words ----
+const W_ONES = ["","One","Two","Three","Four","Five","Six","Seven","Eight","Nine","Ten","Eleven","Twelve","Thirteen","Fourteen","Fifteen","Sixteen","Seventeen","Eighteen","Nineteen"];
+const W_TENS = ["","","Twenty","Thirty","Forty","Fifty","Sixty","Seventy","Eighty","Ninety"];
+function w99(n){ return n<20 ? W_ONES[n] : W_TENS[Math.floor(n/10)]+(n%10?"-"+W_ONES[n%10]:""); }
+function w999(n){ const hdr = Math.floor(n/100), rest = n%100; return [hdr?W_ONES[hdr]+" Hundred":"", rest?w99(rest):""].filter(Boolean).join(" "); }
+function wordsIndian(n){ n = Math.floor(n); if(n===0) return "Zero"; const parts = [];
+  const cr = Math.floor(n/10000000); n %= 10000000; const lk = Math.floor(n/100000); n %= 100000; const th = Math.floor(n/1000); n %= 1000;
+  if(cr) parts.push(wordsIndian(cr)+" Crore"); if(lk) parts.push(w99(lk)+" Lakh"); if(th) parts.push(w99(th)+" Thousand"); if(n) parts.push(w999(n)); return parts.join(" "); }
+function wordsIntl(n){ n = Math.floor(n); if(n===0) return "Zero"; const parts = []; const sc = [[1e9,"Billion"],[1e6,"Million"],[1e3,"Thousand"]];
+  for(const [v,l] of sc){ const q = Math.floor(n/v); if(q){ parts.push(w999(q)+" "+l); n %= v; } } if(n) parts.push(w999(n)); return parts.join(" "); }
+const INV_CUR_WORDS = { INR:["Rupees","Paise"], USD:["US Dollars","Cents"], EUR:["Euros","Cents"], GBP:["Pounds Sterling","Pence"], AED:["UAE Dirhams","Fils"], SAR:["Saudi Riyals","Halalas"], OMR:["Omani Rials","Baisa"], QAR:["Qatari Riyals","Dirhams"], KWD:["Kuwaiti Dinars","Fils"], SGD:["Singapore Dollars","Cents"] };
+function invAmountWords(x, cur){
+  cur = String(cur||"INR").toUpperCase(); const v = r2(Math.abs(x)); const whole = Math.floor(v), frac = Math.round((v-whole)*100);
+  const [maj,min] = INV_CUR_WORDS[cur] || [cur,"Cents"];
+  const w = cur==="INR" ? wordsIndian(whole) : wordsIntl(whole);
+  return maj+" "+w+(frac ? " and "+(cur==="INR"?wordsIndian(frac):wordsIntl(frac))+" "+min : "")+" Only";
+}
+// ---- settings in force on a date, and the LUT for a date ----
+async function invSettingsAt(dateIso){
+  const S = await despSettings(); if(S._missing) return S;
+  try{ const { data, error } = await sb.from("billing_settings_hist_tbl").select("*").lte("effective_from", dateIso||toISODate(new Date())).order("effective_from",{ascending:false}).order("id",{ascending:false}).limit(1);
+    if(!error && data && data[0]){ const hh = data[0]; ["our_gstin","our_pan","our_state","our_state_code","factory_address","bill_prefix","bank_name","bank_account","bank_acc_name","bank_ifsc","bank_branch","bank_swift","iec_no"].forEach(k=>{ if(hh[k]!=null && hh[k]!=="") S[k] = hh[k]; }); } }catch(e){}
+  return S;
+}
+async function invLutFor(dateIso){
+  const fy = despFyLong(dateIso ? new Date(dateIso+"T12:00:00") : new Date());
+  try{ const { data, error } = await sb.from("lut_register_tbl").select("*").eq("fy",fy).maybeSingle(); if(!error && data) return { lut_no:data.lut_no, fy, row:data }; }catch(e){}
+  const S = await despSettings(); if(!S._missing && S.lut_no && S.lut_fy===fy) return { lut_no:S.lut_no, fy, row:null };
+  return { lut_no:"", fy, row:null };
+}
+// The values copied onto a DC when Accounts approves it.
+async function despSnapshotDc(dcId, dateIso){
+  try{ const S = await invSettingsAt(dateIso); const L = await invLutFor(dateIso);
+    await sb.from("dc_tbl").update({ snap_gstin:S.our_gstin||null, snap_pan:S.our_pan||null, snap_state:S.our_state||null, snap_state_code:S.our_state_code||null,
+      snap_factory_addr:S.factory_address||null, snap_lut_no:L.lut_no||null, snap_lut_fy:L.fy }).eq("id",dcId); }catch(e){ console.error("DC snapshot", e); }
+}
+// Unit price of a contract Sl No in the invoice currency.
+async function invUnitPrice(cn, est, currency, fx){
+  const qty = Number(est.order_qty)||1;
+  const p = await computeSlNoPricing(cn, est.item_sl_no, qty);
+  if(p.exact && p.paid && String(p.paid.currency||"INR").toUpperCase()===currency) return { unit:r2(p.paid.value), source:"PO" };
+  // same unit the Quote / OA printed: a PO price to the paisa / cent, otherwise the offer's rounding
+  const inrUnit = (Number(p.total)||0)/qty;
+  const inCur = currency==="INR" ? inrUnit : (fx>0 ? inrUnit/fx : 0);
+  return { unit: p.exact ? r2(inCur) : offerRound(inCur, currency), source:p.exact?"PO":"Contract" };
+}
+// Totals, tax and HSN summary. lines: [{hsn, amount}]
+function invCompute(inv, lines, gstSnap){
+  const cur = String(inv.currency||"INR").toUpperCase();
+  const basic = r2(lines.reduce((n,l)=>n+(Number(l.amount)||0),0));
+  const charges = r2((Number(inv.pf_amount)||0)+(Number(inv.freight_amount)||0)+(Number(inv.insurance_amount)||0));
+  const taxable = r2(basic + charges);
+  const comps = inv.is_export ? [] : (gstSnap||[]).map(c=>({ label:c.label, rate:Number(c.rate_percent)||0 })).filter(c=>c.rate>0);
+  const taxLines = comps.map(c=>({ label:c.label, rate:c.rate, amount:r2(taxable*c.rate/100) }));
+  const tax = r2(taxLines.reduce((n,t)=>n+t.amount,0));
+  const raw = r2(taxable + tax);
+  const grand = cur==="INR" ? Math.round(raw) : raw;
+  const round_off = r2(grand - raw);
+  const rateTot = comps.reduce((n,c)=>n+c.rate,0);
+  const byH = new Map(); lines.forEach(l=>{ const k = l.hsn||"—"; byH.set(k,(byH.get(k)||0)+(Number(l.amount)||0)); });
+  const hsn = Array.from(byH.entries()).map(([k,amt])=>{ const share = basic>0 ? amt/basic : 0; const tx = r2(amt + charges*share); return { hsn:k, taxable:tx, rate:rateTot, tax:r2(tx*rateTot/100), comps:comps.map(c=>({ label:c.label, rate:c.rate, amount:r2(tx*c.rate/100) })) }; });
+  const fx = Number(inv.fx_rate)||0;
+  return { basic_total:basic, taxable_total:taxable, tax_lines:taxLines, tax_total:tax, round_off, grand_total:grand, grand_total_inr: cur==="INR" ? grand : r2(grand*fx), hsn_summary:hsn, amount_words:invAmountWords(grand, cur) };
+}
+// Make the draft invoice for a DC.
+async function invMakeFromDc(dcId, user){
+  const x = await despLoadDc(dcId); const dc = x.dc;
+  if(!dc || !["Approved","Despatched"].includes(dc.status) || dc.is_test || !dc.bill_no) throw new Error("Only an approved, numbered (not test) DC can be invoiced.");
+  const { data: ex } = await sb.from("invoice_tbl").select("id").eq("dc_id",dcId).maybeSingle(); if(ex) return ex.id;
+  const C = await despContract(dc.contract_number, dc.id);
+  const [{ data: terms }, { data: ests }] = await Promise.all([
+    sb.from("quote_commercial_terms").select("*").eq("reference_number",dc.contract_number).maybeSingle(),
+    sb.from("estimates").select("*").eq("reference_number",dc.contract_number)]);
+  const head = (ests||[])[0]||{};
+  const currency = dc.is_export ? String(C.currency||"USD").toUpperCase() : "INR";
+  const fx = dc.is_export ? (Number(head.conversion_rate)||0) : 1;
+  const today = toISODate(new Date());
+  const invDate = dc.dc_date || today;
+  const S = await invSettingsAt(invDate); const L = await invLutFor(invDate);
+  // prices
+  const price = new Map(); let contractBasic = 0;
+  for(const e of (ests||[])){ const p = await invUnitPrice(dc.contract_number, e, currency, fx); price.set(e.item_sl_no, p); contractBasic += p.unit*(Number(e.order_qty)||1); }
+  const lines = x.lines.map((l,i)=>{ const p = price.get(l.item_sl_no)||{unit:0,source:"Contract"}; return { dc_line_id:l.id, item_sl_no:l.item_sl_no, item:l.item, description:l.description, hsn:l.hsn, uom:l.uom||"NOS", qty:Number(l.qty)||0, unit_price:p.unit, amount:r2(p.unit*(Number(l.qty)||0)), price_source:p.source, sort_order:i }; });
+  const basic = r2(lines.reduce((n,l)=>n+l.amount,0));
+  // P&F: a percentage of this invoice's basic, or this invoice's share of a lumpsum (never more than what is left)
+  let pf = 0;
+  if(terms && terms.packing_forwarding_basis==="Percentage") pf = r2(basic*(Number(terms.packing_forwarding_value)||0)/100);
+  else if(terms && terms.packing_forwarding_basis==="Flat" && Number(terms.packing_forwarding_value)){
+    const lump = Number(terms.packing_forwarding_value)||0;
+    const { data: prev } = await sb.from("invoice_tbl").select("pf_amount,status").eq("contract_number",dc.contract_number);
+    const used = (prev||[]).filter(p=>p.status!=="Cancelled").reduce((n,p)=>n+(Number(p.pf_amount)||0),0);
+    const left = Math.max(0, lump-used);
+    const lastShipment = C.lines.every(l=>l.balance===0);
+    pf = lastShipment ? r2(left) : r2(Math.min(left, contractBasic>0 ? lump*basic/contractBasic : 0));
   }
+  const buyerCode = invStateCodeFromGstin(C.buyerGstin) || invStateCodeFromName(C.company && (C.company.billing_state||C.company.state));
+  const pfText = !terms ? "" : terms.packing_forwarding_basis==="Flat" ? "Lumpsum "+invMoney(terms.packing_forwarding_value,currency) : terms.packing_forwarding_basis==="Percentage" ? (Number(terms.packing_forwarding_value)||0)+"%" : (terms.packing_forwarding||"");
+  let vehicle = ""; if(x.gp) vehicle = x.gp.vehicle_no||"";
+  const row = { dc_id:dc.id, invoice_no:dc.bill_no, fy:dc.fy||despFy(), invoice_date:invDate, status:"Draft", is_export:!!dc.is_export, contract_number:dc.contract_number, customer_name:C.customer,
+    bill_to:[C.customer, C.buyerAddr].filter(Boolean).join("\n"), buyer_gstin:C.buyerGstin||null, buyer_state: dc.is_export ? (C.country||null) : (GST_STATES[buyerCode]||(C.company&&(C.company.billing_state||C.company.state))||null),
+    pos_state: dc.is_export ? GST_STATES["96"] : (GST_STATES[buyerCode]||null), pos_code: dc.is_export ? "96" : (buyerCode||null),
+    ship_to:[dc.ship_contact, dc.ship_address, dc.ship_phone].filter(Boolean).join("\n")||null, handoff: dc.is_export ? ([dc.handoff_contact, dc.handoff_address, dc.handoff_phone].filter(Boolean).join("\n")||null) : null,
+    po_no:C.po_number||null, po_date:C.po_date ? toISODate(C.po_date) : null, oa_date:(C.so&&C.so.oa_issued_on)||null, currency, fx_rate: dc.is_export ? (fx||null) : 1,
+    incoterm:(terms&&terms.incoterms)||null, mode_of_shipment:dc.mode_of_shipment||null, port_loading:null, port_discharge:null, final_destination: dc.is_export ? (C.country||null) : null, country_origin:"India",
+    vehicle_no:vehicle||null, payment_term:(terms&&terms.payment_term)||null, delivery_term:(terms&&terms.delivery_term)||null, transport_term:(terms&&(terms.dispatch_through||terms.freight))||null,
+    packing_term:pfText||null, insurance_term:(terms&&terms.insurance)||null, tax_term: dc.is_export ? "Nil — export under LUT" : ((terms&&terms.tax)||((C.so&&C.so.gst_structure_name)||null)),
+    pf_amount:pf, freight_amount:0, insurance_amount:0,
+    snap_gstin:S.our_gstin||null, snap_pan:S.our_pan||null, snap_state:S.our_state||null, snap_state_code:S.our_state_code||null, snap_factory_addr:S.factory_address||null,
+    snap_lut_no: dc.is_export ? (L.lut_no||null) : null, snap_lut_fy: dc.is_export ? L.fy : null, snap_iec:S.iec_no||null,
+    snap_bank_name:S.bank_name||null, snap_bank_account:S.bank_account||null, snap_bank_acc_name:S.bank_acc_name||null, snap_bank_ifsc:S.bank_ifsc||null, snap_bank_branch:S.bank_branch||null, snap_bank_swift:S.bank_swift||null,
+    created_by:user?.username||"unknown" };
+  Object.assign(row, invCompute(row, lines, C.so && C.so.gst_components_snapshot));
+  const { data: inv, error } = await sb.from("invoice_tbl").insert(row).select().single();
+  if(error) throw error;
+  const { error: le } = await sb.from("invoice_line_tbl").insert(lines.map(l=>({ ...l, invoice_id:inv.id })));
+  if(le){ await sb.from("invoice_tbl").delete().eq("id",inv.id); throw le; }
+  await invHist(inv.id, dc.id, "Invoice drafted", user?.username, inv.invoice_no);
+  await logAudit("CREATE","invoice_tbl",inv.invoice_no,"Draft invoice from DC "+inv.invoice_no+" · "+currency+" "+invMoney(row.grand_total,currency),user?.username||"unknown",null,null);
+  return inv.id;
+}
+async function invHist(invId, dcId, action, by, note){ try{ await sb.from("dc_history_tbl").insert({ dc_id:dcId||null, invoice_id:invId||null, action, by_user:by||"", note:note||null }); }catch(e){} }
+// ---- QR code for the signed e-invoice QR (loaded only when needed) ----
+let INV_QR_LIB = null;
+function invLoadQrLib(){
+  if(window.qrcode) return Promise.resolve(window.qrcode);
+  if(INV_QR_LIB) return INV_QR_LIB;
+  INV_QR_LIB = new Promise((res)=>{ const s = document.createElement("script"); s.src = "https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js";
+    s.onload = ()=>res(window.qrcode||null); s.onerror = ()=>{ INV_QR_LIB = null; res(null); }; document.head.appendChild(s); setTimeout(()=>res(window.qrcode||null), 6000); });
+  return INV_QR_LIB;
+}
+async function invQrDataUrl(text){
+  try{ const q = await invLoadQrLib(); if(!q) return null; const qr = q(0,"L"); qr.addData(String(text)); qr.make(); return qr.createDataURL(4, 2); }catch(e){ return null; }
+}
+// ---- the invoice PDF: three copies ----
+async function invPdf(inv, lines){
+  const cur = String(inv.currency||"INR").toUpperCase(); const isInr = cur==="INR";
+  const co = await pdfCompanyFor(null);
+  const { jsPDF } = window.jspdf; const doc = new jsPDF({ orientation:"portrait", unit:"mm", format:"a4" });
+  const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight();
+  const qrImg = inv.signed_qr ? await invQrDataUrl(inv.signed_qr) : null;
+  const copies = inv.is_export ? ["Original for Buyer","Duplicate","Triplicate for Supplier"] : ["Original for Recipient","Duplicate for Transporter","Triplicate for Supplier"];
+  const T = { ...DESP_TBL, bodyStyles:{ ...DESP_TBL.bodyStyles, fontSize:7.6 } };
+  copies.forEach((copy, ci)=>{
+    if(ci) doc.addPage();
+    drawPdfLetterhead(doc, W, co, {logoW:40,logoH:20});
+    doc.setFontSize(7.4); doc.setTextColor(70,70,70); doc.setFont(undefined,"normal");
+    doc.text("GSTIN: "+(inv.snap_gstin||"—")+"   PAN: "+(inv.snap_pan||"—")+(inv.is_export&&inv.snap_iec?"   IEC: "+inv.snap_iec:"")+"   Factory: "+(inv.snap_factory_addr||""), W-14, 21.5, {align:"right", maxWidth:W-60});
+    doc.setDrawColor(200,197,185); doc.setLineWidth(0.4); doc.line(10, 24, W-10, 24);
+    doc.setFontSize(13); doc.setFont(undefined,"bold"); doc.setTextColor(28,31,26);
+    doc.text(inv.is_export ? "TAX INVOICE — EXPORT" : "TAX INVOICE", W/2, 30.5, {align:"center"});
+    doc.setFontSize(7.5); doc.setFont(undefined,"normal"); doc.setTextColor(90,90,90); doc.text(copy, W/2, 34.5, {align:"center"});
+    if(inv.status!=="Issued"){ try{ doc.setGState(new doc.GState({opacity:0.12})); }catch(e){} doc.setFontSize(54); doc.setTextColor(180,40,40);
+      doc.text(inv.status==="Cancelled" ? "CANCELLED" : "DRAFT — NO IRN YET", W/2, H/2, {align:"center", angle:30}); try{ doc.setGState(new doc.GState({opacity:1})); }catch(e){} doc.setTextColor(28,31,26); }
+    let y = 37;
+    // IRN block + QR
+    const irnTxt = [["IRN", inv.irn||"— (enter after uploading to the IRP)"],["Ack No / Date", (inv.ack_no||"—")+(inv.ack_date?" / "+fmtDMYTime(inv.ack_date):"")]];
+    doc.autoTable({ ...T, startY:y, body:irnTxt, margin:{ left:10, right: qrImg ? 40 : 10 }, columnStyles:{0:{fontStyle:"bold",cellWidth:26}} });
+    if(qrImg){ try{ doc.addImage(qrImg,"PNG",W-38,y-1,28,28); }catch(e){} }
+    y = Math.max(doc.lastAutoTable.finalY, qrImg ? y+28 : 0) + 1.5;
+    if(inv.is_export){ doc.setFillColor(253,231,176); doc.rect(10,y,W-20,6,"F"); doc.setFontSize(7.6); doc.setFont(undefined,"bold"); doc.setTextColor(60,40,0);
+      doc.text("SUPPLY MEANT FOR EXPORT UNDER LETTER OF UNDERTAKING WITHOUT PAYMENT OF INTEGRATED TAX · LUT No: "+(inv.snap_lut_no||"—")+" ("+(inv.snap_lut_fy||"")+")", W/2, y+4, {align:"center"}); doc.setFont(undefined,"normal"); doc.setTextColor(28,31,26); y += 7.5; }
+    const billHead = inv.is_export ? "Buyer (Bill To)" : "Customer (Bill To)";
+    const bill = [inv.bill_to, inv.buyer_gstin?"GSTIN/UIN: "+inv.buyer_gstin:"", inv.buyer_state?(inv.is_export?"Country: ":"State: ")+inv.buyer_state+(inv.is_export?"":(invStateCodeFromName(inv.buyer_state)?"  Code: "+invStateCodeFromName(inv.buyer_state):"")):""].filter(Boolean).join("\n");
+    const pRows = [[{content:billHead,styles:{fontStyle:"bold"}},{content:inv.is_export?"Consignee / Deliver To":"Deliver To (if other than consignee)",styles:{fontStyle:"bold"}}],[bill, inv.ship_to||"Same as Bill To"]];
+    if(inv.is_export && inv.handoff) pRows.push([{content:"Notify / Handoff",styles:{fontStyle:"bold"}}, inv.handoff]);
+    doc.autoTable({ ...T, startY:y, body:pRows, columnStyles:{0:{cellWidth:(W-20)/2},1:{cellWidth:(W-20)/2}} });
+    y = doc.lastAutoTable.finalY + 1.5;
+    const L = inv.is_export ? [
+      ["Invoice No", inv.invoice_no, "Invoice Date", fmtDMY(inv.invoice_date)], ["Contract No", inv.contract_number||"", "PO No / Date", [inv.po_no, inv.po_date?fmtDMY(inv.po_date):""].filter(Boolean).join(" / ")||"—"],
+      ["Currency", cur, "Exchange Rate", inv.fx_rate ? "Rs "+inv.fx_rate+" per "+cur+" (GST record)" : "—"], ["Incoterm", inv.incoterm||"—", "Mode of Shipment", inv.mode_of_shipment||"—"],
+      ["Port of Loading", inv.port_loading||"—", "Port of Discharge", inv.port_discharge||"—"], ["Country of Origin", inv.country_origin||"India", "Final Destination", inv.final_destination||"—"],
+      ["Place of Supply", "Outside India (96)", "DC No", inv.invoice_no+" (same number)"], ["Shipping Bill No", inv.shipping_bill_no||"after customs", "Shipping Bill Date", inv.shipping_bill_date?fmtDMY(inv.shipping_bill_date):"after customs"] ]
+    : [
+      ["Invoice No", inv.invoice_no, "Bank Name", inv.snap_bank_name||"—"], ["Invoice Date", fmtDMY(inv.invoice_date), "Account No", inv.snap_bank_account||"—"],
+      ["Contract No", inv.contract_number||"", "Account Name", inv.snap_bank_acc_name||"—"], ["PO No / Date", [inv.po_no, inv.po_date?fmtDMY(inv.po_date):""].filter(Boolean).join(" / ")||"—", "IFSC Code", inv.snap_bank_ifsc||"—"],
+      ["OA Date", inv.oa_date?fmtDMY(inv.oa_date):"—", "Branch", inv.snap_bank_branch||"—"], ["Place of Supply", (inv.pos_state||"—")+(inv.pos_code?" ("+inv.pos_code+")":""), "Reverse Charge", inv.reverse_charge?"Yes":"No"],
+      ["DC No", inv.invoice_no+" (same number)", "E-way Bill No / Date", [inv.eway_no, inv.eway_date?fmtDMY(inv.eway_date):""].filter(Boolean).join(" / ")||"—"],
+      ["Site Contact", inv.site_contact||"—", "Vehicle No", inv.vehicle_no||"—"] ];
+    doc.autoTable({ ...T, startY:y, body:L, columnStyles:{0:{fontStyle:"bold",cellWidth:28},1:{cellWidth:(W-20)/2-28},2:{fontStyle:"bold",cellWidth:30}} });
+    y = doc.lastAutoTable.finalY + 1.5;
+    const sym = isInr ? "Rs" : cur;
+    const body = lines.map((l,i)=>[String(i+1), l.item||"", [l.description, l.item_sl_no!=null?"Contract Sl No "+l.item_sl_no:""].filter(Boolean).join(" — "), l.hsn||"", (Number(l.qty)||0)+" "+(l.uom||"NOS"), invMoney(l.unit_price,cur), invMoney(l.amount,cur)]);
+    body.push([{content:"Total",colSpan:4,styles:{fontStyle:"bold",halign:"right"}},{content:String(lines.reduce((n,l)=>n+(Number(l.qty)||0),0)),styles:{fontStyle:"bold"}},"",{content:invMoney(inv.basic_total,cur),styles:{fontStyle:"bold"}}]);
+    doc.autoTable({ ...T, startY:y, head:[["S.No","Item","Description","HSN/SAC","Qty","Unit Price ("+sym.replace("₹","Rs")+")","Total ("+sym.replace("₹","Rs")+")"]], body,
+      columnStyles:{0:{cellWidth:10},1:{cellWidth:28},3:{cellWidth:18},4:{cellWidth:16},5:{cellWidth:24,halign:"right"},6:{cellWidth:26,halign:"right"}} });
+    y = doc.lastAutoTable.finalY + 1.5;
+    if(y > H-75){ doc.addPage(); y = 15; }
+    const terms = [["Payment Term", inv.payment_term],["Delivery Term", inv.delivery_term],["Transportation", inv.transport_term],["Packing", inv.packing_term],["Insurance", inv.insurance_term],["Taxes", inv.tax_term]].filter(t=>t[1]);
+    const tot = [];
+    if(Number(inv.pf_amount)) tot.push(["Packing & Forwarding", invMoney(inv.pf_amount,cur)]);
+    if(Number(inv.freight_amount)) tot.push(["Freight (recovered)", invMoney(inv.freight_amount,cur)]);
+    if(Number(inv.insurance_amount)) tot.push(["Insurance (recovered)", invMoney(inv.insurance_amount,cur)]);
+    if(!inv.is_export) tot.push(["Taxable Value", invMoney(inv.taxable_total,cur)]);
+    (inv.tax_lines||[]).forEach(t=>tot.push(["OUTPUT "+t.label+" "+t.rate+"%", invMoney(t.amount,cur)]));
+    if(Number(inv.round_off)) tot.push(["Round Off", invMoney(inv.round_off,cur)]);
+    tot.push([{content:"Total ("+sym.replace("₹","Rs")+")",styles:{fontStyle:"bold"}},{content:invMoney(inv.grand_total,cur),styles:{fontStyle:"bold"}}]);
+    if(!isInr) tot.push(["INR equivalent", "Rs "+invMoney(inv.grand_total_inr,"INR")]);
+    const yT = y;
+    doc.autoTable({ ...T, startY:y, body:[[{content:"Terms and Conditions",styles:{fontStyle:"bold"}}], ...terms.map(t=>[t[0]+" : "+t[1]])], margin:{ left:10, right:72 } });
+    const yA = doc.lastAutoTable.finalY;
+    doc.autoTable({ ...T, startY:yT, body:tot, margin:{ left:W-70, right:10 }, columnStyles:{1:{halign:"right"}} });
+    y = Math.max(yA, doc.lastAutoTable.finalY) + 1.5;
+    doc.autoTable({ ...T, startY:y, body:[[{content:"Amount in Words : "+(inv.amount_words||""),styles:{fontStyle:"bold"}}]] });
+    y = doc.lastAutoTable.finalY + 1.5;
+    if(!inv.is_export && (inv.hsn_summary||[]).length){
+      const comps = (inv.tax_lines||[]).map(t=>t.label);
+      doc.autoTable({ ...T, startY:y, head:[["HSN No","Taxable Value", ...comps.map(c=>c+" %"), ...comps.map(c=>c+" Amount"), "Tax Amount"]],
+        body:inv.hsn_summary.map(hh=>[hh.hsn, invMoney(hh.taxable,cur), ...(hh.comps||[]).map(c=>String(c.rate)), ...(hh.comps||[]).map(c=>invMoney(c.amount,cur)), invMoney(hh.tax,cur)]) });
+      y = doc.lastAutoTable.finalY + 1.5;
+    }
+    if(inv.is_export){ doc.autoTable({ ...T, startY:y, body:[["Bank details for remittance: "+[inv.snap_bank_name, inv.snap_bank_account?"A/c "+inv.snap_bank_account:"", inv.snap_bank_acc_name, inv.snap_bank_ifsc?"IFSC "+inv.snap_bank_ifsc:"", inv.snap_bank_swift?"SWIFT "+inv.snap_bank_swift:"", inv.snap_bank_branch].filter(Boolean).join(" · ")]] }); y = doc.lastAutoTable.finalY + 1.5; }
+    if(y > H-32){ doc.addPage(); y = 15; }
+    doc.setDrawColor(216,212,197); doc.rect(10,y,W-20,26); doc.line(W/2,y,W/2,y+26);
+    doc.setFontSize(7); doc.setTextColor(60,60,60);
+    doc.text(doc.splitTextToSize("Declaration: We declare that this invoice shows the actual price of the goods described and that all particulars are true and correct."+(inv.is_export?"":" All Commercial Terms and Conditions agreed upon are applicable to this sale."), W/2-14), 12, y+4);
+    doc.text("For "+pdfFooterCompanyName(co), W-12, y+4, {align:"right"}); doc.text("Authorised Signatory", W-12, y+24, {align:"right"});
+    if(inv.remarks){ doc.text("Note: "+inv.remarks, 12, y+24, {maxWidth:W/2-14}); }
+  });
+  despPdfFooter(doc, co, (inv.is_export?"Export ":"")+"Tax Invoice "+inv.invoice_no);
+  doc.save(("Invoice_"+inv.invoice_no+"_"+(inv.contract_number||"")).replace(/[^A-Za-z0-9_-]+/g,"_")+".pdf");
+}
+// ---- the invoice editor ----------------------------------------------------------------------------
+function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
+  const [inv,setInv] = useState(null); const [lines,setLines] = useState([]); const [orig,setOrig] = useState(null);
+  const [gst,setGst] = useState(null); const [busy,setBusy] = useState(false); const [msg,setMsg] = useState(""); const [hist,setHist] = useState([]);
+  const [irnDlg,setIrnDlg] = useState(null); const [cancelDlg,setCancelDlg] = useState(false);
+  const load = useCallback(async()=>{
+    const [{ data: i }, { data: ls }] = await Promise.all([ sb.from("invoice_tbl").select("*").eq("id",invoiceId).maybeSingle(), sb.from("invoice_line_tbl").select("*").eq("invoice_id",invoiceId).order("sort_order") ]);
+    if(!i){ setMsg("Invoice not found."); return; }
+    const { data: so } = await sb.from("sale_order_tbl").select("gst_components_snapshot,gst_structure_name").eq("contract_number",i.contract_number).maybeSingle();
+    setGst(so ? (so.gst_components_snapshot||[]) : []);
+    setInv(i); setLines((ls||[]).map(l=>({ ...l, unit_price:String(l.unit_price), _orig:Number(l.unit_price) }))); setOrig(JSON.stringify(i));
+    const { data: hs } = await sb.from("dc_history_tbl").select("*").eq("invoice_id",invoiceId).order("at"); setHist(hs||[]);
+  },[invoiceId]);
+  useEffect(()=>{ load(); },[load]);
+  if(!inv) return h("div",{style:{padding:20,color:colors.muted}}, msg || "Reading the invoice…");
+  const canAcc = despCan("acc",user,me,P);
+  const editable = inv.status==="Draft" && canAcc;
+  const cur = String(inv.currency||"INR").toUpperCase();
+  const calcLines = lines.map(l=>({ ...l, amount:r2((Number(l.unit_price)||0)*(Number(l.qty)||0)) }));
+  const calc = invCompute(inv, calcLines, gst);
+  const set = (k,v)=> setInv(x=>({...x,[k]:v}));
+  const ourCode = inv.snap_state_code || "33";
+  const labels = (gst||[]).map(c=>String(c.label||"").toUpperCase());
+  const posWarn = !inv.is_export && inv.pos_code ? ( inv.pos_code===ourCode ? (labels.some(l=>/IGST/.test(l)) ? "Place of supply is "+(inv.pos_state||inv.pos_code)+" (same state) but the contract's GST structure charges IGST — intra-state needs CGST + SGST." : null)
+                                                                   : (labels.some(l=>/CGST|SGST/.test(l)) ? "Place of supply is "+(inv.pos_state||inv.pos_code)+" (other state) but the contract's GST structure charges CGST + SGST — inter-state needs IGST." : null) ) : null;
+  const save = async(quiet)=>{
+    // prices changed from the contract need a reason
+    const changed = lines.filter(l=>r2(l.unit_price)!==r2(l._orig) && l.price_source!=="Edited");
+    let reason = null;
+    if(changed.length){ reason = prompt("Unit price changed from the contract on Sl No "+changed.map(l=>l.item_sl_no).join(", ")+".\n\nWhy? (kept with the invoice)"); if(!reason || !reason.trim()){ setMsg("A price change needs a reason."); return false; } }
+    setBusy(true); setMsg("");
+    const head = { invoice_date:inv.invoice_date, bill_to:inv.bill_to, buyer_gstin:inv.buyer_gstin||null, buyer_state:inv.buyer_state||null, pos_state:inv.pos_state||null, pos_code:inv.pos_code||null,
+      reverse_charge:!!inv.reverse_charge, ship_to:inv.ship_to||null, handoff:inv.handoff||null, po_no:inv.po_no||null, po_date:inv.po_date||null, oa_date:inv.oa_date||null, site_contact:inv.site_contact||null,
+      fx_rate: inv.is_export ? (Number(inv.fx_rate)||null) : 1, incoterm:inv.incoterm||null, mode_of_shipment:inv.mode_of_shipment||null, port_loading:inv.port_loading||null, port_discharge:inv.port_discharge||null,
+      final_destination:inv.final_destination||null, country_origin:inv.country_origin||null, vehicle_no:inv.vehicle_no||null, eway_no:inv.eway_no||null, eway_date:inv.eway_date||null,
+      shipping_bill_no:inv.shipping_bill_no||null, shipping_bill_date:inv.shipping_bill_date||null,
+      payment_term:inv.payment_term||null, delivery_term:inv.delivery_term||null, transport_term:inv.transport_term||null, packing_term:inv.packing_term||null, insurance_term:inv.insurance_term||null, tax_term:inv.tax_term||null,
+      pf_amount:r2(inv.pf_amount), freight_amount:r2(inv.freight_amount), insurance_amount:r2(inv.insurance_amount), remarks:inv.remarks||null, ...calc };
+    // the LUT follows the invoice date's financial year
+    if(inv.is_export){ const L = await invLutFor(inv.invoice_date); head.snap_lut_no = L.lut_no||null; head.snap_lut_fy = L.fy; }
+    const { error } = await sb.from("invoice_tbl").update(head).eq("id",inv.id).eq("status","Draft");
+    if(error){ setBusy(false); setMsg("Could not save: "+error.message); return false; }
+    for(const l of calcLines){ const ed = r2(l.unit_price)!==r2(l._orig) || l.price_source==="Edited";
+      await sb.from("invoice_line_tbl").update({ unit_price:r2(l.unit_price), amount:l.amount, price_source: ed ? "Edited" : l.price_source, edit_reason: changed.find(c=>c.id===l.id) ? reason.trim() : l.edit_reason }).eq("id",l.id); }
+    await invHist(inv.id, inv.dc_id, "Saved", user?.username, changed.length ? "Price changed on Sl No "+changed.map(l=>l.item_sl_no).join(", ")+": "+reason.trim() : null);
+    if(changed.length) await logAudit("UPDATE","invoice_line_tbl",inv.invoice_no,"Unit price changed on Sl No "+changed.map(l=>l.item_sl_no+" "+invMoney(l._orig,cur)+" → "+invMoney(l.unit_price,cur)).join(", ")+" · "+reason.trim(),user?.username||"unknown",null,null);
+    setBusy(false); if(!quiet) setMsg("Saved."); onChanged && onChanged(); await load(); return true;
+  };
+  const problems = ()=>{
+    const p = [];
+    if(!inv.invoice_date) p.push("Enter the invoice date.");
+    calcLines.forEach(l=>{ if(!String(l.hsn||"").trim()) p.push("Sl No "+l.item_sl_no+": HSN missing — add it to the item in the Items master, then make the invoice again."); if(!(Number(l.unit_price)>0)) p.push("Sl No "+l.item_sl_no+": unit price is zero."); });
+    if(inv.is_export){
+      if(!(Number(inv.fx_rate)>0)) p.push("Enter the exchange rate (₹ per "+cur+").");
+      if(!inv.snap_lut_no) p.push("No LUT for "+despFyLong(new Date(inv.invoice_date+"T12:00:00"))+" — enter it in Despatch Settings & LUT.");
+    } else {
+      if(!(gst||[]).length) p.push("The contract has no GST structure — set it in the Sale Order's Commercial Terms.");
+      if(!inv.pos_code) p.push("Enter the place of supply.");
+    }
+    return p;
+  };
+  const toReady = async()=>{
+    if(!(await save(true))) return;
+    const p = problems(); if(p.length){ setMsg(p.join("\n")); return; }
+    if(!inv.is_export && !inv.buyer_gstin){ const a = await despAsk("No GSTIN for the buyer","This invoice will be treated as a supply to an unregistered buyer (B2C).", [{key:"no",label:"Go back"},{key:"yes",label:"Continue",primary:true}]); if(a!=="yes") return; }
+    if(posWarn){ const a = await despAsk("Check the tax", posWarn+"\n\nFix the contract's GST structure, or continue if you are sure.", [{key:"no",label:"Go back"},{key:"yes",label:"Continue anyway",primary:true}]); if(a!=="yes") return; }
+    setBusy(true);
+    const { error } = await sb.from("invoice_tbl").update({ status:"Ready for IRN", ready_by:user?.username||"unknown", ready_at:new Date().toISOString() }).eq("id",inv.id).eq("status","Draft");
+    setBusy(false); if(error){ setMsg("Could not move it: "+error.message); return; }
+    await invHist(inv.id, inv.dc_id, "Ready for IRN", user?.username, posWarn?("Tax warning accepted: "+posWarn):null);
+    await logAudit("UPDATE","invoice_tbl",inv.invoice_no,"Ready for IRN · "+cur+" "+invMoney(calc.grand_total,cur),user?.username||"unknown",null,null);
+    onChanged && onChanged(); load();
+  };
+  const backToDraft = async()=>{ setBusy(true); await sb.from("invoice_tbl").update({ status:"Draft", ready_by:null, ready_at:null }).eq("id",inv.id).eq("status","Ready for IRN"); setBusy(false);
+    await invHist(inv.id, inv.dc_id, "Back to Draft", user?.username, null); onChanged && onChanged(); load(); };
+  const issue = async(f)=>{
+    const irn = String(f.irn||"").trim().toLowerCase();
+    if(!/^[0-9a-f]{64}$/.test(irn)){ alert("The IRN is 64 characters, letters a–f and digits only. Copy it from the IRP."); return; }
+    if(!String(f.ack_no||"").trim() || !f.ack_date){ alert("Enter the Ack No and Ack date from the IRP."); return; }
+    const { data: dup } = await sb.from("invoice_tbl").select("invoice_no").eq("irn",irn).neq("id",inv.id);
+    if(dup && dup.length){ alert("This IRN is already on invoice "+dup[0].invoice_no+"."); return; }
+    setBusy(true);
+    const now = new Date().toISOString();
+    const { error } = await sb.from("invoice_tbl").update({ status:"Issued", irn, ack_no:String(f.ack_no).trim(), ack_date:new Date(f.ack_date).toISOString(), signed_qr:String(f.signed_qr||"").trim()||null, issued_by:user?.username||"unknown", issued_at:now }).eq("id",inv.id).eq("status","Ready for IRN");
+    if(error){ setBusy(false); alert("Could not save: "+error.message); return; }
+    try{ await sb.from("posting_queue_tbl").insert({ doc_type: inv.is_export ? "Export invoice" : "Tax invoice", doc_id:inv.id, doc_no:inv.invoice_no, doc_date:inv.invoice_date, party:inv.customer_name, amount:inv.grand_total, currency:cur, amount_inr:inv.grand_total_inr, status:"To post" }); }catch(e){ console.error("posting queue", e); }
+    await invHist(inv.id, inv.dc_id, "Issued — IRN entered", user?.username, "Ack "+String(f.ack_no).trim());
+    await logAudit("UPDATE","invoice_tbl",inv.invoice_no,"Issued · IRN "+irn.slice(0,12)+"… · Ack "+String(f.ack_no).trim()+" · "+cur+" "+invMoney(inv.grand_total,cur),user?.username||"unknown",null,null);
+    setBusy(false); setIrnDlg(null); onChanged && onChanged(); load();
+  };
+  const saveTransport = async()=>{
+    setBusy(true);
+    const { error } = await sb.from("invoice_tbl").update({ eway_no:inv.eway_no||null, eway_date:inv.eway_date||null, vehicle_no:inv.vehicle_no||null, shipping_bill_no:inv.shipping_bill_no||null, shipping_bill_date:inv.shipping_bill_date||null }).eq("id",inv.id);
+    setBusy(false); if(error){ setMsg("Could not save: "+error.message); return; }
+    await invHist(inv.id, inv.dc_id, "Transport details", user?.username, [inv.eway_no&&"e-way "+inv.eway_no, inv.shipping_bill_no&&"shipping bill "+inv.shipping_bill_no, inv.vehicle_no].filter(Boolean).join(" · ")||null);
+    setMsg("Saved."); onChanged && onChanged(); load();
+  };
+  const discard = async()=>{
+    const a = await despAsk("Discard this draft?", "Invoice "+inv.invoice_no+" (no IRN yet) is deleted. The DC stays approved and can be invoiced again with the same number.", [{key:"no",label:"Keep it"},{key:"yes",label:"Discard",primary:true}]);
+    if(a!=="yes") return;
+    await invHist(null, inv.dc_id, "Invoice draft discarded", user?.username, inv.invoice_no);
+    await sb.from("invoice_tbl").delete().eq("id",inv.id);
+    await logAudit("DELETE","invoice_tbl",inv.invoice_no,"Draft invoice discarded (no IRN)",user?.username||"unknown",null,null);
+    onChanged && onChanged(); onClose && onClose();
+  };
+  const cancelIssued = async(why)=>{
+    await sb.from("invoice_tbl").update({ status:"Cancelled", cancelled_by:user?.username||"unknown", cancelled_at:new Date().toISOString(), cancel_reason:why }).eq("id",inv.id);
+    await sb.from("posting_queue_tbl").update({ status:"Withdrawn", note:"IRN cancelled: "+why }).eq("doc_id",inv.id).eq("doc_no",inv.invoice_no).eq("status","To post");
+    await invHist(inv.id, inv.dc_id, "IRN cancellation recorded", user?.username, why);
+    await logAudit("UPDATE","invoice_tbl",inv.invoice_no,"IRN cancelled: "+why,user?.username||"unknown",null,null);
+    setCancelDlg(false); onChanged && onChanged(); load();
+  };
+  // ---- view ----
+  const fld = (label, k, opt)=> h("label",{style:{display:"flex",flexDirection:"column",gap:3,fontSize:11.5,color:colors.muted,flex:"1 1 "+((opt&&opt.w)||200)+"px"}}, label,
+    (opt&&opt.area) ? h("textarea",{rows:opt.rows||3,value:inv[k]||"",disabled:!(opt&&opt.always?canAcc:editable),onChange:e=>set(k,e.target.value),style:inputStyle})
+    : h("input",{type:(opt&&opt.type)||"text",value:inv[k]==null?"":(opt&&opt.type==="date"?String(inv[k]).slice(0,10):inv[k]),disabled:!(opt&&opt.always?canAcc&&inv.status!=="Cancelled":editable),onChange:e=>set(k,e.target.value),style:inputStyle}));
+  const card = (title, ...kids)=> h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"8px 12px",marginBottom:10}}, h("b",{style:{fontSize:13}},title), h("div",{style:{marginTop:6}},...kids));
+  const row = (...kids)=> h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",marginBottom:6}},...kids);
+  const th = (t,w,al)=> h("th",{style:{textAlign:al||"left",padding:"5px 7px",fontSize:11,color:colors.muted,borderBottom:"2px solid "+colors.dark,width:w}},t);
+  const td = (c,al)=> h("td",{style:{padding:"5px 7px",borderBottom:"1px solid "+colors.border,fontSize:12.5,textAlign:al||"left",verticalAlign:"top"}},c);
+  const acts = [];
+  if(editable){ acts.push(h("button",{key:"s",onClick:()=>save(false),disabled:busy,style:btnSecondary},busy?"Saving…":"Save draft"));
+    acts.push(h("button",{key:"r",onClick:toReady,disabled:busy,style:btnPrimary},"Ready for IRN"));
+    acts.push(h("button",{key:"d",onClick:discard,style:btnDanger},"Discard draft")); }
+  if(inv.status==="Ready for IRN" && canAcc){ acts.push(h("button",{key:"b",onClick:backToDraft,disabled:busy,style:btnSecondary},"Back to draft"));
+    acts.push(h("button",{key:"i",onClick:()=>setIrnDlg({ irn:"", ack_no:"", ack_date:"", signed_qr:"" }),style:btnPrimary},"Enter IRN and issue")); }
+  if(inv.status==="Issued" && canAcc){ acts.push(h("button",{key:"t",onClick:saveTransport,disabled:busy,style:btnSecondary},"Save transport details"));
+    acts.push(h("button",{key:"c",onClick:()=>setCancelDlg(true),style:btnDanger},"Record IRN cancellation")); }
+  acts.push(h("button",{key:"p",onClick:()=>invPdf({ ...inv, ...(editable?calc:{}) }, editable?calcLines:lines.map(l=>({...l,unit_price:Number(l.unit_price)}))).catch(e=>alert("PDF: "+e.message)),style:btnSecondary},"Invoice PDF (3 copies)"));
+  return h("div",{style:{padding:"12px 18px",maxWidth:1150}},
+    h("div",{style:{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}},
+      h("button",{onClick:()=>onClose&&onClose(),style:btnSmall},"← All invoices"),
+      h("h2",{style:{fontSize:18,margin:0}},(inv.is_export?"Export invoice ":"Tax invoice ")+inv.invoice_no), invPill(inv.status),
+      h("span",{style:{fontSize:13,color:colors.muted}},"Contract "+inv.contract_number+" · "+(inv.customer_name||"")+" · DC "+inv.invoice_no)),
+    h("div",{style:{fontSize:11.5,color:colors.muted,margin:"4px 0 8px"}}, inv.status==="Draft" ? "Draft: check prices, charges and fields, then Ready for IRN. Upload to the IRP outside the app and enter the IRN back here." :
+      inv.status==="Ready for IRN" ? "Upload this invoice to the IRP, then Enter IRN and issue. Values are locked; Back to draft to change them." :
+      inv.status==="Issued" ? "Issued "+fmtDMYTime(inv.issued_at)+" by "+(inv.issued_by||"")+" — locked. Corrections only by a credit note. E-way bill and shipping bill details can still be added." : "Cancelled: "+(inv.cancel_reason||"")),
+    posWarn && inv.status!=="Issued" ? h("div",{style:{background:"#fff4d6",color:"#854f0b",borderRadius:6,padding:"6px 10px",fontSize:12.5,marginBottom:8}},"⚠ "+posWarn) : null,
+    card("Invoice",
+      row(fld("Invoice date","invoice_date",{type:"date",w:150}), fld("PO No","po_no",{w:160}), fld("PO date","po_date",{type:"date",w:150}), !inv.is_export ? fld("OA date","oa_date",{type:"date",w:150}) : null, !inv.is_export ? fld("Site contact","site_contact") : null),
+      row(fld(inv.is_export?"Buyer (Bill To)":"Customer (Bill To)","bill_to",{area:true,w:300}), fld(inv.is_export?"Consignee / Deliver To":"Deliver To","ship_to",{area:true,w:300}), inv.is_export ? fld("Notify / Handoff","handoff",{area:true,w:260}) : null),
+      inv.is_export ? row(fld("Buyer country","buyer_state",{w:180}), fld("Currency (from the contract)","currency",{w:120}), fld("Exchange rate ₹ per "+cur,"fx_rate",{w:150}), fld("Incoterm","incoterm",{w:150}), fld("Mode of shipment","mode_of_shipment",{w:150}))
+        : row(fld("Buyer GSTIN","buyer_gstin",{w:180}), fld("Buyer state","buyer_state",{w:180}), fld("Place of supply (state)","pos_state",{w:180}), fld("State code","pos_code",{w:90}),
+            h("label",{style:{display:"flex",alignItems:"center",gap:5,fontSize:12,color:colors.muted}},h("input",{type:"checkbox",checked:!!inv.reverse_charge,disabled:!editable,onChange:e=>set("reverse_charge",e.target.checked)}),"Reverse charge")),
+      inv.is_export ? row(fld("Port of loading","port_loading",{w:200}), fld("Port of discharge","port_discharge",{w:200}), fld("Final destination","final_destination",{w:200}), fld("Country of origin","country_origin",{w:140})) : null,
+      inv.is_export ? h("div",{style:{fontSize:12,color:inv.snap_lut_no?"#0f6b4f":"#a3312a"}},"LUT for "+(inv.snap_lut_fy||despFyLong(new Date((inv.invoice_date||toISODate(new Date()))+"T12:00:00")))+": "+(inv.snap_lut_no||"none on record — enter it in Despatch Settings & LUT")+(editable?" (follows the invoice date on Save)":"")) : null),
+    card("Items (from DC "+inv.invoice_no+")",
+      h("div",{style:{overflowX:"auto"}}, h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:760}},
+        h("thead",null,h("tr",null,th("Sl No",50),th("Item / description"),th("HSN",80),th("Qty",60,"right"),th("Unit price ("+cur+")",140,"right"),th("Amount ("+cur+")",120,"right"),th("Price from",110))),
+        h("tbody",null, calcLines.map(l=>h("tr",{key:l.id}, td(l.item_sl_no), td(h("div",null,h("b",null,l.item||""),h("div",{style:{fontSize:11.5,color:colors.muted}},l.description||""))),
+          td(l.hsn||h("span",{style:{color:"#a3312a",fontWeight:700}},"missing")), td(l.qty,"right"),
+          td(editable ? h("input",{value:l.unit_price,onChange:e=>{ const v = e.target.value.replace(/[^\d.]/g,""); const nl = lines.map(x=>x.id===l.id?{...x,unit_price:v}:x); setLines(nl);
+              // a percentage P&F follows the basic
+              const pm = String(inv.packing_term||"").match(/^\s*([\d.]+)\s*%\s*$/); if(pm) set("pf_amount", r2(nl.reduce((n,x)=>n+r2((Number(x.unit_price)||0)*(Number(x.qty)||0)),0)*Number(pm[1])/100)); },style:{...inputStyle,padding:"4px 6px",fontSize:12.5,textAlign:"right",width:120}}) : invMoney(l.unit_price,cur),"right"),
+          td(invMoney(l.amount,cur),"right"),
+          td(h("span",{style:{fontSize:11.5,color:(r2(l.unit_price)!==r2(l._orig)||l.price_source==="Edited")?"#a3312a":colors.muted}}, (r2(l.unit_price)!==r2(l._orig)||l.price_source==="Edited") ? "Edited"+(l.edit_reason?": "+l.edit_reason:"") : l.price_source==="PO" ? "PO price" : "Contract"))))))) ),
+    card("Charges and totals",
+      row(fld("Packing & forwarding ("+cur+")","pf_amount",{w:170}), fld("Freight recovered ("+cur+")","freight_amount",{w:170}), fld("Insurance recovered ("+cur+")","insurance_amount",{w:170})),
+      h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:6}},"P&F is worked out from the contract ("+(inv.packing_term||"none")+"); a lumpsum is shared across shipments and never exceeds what is left. Freight goes on the bill only when we paid it and recover it."),
+      h("table",{style:{borderCollapse:"collapse",fontSize:13,marginLeft:"auto"}}, h("tbody",null,
+        [["Basic", calc.basic_total], ["Charges", r2((Number(inv.pf_amount)||0)+(Number(inv.freight_amount)||0)+(Number(inv.insurance_amount)||0))], ...(inv.is_export?[]:[["Taxable value", calc.taxable_total]]),
+         ...calc.tax_lines.map(t=>["Output "+t.label+" "+t.rate+"%", t.amount]), ...(calc.round_off?[["Round off", calc.round_off]]:[]), ["Total ("+cur+")", calc.grand_total], ...(cur!=="INR"?[["INR equivalent (₹)", calc.grand_total_inr]]:[])]
+         .map(([k,v],i,a)=>h("tr",{key:k},h("td",{style:{padding:"3px 14px 3px 0",color:colors.muted,fontWeight:i===a.length-1||/^Total/.test(k)?700:400}},k),h("td",{style:{padding:"3px 0",textAlign:"right",fontWeight:/^Total/.test(k)?700:400}},invMoney(v, /INR equiv/.test(k)?"INR":cur)))))),
+      h("div",{style:{fontSize:12,color:colors.muted,textAlign:"right"}}, calc.amount_words),
+      !inv.is_export && !(gst||[]).length ? h("div",{style:{color:"#a3312a",fontSize:12.5,marginTop:4}},"The contract has no GST structure — no tax is calculated. Set it in the Sale Order's Commercial Terms.") : null),
+    card("Terms printed on the invoice",
+      row(fld("Payment term","payment_term"), fld("Delivery term","delivery_term"), fld("Transportation","transport_term")),
+      row(fld("Packing","packing_term"), fld("Insurance","insurance_term"), fld("Taxes","tax_term")),
+      row(fld("Note on the invoice (optional)","remarks",{w:500}))),
+    card("Transport and e-invoice",
+      row(!inv.is_export ? fld("E-way bill no","eway_no",{always:true,w:160}) : null, !inv.is_export ? fld("E-way bill date","eway_date",{type:"date",always:true,w:150}) : null, fld("Vehicle no","vehicle_no",{always:true,w:150}),
+        inv.is_export ? fld("Shipping bill no","shipping_bill_no",{always:true,w:160}) : null, inv.is_export ? fld("Shipping bill date","shipping_bill_date",{type:"date",always:true,w:150}) : null),
+      !inv.is_export && inv.grand_total_inr>50000 && !inv.eway_no ? h("div",{style:{fontSize:11.5,color:"#854f0b"}},"Over ₹50,000 — an e-way bill is needed before the goods move.") : null,
+      inv.irn ? h("div",{style:{fontSize:12,marginTop:4}},h("b",null,"IRN "),h("span",{style:{fontFamily:"monospace",fontSize:11.5}},inv.irn)," · Ack ",inv.ack_no," · ",fmtDMYTime(inv.ack_date), inv.signed_qr?" · signed QR on file":" · no signed QR (the PDF prints without the QR)") : null),
+    msg ? h("div",{style:{whiteSpace:"pre-wrap",color:/Saved/.test(msg)?"#0f6b4f":colors.danger,fontSize:12.5,margin:"6px 0",background:/Saved/.test(msg)?"#e4f3ed":"#fdecea",borderRadius:6,padding:"6px 10px"}},msg) : null,
+    h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",marginTop:6}}, acts),
+    hist.length ? h("div",{style:{marginTop:14}},h("div",{style:{fontSize:12,fontWeight:700,color:colors.muted}},"History"),
+      hist.map(x=>h("div",{key:x.id,style:{fontSize:11.5,color:colors.muted,padding:"2px 0"}},fmtDMYTime(x.at)+" · "+(x.by_user||"")+" · "+x.action+(x.note?" — "+x.note:"")))) : null,
+    irnDlg ? h("div",{onClick:e=>{ if(e.target===e.currentTarget) setIrnDlg(null); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:2600,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"60px 16px"}},
+      h("div",{style:{background:"#fff",borderRadius:10,width:540,maxWidth:"100%",padding:"14px 16px"}},
+        h("b",{style:{fontSize:15}},"Enter the IRN — "+inv.invoice_no),
+        h("div",{style:{fontSize:11.5,color:colors.muted,margin:"3px 0 8px"}},"Copy these from the IRP after uploading the invoice. Once saved the invoice is issued and locked."),
+        ...[["IRN (64 characters)","irn"],["Ack No","ack_no"]].map(([l,k])=>h("label",{key:k,style:{display:"flex",flexDirection:"column",gap:3,fontSize:11.5,color:colors.muted,marginBottom:6}},l,h("input",{value:irnDlg[k],onChange:e=>{ const v = e.target.value; setIrnDlg(d=>({...d,[k]:v})); },style:{...inputStyle,fontFamily:k==="irn"?"monospace":"inherit"}}))),
+        h("label",{style:{display:"flex",flexDirection:"column",gap:3,fontSize:11.5,color:colors.muted,marginBottom:6}},"Ack date and time",h("input",{type:"datetime-local",value:irnDlg.ack_date,onChange:e=>{ const v = e.target.value; setIrnDlg(d=>({...d,ack_date:v})); },style:inputStyle})),
+        h("label",{style:{display:"flex",flexDirection:"column",gap:3,fontSize:11.5,color:colors.muted}},"Signed QR code text (optional — prints as the QR)",h("textarea",{rows:3,value:irnDlg.signed_qr,onChange:e=>{ const v = e.target.value; setIrnDlg(d=>({...d,signed_qr:v})); },style:{...inputStyle,fontFamily:"monospace",fontSize:11}})),
+        h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}, h("button",{onClick:()=>setIrnDlg(null),style:btnSecondary},"Cancel"), h("button",{onClick:()=>issue(irnDlg),disabled:busy,style:btnPrimary},busy?"Saving…":"Issue the invoice")))) : null,
+    cancelDlg ? h(ReasonDialog,{title:"Record IRN cancellation — "+inv.invoice_no, subtitle:"Cancel the IRN on the IRP first (allowed within 24 hours of issue). This invoice and its number stay as Cancelled; the goods need a new DC.", placeholder:"Why was the IRN cancelled?", okLabel:"Record cancellation", okStyle:{background:colors.danger}, onCancel:()=>setCancelDlg(false), onOk:cancelIssued}) : null);
+}
+// ---- invoice list ----------------------------------------------------------------------------------
+function InvoicesScreen({ user }){
+  const [list,setList] = useState(null); const [dcs,setDcs] = useState([]); const [err,setErr] = useState("");
+  const [me,setMe] = useState(""); const [P,setP] = useState({ stores:[], pm:[], qc:[], acc:[], supers:[] });
+  const [open,setOpen] = useState(null); const [filter,setFilter] = useState("open"); const [busy,setBusy] = useState(false);
+  const [month,setMonth] = useState(()=>toISODate(new Date()).slice(0,7));
+  const load = useCallback(async()=>{
+    const [m,p] = await Promise.all([despMe(user), despPeople()]); setMe(m); setP(p);
+    const { data, error } = await sb.from("invoice_tbl").select("*").order("id",{ascending:false}).limit(2000);
+    if(error){ setErr(error.message); setList([]); return; }
+    const { data: d } = await sb.from("dc_tbl").select("*").in("status",["Approved","Despatched"]).order("id",{ascending:false}).limit(2000);
+    const done = new Set((data||[]).map(i=>i.dc_id));
+    setDcs((d||[]).filter(x=>!x.is_test && x.bill_no && !done.has(x.id))); setList(data||[]);
+  },[user && user.username]);
+  useEffect(()=>{ load(); },[load]);
+  if(open) return h(InvoiceEditor,{ user, me, P, invoiceId:open, onChanged:load, onClose:()=>{ setOpen(null); load(); } });
+  if(!list) return h("div",{style:{padding:20,color:colors.muted}},"Reading the invoices…");
+  const canAcc = despCan("acc",user,me,P);
+  const make = async(dc)=>{ setBusy(true); try{ const id = await invMakeFromDc(dc.id, user); setBusy(false); setOpen(id); }catch(e){ setBusy(false); alert("Could not make the invoice: "+(e.message||e)); } };
+  const shown = list.filter(i=> filter==="all" ? true : filter==="open" ? i.status!=="Issued" && i.status!=="Cancelled" : i.status===filter);
+  const register = ()=>{
+    const xs = list.filter(i=>String(i.invoice_date||"").slice(0,7)===month && i.status!=="Draft");
+    const comp = (i,re)=> r2((i.tax_lines||[]).filter(t=>re.test(String(t.label||"").toUpperCase())).reduce((n,t)=>n+(Number(t.amount)||0),0));
+    const rows = [["Invoice No","Invoice Date","Status","Contract","Customer","Buyer GSTIN","Place of Supply","Export","Currency","Exchange Rate","Taxable Value","CGST","SGST","IGST","Round Off","Invoice Total","Total in INR","IRN","Ack No","E-way Bill","Shipping Bill"]];
+    xs.slice().sort((a,b)=>String(a.invoice_no).localeCompare(String(b.invoice_no))).forEach(i=>rows.push([i.invoice_no, fmtDMY(i.invoice_date), i.status, i.contract_number, i.customer_name, i.buyer_gstin||"", (i.pos_state||"")+(i.pos_code?" ("+i.pos_code+")":""), i.is_export?"Yes":"No", i.currency, Number(i.fx_rate)||"",
+      Number(i.taxable_total)||0, comp(i,/CGST/), comp(i,/SGST/), comp(i,/IGST/), Number(i.round_off)||0, Number(i.grand_total)||0, Number(i.grand_total_inr)||0, i.irn||"", i.ack_no||"", i.eway_no||"", i.shipping_bill_no||""]));
+    try{ const ws = XLSX.utils.aoa_to_sheet(rows); ws["!cols"] = rows[0].map(()=>({wch:16})); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Invoices "+month); XLSX.writeFile(wb, "Invoice_Register_"+month+".xlsx"); }
+    catch(e){ alert("Excel: "+(e.message||e)); }
+  };
+  const chip = (k,l)=> h("button",{key:k,onClick:()=>setFilter(k),style:{...btnSmall,fontSize:12,padding:"4px 10px",background:filter===k?colors.dark:"#fff",color:filter===k?"#fff":colors.text}},l);
+  const cell = (c,i,al)=> h("td",{key:i,style:{padding:"6px 9px",borderBottom:"1px solid "+colors.border,textAlign:al||"left"}},c);
+  return h("div",{style:{padding:"14px 18px"}},
+    h("div",{style:{fontSize:11.5,color:colors.muted}},"Accounts → Billing"),
+    h("h2",{style:{fontSize:19,margin:"2px 0 8px"}},"Tax Invoices"),
+    err ? h("div",{style:{color:colors.danger,fontSize:12.5,marginBottom:8}},"Run structure_invoice_2026-10-10.sql first. ("+err+")") : null,
+    h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"8px 12px",marginBottom:12}},
+      h("b",{style:{fontSize:13}},"Approved DCs waiting for their invoice ("+dcs.length+")"),
+      dcs.length===0 ? h("div",{style:{fontSize:12.5,color:colors.mutedLight,marginTop:4}},"None.") :
+      h("table",{style:{borderCollapse:"collapse",width:"100%",fontSize:12.5,marginTop:4}}, h("tbody",null, dcs.map(d=>h("tr",{key:d.id},
+        cell(h("b",null,d.bill_no),0), cell(d.contract_number,1), cell(d.customer_name,2), cell((d.is_export?"Export":"Domestic")+" · "+d.status+(d.acc_at?" "+fmtDMY(d.acc_at):""),3),
+        cell(canAcc ? h("button",{onClick:()=>make(d),disabled:busy,style:{...btnSmall,color:"#0f7a5c",borderColor:"#0f7a5c",fontWeight:700}},busy?"…":"Make invoice") : "",4,"right")))))),
+    h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:8}}, chip("open","Not yet issued"), chip("Draft","Draft"), chip("Ready for IRN","Ready for IRN"), chip("Issued","Issued"), chip("Cancelled","Cancelled"), chip("all","All"),
+      h("span",{style:{marginLeft:"auto",display:"inline-flex",gap:6,alignItems:"center",fontSize:12,color:colors.muted}},"Register for",
+        h("input",{type:"month",value:month,onChange:e=>setMonth(e.target.value),style:{...inputStyle,width:150,padding:"4px 8px"}}), h("button",{onClick:register,style:btnSmall},"Download Excel"))),
+    h("div",{style:{overflowX:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8}},
+      h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:860,fontSize:12.5}},
+        h("thead",null,h("tr",null,["Invoice","Date","Contract","Customer","Type","Status","Total",""].map((x,i)=>h("th",{key:x+i,style:{textAlign:i===6?"right":"left",padding:"7px 9px",fontSize:11.5,color:colors.muted,borderBottom:"2px solid "+colors.dark}},x)))),
+        h("tbody",null, shown.length===0 ? h("tr",null,h("td",{colSpan:8,style:{padding:12,color:colors.mutedLight}},"Nothing here.")) :
+          shown.map(i=>h("tr",{key:i.id,onClick:()=>setOpen(i.id),style:{cursor:"pointer"}},
+            cell(h("b",null,i.invoice_no),0), cell(fmtDMY(i.invoice_date),1), cell(i.contract_number,2), cell(i.customer_name,3), cell(i.is_export?"Export":"Domestic",4), cell(invPill(i.status),5),
+            cell(i.currency+" "+invMoney(i.grand_total,i.currency),6,"right"), cell(i.status==="Issued" && !i.is_export && Number(i.grand_total_inr)>50000 && !i.eway_no ? h("span",{style:{fontSize:11,color:"#854f0b",fontWeight:700}},"e-way bill?") : "",7))))) ));
+}
+// ---- Despatch Settings & LUT (replaces the single-LUT screen): LUT register + dated settings history ----
+function DespatchSettingsScreen({ user }){
+  const [S,setS] = useState(null); const [f,setF] = useState(null); const [series,setSeries] = useState([]); const [can,setCan] = useState(false);
+  const [luts,setLuts] = useState([]); const [lutErr,setLutErr] = useState(""); const [hist,setHist] = useState([]);
+  const [newLut,setNewLut] = useState(null); const [fix,setFix] = useState(null); const [busy,setBusy] = useState(false); const [msg,setMsg] = useState("");
+  const keys = ["our_gstin","our_pan","our_state","our_state_code","factory_address","bill_prefix","bank_name","bank_account","bank_acc_name","bank_ifsc","bank_branch","bank_swift","iec_no"];
+  const load = useCallback(async()=>{
+    const s = await despSettings(); setS(s);
+    const ff = {}; keys.forEach(k=>ff[k] = s[k]||""); if(!ff.bill_prefix) ff.bill_prefix = "FFI"; setF(ff);
+    const { data } = await sb.from("doc_series_tbl").select("*").order("fy",{ascending:false}); setSeries(data||[]);
+    const { data: l, error: le } = await sb.from("lut_register_tbl").select("*").order("fy",{ascending:false}); setLuts(l||[]); setLutErr(le?le.message:"");
+    const { data: hh } = await sb.from("billing_settings_hist_tbl").select("*").order("effective_from",{ascending:false}).order("id",{ascending:false}).limit(50); setHist(hh||[]);
+    const me = await despMe(user); const P = await despPeople(); setCan(despCan("acc",user,me,P));
+  },[user && user.username]);
+  useEffect(()=>{ load(); },[load]);
+  if(!S || !f) return h("div",{style:{padding:20,color:colors.muted}},"Reading the settings…");
+  if(S._missing) return h("div",{style:{padding:20,color:colors.danger}},"Run structure_despatch_dc_gatepass_2026-10-10.sql first. ("+S._err+")");
+  const nowFy = despFyLong(), nextFy = despNextFyLong();
+  const cur = luts.find(l=>l.fy===nowFy), nxt = luts.find(l=>l.fy===nextFy);
+  const changedKeys = keys.filter(k=>String(S[k]||"")!==String(f[k]||""));
+  const save = async()=>{
+    if(!changedKeys.length){ setMsg("Nothing changed."); return; }
+    const eff = prompt("These details change: "+changedKeys.join(", ")+".\n\nFrom which date do the new details apply? (dd/mm/yyyy — documents dated earlier keep printing the old details)", fmtDMY(new Date()));
+    if(eff===null) return; const effIso = toISODate(eff); if(!effIso){ setMsg("That date is not readable."); return; }
+    const why = prompt("Reason for the change:"); if(!why || !why.trim()){ setMsg("A reason is needed."); return; }
+    setBusy(true); setMsg("");
+    const row = { id:1, ...f, bill_prefix:(f.bill_prefix||"FFI").trim().toUpperCase(), updated_by:user?.username||"unknown", updated_at:new Date().toISOString() };
+    const { error } = await sb.from("billing_settings_tbl").upsert(row,{ onConflict:"id" });
+    if(error){ setBusy(false); setMsg("Could not save: "+error.message); return; }
+    const hrow = { effective_from:effIso, changed_by:user?.username||"unknown", reason:why.trim() }; keys.forEach(k=>hrow[k] = row[k]||null);
+    const { error: he } = await sb.from("billing_settings_hist_tbl").insert(hrow);
+    await logAudit("UPDATE","billing_settings_tbl","1","Settings from "+fmtDMY(effIso)+": "+changedKeys.map(k=>k+" "+(S[k]||"—")+" → "+(f[k]||"—")).join("; ")+" · "+why.trim(),user?.username||"unknown",S,row);
+    setBusy(false); setMsg(he ? "Saved, but the history row failed ("+he.message+") — run the LUT / settings SQL." : "Saved."); load();
+  };
+  const addLut = async()=>{
+    const n = newLut; if(!/^\d{4}-\d{2}$/.test(n.fy||"")){ alert("Financial year looks like "+nowFy+"."); return; } if(!String(n.lut_no||"").trim()){ alert("Enter the LUT number."); return; }
+    if(luts.find(l=>l.fy===n.fy)){ alert("There is already an LUT for "+n.fy+". Use Correct on that row."); return; }
+    setBusy(true); const y0 = Number(n.fy.slice(0,4));
+    const { error } = await sb.from("lut_register_tbl").insert({ fy:n.fy, lut_no:n.lut_no.trim().toUpperCase(), arn:n.arn||null, filed_on:n.filed_on||null, valid_from:y0+"-04-01", valid_to:(y0+1)+"-03-31", ack_link:n.ack_link||null, entered_by:user?.username||"unknown" });
+    if(!error){ if(n.fy===nowFy || !S.lut_fy || n.fy > (S.lut_fy||"")) await sb.from("billing_settings_tbl").update({ lut_no:n.lut_no.trim().toUpperCase(), lut_fy:n.fy }).eq("id",1);
+      await logAudit("CREATE","lut_register_tbl",n.fy,"LUT "+n.lut_no+" for "+n.fy,user?.username||"unknown",null,null); }
+    setBusy(false); if(error){ alert("Could not save: "+error.message); return; } setNewLut(null); load();
+  };
+  const correctLut = async()=>{
+    const x = fix; if(!String(x.lut_no||"").trim() || !String(x.reason||"").trim()){ alert("Enter the corrected number and the reason."); return; }
+    setBusy(true);
+    const { error } = await sb.from("lut_register_tbl").update({ lut_no:x.lut_no.trim().toUpperCase(), arn:x.arn||null, filed_on:x.filed_on||null, ack_link:x.ack_link||null, previous_lut_no:x.row.lut_no, corrected_by:user?.username||"unknown", corrected_at:new Date().toISOString(), correct_reason:x.reason.trim() }).eq("id",x.row.id);
+    if(!error && S.lut_fy===x.row.fy) await sb.from("billing_settings_tbl").update({ lut_no:x.lut_no.trim().toUpperCase() }).eq("id",1);
+    await logAudit("UPDATE","lut_register_tbl",x.row.fy,"LUT corrected "+x.row.lut_no+" → "+x.lut_no+" · "+x.reason.trim(),user?.username||"unknown",x.row,null);
+    setBusy(false); if(error){ alert("Could not save: "+error.message); return; } setFix(null); load();
+  };
+  const fld = (k,l,ph,w)=> h("label",{key:k,style:{display:"flex",flexDirection:"column",gap:3,fontSize:11.5,color:colors.muted,flex:"1 1 "+(w||220)+"px"}},l,h("input",{value:f[k],disabled:!can,placeholder:ph||"",onChange:e=>setF(x=>({...x,[k]:e.target.value})),style:inputStyle}));
+  const box = (kids)=> h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px",marginBottom:10}},...kids);
+  const inpN = (obj,setter,k,l,type,w)=> h("label",{key:k,style:{display:"flex",flexDirection:"column",gap:3,fontSize:11.5,color:colors.muted,flex:"1 1 "+(w||160)+"px"}},l,h("input",{type:type||"text",value:obj[k]||"",onChange:e=>{ const v = e.target.value; setter(o=>({...o,[k]:v})); },style:inputStyle}));
+  return h("div",{style:{padding:"14px 18px",maxWidth:980}},
+    h("div",{style:{fontSize:11.5,color:colors.muted}},"Order Status → Despatch"),
+    h("h2",{style:{fontSize:19,margin:"2px 0 8px"}},"Despatch Settings & LUT"),
+    !can ? h("div",{style:{fontSize:12,color:colors.muted,marginBottom:8}},"Only Accounts, admins and the super admin can change these.") : null,
+    box([ h("b",{key:"t"},"LUT register — one row per financial year"),
+      h("div",{key:"s",style:{fontSize:12,margin:"3px 0 6px",fontWeight:700,color:cur?"#0f6b4f":"#a3312a"}}, cur ? "Current year "+nowFy+": "+cur.lut_no : "No LUT for the current year "+nowFy+" — export invoices cannot be made ready."),
+      lutErr ? h("div",{key:"e",style:{fontSize:12,color:colors.danger}},"The LUT register table is not there yet — run structure_lut_register_settings_history_2026-10-10.sql. Showing the single LUT on the settings: "+(S.lut_no||"none")+" ("+(S.lut_fy||"no year")+").") :
+      h("table",{key:"tb",style:{borderCollapse:"collapse",fontSize:12.5,width:"100%"}}, h("tbody",null,
+        luts.length===0 ? h("tr",null,h("td",{style:{color:colors.mutedLight,padding:4}},"No LUT entered yet.")) :
+        luts.map(l=>h("tr",{key:l.id},
+          h("td",{style:{padding:"4px 10px 4px 0",fontWeight:700}},l.fy), h("td",{style:{padding:"4px 10px"}},l.lut_no), h("td",{style:{padding:"4px 10px",color:colors.muted}},[l.arn&&"ARN "+l.arn, l.filed_on&&"filed "+fmtDMY(l.filed_on)].filter(Boolean).join(" · ")||"—"),
+          h("td",{style:{padding:"4px 10px"}}, l.ack_link ? h("a",{href:l.ack_link,target:"_blank",rel:"noopener noreferrer"},"acknowledgement") : h("span",{style:{color:colors.mutedLight}},"no link")),
+          h("td",{style:{padding:"4px 10px",color:colors.mutedLight,fontSize:11.5}},(l.entered_by||"")+" "+fmtDMY(l.entered_at)+(l.corrected_at?" · corrected "+fmtDMY(l.corrected_at)+" (was "+(l.previous_lut_no||"")+": "+(l.correct_reason||"")+")":"")),
+          h("td",{style:{padding:"4px 0",textAlign:"right"}}, can ? h("button",{onClick:()=>setFix({ row:l, lut_no:l.lut_no, arn:l.arn||"", filed_on:l.filed_on||"", ack_link:l.ack_link||"", reason:"" }),style:btnSmall},"Correct") : null))))),
+      can && !lutErr ? h("button",{key:"a",onClick:()=>setNewLut({ fy: cur ? nextFy : nowFy, lut_no:"", arn:"", filed_on:"", ack_link:"" }),style:{...btnSmall,marginTop:6}}, "+ LUT for "+(cur?nextFy:nowFy)) : null,
+      newLut ? h("div",{key:"n",style:{border:"1px solid "+colors.border,borderRadius:6,padding:8,marginTop:6,background:"#fcfbf7"}},
+        h("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}}, inpN(newLut,setNewLut,"fy","Financial year",null,110), inpN(newLut,setNewLut,"lut_no","LUT number",null,200), inpN(newLut,setNewLut,"arn","ARN",null,160), inpN(newLut,setNewLut,"filed_on","Filed on","date",150), inpN(newLut,setNewLut,"ack_link","Drive link to the acknowledgement",null,300)),
+        h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}, h("button",{onClick:()=>setNewLut(null),style:btnSecondary},"Cancel"), h("button",{onClick:addLut,disabled:busy,style:btnPrimary},"Save LUT"))) : null,
+      fix ? h("div",{key:"f",style:{border:"1px solid "+colors.border,borderRadius:6,padding:8,marginTop:6,background:"#fff8f0"}},
+        h("div",{style:{fontSize:12,marginBottom:4}},"Correct the LUT for "+fix.row.fy+" (now "+fix.row.lut_no+"). The old number is kept."),
+        h("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}}, inpN(fix,setFix,"lut_no","LUT number",null,200), inpN(fix,setFix,"arn","ARN",null,160), inpN(fix,setFix,"filed_on","Filed on","date",150), inpN(fix,setFix,"ack_link","Drive link",null,260), inpN(fix,setFix,"reason","Reason for the correction",null,260)),
+        h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:6}}, h("button",{onClick:()=>setFix(null),style:btnSecondary},"Cancel"), h("button",{onClick:correctLut,disabled:busy,style:btnPrimary},"Save correction"))) : null,
+      h("div",{key:"r",style:{fontSize:11.5,color:colors.muted,marginTop:6}},"An export invoice prints the LUT of its own date's financial year. Every March, Accounts and the super admin get a Pending Action to enter next year's LUT; from 1 April it is overdue until entered.") ]),
+    box([ h("b",{key:"t"},"Our details on DCs and invoices"),
+      h("div",{key:"a",style:{display:"flex",gap:8,flexWrap:"wrap",marginTop:6}}, fld("our_gstin","GSTIN"), fld("our_pan","PAN",null,140), fld("our_state","State",null,140), fld("our_state_code","State code",null,90), fld("iec_no","IEC (export)",null,140)),
+      h("div",{key:"b",style:{display:"flex",gap:8,flexWrap:"wrap",marginTop:6}}, fld("factory_address","Despatched from (factory address)",null,500), fld("bill_prefix","Bill number prefix","FFI",90)),
+      h("div",{key:"c",style:{display:"flex",gap:8,flexWrap:"wrap",marginTop:6}}, fld("bank_name","Bank"), fld("bank_account","Account no"), fld("bank_acc_name","Account name",null,300)),
+      h("div",{key:"d",style:{display:"flex",gap:8,flexWrap:"wrap",marginTop:6}}, fld("bank_ifsc","IFSC",null,140), fld("bank_branch","Branch",null,260), fld("bank_swift","SWIFT",null,140)),
+      h("div",{key:"e",style:{fontSize:11.5,color:colors.muted,marginTop:6}},"A change asks from which date it applies and why, and is kept below. Every DC and invoice also keeps its own copy of these details from the day it was approved, so a reprint never changes."),
+      can ? h("div",{key:"f",style:{display:"flex",gap:8,alignItems:"center",marginTop:8}}, h("button",{onClick:save,disabled:busy,style:btnPrimary},busy?"Saving…":"Save changes"), msg ? h("span",{style:{fontSize:12.5,color:/Saved|Nothing/.test(msg)?"#0f6b4f":colors.danger}},msg) : null) : null,
+      hist.length ? h("div",{key:"g",style:{marginTop:10}}, h("div",{style:{fontSize:12,fontWeight:700,color:colors.muted}},"History"),
+        hist.map(x=>h("div",{key:x.id,style:{fontSize:11.5,color:colors.muted,padding:"2px 0"}},"From "+fmtDMY(x.effective_from)+" · "+(x.changed_by||"")+" · "+(x.reason||"")+" · GSTIN "+(x.our_gstin||"—")+" · prefix "+(x.bill_prefix||"—")+(x.bank_account?" · bank "+x.bank_account:"")))) : null ]),
+    box([ h("b",{key:"t"},"Numbers used"),
+      h("div",{key:"s",style:{fontSize:12,color:colors.muted,margin:"3px 0 6px"}}, S.test_phase_done ? "Test phase over — every DC takes a real bill number." : "Test phase: Accounts is asked “Is this a test?” on each DC until someone answers No."),
+      series.length===0 ? h("div",{key:"n",style:{fontSize:12.5,color:colors.mutedLight}},"No numbers used yet. Each series restarts every financial year; the first bill number of each year is asked for.") :
+      h("table",{key:"tb",style:{borderCollapse:"collapse",fontSize:12.5}}, h("tbody",null, series.map(r=>h("tr",{key:r.series_key+r.fy},
+        h("td",{style:{padding:"3px 10px 3px 0"}},{BILL:"Bill (DC / invoice)",GP:"Gate pass",DCD:"DC draft"}[r.series_key]||r.series_key), h("td",{style:{padding:"3px 10px"}},r.fy), h("td",{style:{padding:"3px 10px"}},h("b",null,"last "+r.last_no)), h("td",{style:{padding:"3px 10px",color:colors.mutedLight}},"started by "+(r.start_set_by||"")+" · "+fmtDMY(r.start_set_at)))))) ]));
+}
+// ---- invoice + LUT Pending Actions ----
+async function invPendingItems(P){
+  const out = [];
+  const days = (ts)=> ts ? Math.max(0, Math.floor((Date.now()-new Date(ts).getTime())/86400000)) : 0;
+  const to = (people, base)=>{ (people.length ? people : [""]).forEach(p=>out.push({ ...base, owed_by_person:p, client_side:true })); };
+  const { data: invs, error } = await sb.from("invoice_tbl").select("id,dc_id,invoice_no,contract_number,customer_name,status,is_export,grand_total_inr,eway_no,shipping_bill_no,created_at,ready_at,issued_at").neq("status","Cancelled");
+  if(error) return out;
+  (invs||[]).forEach(i=>{
+    const no = i.invoice_no+" · contract "+i.contract_number+(i.customer_name?" ("+i.customer_name+")":"");
+    if(i.status==="Draft" && days(i.created_at)>=1) to(P.acc, { what:"Invoice "+no+" is a draft — check and make it Ready for IRN", entity_key:i.invoice_no, detail_key:"inv-draft", owed_by_role:"accounts", days_waiting:days(i.created_at), urgency:days(i.created_at)>=2?"overdue":"due", source:"invoice" });
+    if(i.status==="Ready for IRN" && days(i.ready_at)>=1) to(P.acc, { what:"Invoice "+no+" — upload to the IRP and enter the IRN", entity_key:i.invoice_no, detail_key:"inv-irn", owed_by_role:"accounts", days_waiting:days(i.ready_at), urgency:"overdue", source:"invoice" });
+    if(i.status==="Issued" && !i.is_export && Number(i.grand_total_inr)>50000 && !i.eway_no) to(P.acc, { what:"Invoice "+no+" — e-way bill number not entered (over ₹50,000)", entity_key:i.invoice_no, detail_key:"inv-eway", owed_by_role:"accounts", days_waiting:days(i.issued_at)||null, urgency:"due", source:"invoice" });
+    if(i.status==="Issued" && i.is_export && !i.shipping_bill_no && days(i.issued_at)>=7) to(P.acc, { what:"Export invoice "+no+" — enter the shipping bill number and date", entity_key:i.invoice_no, detail_key:"inv-sb", owed_by_role:"accounts", days_waiting:days(i.issued_at), urgency:"due", source:"invoice" });
+  });
+  const done = new Set((invs||[]).map(i=>i.dc_id));
+  const { data: dcs } = await sb.from("dc_tbl").select("id,bill_no,contract_number,customer_name,acc_at,is_test,status").in("status",["Approved","Despatched"]);
+  (dcs||[]).filter(d=>!d.is_test && d.bill_no && !done.has(d.id) && days(d.acc_at)>=1).forEach(d=>to(P.acc, { what:"DC "+d.bill_no+" · contract "+d.contract_number+" approved — make its invoice", entity_key:d.bill_no, detail_key:"inv-make", owed_by_role:"accounts", days_waiting:days(d.acc_at), urgency:days(d.acc_at)>=2?"overdue":"due", source:"invoice" }));
+  return out;
+}
+async function invLutPending(P){
+  const out = []; const who = Array.from(new Set([...P.acc, ...P.supers]));
+  const nowFy = despFyLong(), nextFy = despNextFyLong(), m = new Date().getMonth()+1;
+  let have = null;
+  try{ const { data, error } = await sb.from("lut_register_tbl").select("fy"); if(!error) have = new Set((data||[]).map(r=>r.fy)); }catch(e){}
+  if(!have){ const S = await despSettings(); if(S._missing || !(S.lut_no||S.lut_fy)) return out; have = new Set([S.lut_fy]); }
+  const to = (base)=> (who.length ? who : [""]).forEach(p=>out.push({ ...base, owed_by_person:p, client_side:true, owed_by_role:"accounts", days_waiting:null, entity_key:"LUT", source:"despatch_lut" }));
+  if(!have.has(nowFy)) to({ what:"LUT for "+nowFy+" not entered — export invoices cannot be issued (Despatch Settings & LUT)", detail_key:"lut|"+nowFy, urgency:"overdue" });
+  else if(m===3 && !have.has(nextFy)) to({ what:"Renew the LUT for "+nextFy+" before 1 April and enter it in Despatch Settings & LUT", detail_key:"lut|"+nextFy, urgency:"due" });
   return out;
 }
 
