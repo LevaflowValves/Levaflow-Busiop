@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-10T06:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-10T11:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -2134,6 +2134,11 @@ function MenuTabs({ user, active, onChange }) {
       {key:"doc_report",label:"Report by Contract"},
       {key:"doc_letters",label:"Chase Letters"},
       {key:"reports_document_register",label:"Document Register"},
+    ]},
+    { label:"Despatch", tabs:[   // 10 Oct 2026
+      {key:"despatch_dc",label:"Delivery Challans (DC)"},
+      {key:"gate_pass",label:"Gate Passes"},
+      {key:"despatch_settings",label:"Despatch Settings & LUT"},
     ]},
     ...(isAdmin?[{ label:"Setup", tabs:[{key:"doc_status_master",label:"Document Status Master"},...byKeys(["doc_category_tbl"])] }]:[]),
   ]};
@@ -13384,6 +13389,8 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
     const { error } = await sb.from("sale_order_tbl").update(patch).eq("id",contractInfo.id);
     if(error){ alert("Approval failed: "+error.message); return; }
     await logAudit("UPDATE","sale_order_tbl",contractInfo.contract_number,"Approved "+field.replace("_approved","")+(overrideActive?" (Super Admin override in effect)":""),user?.username||"unknown",null,null);
+    // 10 Oct 2026 (despatch): Commercial Terms approved -> the Accounts Head's "Despatch details" card
+    if(field==="commercial_approved") despCreateCard(contractInfo.contract_number, user).catch(e=>console.error("Despatch card", e));
     if(onChanged) onChanged();
   };
   const changeStatus = async(newStatus)=>{
@@ -20003,6 +20010,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           if(openRef && openRef.reference_number===contractInfo.contract_number) setOpenRef(r=>({...r,po_number,po_date}));
         }
       }),
+      mode==="contract" && contractInfo && h(DespatchDetailsPanel,{key:"desp-"+contractInfo.contract_number, contractInfo, user}),   // 10 Oct 2026 despatch
       // Documents, on the order screen itself. refreshKey is the count of
       // requirement rows so the panel reloads when something is added or
       // marked mandatory in the modal, without polling.
@@ -27335,6 +27343,10 @@ const MANUAL_SECTIONS = [
         "tag": "Purchase \u2192 Procurement \u2192 Procurement Gantt",
         "blocks": [
           {
+            "type": "tip",
+            "text": "Changed 10 October 2026. OVERDUE (ALL STEPS) has a Table / Bars switch beside One contract / All contracts. Bars shows only the steps that are overdue: one red bar per step, its length the days past the planned date, the worst contract first and the worst step first in each contract; contracts with nothing overdue are left out. Each bar names the material and step, the holder and the planned date. Click a bar (or a row of the table) to open the Procurement Gantt at that line with its dates open to update. The word General is no longer used: the BOM Received and Purchase BOM Approval line is called Contract-wide steps everywhere (Gantt, reports, cards, Pending Actions), and in the reports it lists every material of the contract it is holding up. Download PDF still prints the table."
+          },
+          {
             "type": "p",
             "text": "Changed 9 October 2026 (build 161). On the Procurement Gantt chart the General line item now shows as two rows, BOM Received and Purchase BOM Approval, each with its own Planned and Actual row \u2014 the same in Download Excel and Download PDF. The Table and Edit dates still show them together under General. On the procurement card, the General sub-task is called \u201cBOM Received & Purchase BOM Approval\u201d."
           },
@@ -27822,6 +27834,79 @@ const MANUAL_SECTIONS = [
             "text": "Packing & Forwarding can be Percentage (of Basic Price) or Lumpsum. A Lumpsum amount is always entered in \u20b9, regardless of the quote's own currency \u2014 for a non-INR quote, both the live preview and the final PDF show the converted figure. The customer only ever sees their own currency, never the raw \u20b9 number."
           }
         ]
+      },
+      {
+        "key": "despatch_dc",
+        "title": "Despatch \u2014 Delivery Challan, packing slip and gate pass",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "Order Status \u2192 Despatch has three screens: Delivery Challans (DC), Gate Passes, and Despatch Settings & LUT. A sale DC is the invoice without values plus our product serial numbers. It is prepared ahead of the truck, goes through Production, QC and Accounts, and gets its number from Accounts. The tax invoice made later from the DC keeps the same number."
+          },
+          {
+            "type": "h3",
+            "text": "Despatch details (ship-to, mode, notify / handoff)"
+          },
+          {
+            "type": "p",
+            "text": "When Accounts Admin approves the Commercial Terms of a contract, the Accounts Head gets a card \u201cDespatch details \u2014 contract\u201d. It has a sub-task to confirm the shipping address (and, for export, the mode of shipment) and, for export, a sub-task for the notify / handoff party \u2014 a forwarder or agent the cargo goes to first, or none. Enter them on the Sale Order (Despatch details \u2192 Enter details); the sub-tasks tick themselves. If they are still missing when Stores makes the first DC of the contract, the DC asks for them. Domestic contracts have no handoff."
+          },
+          {
+            "type": "h3",
+            "text": "Making a DC (Stores)"
+          },
+          {
+            "type": "steps",
+            "items": [
+              "Delivery Challans \u2192 + New DC \u2192 pick the contract.",
+              "For each contract Sl No, type how many go now. The screen shows ordered, already on other DCs, and the balance; you cannot send more than the balance.",
+              "Enter one product serial number per item (YY-NNNNNNN, e.g. 26-0000451): type the first and press Fill to fill the rest, then correct any single one. Tick No serial where an item has none. A serial can never be used on two DCs.",
+              "Packing: add each box, its size (L \u00d7 W \u00d7 H mm) and packing weight, and what is in it (Sl No, quantity, kg per item). Every item sent must be in a box. This prints as the packing slip.",
+              "Tick the readiness line (the app cannot yet check what production has finished), then Send to Production Manager. Save draft keeps it without sending."
+            ]
+          },
+          {
+            "type": "h3",
+            "text": "Approval \u2014 one after the other"
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "Production Manager: Present to QC (or send back to Stores with a reason).",
+              "QC: QC consents to despatch (or objects \u2014 back to Stores with a reason).",
+              "Production Manager: Send to Accounts.",
+              "Accounts: Approve and number. The DC gets the next bill number, e.g. FFI/0081/26-27 \u2014 the number its invoice will carry. The first time each year Accounts types the starting number (last paper invoice + 1)."
+            ]
+          },
+          {
+            "type": "tip",
+            "text": "Until someone answers No, Accounts is asked \u201cIs this a test?\u201d on each DC. A test DC gets a TEST number, uses no bill number and can be rolled back."
+          },
+          {
+            "type": "p",
+            "text": "Whoever's step it is sees the DC under \u201cWaiting on me\u201d and in Pending Actions. Admins can act at any step. DC PDF and Packing slip PDF are on the DC; before approval they print DRAFT."
+          },
+          {
+            "type": "h3",
+            "text": "Gate pass (Stores)"
+          },
+          {
+            "type": "p",
+            "text": "Gate Passes \u2192 + New gate pass: tick the approved DCs going on one truck, enter the vehicle number (driver and transporter if known) and print \u2014 two copies on one sheet. When the truck leaves, Record exit with the time from the signed security copy; the DCs become Despatched. Scan the signed copy to the drive and paste its link (Add scan link) \u2014 until then it stays in Pending Actions."
+          },
+          {
+            "type": "h3",
+            "text": "LUT"
+          },
+          {
+            "type": "p",
+            "text": "Despatch Settings & LUT holds our GSTIN, the factory address, the bill prefix and the LUT number with its financial year. Every March, Accounts and the super admin get a Pending Action to enter next year's LUT; from 1 April it is overdue until done."
+          },
+          {
+            "type": "warn",
+            "text": "Cancelling an approved DC keeps its number used (no gaps are refilled). Cancelling frees its serial numbers; the history keeps them."
+          }
+        ]
       }
     ]
   },
@@ -28299,6 +28384,10 @@ const MANUAL_TA = {
   "tag": "Purchase \u2192 Procurement \u2192 Procurement Gantt",
   "blocks": [
    {
+    "type": "tip",
+    "text": "10 \u0b85\u0b95\u0bcd\u0b9f\u0bcb\u0baa\u0bb0\u0bcd 2026 \u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bcd: OVERDUE (ALL STEPS)-\u0b87\u0bb2\u0bcd One contract / All contracts \u0b85\u0bb0\u0bc1\u0b95\u0bc7 Table / Bars switch \u0b89\u0bb3\u0bcd\u0bb3\u0ba4\u0bc1. Bars-\u0b87\u0bb2\u0bcd \u0ba4\u0bbe\u0bae\u0ba4\u0bae\u0bbe\u0ba9 \u0baa\u0b9f\u0bbf\u0b95\u0bb3\u0bcd \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd \u0bb5\u0bb0\u0bc1\u0bae\u0bcd \u2014 \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 \u0baa\u0b9f\u0bbf\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0b92\u0bb0\u0bc1 \u0b9a\u0bbf\u0bb5\u0baa\u0bcd\u0baa\u0bc1 bar; \u0b85\u0ba4\u0ba9\u0bcd \u0ba8\u0bc0\u0bb3\u0bae\u0bcd planned \u0ba4\u0bc7\u0ba4\u0bbf\u0baf\u0bc8\u0ba4\u0bcd \u0ba4\u0bbe\u0ba3\u0bcd\u0b9f\u0bbf\u0baf \u0ba8\u0bbe\u0b9f\u0bcd\u0b95\u0bb3\u0bcd. \u0b85\u0ba4\u0bbf\u0b95 \u0ba4\u0bbe\u0bae\u0ba4\u0bae\u0bbe\u0ba9 contract \u0bae\u0bc1\u0ba4\u0bb2\u0bbf\u0bb2\u0bcd, \u0b85\u0ba4\u0bb1\u0bcd\u0b95\u0bc1\u0bb3\u0bcd \u0b85\u0ba4\u0bbf\u0b95 \u0ba4\u0bbe\u0bae\u0ba4\u0bae\u0bbe\u0ba9 \u0baa\u0b9f\u0bbf \u0bae\u0bc1\u0ba4\u0bb2\u0bbf\u0bb2\u0bcd; \u0ba4\u0bbe\u0bae\u0ba4\u0bae\u0bcd \u0b87\u0bb2\u0bcd\u0bb2\u0bbe\u0ba4 contract-\u0b95\u0bb3\u0bcd \u0b95\u0bbe\u0b9f\u0bcd\u0b9f\u0baa\u0bcd\u0baa\u0b9f\u0bbe\u0ba4\u0bc1. \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 bar-\u0b87\u0bb2\u0bc1\u0bae\u0bcd material, \u0baa\u0b9f\u0bbf, holder, planned \u0ba4\u0bc7\u0ba4\u0bbf \u0b87\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd. \u0b92\u0bb0\u0bc1 bar-\u0b90 (\u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 table \u0bb5\u0bb0\u0bbf\u0baf\u0bc8) click \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd Procurement Gantt \u0b85\u0ba8\u0bcd\u0ba4 \u0bb5\u0bb0\u0bbf\u0baf\u0bbf\u0bb2\u0bcd \u0ba4\u0bc7\u0ba4\u0bbf\u0b95\u0bb3\u0bc8\u0ba4\u0bcd \u0ba4\u0bbf\u0bb0\u0bc1\u0ba4\u0bcd\u0ba4\u0bc1\u0bae\u0bcd \u0ba8\u0bbf\u0bb2\u0bc8\u0baf\u0bbf\u0bb2\u0bcd \u0ba4\u0bbf\u0bb1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd. General \u0b8e\u0ba9\u0bcd\u0bb1 \u0b9a\u0bca\u0bb2\u0bcd \u0b87\u0ba9\u0bbf \u0b87\u0bb2\u0bcd\u0bb2\u0bc8: BOM Received, Purchase BOM Approval \u0bb5\u0bb0\u0bbf \u0b8e\u0b99\u0bcd\u0b95\u0bc1\u0bae\u0bcd Contract-wide steps \u0b8e\u0ba9\u0bcd\u0bb1\u0bc1 \u0bb5\u0bb0\u0bc1\u0bae\u0bcd; reports-\u0b87\u0bb2\u0bcd \u0b85\u0ba4\u0bc1 \u0ba4\u0b9f\u0bc1\u0ba4\u0bcd\u0ba4\u0bc1 \u0ba8\u0bbf\u0bb1\u0bcd\u0b95\u0bc1\u0bae\u0bcd contract-\u0b87\u0ba9\u0bcd \u0b8e\u0bb2\u0bcd\u0bb2\u0bbe material-\u0b95\u0bb3\u0bc8\u0baf\u0bc1\u0bae\u0bcd \u0baa\u0b9f\u0bcd\u0b9f\u0bbf\u0baf\u0bb2\u0bbf\u0b9f\u0bc1\u0bae\u0bcd. Download PDF \u0b87\u0ba9\u0bcd\u0ba9\u0bc1\u0bae\u0bcd table-\u0b90\u0baf\u0bc7 \u0b85\u0b9a\u0bcd\u0b9a\u0bbf\u0b9f\u0bc1\u0bae\u0bcd."
+   },
+   {
     "type": "p",
     "text": "Purchase \u0b95\u0bc1\u0bb4\u0bc1\u0bb5\u0bc1\u0b95\u0bcd\u0b95\u0bc1 \u0b92\u0bb0\u0bc1 contract-\u0b95\u0bcd\u0b95\u0bc1 \u0b92\u0bb0\u0bc1 \u0ba4\u0bbf\u0b9f\u0bcd\u0b9f\u0bae\u0bcd, \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 MATERIAL FORM-\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0b92\u0bb0\u0bc1 \u0bb5\u0bb0\u0bbf (Pipe, Fittings, Flanges, Plate / Sheet, Perforated sheet, Wire mesh, Bars & sections, Fasteners, Gaskets, Paint, Packing\u2026). BOM-\u0b87\u0bb2\u0bcd Pipe \u0b8e\u0ba4\u0bcd\u0ba4\u0ba9\u0bc8 \u0bae\u0bc1\u0bb1\u0bc8 \u0bb5\u0ba8\u0bcd\u0ba4\u0bbe\u0bb2\u0bc1\u0bae\u0bcd \u0b92\u0bb0\u0bc7 Pipe \u0bb5\u0bb0\u0bbf. Sale Order-\u0b87\u0bb2\u0bcd Technical Head Approve Production BOM \u0b85\u0bb4\u0bc1\u0ba4\u0bcd\u0ba4\u0bc1\u0bae\u0bcd\u0baa\u0bcb\u0ba4\u0bc1, \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 Upload BOM (Excel) \u0bae\u0bc2\u0bb2\u0bae\u0bcd \u0b89\u0bb0\u0bc1\u0bb5\u0bbe\u0b95\u0bc1\u0bae\u0bcd."
    },
@@ -28326,7 +28415,7 @@ const MANUAL_TA = {
     "text": "\u0ba4\u0bbe\u0bae\u0ba4\u0bae\u0bbe\u0ba9 \u0baa\u0b9f\u0bbf, \u0b85\u0ba8\u0bcd\u0ba4 material-\u0b87\u0ba9\u0bcd sub-task \u0bb5\u0bc8\u0ba4\u0bcd\u0ba4\u0bbf\u0bb0\u0bc1\u0baa\u0bcd\u0baa\u0bb5\u0bb0\u0bbf\u0ba9\u0bcd Pending Actions-\u0b87\u0bb2\u0bc1\u0bae\u0bcd \u0ba4\u0bc6\u0bb0\u0bbf\u0baf\u0bc1\u0bae\u0bcd."
    }
   ],
-  "en_sig": "725d6243"
+  "en_sig": "fb550884"
  },
  "po_register_manual": {
   "title": "PO Register",
@@ -28462,6 +28551,79 @@ const MANUAL_TA = {
    }
   ],
   "en_sig": "917ea585"
+ },
+ "despatch_dc": {
+  "title": "\u0b85\u0ba9\u0bc1\u0baa\u0bcd\u0baa\u0bc1\u0ba4\u0bb2\u0bcd \u2014 Delivery Challan, packing slip, gate pass",
+  "blocks": [
+   {
+    "type": "p",
+    "text": "Order Status \u2192 Despatch-\u0b87\u0bb2\u0bcd \u0bae\u0bc2\u0ba9\u0bcd\u0bb1\u0bc1 \u0ba4\u0bbf\u0bb0\u0bc8\u0b95\u0bb3\u0bcd: Delivery Challans (DC), Gate Passes, Despatch Settings & LUT. Sale DC \u0b8e\u0ba9\u0bcd\u0baa\u0ba4\u0bc1 \u0bae\u0ba4\u0bbf\u0baa\u0bcd\u0baa\u0bc1\u0b95\u0bb3\u0bcd \u0b87\u0bb2\u0bcd\u0bb2\u0bbe\u0ba4 invoice + \u0ba8\u0bae\u0bcd product serial \u0b8e\u0ba3\u0bcd\u0b95\u0bb3\u0bcd. \u0bb2\u0bbe\u0bb0\u0bbf \u0bb5\u0bb0\u0bc1\u0bb5\u0ba4\u0bb1\u0bcd\u0b95\u0bc1 \u0bae\u0bc1\u0ba9\u0bcd\u0baa\u0bc7 \u0ba4\u0baf\u0bbe\u0bb0\u0bbf\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bcd\u0b9f\u0bc1 Production, QC, Accounts \u0bb5\u0bb4\u0bbf\u0baf\u0bbe\u0b95\u0b9a\u0bcd \u0b9a\u0bc6\u0ba9\u0bcd\u0bb1\u0bc1 Accounts-\u0b87\u0b9f\u0bae\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 \u0b8e\u0ba3\u0bcd \u0baa\u0bc6\u0bb1\u0bc1\u0bae\u0bcd. \u0baa\u0bbf\u0ba9\u0bcd\u0ba9\u0bb0\u0bcd DC-\u0baf\u0bbf\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0baa\u0bcd\u0baa\u0b9f\u0bc1\u0bae\u0bcd tax invoice \u0b85\u0ba4\u0bc7 \u0b8e\u0ba3\u0bcd\u0ba3\u0bc8\u0b95\u0bcd \u0b95\u0bca\u0ba3\u0bcd\u0b9f\u0bbf\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd."
+   },
+   {
+    "type": "h3",
+    "text": "Despatch details (ship-to, mode, notify / handoff)"
+   },
+   {
+    "type": "p",
+    "text": "Accounts Admin \u0b92\u0bb0\u0bc1 contract-\u0b87\u0ba9\u0bcd Commercial Terms-\u0b90 approve \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0ba4\u0bc1\u0bae\u0bcd, Accounts Head-\u0b95\u0bcd\u0b95\u0bc1 \u201cDespatch details \u2014 contract\u201d card \u0bb5\u0bb0\u0bc1\u0bae\u0bcd. \u0b85\u0ba4\u0bbf\u0bb2\u0bcd shipping address \u0b89\u0bb1\u0bc1\u0ba4\u0bbf\u0baa\u0bcd\u0baa\u0b9f\u0bc1\u0ba4\u0bcd\u0ba4\u0bc1\u0bae\u0bcd sub-task (export-\u0b95\u0bcd\u0b95\u0bc1 mode of shipment \u0b89\u0b9f\u0ba9\u0bcd), export-\u0b95\u0bcd\u0b95\u0bc1 notify / handoff (forwarder \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 agent, \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 \u0b87\u0bb2\u0bcd\u0bb2\u0bc8) sub-task. Sale Order-\u0b87\u0bb2\u0bcd Despatch details \u2192 Enter details-\u0b87\u0bb2\u0bcd \u0ba8\u0bbf\u0bb0\u0baa\u0bcd\u0baa\u0bbf\u0ba9\u0bbe\u0bb2\u0bcd sub-tasks \u0ba4\u0bbe\u0ba9\u0bbe\u0b95 \u0bae\u0bc1\u0b9f\u0bbf\u0baf\u0bc1\u0bae\u0bcd. Stores \u0bae\u0bc1\u0ba4\u0bb2\u0bcd DC \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bc1\u0bae\u0bcd\u0baa\u0bcb\u0ba4\u0bc1 \u0b87\u0ba9\u0bcd\u0ba9\u0bc1\u0bae\u0bcd \u0b87\u0bb2\u0bcd\u0bb2\u0bc8\u0baf\u0bc6\u0ba9\u0bcd\u0bb1\u0bbe\u0bb2\u0bcd DC \u0b95\u0bc7\u0b9f\u0bcd\u0b95\u0bc1\u0bae\u0bcd. Domestic-\u0b95\u0bcd\u0b95\u0bc1 handoff \u0b87\u0bb2\u0bcd\u0bb2\u0bc8."
+   },
+   {
+    "type": "h3",
+    "text": "DC \u0b9a\u0bc6\u0baf\u0bcd\u0bb5\u0ba4\u0bc1 (Stores)"
+   },
+   {
+    "type": "steps",
+    "items": [
+     "Delivery Challans \u2192 + New DC \u2192 contract-\u0b90\u0ba4\u0bcd \u0ba4\u0bc7\u0bb0\u0bcd\u0bb5\u0bc1 \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bb5\u0bc1\u0bae\u0bcd.",
+     "\u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 Sl No-\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0b87\u0baa\u0bcd\u0baa\u0bcb\u0ba4\u0bc1 \u0b85\u0ba9\u0bc1\u0baa\u0bcd\u0baa\u0bc1\u0bae\u0bcd \u0b8e\u0ba3\u0bcd\u0ba3\u0bbf\u0b95\u0bcd\u0b95\u0bc8. Ordered, \u0bae\u0bb1\u0bcd\u0bb1 DC-\u0b95\u0bb3\u0bbf\u0bb2\u0bcd \u0b89\u0bb3\u0bcd\u0bb3\u0ba4\u0bc1, balance \u0b95\u0bbe\u0b9f\u0bcd\u0b9f\u0baa\u0bcd\u0baa\u0b9f\u0bc1\u0bae\u0bcd; balance-\u0b95\u0bcd\u0b95\u0bc1 \u0bae\u0bc7\u0bb2\u0bcd \u0b85\u0ba9\u0bc1\u0baa\u0bcd\u0baa \u0bae\u0bc1\u0b9f\u0bbf\u0baf\u0bbe\u0ba4\u0bc1.",
+     "\u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 item-\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0b92\u0bb0\u0bc1 serial (YY-NNNNNNN, \u0b89.\u0ba4\u0bbe. 26-0000451): \u0bae\u0bc1\u0ba4\u0bb2\u0bcd \u0b8e\u0ba3\u0bcd\u0ba3\u0bc8 type \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bc1 Fill \u0b85\u0bb4\u0bc1\u0ba4\u0bcd\u0ba4\u0bb5\u0bc1\u0bae\u0bcd; \u0ba4\u0bc7\u0bb5\u0bc8\u0baf\u0bbe\u0ba9\u0ba4\u0bc8\u0ba4\u0bcd \u0ba4\u0bbf\u0bb0\u0bc1\u0ba4\u0bcd\u0ba4\u0bb5\u0bc1\u0bae\u0bcd. Serial \u0b87\u0bb2\u0bcd\u0bb2\u0bbe\u0ba4 item-\u0b95\u0bcd\u0b95\u0bc1 No serial. \u0b92\u0bb0\u0bc1 serial \u0b87\u0bb0\u0ba3\u0bcd\u0b9f\u0bc1 DC-\u0b95\u0bb3\u0bbf\u0bb2\u0bcd \u0bb5\u0bb0 \u0bae\u0bc1\u0b9f\u0bbf\u0baf\u0bbe\u0ba4\u0bc1.",
+     "Packing: \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 box, \u0b85\u0bb3\u0bb5\u0bc1 (L \u00d7 W \u00d7 H mm), packing \u0b8e\u0b9f\u0bc8, \u0b89\u0bb3\u0bcd\u0bb3\u0bc7 \u0b8e\u0ba9\u0bcd\u0ba9 (Sl No, \u0b8e\u0ba3\u0bcd\u0ba3\u0bbf\u0b95\u0bcd\u0b95\u0bc8, item-\u0b95\u0bcd\u0b95\u0bc1 kg). \u0b85\u0ba9\u0bc1\u0baa\u0bcd\u0baa\u0bc1\u0bae\u0bcd \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 item-\u0b89\u0bae\u0bcd box-\u0b87\u0bb2\u0bcd \u0b87\u0bb0\u0bc1\u0b95\u0bcd\u0b95 \u0bb5\u0bc7\u0ba3\u0bcd\u0b9f\u0bc1\u0bae\u0bcd. \u0b87\u0ba4\u0bc1 packing slip \u0b86\u0b95 \u0b85\u0b9a\u0bcd\u0b9a\u0bbe\u0b95\u0bc1\u0bae\u0bcd.",
+     "Readiness \u0bb5\u0bb0\u0bbf\u0baf\u0bc8 tick \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bc1 Send to Production Manager. Save draft \u0b85\u0ba9\u0bc1\u0baa\u0bcd\u0baa\u0bbe\u0bae\u0bb2\u0bcd \u0b9a\u0bc7\u0bae\u0bbf\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd."
+    ]
+   },
+   {
+    "type": "h3",
+    "text": "Approval \u2014 \u0b92\u0ba9\u0bcd\u0bb1\u0ba9\u0bcd \u0baa\u0bbf\u0ba9\u0bcd \u0b92\u0ba9\u0bcd\u0bb1\u0bbe\u0b95"
+   },
+   {
+    "type": "bullets",
+    "items": [
+     "Production Manager: Present to QC (\u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 \u0b95\u0bbe\u0bb0\u0ba3\u0ba4\u0bcd\u0ba4\u0bc1\u0b9f\u0ba9\u0bcd Stores-\u0b95\u0bcd\u0b95\u0bc1\u0ba4\u0bcd \u0ba4\u0bbf\u0bb0\u0bc1\u0baa\u0bcd\u0baa\u0bbf).",
+     "QC: QC consents to despatch (\u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 objection \u2014 Stores-\u0b95\u0bcd\u0b95\u0bc1\u0ba4\u0bcd \u0ba4\u0bbf\u0bb0\u0bc1\u0baa\u0bcd\u0baa\u0bbf).",
+     "Production Manager: Send to Accounts.",
+     "Accounts: Approve and number. \u0b85\u0b9f\u0bc1\u0ba4\u0bcd\u0ba4 bill \u0b8e\u0ba3\u0bcd \u0b95\u0bbf\u0b9f\u0bc8\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd, \u0b89.\u0ba4\u0bbe. FFI/0081/26-27 \u2014 invoice-\u0b89\u0bae\u0bcd \u0b87\u0ba4\u0bc7 \u0b8e\u0ba3\u0bcd. \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 \u0b86\u0ba3\u0bcd\u0b9f\u0bc1\u0bae\u0bcd \u0bae\u0bc1\u0ba4\u0bb2\u0bcd \u0bae\u0bc1\u0bb1\u0bc8 Accounts \u0ba4\u0bca\u0b9f\u0b95\u0bcd\u0b95 \u0b8e\u0ba3\u0bcd\u0ba3\u0bc8 type \u0b9a\u0bc6\u0baf\u0bcd\u0bb5\u0bbe\u0bb0\u0bcd (\u0b95\u0b9f\u0bc8\u0b9a\u0bbf paper invoice + 1)."
+    ]
+   },
+   {
+    "type": "tip",
+    "text": "\u0baf\u0bbe\u0bb0\u0bbe\u0bb5\u0ba4\u0bc1 No \u0b8e\u0ba9\u0bcd\u0bb1\u0bc1 \u0b9a\u0bca\u0bb2\u0bcd\u0bb2\u0bc1\u0bae\u0bcd \u0bb5\u0bb0\u0bc8 \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 DC-\u0baf\u0bbf\u0bb2\u0bc1\u0bae\u0bcd \u201cIs this a test?\u201d \u0b8e\u0ba9\u0bcd\u0bb1\u0bc1 \u0b95\u0bc7\u0b9f\u0bcd\u0b95\u0bc1\u0bae\u0bcd. Test DC-\u0b95\u0bcd\u0b95\u0bc1 TEST \u0b8e\u0ba3\u0bcd; bill \u0b8e\u0ba3\u0bcd \u0baa\u0baf\u0ba9\u0bcd\u0baa\u0b9f\u0bbe\u0ba4\u0bc1; roll back \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bb2\u0bbe\u0bae\u0bcd."
+   },
+   {
+    "type": "p",
+    "text": "\u0baf\u0bbe\u0bb0\u0bc1\u0b9f\u0bc8\u0baf \u0baa\u0b9f\u0bbf\u0baf\u0bcb \u0b85\u0bb5\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1 \u201cWaiting on me\u201d-\u0b87\u0bb2\u0bc1\u0bae\u0bcd Pending Actions-\u0b87\u0bb2\u0bc1\u0bae\u0bcd \u0ba4\u0bc6\u0bb0\u0bbf\u0baf\u0bc1\u0bae\u0bcd. Admin \u0b8e\u0ba8\u0bcd\u0ba4\u0baa\u0bcd \u0baa\u0b9f\u0bbf\u0baf\u0bbf\u0bb2\u0bc1\u0bae\u0bcd \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bb2\u0bbe\u0bae\u0bcd. DC PDF, Packing slip PDF DC-\u0baf\u0bbf\u0bb2\u0bc7\u0baf\u0bc7; approval-\u0b95\u0bcd\u0b95\u0bc1 \u0bae\u0bc1\u0ba9\u0bcd DRAFT \u0b8e\u0ba9\u0bcd\u0bb1\u0bc1 \u0b85\u0b9a\u0bcd\u0b9a\u0bbe\u0b95\u0bc1\u0bae\u0bcd."
+   },
+   {
+    "type": "h3",
+    "text": "Gate pass (Stores)"
+   },
+   {
+    "type": "p",
+    "text": "Gate Passes \u2192 + New gate pass: \u0b92\u0bb0\u0bc1 \u0bb2\u0bbe\u0bb0\u0bbf\u0baf\u0bbf\u0bb2\u0bcd \u0baa\u0bcb\u0b95\u0bc1\u0bae\u0bcd approved DC-\u0b95\u0bb3\u0bc8 tick \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bc1, vehicle \u0b8e\u0ba3\u0bcd (driver, transporter \u0ba4\u0bc6\u0bb0\u0bbf\u0ba8\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd) \u0ba8\u0bbf\u0bb0\u0baa\u0bcd\u0baa\u0bbf \u0b85\u0b9a\u0bcd\u0b9a\u0bbf\u0b9f\u0bb5\u0bc1\u0bae\u0bcd \u2014 \u0b92\u0bb0\u0bc7 \u0ba4\u0bbe\u0bb3\u0bbf\u0bb2\u0bcd \u0b87\u0bb0\u0ba3\u0bcd\u0b9f\u0bc1 copy. \u0bb2\u0bbe\u0bb0\u0bbf \u0bb5\u0bc6\u0bb3\u0bbf\u0baf\u0bc7\u0bb1\u0bbf\u0baf\u0ba4\u0bc1\u0bae\u0bcd signed security copy-\u0b87\u0bb2\u0bcd \u0b89\u0bb3\u0bcd\u0bb3 \u0ba8\u0bc7\u0bb0\u0ba4\u0bcd\u0ba4\u0bc1\u0b9f\u0ba9\u0bcd Record exit; DC-\u0b95\u0bb3\u0bcd Despatched \u0b86\u0b95\u0bc1\u0bae\u0bcd. Signed copy-\u0b90 scan \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bc1 drive-\u0b87\u0bb2\u0bcd \u0bb5\u0bc8\u0ba4\u0bcd\u0ba4\u0bc1 link-\u0b90 \u0b92\u0b9f\u0bcd\u0b9f\u0bb5\u0bc1\u0bae\u0bcd (Add scan link) \u2014 \u0b85\u0ba4\u0bc1\u0bb5\u0bb0\u0bc8 Pending Actions-\u0b87\u0bb2\u0bcd \u0b87\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd."
+   },
+   {
+    "type": "h3",
+    "text": "LUT"
+   },
+   {
+    "type": "p",
+    "text": "Despatch Settings & LUT-\u0b87\u0bb2\u0bcd \u0ba8\u0bae\u0bcd GSTIN, factory \u0bae\u0bc1\u0b95\u0bb5\u0bb0\u0bbf, bill prefix, LUT \u0b8e\u0ba3\u0bcd \u0bae\u0bb1\u0bcd\u0bb1\u0bc1\u0bae\u0bcd \u0b85\u0ba4\u0ba9\u0bcd \u0ba8\u0bbf\u0ba4\u0bbf\u0baf\u0bbe\u0ba3\u0bcd\u0b9f\u0bc1. \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 \u0bae\u0bbe\u0bb0\u0bcd\u0b9a\u0bcd\u0b9a\u0bbf\u0bb2\u0bc1\u0bae\u0bcd Accounts, super admin-\u0b95\u0bcd\u0b95\u0bc1 \u0b85\u0b9f\u0bc1\u0ba4\u0bcd\u0ba4 \u0b86\u0ba3\u0bcd\u0b9f\u0bc1 LUT \u0ba8\u0bbf\u0bb0\u0baa\u0bcd\u0baa Pending Action; \u0b8f\u0baa\u0bcd\u0bb0\u0bb2\u0bcd 1 \u0bae\u0bc1\u0ba4\u0bb2\u0bcd overdue."
+   },
+   {
+    "type": "warn",
+    "text": "Approve \u0b86\u0ba9 DC-\u0b90 cancel \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd \u0b85\u0ba4\u0ba9\u0bcd \u0b8e\u0ba3\u0bcd \u0baa\u0baf\u0ba9\u0bcd\u0baa\u0b9f\u0bcd\u0b9f\u0ba4\u0bbe\u0b95\u0bb5\u0bc7 \u0b87\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd. Cancel \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd serial \u0b8e\u0ba3\u0bcd\u0b95\u0bb3\u0bcd \u0bb5\u0bbf\u0b9f\u0bc1\u0bb5\u0bbf\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bc1\u0bae\u0bcd; history-\u0b87\u0bb2\u0bcd \u0b87\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd."
+   }
+  ],
+  "en_sig": "3c27f963"
  }
 };
 function manualSig(a){
@@ -28588,6 +28750,8 @@ function downloadManualPdf(){
 // added to over time; not wired to a database table yet, so edits currently
 // mean updating this array directly.
 const FAQ_ENTRIES = [
+  { q:"Where do I make a Delivery Challan?", a:"Order Status \u2192 Despatch \u2192 Delivery Challans (DC) \u2192 + New DC (Stores). It then goes Production Manager \u2192 QC \u2192 Production Manager \u2192 Accounts, one after the other. Accounts gives it the bill number, which its invoice keeps." },
+  { q:"A DC says the serial number is already used.", a:"A product serial number (YY-NNNNNNN) can be on one DC only, ever. Check QC's serial register for the right number. If the earlier DC was cancelled, its serials are free again." },
   { q:"Can I read the User Manual in Tamil?", a:"Yes. Open User Manual and press \u0ba4\u0bae\u0bbf\u0bb4\u0bcd at the top of the list; your choice is remembered on that computer. The staff sections (tasks and boards, Pending Actions, Document Control, enquiries, quotes, Quote Register, follow-ups, procurement, stores) are in Tamil; the rest show in English with a note until they are translated. Screen and button names stay in English so they match the screen. If the English page was changed after the Tamil was written, the Tamil page says the English is newer." },
   { q:"Why can't I move my quote's stage? It asks for a code.", a:"The quote still has a Direct Price (Custom) line whose price an Admin has not validated. Ask an Admin for a Direct Price code (Admin \u2192 Authorization Codes \u2192 Generate Direct Price code), enter it with a short reason, and the line is marked Validated and the stage moves. An Admin moving the stage just confirms; the lines are validated in their name." },
   { q:"Why does Make New Quote say I have quotes in Draft for more than three days?", a:"One or more quotes you built have sat in Draft for over three days. Send them, move them to Lost or Deferred, or carry on for three more days with a reason (the Sales Head sees it). Only Make New Quote is stopped \u2014 everything else works." },
@@ -28669,6 +28833,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"10 Oct 2026 (165)", summary:"Built on 2026-10-10T08:45:00Z. SQL: structure_despatch_dc_gatepass_2026-10-10.sql (both companies; seeds Flometriq's GSTIN / LUT only on Flometriq). DESPATCH, Order Status \u2192 Despatch. (1) DESPATCH DETAILS per contract (contract_despatch_tbl, with history): ship-to contact / address / phone (default: the Sale Order's shipping address), export also mode of shipment (Sea / Air / Courier / Road) and notify / handoff (No skips; Yes asks contact and address). Panel on the Sale Order; asked on the first DC of a contract when missing; domestic = ship-to only. (2) ACCOUNTS HEAD CARD: approving the Commercial Terms creates \u201cDespatch details \u2014 contract\u201d for the Accounts Head post, due +3 days, with sub-tasks Confirm shipping address (+ mode, export) and Notify / handoff (export); they tick themselves when the details are saved (task_tbl.despatch_contract / despatch_part). (3) SALE DC (dc_tbl, dc_line_tbl, dc_serial_tbl, dc_box_tbl, dc_box_line_tbl, dc_history_tbl): lines from the contract Sl Nos with ordered / on other DCs / balance \u2014 never more than the balance (checked again when Accounts approves); product serials YY-NNNNNNN with Fill from a start number, each editable, No serial per line, unique across all DCs (database index); packing by box (mode, L\u00d7W\u00d7H mm, packing kg, contents with kg per item) = the packing slip; readiness tick in place of the stores / production gateway. Sequential: Stores \u2192 Production Manager (Present to QC) \u2192 QC (consents) \u2192 Production Manager (Send to Accounts) \u2192 Accounts (Approve and number); send back with a reason at any step; cancel with a reason (approved: number stays used; serials released). Posts decide who acts (stores, production_manager, qc, accounts; qc / accounts_admin logins too); admins may act at any step. (4) NUMBERS (doc_series_tbl): DC draft D/26-27/0001; on approval the bill number FFI/0081/26-27 (prefix in settings), the same number the invoice will carry; first time each year Accounts types the starting number (confirmed); \u201cIs this a test?\u201d asked on each approval until someone answers No \u2014 a test DC gets TEST-n, uses no number and can be rolled back. (5) GATE PASS (gate_pass_tbl): several approved DCs on one truck, vehicle / transporter / LR / driver, GP/26-27/0001, PDF with two copies (security and office); Record exit (time from the signed copy) makes the DCs Despatched; scan link can follow. (6) PDFs: DC (no values; Bill To / Deliver To / Notify-Handoff; serial ranges; DRAFT / TEST watermark), packing slip (landscape, serials split box by box, net / gross / volume, shipping marks for export), gate pass. (7) SETTINGS & LUT (billing_settings_tbl): GSTIN, PAN, state, factory address, bill prefix, LUT no and year; March: Pending Action to Accounts + super admins to renew; from April overdue if not entered. (8) PENDING ACTIONS: DCs at each step owed by that post; DC sent back \u2192 Stores; approved DC without gate pass \u2192 Stores; gate pass not exited / no scan link \u2192 Stores; LUT. Manual: Sale Order \u2192 Despatch (English and Tamil). The invoice comes next build." },
+  { date:"10 Oct 2026 (164)", summary:"Built on 2026-10-10T06:30:00Z. No SQL. PROCUREMENT REPORTS \u2192 OVERDUE (ALL STEPS): Table / Bars switch (remembered per computer, pr_odview). Bars = overdue steps only, one red bar per step sized by days past plan (start-late steps marked (start)), contracts worst first, steps worst first; contracts with nothing overdue left out; each bar shows material \u2014 step, holder, planned date; the Every line / Include ticks apply to the Table only. Clicking a bar or a table row opens the Procurement Gantt at that line with Edit dates open (if the user may edit; otherwise just the Gantt) \u2014 contract-wide rows now click through too. NO MORE \u201cGENERAL\u201d: the BOM Received / Purchase BOM Approval line item is titled Contract-wide steps (pgRows), so the Gantt, the chart, the cards text, Pending Actions and the reports all say so; in Overdue (all steps) and Plan history it lists every material of the contract it holds (all names, never cut). Internal keys unchanged. Download PDF prints the table as before. Manual: Procurement Gantt note in English and Tamil." },
   { date:"10 Oct 2026 (163)", summary:"Built on 2026-10-10T03:55:00Z (never uploaded), so it also carries that build's three changes: version under the company name, no stage move on an unchecked Direct Price line, and the Draft-quote rule. No SQL. (1) DRAFT QUOTES \u2014 the pre-upload check found 34 drafts that would have blocked on day one. Two refinements: drafts that existed before the rule count from DRAFT_RULE_FROM (10/10/2026), not from their creation date, so everyone has three days to clear the backlog; and only the LATEST revision of a quote counts \u2014 a Draft revision with a newer revision of the same quote (any stage) is ignored (quoteBaseAndRev; only numbers carrying Rev/R are read for this). check_draft_quotes_before_deploy_v2.sql previews it. (2) USER MANUAL IN TAMIL \u2014 English / \u0ba4\u0bae\u0bbf\u0bb4\u0bcd switch at the top of the manual's list, remembered per computer (localStorage manual_lang). MANUAL_TA holds Tamil for the staff articles: navigation, Pending Actions, task boards, movable lists, Document Control, enquiries, My day, Log Follow-ups, Quote Register, quotes overview, Quote PDF, Direct Price lines, Procurement Gantt, PO Register, Material Inward, tagging, documents, Report an issue. Others show English with a note. Each Tamil article stores en_sig, a fingerprint of the English it was written from; when the English changes, the Tamil page says the English is newer (manualSig). Screen and button names stay in English. Not proofread, by decision. Search matches English and Tamil titles. The Download manual PDF stays English." },
   { date:"10 Oct 2026 (162)", summary:"Three changes. No SQL. (1) VERSION IN THE TOP BAR \u2014 the version.txt line now shows under the company name (option A), visible on a phone too; hover gives the time in India, Super Admins click it for Version History; for the first 24 hours a browser sees a new version it shows yellow with \u201cnew today\u201d (VersionLine, per-browser first-seen in localStorage). (2) NO STAGE MOVE ON AN UNCHECKED PRICE \u2014 an offer error report found 23 offers sent with Direct Price lines still Pending. updateQuoteStatusForQuote now runs gateDirectPriceOnStageMove before every move except back to Draft, so it covers every path (quote screen, funnel board, follow-up log, Quotes Report, Quote Stage Review, login Draft reminder, Enquiry screen). Admin / Super Admin: one confirm, the lines are validated in their name. Anyone else: a Direct Price code from Authorization Codes (the readiness check's validate-line code also works) plus a required reason; the code marks every Pending line on the quote Validated, logged with the reason. Applies to Lost and Deferred too \u2014 the price has already gone to the customer. (3) DRAFT QUOTES NOT SENT \u2014 the stale-OA rule applied to quotes: more than a day in Draft = due in Pending Actions for whoever built it; more than three days = overdue, also listed for the Sales Head, and Make New Quote is stopped for its builder until it is sent, closed, or carried on 3 days with a reason (pending_action_hold_tbl, source quote_draft). Hold pauses the clock (held time is subtracted). Clock from quote creation. Abandoned drafts excluded. App and login never blocked." },
   { date:"9 Oct 2026 (161)", summary:"Procurement Gantt: the General line item is shown as TWO ROWS — BOM Received and Purchase BOM Approval — on the chart (one row per material, and with the steps) and in its Download Excel and Download PDF (pgDisplayRows / pgTplPairs). Display only: the data, the Table and Edit dates keep one General line item; an inserted step stays on the row of the step it follows. The General sub-task on each procurement card is renamed “BOM Received & Purchase BOM Approval” (PG_GEN_TITLE); existing ones are renamed at their next sync. No SQL. (This is the change planned as build 159, which never went live; it now comes with build 160.)" },
@@ -35427,7 +35593,7 @@ function pgFormNames(plan){ return pgForms(plan).map(f=>f.form); }
 function pgRows(plan, d, extra){
   const mk = (key,label,color,group,pred,custom)=>({ key, label, color, group, pred, custom:!!custom, plan:{ s:(d[key]||{}).ps||PG_NONE, e:(d[key]||{}).pe||PG_NONE }, act:{ s:(d[key]||{}).as||PG_NONE, e:(d[key]||{}).ae||PG_NONE } });
   const place = (steps, group)=>{ (extra||[]).filter(x=>(x.form||"")===group).forEach(x=>{ const i = steps.findIndex(s=>s.key===x.pred); const st = mk(x.key,x.label,PG_CUSTOM_COLOR,group,x.pred,true); if(i>=0) steps.splice(i+1,0,st); else steps.push(st); }); return steps; };
-  const rows = [{ form:"", title:"General", gen:true, steps: place(PG_GEN.map(([k,l,c],i)=>mk(k,l,c,"",i?PG_GEN[i-1][0]:null)), "") }];
+  const rows = [{ form:"", title:"Contract-wide steps", gen:true, steps: place(PG_GEN.map(([k,l,c],i)=>mk(k,l,c,"",i?PG_GEN[i-1][0]:null)), "") }];
   pgForms(plan).forEach(f=>{ const S = PG_STEPS.filter(s=>f.rfi || (s[0]!=="rs" && s[0]!=="rt"));
     rows.push({ form:f.form, title:f.form, f, steps: place(S.map(([k,l,c],i)=>mk(k+"|"+f.form,l,c,f.form,i ? S[i-1][0]+"|"+f.form : "pbom")), f.form) }); });
   return rows;
@@ -36193,6 +36359,7 @@ function ProcReportsScreen({ user, onOpenGantt }){
   const [per,setPer] = useState("this");
   const [odAll,setOdAll] = useState(false);   // 160: Overdue (all steps) — every line of each contract, not only the late ones
   const [odInc,setOdInc] = useState(false);   // 160: list contracts with nothing overdue too
+  const [odView,setOdView] = useState(()=>{ try{ return localStorage.getItem("pr_odview")||"table"; }catch(e){ return "table"; } });   // 163: Table / Bars
   const [busy,setBusy] = useState(false);
   useEffect(()=>{ (async()=>{
     const { data: plans, error } = await sb.from("proc_plan_tbl").select("*").order("contract_number",{ascending:false});
@@ -36204,6 +36371,7 @@ function ProcReportsScreen({ user, onOpenGantt }){
     if((plans||[]).length) setCt(String(plans[0].contract_number));
   })(); },[]);
   useEffect(()=>{ try{ localStorage.setItem("pr_rep",rep); }catch(e){} },[rep]);
+  useEffect(()=>{ try{ localStorage.setItem("pr_odview",odView); }catch(e){} },[odView]);
   if(!data) return h("div",{style:{padding:20,color:colors.muted}},"Reading the procurement plans…");
   if(data.err) return h("div",{style:{padding:20,color:colors.danger}},"The Procurement Gantt tables are not there yet — run the build-139 SQL. ("+data.err+")");
   const allM = prMaterials(data.plans, data.lines, data.tasks, data.chg, today);
@@ -36216,6 +36384,10 @@ function ProcReportsScreen({ user, onOpenGantt }){
   const pill = (t,k)=> h("span",{style:{display:"inline-block",fontSize:10.5,fontWeight:700,borderRadius:9,padding:"1px 8px",whiteSpace:"nowrap",
     ...(k==="r"?{background:"#fdecea",color:"#a3312a"}:k==="a"?{background:"#fff4d6",color:"#854f0b"}:k==="g"?{background:"#e4f3ed",color:"#0f6b4f"}:k==="b"?{background:"#e6f1fb",color:"#2a6db0"}:{background:"#eeece4",color:colors.muted})}},t);
   const go = (m)=> onOpenGantt && onOpenGantt(m.cn, m.form);
+  const goEdit = (m)=> onOpenGantt && onOpenGantt(m.cn, m.form||"", true);   // 163: bar click -> Gantt, dates of that line open
+  // 163: never "General" — contract-wide steps name what they hold: every material of the contract
+  const matNames = (cn)=> allM.filter(x=>x.cn===cn && !x.gen).map(x=>x.title);
+  const holdsTxt = (cn)=>{ const ns = matNames(cn); return ns.length ? "Holds all "+ns.length+" material"+(ns.length===1?"":"s")+": "+ns.join(", ") : "No materials listed yet"; };
   // ---- the five reports: each gives {count, head, rows:[{cells, pdf, group?, onClick}]} ----
   let R = { count:"", head:[], rows:[] };
   if(rep==="past"){
@@ -36269,7 +36441,7 @@ function ProcReportsScreen({ user, onOpenGantt }){
     if(scope==="one"){
       R.head = ["Step","Date","Original","Revision","Moved","Reason","Note","By · when"];
       const forms = Array.from(new Set(xs.map(c=>c.form||"")));
-      forms.forEach(f=>{ R.rows.push({ group:true, cells:[h("b",null,f||"General")], pdf:[f||"General"] });
+      forms.forEach(f=>{ const gl = f || ("Contract-wide steps — "+holdsTxt(ct)); R.rows.push({ group:true, cells:[h("b",null,gl)], pdf:[gl] });
         const fx = xs.filter(c=>(c.form||"")===f).sort((a,b)=>String(a.line_key+a.field+a.changed_at).localeCompare(String(b.line_key+b.field+b.changed_at)));
         const seen = {};
         fx.forEach(c=>{ const k = c.line_key+"|"+c.field; seen[k] = (seen[k]||0)+1; const orig = pgChgOf(data.chg, c.plan_id, c.line_key, c.field)[0];
@@ -36277,8 +36449,8 @@ function ProcReportsScreen({ user, onOpenGantt }){
             pdf:[c.step_label||c.line_key, fdl(c), orig&&orig.old_date?pgDmy(String(orig.old_date).slice(0,10)):"", "rev "+seen[k]+" → "+(c.new_date?pgDmy(String(c.new_date).slice(0,10)):"cleared"), days(c), c.reason, (c.note||"")+(c.cascade_from?" (followed an earlier step)":""), (c.changed_by||"")+" · "+fmtDMYTime(c.changed_at)] }); }); });
     } else {
       R.head = ["When","Contract","Material","Step","Date","Old → new","Moved","Reason","Note","By"];
-      xs.slice().sort((a,b)=>String(b.changed_at).localeCompare(String(a.changed_at))).forEach(c=>R.rows.push({ cells:[fmtDMYTime(c.changed_at), c.contract_number||"", c.form||"General", c.step_label||c.line_key, fdl(c), chgTxt(c), h("b",{style:{color:(c.days||0)>0?"#a3312a":"#0f6b4f"}},days(c)), c.reason, (c.note||"—")+(c.cascade_from?" (followed an earlier step)":""), c.changed_by||""],
-        pdf:[fmtDMYTime(c.changed_at), c.contract_number||"", c.form||"General", c.step_label||c.line_key, fdl(c), chgTxt(c), days(c), c.reason, (c.note||"")+(c.cascade_from?" (followed an earlier step)":""), c.changed_by||""] }));
+      xs.slice().sort((a,b)=>String(b.changed_at).localeCompare(String(a.changed_at))).forEach(c=>R.rows.push({ cells:[fmtDMYTime(c.changed_at), c.contract_number||"", c.form||"Contract-wide", c.step_label||c.line_key, fdl(c), chgTxt(c), h("b",{style:{color:(c.days||0)>0?"#a3312a":"#0f6b4f"}},days(c)), c.reason, (c.note||"—")+(c.cascade_from?" (followed an earlier step)":""), c.changed_by||""],
+        pdf:[fmtDMYTime(c.changed_at), c.contract_number||"", c.form||"Contract-wide", c.step_label||c.line_key, fdl(c), chgTxt(c), days(c), c.reason, (c.note||"")+(c.cascade_from?" (followed an earlier step)":""), c.changed_by||""] }));
     }
   }
   let kpiTiles = null;
@@ -36313,6 +36485,7 @@ function ProcReportsScreen({ user, onOpenGantt }){
   }
   // ---- 160: OVERDUE (ALL STEPS) — every line × every step, planned and actual finish, days late ----
   let odSum = null;   // all-contracts summary table for the PDF
+  let odBars = null;  // 163: Bars view
   if(rep==="od"){
     const TONE = { late:"r", donelate:"a", done:"g", run:"b", open:"n", miss:"a" };
     const FILL = { r:[248,201,196], a:[253,231,176], g:[205,236,207], b:[214,232,250], n:[240,240,240] };
@@ -36348,15 +36521,46 @@ function ProcReportsScreen({ user, onOpenGantt }){
         const cuEl = cu ? (cu.many ? h("div",{style:{display:"flex",flexDirection:"column",gap:3}},cu.many.map((c,i)=>h("div",{key:i},cellEl(c)))) : cellEl(cu)) : null;
         const cuPdf = cu ? (cu.many ? cu.many.map(c=>c.pdf).join("\n\n") : "") : null;
         const cuTone = cu && cu.many ? (cu.many.some(c=>c.tone==="r")?"r":cu.many.some(c=>c.tone==="a")?"a":null) : null;
-        R.rows.push({ onClick: m.gen ? null : ()=>go(m),
-          cells:[h("b",null,m.gen?"General (whole contract)":m.title), m.holder||"Unassigned", ...cs.map(c=>c.tone||c.txt==="n/a"?cellEl(c):""), ...(custom?[cuEl]:[]), w?h("b",{style:{color:"#a3312a"}},w+" d"):"—"],
-          pdf:[m.gen?"General (whole contract)":m.title, m.holder||"Unassigned", ...cs.map(c=>c.pdf), ...(custom?[cuPdf]:[]), w?w+" d":"—"],
+        R.rows.push({ onClick: ()=>goEdit(m),
+          cells:[m.gen ? h("div",null,h("b",null,"Contract-wide steps"),h("div",{style:{fontSize:11,color:colors.muted,fontWeight:400,lineHeight:1.35,maxWidth:260}},holdsTxt(m.cn))) : h("b",null,m.title), m.holder||"Unassigned", ...cs.map(c=>c.tone||c.txt==="n/a"?cellEl(c):""), ...(custom?[cuEl]:[]), w?h("b",{style:{color:"#a3312a"}},w+" d"):"—"],
+          pdf:[m.gen?"Contract-wide steps\n"+holdsTxt(m.cn):m.title, m.holder||"Unassigned", ...cs.map(c=>c.pdf), ...(custom?[cuPdf]:[]), w?w+" d":"—"],
           fills:[null, null, ...cs.map(c=>c.tone?FILL[c.tone]:null), ...(custom?[cuTone?FILL[cuTone]:null]:[]), w?FILL.r:null] });
       });
     });
     // worst contract first in All contracts
     if(scope==="all"){ const blocks = []; R.rows.forEach(r=>{ if(r.group) blocks.push([r]); else if(blocks.length) blocks[blocks.length-1].push(r); }); blocks.sort((a,b)=>(b[0].worst||0)-(a[0].worst||0)); R.rows = blocks.flat(); sumRows.sort((a,b)=>b.worst-a.worst); }
     odSum = scope==="all" ? { head:["Contract","Client","Delivery","Materials","Overdue steps","Worst delay","Oldest overdue step","Holders with overdue steps","At factory — planned / expected"], rows:sumRows.map(r=>r.pdf), worst:sumRows.map(r=>r.worst) } : null;
+    // 163: BARS — only the overdue steps, one bar each, length = days past plan; worst contract first, worst step first
+    const bars = []; cns.forEach(cn=>{ const g = M.filter(m=>m.cn===cn); const its = [];
+      g.forEach(m=>m.row.steps.forEach(st=>{ const ss = pgStat(st,today); if(ss.k!=="late") return;
+        const startLate = /^start/.test(ss.t||""); its.push({ m, st, l:ss.l||0, startLate, due: startLate ? pgDue(st.plan.s) : pgDue(st.plan.e) }); }));
+      if(!its.length) return; its.sort((a,b)=>b.l-a.l || (a.m.gen?-1:b.m.gen?1:0) || a.m.title.localeCompare(b.m.title));
+      const mats = g.filter(m=>!m.gen); const facP = mats.map(m=>m.rec||m.supP).filter(Boolean).sort().pop()||"";
+      bars.push({ cn, client:g[0].client, deliv:g[0].deliv, facP, its, worst:its[0].l }); });
+    bars.sort((a,b)=>b.worst-a.worst || a.cn.localeCompare(b.cn));
+    const maxL = bars.reduce((n,b)=>Math.max(n,b.worst),0);
+    const axis = [2,4,6,8,10,14,20,30,45,60,90,120,180,270,365].find(n=>n>=maxL) || Math.ceil(maxL/30)*30;
+    const tick = (f)=> Math.round(axis*f);
+    const lblW = 330;
+    odBars = bars.length===0 ? h("div",{style:{padding:14,color:colors.mutedLight}},"Nothing overdue for this choice.") :
+      h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 14px"}},
+        h("div",{style:{display:"grid",gridTemplateColumns:lblW+"px minmax(0,1fr) 56px",gap:10,fontSize:11,color:colors.muted,marginBottom:4}},
+          h("span",null,"Overdue step"),
+          h("div",{style:{position:"relative",height:14}},[0,0.25,0.5,0.75,1].map(f=>h("span",{key:f,style:{position:"absolute",left:(f*100)+"%",transform:f===0?"none":f===1?"translateX(-100%)":"translateX(-50%)"}},tick(f)+" d"))),
+          h("span",{style:{textAlign:"right"}},"Late by")),
+        bars.map(b=>h("div",{key:b.cn,style:{borderTop:"1px solid "+colors.border,padding:"8px 0 4px"}},
+          h("div",{style:{fontSize:13,fontWeight:700,marginBottom:6}},b.cn+" · "+b.client,
+            h("span",{style:{fontWeight:400,color:colors.muted,fontSize:12}}," · "+b.its.length+" overdue step"+(b.its.length===1?"":"s")+" · worst "+b.worst+" d"+(b.facP?" · at factory planned "+pgDmy(b.facP):"")+(b.deliv?" · delivery "+pgDmy(b.deliv):""))),
+          b.its.map((x,i)=>h("div",{key:i,onClick:()=>goEdit(x.m),title:"Open the Gantt at "+(x.m.gen?"the contract-wide steps":x.m.title)+" to update its dates",
+              style:{display:"grid",gridTemplateColumns:lblW+"px minmax(0,1fr) 56px",gap:10,alignItems:"center",padding:"5px 0",cursor:"pointer"}},
+            h("div",null,
+              h("div",{style:{fontSize:12.5,fontWeight:600}}, x.m.gen ? x.st.label : x.m.title+" — "+x.st.label),
+              x.m.gen ? h("div",{style:{fontSize:11,color:colors.muted,lineHeight:1.35}},"Contract-wide · "+holdsTxt(b.cn)) : null,
+              h("div",{style:{fontSize:11,color:colors.muted}},(x.m.holder||"Unassigned")+" · "+(x.startLate?"start planned ":"finish planned ")+(x.due?pgDmy(x.due):"—"))),
+            h("div",{style:{height:16,background:"#f4f3ee",borderRadius:3,position:"relative"}},
+              h("div",{style:{width:Math.max(2,Math.min(100,x.l/axis*100))+"%",height:"100%",background:"#E24B4A",borderRadius:"0 3px 3px 0"}})),
+            h("b",{style:{color:"#a3312a",textAlign:"right",fontSize:12.5}},x.l+" d"+(x.startLate?" (start)":"")))))),
+        h("div",{style:{fontSize:11,color:colors.muted,marginTop:8}},"Bar length = days past the planned date as on "+pgDmy(today)+" · \u201c(start)\u201d = not started after its planned start · contracts with nothing overdue are not shown · click a bar to open the Gantt there and update the dates."));
     R.count = nC+" contract(s) with overdue steps · "+nSteps+" overdue step"+(nSteps===1?"":"s")+(worstAll?" · worst "+worstAll+" d":"")+" · as on "+pgDmy(today)+" · overdue = not finished after its planned finish, or not started after its planned start · P = planned finish, A = actual finish";
   }
   const titles = { past:"Materials past planned date", od:"Overdue (all steps)", pend:"Pending supply", sum:"Contract summary", hist:"Plan history", kpi:"Purchase engineer KPI" };
@@ -36405,12 +36609,14 @@ function ProcReportsScreen({ user, onOpenGantt }){
       rep==="pend" ? lab("Show", sel(show, setShow, [h("option",{key:"p",value:"pending"},"Pending only"),h("option",{key:"r",value:"recent"},"Pending + received in the last 30 days"),h("option",{key:"a",value:"all"},"Everything")])) : null,
       rep==="pend" ? lab("Expected", sel(within, setWithin, [h("option",{key:"",value:""},"Any date"),h("option",{key:"7",value:"7"},"Next 7 days"),h("option",{key:"14",value:"14"},"Next 14 days")])) : null,
       rep==="sum" ? h("label",{style:{fontSize:12,display:"inline-flex",gap:5,alignItems:"center"}},h("input",{type:"checkbox",checked:incDone,onChange:e=>setIncDone(e.target.checked)}),"Include contracts fully received") : null,
-      rep==="od" && scope==="all" ? h("label",{style:{fontSize:12,display:"inline-flex",gap:5,alignItems:"center"}},h("input",{type:"checkbox",checked:odAll,onChange:e=>setOdAll(e.target.checked)}),"Every line (not only the late ones)") : null,
-      rep==="od" && scope==="all" ? h("label",{style:{fontSize:12,display:"inline-flex",gap:5,alignItems:"center"}},h("input",{type:"checkbox",checked:odInc,onChange:e=>setOdInc(e.target.checked)}),"Include contracts with nothing overdue") : null,
+      rep==="od" ? seg([["table","Table"],["bars","Bars"]], odView, setOdView) : null,
+      rep==="od" && scope==="all" && odView==="table" ? h("label",{style:{fontSize:12,display:"inline-flex",gap:5,alignItems:"center"}},h("input",{type:"checkbox",checked:odAll,onChange:e=>setOdAll(e.target.checked)}),"Every line (not only the late ones)") : null,
+      rep==="od" && scope==="all" && odView==="table" ? h("label",{style:{fontSize:12,display:"inline-flex",gap:5,alignItems:"center"}},h("input",{type:"checkbox",checked:odInc,onChange:e=>setOdInc(e.target.checked)}),"Include contracts with nothing overdue") : null,
       rep==="kpi" ? lab("Period", sel(per, setPer, [h("option",{key:"t",value:"this"},"This month"),h("option",{key:"l",value:"last"},"Last month"),h("option",{key:"q",value:"q"},"This quarter"),h("option",{key:"y",value:"12"},"Last 12 months")])) : null,
       h("button",{onClick:pdf,disabled:busy,style:{...btnPrimary,marginLeft:"auto",padding:"6px 14px"}},busy?"Making PDF…":"Download PDF")),
     h("div",{style:{fontSize:12.5,color:colors.muted,marginBottom:8}},R.count),
     kpiTiles ? h("div",{style:{marginBottom:10}},kpiTiles) : null,
+    rep==="od" && odView==="bars" ? odBars :
     h("div",{style:{overflowX:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8}},h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:900,fontSize:12.5}},
       h("thead",null,h("tr",null,R.head.map(x=>h("th",{key:x,style:{textAlign:"left",padding:"7px 9px",fontSize:11.5,color:colors.muted,borderBottom:"2px solid "+colors.dark,whiteSpace:"nowrap"}},x)))),
       h("tbody",null, R.rows.length===0 ? h("tr",null,h("td",{colSpan:R.head.length||1,style:{padding:12,color:colors.mutedLight}},"Nothing for this choice.")) :
@@ -36500,6 +36706,11 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
     x.info = { po:plan.po_no||"", deliv:plan.delivery_date?String(plan.delivery_date).slice(0,10):"" };   // 142: P O No and delivery editable here
     x.o = JSON.stringify({d:x.d,extra:x.extra,forms:x.forms,info:x.info}); setEd(x); setView("table");
     if(focus!==undefined) setTimeout(()=>{ const el = document.querySelector('[data-pgform="'+(focus||"General")+'"]'); if(el) el.scrollIntoView({behavior:"smooth",block:"start"}); },80); };
+  // 163: opened from a bar in Procurement reports -> straight into the dates of that line
+  const editAsked = useRef("");
+  useEffect(()=>{ if(!initial || !initial.edit || !plan || String(plan.contract_number)!==String(initial.contract)) return;
+    const k = initial.contract+"|"+(initial.form||"")+"|"+initial.edit; if(editAsked.current===k || !(canEdit||storesOnly) || ed) return;
+    editAsked.current = k; openEdit(initial.form||""); },[initial, plan && plan.id, canEdit, storesOnly]);
   const setWhen = (key, which, val)=>{ if(pgFutureAct(which, val, today)){ alert((which==="as"?"Started on":"Finished on")+" cannot be after today ("+pgDmy(today)+").\n\nFill it on the day it happens. What you expect goes in Plan: start / Plan: finish."); return; } setWhenOk(key, which, val); };
   const setWhenOk = (key, which, val)=> setEd(x=>{ const d = {...x.d}; const r = {...(d[key]||{})}; r[which] = val;
     if(which==="pe" && val.v && !(r.ps && r.ps.v)){   // planned start left empty -> the step before's planned end
@@ -36584,7 +36795,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
     const { error } = await sb.from("proc_line_tbl").insert({ plan_id:plan.id, line_key:key, label:ins.label.trim(), stage:"Inserted", form:ins.form||null, pred_key:pred, is_custom:true,
       plan_start_type:ps.t, plan_start:ps.v||null, plan_type:ins.pe.t, plan_date:ins.pe.v, act_start_type:"d", act_start:null, act_type:"d", act_date:null, updated_by:me, updated_at:now });
     if(error){ alert("Could not insert the step:\n\n"+error.message); return false; }
-    await logAudit("INSERT","proc_line_tbl",plan.contract_number,"Procurement Gantt: step inserted on "+(ins.form||"General")+" — "+ins.label.trim(),user?.username||"");
+    await logAudit("INSERT","proc_line_tbl",plan.contract_number,"Procurement Gantt: step inserted on "+(ins.form||"Contract-wide steps")+" — "+ins.label.trim(),user?.username||"");
     setIns(null); await pgSyncTasks(plan.id, me); await load(); return true;
   };
 
@@ -36788,7 +36999,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
           h("div",{style:{minWidth:0}},h("div",{style:{fontSize:12,fontWeight:700,marginBottom:4}},"Material forms — one row each ",h("span",{style:{fontWeight:400,color:colors.muted}},nUsed+" lines → "+forms.length+" forms")),
             forms.map(f=>h("div",{key:f.form,style:{display:"flex",gap:6,alignItems:"center",padding:"5px 2px",borderBottom:"1px solid #ebe8dd",fontSize:12}},h("b",null,f.form),pgCertPill(f.cert),
               h("span",{style:{marginLeft:"auto",fontSize:11,color:colors.muted}},f.lines.length+" BOM lines · "+(f.rfi?"6 steps incl. RFI":"4 steps")))),
-            h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:8}},"The task card goes to the "+PG_DEPT_LABEL()+" Unassigned pile, with one sub-task per form plus General. It is handed to a buyer in the daily review.")))));
+            h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:8}},"The task card goes to the "+PG_DEPT_LABEL()+" Unassigned pile, with one sub-task per form plus one for the contract-wide steps (BOM Received, Purchase BOM Approval). It is handed to a buyer in the daily review.")))));
   };
 
   return h("div",{style:{padding:"14px 18px"}},
@@ -36802,7 +37013,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
     ins && plan ? modal("Insert Step — contract "+plan.contract_number,
       h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}},
         fl("Step name *",h("input",{value:ins.label,onChange:e=>setIns(x=>({...x,label:e.target.value})),placeholder:"e.g. Pipe bending at sub-vendor, Galvanising, TPI document review",style:inputStyle}),true),
-        fl("On the row of",h("select",{value:ins.form,onChange:e=>setIns(x=>({...x,form:e.target.value,pred:""})),style:inputStyle},h("option",{value:""},"General"),pgFormNames(plan).map(f=>h("option",{key:f,value:f},f)))),
+        fl("On the row of",h("select",{value:ins.form,onChange:e=>setIns(x=>({...x,form:e.target.value,pred:""})),style:inputStyle},h("option",{value:""},"Contract-wide steps"),pgFormNames(plan).map(f=>h("option",{key:f,value:f},f)))),
         fl("Comes after",h("select",{value:ins.pred,onChange:e=>setIns(x=>({...x,pred:e.target.value})),style:inputStyle},h("option",{value:""},"the last step of the row"),
           ((rowsOf(plan).find(r=>(r.form||"")===ins.form)||{steps:[]}).steps).map(s=>h("option",{key:s.key,value:s.key},s.label)))),
         fl("Plan: start (empty = same as the finish)",h(PgWhen,{value:ins.ps,weeks:weeksFor(plan),kind:"start",onChange:v=>setIns(x=>({...x,ps:v}))})),
@@ -45531,6 +45742,9 @@ function App() {
     tab==="reports_status_history"?h(StatusChangeHistoryReport,null):
     tab==="reports_po_register"?h(PoRegisterReport,null):
     tab==="pending_actions"?h(PendingActionsScreen,{user}):
+    tab==="despatch_dc"?h(DespatchScreen,{user}):
+    tab==="gate_pass"?h(GatePassScreen,{user}):
+    tab==="despatch_settings"?h(DespatchSettingsScreen,{user}):
     tab==="period_reports"?h(PeriodReportsScreen,{user}):   // 148
     tab==="reports_document_register"?h(DocumentRegisterReport,null):
     tab==="reports_grn_status"?h(GrnStatusReport,null):
@@ -45607,7 +45821,7 @@ function App() {
     tab==="permissions"?h(PermissionsEditor,null):
     tab==="dashboards"?h(DashboardsScreen,{user}):
     tab==="proc_gantt"?h(ProcGanttScreen,{user, onGoToTab:setTab, initial:pgNav, onOpenCard:(id,cn)=>{ setNavBack({label:"\u2190 Back to the Gantt", go:()=>{ setPgNav({contract:cn}); setTab("proc_gantt"); }}); setMyDayTaskId(id); setTab("task_board"); }}):
-    tab==="proc_reports"?h(ProcReportsScreen,{user, onOpenGantt:(cn,form)=>{ setNavBack({label:"\u2190 Back to the Procurement reports", go:()=>setTab("proc_reports")}); setPgNav({contract:cn, form}); setTab("proc_gantt"); }}):   // 154
+    tab==="proc_reports"?h(ProcReportsScreen,{user, onOpenGantt:(cn,form,edit)=>{ setNavBack({label:"\u2190 Back to the Procurement reports", go:()=>setTab("proc_reports")}); setPgNav({contract:cn, form, edit:edit?Date.now():0}); setTab("proc_gantt"); }}):   // 154
     tab==="proc_list"?h(ProcListScreen,{user, onOpenCard:(id,cn)=>{ setNavBack({label:"\u2190 Back to the Procurement list", go:()=>setTab("proc_list")}); setMyDayTaskId(id); setTab("task_board"); },
       onOpenGantt:(cn)=>{ setNavBack({label:"\u2190 Back to the Procurement list", go:()=>setTab("proc_list")}); setPgNav({contract:cn}); setTab("proc_gantt"); }}):   // 147   // 138 Build A
     (tab==="valve_price"||tab==="valve_price_purchase")?(canSeeValvePrice(user)?h(ValvePriceScreen,{user}):h("div",{style:{padding:24,fontSize:13,color:colors.muted}},"Valve Price is for admins on this site.")):
@@ -50220,7 +50434,7 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
           h("input",{value:d.title,disabled:!editable,placeholder:"What needs doing",onChange:e=>set({title:e.target.value}),style:{width:"100%",fontSize:16,fontWeight:700,border:"1px solid "+(isNew?colors.border:"transparent"),borderRadius:5,padding:"5px 6px"}})),
         isNew ? null : h("span",{style:{fontSize:10.5,fontWeight:700,color:"#fff",background:stObj.color,borderRadius:9,padding:"3px 9px",whiteSpace:"nowrap",marginTop:6}},stObj.label),
         (!isNew && saved && saved.proc_plan_id && onOpenGantt) ? h("button",{onClick:()=>{ if(dirty && !confirm("Leave without saving your changes?")) return; onClose(); onOpenGantt({ contract:saved.ref||"", form:saved.parent_id?(saved.proc_form||""):"", taskId:saved.id }); },
-          title:"Open this contract's Procurement Gantt"+(saved.parent_id?" at the "+(saved.proc_form||"General")+" row":""),style:{...btnSmall,fontWeight:700,color:"#0f7a5c",borderColor:"#0f7a5c"}},"Open Gantt") : null,   // 147
+          title:"Open this contract's Procurement Gantt"+(saved.parent_id?" at the "+(saved.proc_form||"Contract-wide steps")+" row":""),style:{...btnSmall,fontWeight:700,color:"#0f7a5c",borderColor:"#0f7a5c"}},"Open Gantt") : null,   // 147
         h("button",{onClick:close,style:btnSmall},"Close")),
       !isNew ? h("div",{style:{fontSize:11,color:colors.mutedLight,margin:"4px 6px 0"}},
         "Created by "+(saved.created_by||"—")+" · "+fmtDMYTime(saved.created_at)+(saved.moved_by?"   |   Last moved by "+saved.moved_by+" · "+fmtDMYTime(saved.moved_at)+" — "+(saved.moved_what||""):"")) : null,
@@ -50249,6 +50463,949 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
       rd==="wait" ? h(ReasonDialog,{title:"\u23f8 Waiting For Customer",subtitle:(enq?enq.enquiry_number+" \u00b7 "+(enq.company_name||""):saved.title),placeholder:"What are we waiting for?",picks:waitPicks,
         info:"Due moves to "+fmtDMY(addDaysISO(today,3))+" (+3 days), label \u201cWaiting customer\u201d is added, and the card is not counted as stale.",okLabel:"Mark waiting",onOk:doWait,onCancel:()=>setRd(null)}) : null,
       rd==="regret" ? h(ReasonDialog,{title:"\u2716 Regret Quote \u2014 "+(enq?enq.enquiry_number:""),subtitle:"Goes to the approver; the enquiry closes as Regretted once approved.",placeholder:"Why are we regretting?",picks:regretPicks,okLabel:"Send for approval",okStyle:{background:colors.danger,borderColor:colors.danger},onOk:doRegret,onCancel:()=>setRd(null)}) : null));
+}
+
+// =====================================================================================================
+// DESPATCH (10 Oct 2026) — despatch details per contract, the Accounts Head's despatch card, Delivery
+// Challan (sale DC) with packing slip and product serial numbers, sequential approval
+// Stores -> Production Manager -> QC -> Production Manager -> Accounts, the bill number (= invoice number),
+// the gate pass, and the LUT. Needs structure_despatch_dc_gatepass_2026-10-10.sql.
+// The invoice itself comes in the next build; it will be made FROM an approved DC and keep its number.
+// =====================================================================================================
+const DESP_MODES = ["Sea","Air","Courier","Road"];
+const DC_FLOW = ["Draft","With PM","With QC","QC cleared","With Accounts","Approved","Despatched"];
+const DC_TONE = { "Draft":["#eeece4","#5c5a50"], "With PM":["#e6f1fb","#2a6db0"], "With QC":["#efe9fb","#5b3fa3"], "QC cleared":["#e6f1fb","#2a6db0"],
+  "With Accounts":["#fff4d6","#854f0b"], "Approved":["#e4f3ed","#0f6b4f"], "Despatched":["#d7efe3","#0b5a40"], "Cancelled":["#fdecea","#a3312a"] };
+const DESP_SERIAL_RE = /^\d{2}-\d{7}$/;
+const despPad = (n,w)=> String(n).padStart(w||4,"0");
+// Financial year April-March: "26-27" (short, used in numbers) and "2026-27" (long, used for the LUT).
+function despFy(d){ const x = d ? new Date(d) : new Date(); const y = x.getFullYear(), m = x.getMonth()+1; const s = m>=4 ? y : y-1; return despPad(s%100,2)+"-"+despPad((s+1)%100,2); }
+function despFyLong(d){ const x = d ? new Date(d) : new Date(); const y = x.getFullYear(), m = x.getMonth()+1; const s = m>=4 ? y : y-1; return s+"-"+despPad((s+1)%100,2); }
+function despNextFyLong(d){ const x = d ? new Date(d) : new Date(); const y = x.getFullYear(), m = x.getMonth()+1; const s = (m>=4 ? y : y-1)+1; return s+"-"+despPad((s+1)%100,2); }
+function despBillNo(prefix, n, fy){ return (prefix||"FFI")+"/"+despPad(n,4)+"/"+fy; }
+function despStatusPill(s){ const t = DC_TONE[s]||["#eeece4","#5c5a50"]; return h("span",{style:{display:"inline-block",fontSize:11,fontWeight:700,borderRadius:9,padding:"1px 9px",background:t[0],color:t[1],whiteSpace:"nowrap"}},s); }
+// "26-0000451 to 26-0000458, 26-0000460"
+function despSerialRanges(list){
+  const xs = (list||[]).filter(Boolean).slice().sort(); if(!xs.length) return "";
+  const out = []; let a = xs[0], b = xs[0];
+  const nx = (s)=>{ const m = String(s).match(/^(\d{2})-(\d{7})$/); return m ? m[1]+"-"+despPad(Number(m[2])+1,7) : null; };
+  for(let i=1;i<xs.length;i++){ if(nx(b)===xs[i]) b = xs[i]; else { out.push(a===b?a:a+" to "+b); a = b = xs[i]; } }
+  out.push(a===b?a:a+" to "+b); return out.join(", ");
+}
+// Block fill: start serial + qty -> qty consecutive serials. Each stays editable afterwards.
+function despSerialBlock(start, qty){
+  const m = String(start||"").trim().match(/^(\d{2})-(\d{7})$/); if(!m) return null;
+  const out = []; for(let i=0;i<qty;i++) out.push(m[1]+"-"+despPad(Number(m[2])+i,7)); return out;
+}
+async function despMe(user){
+  try{ const { data } = await sb.from("app_users").select("employee_name").eq("username",user?.username||"").maybeSingle(); return (data&&data.employee_name)||""; }catch(e){ return ""; }
+}
+async function despPeople(){
+  await loadPostPeople(true);
+  let supers = [];
+  try{ const { data } = await sb.from("app_users").select("employee_name,role").eq("role","super_admin"); supers = (data||[]).map(r=>r.employee_name).filter(Boolean); }catch(e){}
+  return { stores:postHolders("stores"), pm:postHolders("production_manager"), qc:postHolders("qc"), acc:postHolders("accounts"), supers };
+}
+// Who may act at a step. Admins and super admins may act at any step (logged as such).
+function despCan(step, user, me, P){
+  if(!user) return false;
+  if(user.role==="admin" || user.role==="super_admin") return true;
+  if(step==="stores") return P.stores.includes(me);
+  if(step==="pm") return P.pm.includes(me);
+  if(step==="qc") return P.qc.includes(me) || user.role==="qc";
+  if(step==="acc") return P.acc.includes(me) || user.role==="accounts_admin";
+  return false;
+}
+async function despSettings(){
+  try{ const { data, error } = await sb.from("billing_settings_tbl").select("*").eq("id",1).maybeSingle(); if(error) return { _missing:true, _err:error.message }; return data || {}; }
+  catch(e){ return { _missing:true, _err:String(e&&e.message||e) }; }
+}
+// Next number of a series. BILL asks for its starting number the first time in a year (startIfNew).
+async function despSeriesNext(key, fy, startIfNew, who){
+  for(let tries=0; tries<4; tries++){
+    const { data: row, error } = await sb.from("doc_series_tbl").select("*").eq("series_key",key).eq("fy",fy).maybeSingle();
+    if(error) throw error;
+    if(!row){
+      if(startIfNew==null) return { needStart:true };
+      const { error: e2 } = await sb.from("doc_series_tbl").insert({ series_key:key, fy, last_no:Number(startIfNew), start_set_by:who||"" });
+      if(!e2) return { no:Number(startIfNew) };
+      continue;   // somebody else started it at the same moment — read again
+    }
+    const n = Number(row.last_no||0)+1;
+    const { data: upd } = await sb.from("doc_series_tbl").update({ last_no:n }).eq("series_key",key).eq("fy",fy).eq("last_no",row.last_no).select();
+    if(upd && upd.length) return { no:n };
+  }
+  throw new Error("Could not take the next "+key+" number — try again.");
+}
+async function despHist(dcId, gpId, action, by, note){
+  try{ await sb.from("dc_history_tbl").insert({ dc_id:dcId||null, gate_pass_id:gpId||null, action, by_user:by||"", note:note||null }); }catch(e){}
+}
+// Everything about one contract that despatch needs: header, buyer, export or not, lines with balance.
+async function despContract(cn, exceptDcId){
+  cn = String(cn||"").trim();
+  const [{ data: so }, { data: ests }, { data: dd }, { data: dcs }, { data: dps }] = await Promise.all([
+    sb.from("sale_order_tbl").select("*").eq("contract_number",cn).maybeSingle(),
+    sb.from("estimates").select("*").eq("reference_number",cn).order("item_sl_no"),
+    sb.from("contract_despatch_tbl").select("*").eq("contract_number",cn).maybeSingle(),
+    sb.from("dc_tbl").select("id,status,is_test").eq("contract_number",cn),
+    sb.from("estimate_lines").select("item_sl_no,item,is_direct_price").eq("reference_number",cn).eq("is_direct_price",true),
+  ]);
+  const cust = (so&&so.customer_name) || ((ests||[])[0]||{}).customer_name || "";
+  let company = null;
+  try{ const { data: cs } = await sb.from("companies").select("*").ilike("company_name", cust.replace(/[%_]/g,"")); company = (cs||[]).find(c=>String(c.company_name||"").trim().toLowerCase()===cust.trim().toLowerCase()) || (cs||[])[0] || null; }catch(e){}
+  const models = Array.from(new Set((ests||[]).map(e=>e.model).filter(Boolean)));
+  let modelItem = new Map(), hsnByItem = new Map();
+  try{ if(models.length){ const { data: ms } = await sb.from("model_tbl").select("model,item").in("model",models); (ms||[]).forEach(m=>modelItem.set(m.model,m.item)); } }catch(e){}
+  try{ const { data: its } = await sb.from("item_tbl").select("item,hsn_code"); (its||[]).forEach(r=>{ if(r.item) hsnByItem.set(String(r.item).trim().toLowerCase(), String(r.hsn_code||"").trim()); }); }catch(e){}
+  const live = (dcs||[]).filter(d=>d.status!=="Cancelled" && !d.is_test && d.id!==exceptDcId).map(d=>d.id);
+  let shipped = new Map();
+  if(live.length){ const { data: ls } = await sb.from("dc_line_tbl").select("item_sl_no,qty,dc_id").in("dc_id",live); (ls||[]).forEach(l=>shipped.set(l.item_sl_no,(shipped.get(l.item_sl_no)||0)+Number(l.qty||0))); }
+  const lines = (ests||[]).map(e=>{
+    const dp = (dps||[]).find(x=>x.item_sl_no===e.item_sl_no);
+    const item = dp ? (dp.item||"Custom") : (modelItem.get(e.model)||e.model||"");
+    const ordered = Number(e.order_qty)||1, sh = shipped.get(e.item_sl_no)||0;
+    return { item_sl_no:e.item_sl_no, item, description:e.description||"", hsn:hsnByItem.get(String(item).trim().toLowerCase())||"", ordered, shipped:sh, balance:Math.max(0, ordered-sh), customer_tag:e.tag_number||"" };
+  });
+  const head = (ests||[])[0]||{};
+  const currency = String((so&&so.currency) || head.currency || "INR").toUpperCase();
+  const country = company ? String(company.billing_country||company.country||"").trim() : "";
+  const isExport = currency!=="INR" || (!!country && !/^india$/i.test(country));
+  const buyerAddr = (so&&so.billing_address) || (company ? [company.billing_street||company.street, company.billing_city||company.city, company.billing_state||company.state, company.billing_pin||company.pin, country].filter(Boolean).join(", ") : "");
+  return { cn, so, ests:ests||[], lines, despatch:dd||null, company, customer:cust, isExport, currency, country,
+    buyerAddr, buyerGstin: company ? (company.gst_tax_id||"") : "", oaShip:(so&&so.shipping_address)||"", po_number:head.po_number||"", po_date:head.po_date||"",
+    dcCount:(dcs||[]).filter(d=>d.status!=="Cancelled" && !d.is_test).length };
+}
+function despDetailsComplete(dd, isExport){
+  if(!dd || !String(dd.ship_address||"").trim()) return false;
+  if(isExport && (!dd.mode_of_shipment || dd.handoff_needed===null || dd.handoff_needed===undefined)) return false;
+  return true;
+}
+// Save the despatch details of a contract, keep the history, tick the Accounts Head's card.
+async function despSaveDetails(cn, after, user, note){
+  const { data: before } = await sb.from("contract_despatch_tbl").select("*").eq("contract_number",cn).maybeSingle();
+  const row = { contract_number:cn, ship_contact:after.ship_contact||null, ship_address:after.ship_address||null, ship_phone:after.ship_phone||null,
+    ship_same_as_oa:!!after.ship_same_as_oa, mode_of_shipment:after.mode_of_shipment||null,
+    handoff_needed: after.handoff_needed===true ? true : after.handoff_needed===false ? false : null,
+    handoff_contact: after.handoff_needed ? (after.handoff_contact||null) : null, handoff_address: after.handoff_needed ? (after.handoff_address||null) : null,
+    handoff_phone: after.handoff_needed ? (after.handoff_phone||null) : null, updated_by:user?.username||"unknown", updated_at:new Date().toISOString() };
+  const { error } = await sb.from("contract_despatch_tbl").upsert(row,{ onConflict:"contract_number" });
+  if(error) throw error;
+  await sb.from("contract_despatch_hist_tbl").insert({ contract_number:cn, changed_by:user?.username||"unknown", before_data:before||null, after_data:row, note:note||null });
+  await logAudit(before?"UPDATE":"CREATE","contract_despatch_tbl",cn,"Despatch details: ship to "+(row.ship_address||"—").slice(0,60)+(row.mode_of_shipment?" · "+row.mode_of_shipment:"")+(row.handoff_needed===true?" · handoff "+(row.handoff_contact||""):row.handoff_needed===false?" · no handoff":""),user?.username||"unknown",before||null,row);
+  try{ await despSyncCard(cn); }catch(e){ console.error("Despatch card sync", e); }
+  return row;
+}
+// ---- the Accounts Head's despatch card -------------------------------------------------------------
+async function despAccountsDept(){
+  try{ const { data } = await sb.from("department_tbl").select("department"); const n = (data||[]).map(r=>r.department).find(d=>/account/i.test(d||"")); return n||null; }catch(e){ return null; }
+}
+// Made when Accounts Admin approves the Commercial Terms of a contract. One card, two sub-tasks
+// (export) or one (domestic): confirm the shipping address, and notify / handoff.
+async function despCreateCard(cn, user){
+  try{
+    const { data: ex, error: exErr } = await sb.from("task_tbl").select("id").eq("despatch_contract",cn).eq("despatch_part","card").limit(1);
+    if(exErr){ console.error("Despatch card: run the despatch SQL", exErr); return null; }
+    if(ex && ex.length) return ex[0];
+    const C = await despContract(cn);
+    await loadPostPeople(true);
+    const who = postHolders("accounts")[0] || null;
+    const dept = await despAccountsDept();
+    const today = toISODate(new Date());
+    const base = { assignee:who, department:dept, labels:["Despatch"], links:[], ref:cn, customer:C.customer||null, created_by:"App", status:"open", despatch_contract:cn, due_date:addDaysISO(today,3) };
+    const { data: card, error } = await sb.from("task_tbl").insert({ ...base, title:"Despatch details — "+cn+(C.customer?" "+C.customer:""), despatch_part:"card", checklists:[],
+      notes:"Commercial terms approved. Get from the customer, early: the shipping address"+(C.isExport?", mode of shipment, and whether a notify / handoff party is needed (forwarder or agent)":"")+". Enter them in Sale Order "+cn+" → Despatch details. The sub-tasks tick themselves when the details are saved." }).select().single();
+    if(error){ console.error("Despatch card", error); return null; }
+    await taskLog(card.id, "App", "Created when the Commercial Terms of contract "+cn+" were approved by "+(user?.username||""));
+    const subs = [{ part:"ship", title:cn+" · Confirm shipping address"+(C.isExport?" and mode of shipment":"") }];
+    if(C.isExport) subs.push({ part:"handoff", title:cn+" · Notify / handoff party (or none)" });
+    for(const s of subs){
+      const { data: st } = await sb.from("task_tbl").insert({ ...base, title:s.title, parent_id:card.id, despatch_part:s.part, checklists:[] }).select().single();
+      if(st) await taskLog(st.id, "App", "Created as a sub-task of “"+card.title+"”");
+    }
+    await despSyncCard(cn);
+    return card;
+  }catch(e){ console.error("Despatch card", e); return null; }
+}
+async function despSyncCard(cn){
+  const { data: tks, error } = await sb.from("task_tbl").select("*").eq("despatch_contract",cn);
+  if(error || !tks || !tks.length) return;
+  const { data: dd } = await sb.from("contract_despatch_tbl").select("*").eq("contract_number",cn).maybeSingle();
+  const card = tks.find(t=>t.despatch_part==="card"); if(!card) return;
+  const subs = tks.filter(t=>t.parent_id===card.id);
+  const exportCard = subs.some(t=>t.despatch_part==="handoff");
+  const done = { ship: !!(dd && String(dd.ship_address||"").trim() && (!exportCard || dd.mode_of_shipment)), handoff: !!(dd && (dd.handoff_needed===true || dd.handoff_needed===false)) };
+  const now = new Date().toISOString();
+  for(const s of subs){
+    const want = !!done[s.despatch_part];
+    if(want && s.status!=="done"){ await sb.from("task_tbl").update({ status:"done", approved_by:"App (Despatch details)", approved_at:now }).eq("id",s.id); await taskLog(s.id,"App","Despatch details saved — completed"); s.status = "done"; }
+    else if(!want && s.status==="done"){ await sb.from("task_tbl").update({ status:"open", approved_at:null }).eq("id",s.id); await taskLog(s.id,"App","Despatch details cleared — re-opened"); s.status = "open"; }
+  }
+  const all = subs.length && subs.every(s=>s.status==="done");
+  if(all && card.status!=="done"){ await sb.from("task_tbl").update({ status:"done", approved_by:"App (Despatch details)", approved_at:now }).eq("id",card.id); await taskLog(card.id,"App","All despatch details in — completed"); }
+  else if(!all && card.status==="done"){ await sb.from("task_tbl").update({ status:"open", approved_at:null }).eq("id",card.id); await taskLog(card.id,"App","Despatch details incomplete again — re-opened"); }
+}
+// ---- the despatch details dialog (export: two steps; domestic: ship-to only) -------------------------
+function DespatchDetailsDialog({ C, user, onSaved, onCancel, reason }){
+  const dd = C.despatch || {};
+  const [step,setStep] = useState(1);
+  const [f,setF] = useState(()=>({
+    ship_same_as_oa: dd.ship_address ? !!dd.ship_same_as_oa : !!C.oaShip,
+    ship_contact: dd.ship_contact||"", ship_address: dd.ship_address || C.oaShip || "", ship_phone: dd.ship_phone||"",
+    mode_of_shipment: dd.mode_of_shipment||"", handoff_needed: dd.handoff_needed===true ? true : dd.handoff_needed===false ? false : null,
+    handoff_contact: dd.handoff_contact||"", handoff_address: dd.handoff_address||"", handoff_phone: dd.handoff_phone||"" }));
+  const [err,setErr] = useState(""); const [busy,setBusy] = useState(false);
+  const set = (k,v)=> setF(x=>({...x,[k]:v}));
+  const lab = (t)=> h("div",{style:{fontSize:11.5,color:colors.muted,margin:"8px 0 3px"}},t);
+  const step1ok = ()=>{ if(!String(f.ship_address).trim()){ setErr("Enter the shipping address."); return false; }
+    if(C.isExport && !f.mode_of_shipment){ setErr("Choose the mode of shipment."); return false; } setErr(""); return true; };
+  const save = async()=>{
+    if(!step1ok()) { setStep(1); return; }
+    if(C.isExport){
+      if(f.handoff_needed===null){ setErr("Say whether a notify / handoff party is needed."); return; }
+      if(f.handoff_needed && (!String(f.handoff_contact).trim() || !String(f.handoff_address).trim())){ setErr("Enter the handoff contact name and address."); return; }
+    }
+    setBusy(true);
+    try{ const row = await despSaveDetails(C.cn, { ...f, handoff_needed: C.isExport ? f.handoff_needed : null }, user, reason||null); onSaved(row); }
+    catch(e){ setErr("Could not save: "+(e.message||e)+(/despatch/.test(String(e.message||""))?"":"\n(Has the despatch SQL been run?)")); setBusy(false); }
+  };
+  const box = (children)=> h("div",{onClick:e=>{ if(e.target===e.currentTarget && !busy) onCancel(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:2600,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"50px 16px",overflowY:"auto"}},
+    h("div",{style:{background:"#fff",borderRadius:10,width:520,maxWidth:"100%",padding:"16px 18px"}},children));
+  const head = h("div",null,
+    h("div",{style:{fontSize:11,color:colors.mutedLight}}, C.isExport ? "Step "+step+" of 2" : "Domestic contract — shipping address only"),
+    h("b",{style:{fontSize:15}}, step===1 ? "Despatch details — contract "+C.cn : "Is a notify / handoff party needed?"),
+    h("div",{style:{fontSize:11.5,color:colors.muted,margin:"2px 0 6px"}}, step===1 ? (C.customer+(C.isExport?" · export":" · domestic")+" · prints on the DC, packing slip and invoice") : "Some customers want the cargo handed to a forwarder or agent first."));
+  const errEl = err ? h("div",{style:{color:colors.danger,fontSize:12,marginTop:8,whiteSpace:"pre-wrap"}},err) : null;
+  if(step===1) return box(h("div",null, head,
+    C.oaShip ? h("label",{style:{display:"flex",gap:6,alignItems:"center",fontSize:12,color:colors.muted}},
+      h("input",{type:"checkbox",checked:!!f.ship_same_as_oa,onChange:e=>{ const on = e.target.checked; setF(x=>({...x,ship_same_as_oa:on, ship_address: on ? C.oaShip : x.ship_address})); }}),"Same as the shipping address on the Sale Order (untick to change)") : null,
+    lab("Ship to — contact name"), h("input",{value:f.ship_contact,onChange:e=>set("ship_contact",e.target.value),style:inputStyle,placeholder:"Mr. R. Menon (Logistics)"}),
+    lab("Ship to — company and address"), h("textarea",{rows:3,value:f.ship_address,disabled:!!(f.ship_same_as_oa&&C.oaShip),onChange:e=>set("ship_address",e.target.value),style:{...inputStyle,opacity:(f.ship_same_as_oa&&C.oaShip)?0.7:1}}),
+    lab("Phone / email"), h("input",{value:f.ship_phone,onChange:e=>set("ship_phone",e.target.value),style:inputStyle}),
+    C.isExport ? h("div",null, lab("Mode of shipment"), h("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}}, DESP_MODES.map(m=>h("button",{key:m,onClick:()=>set("mode_of_shipment",m),style:{...btnSmall,fontSize:12.5,padding:"5px 12px",background:f.mode_of_shipment===m?colors.dark:"#fff",color:f.mode_of_shipment===m?"#fff":colors.text}},m)))) : null,
+    errEl,
+    h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}},
+      h("button",{onClick:onCancel,disabled:busy,style:btnSecondary},"Cancel"),
+      C.isExport ? h("button",{onClick:()=>{ if(step1ok()) setStep(2); },style:btnPrimary},"Next")
+                 : h("button",{onClick:save,disabled:busy,style:btnPrimary},busy?"Saving…":"Save"))));
+  return box(h("div",null, head,
+    h("div",{style:{display:"flex",gap:8,marginBottom:4}},
+      h("button",{onClick:()=>set("handoff_needed",false),style:{...btnSmall,fontSize:12.5,padding:"6px 14px",background:f.handoff_needed===false?colors.dark:"#fff",color:f.handoff_needed===false?"#fff":colors.text}},"No — not needed"),
+      h("button",{onClick:()=>set("handoff_needed",true),style:{...btnSmall,fontSize:12.5,padding:"6px 14px",background:f.handoff_needed===true?colors.dark:"#fff",color:f.handoff_needed===true?"#fff":colors.text}},"Yes")),
+    f.handoff_needed ? h("div",null,
+      lab("Notify / handoff — contact name"), h("input",{value:f.handoff_contact,onChange:e=>set("handoff_contact",e.target.value),style:inputStyle}),
+      lab("Notify / handoff — company and address"), h("textarea",{rows:3,value:f.handoff_address,onChange:e=>set("handoff_address",e.target.value),style:inputStyle}),
+      lab("Phone / email"), h("input",{value:f.handoff_phone,onChange:e=>set("handoff_phone",e.target.value),style:inputStyle})) : null,
+    errEl,
+    h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}},
+      h("button",{onClick:()=>{ setErr(""); setStep(1); },disabled:busy,style:btnSecondary},"Back"),
+      h("button",{onClick:onCancel,disabled:busy,style:btnSecondary},"Cancel"),
+      h("button",{onClick:save,disabled:busy,style:btnPrimary},busy?"Saving…":"Save"))));
+}
+// ---- panel on the Sale Order ------------------------------------------------------------------------
+function DespatchDetailsPanel({ contractInfo, user }){
+  const cn = contractInfo && contractInfo.contract_number;
+  const [C,setC] = useState(null); const [open,setOpen] = useState(false); const [edit,setEdit] = useState(false);
+  const [missing,setMissing] = useState(false); const [canEdit,setCanEdit] = useState(false);
+  const load = useCallback(async()=>{ if(!cn) return; try{ const c = await despContract(cn); setC(c); setMissing(false); }catch(e){ setMissing(true); } },[cn]);
+  useEffect(()=>{ load(); },[load]);
+  useEffect(()=>{ (async()=>{ const me = await despMe(user); const P = await despPeople(); setCanEdit(despCan("acc",user,me,P) || despCan("stores",user,me,P)); })(); },[user && user.username]);
+  if(!cn || missing || !C) return null;
+  const dd = C.despatch;
+  const ok = despDetailsComplete(dd, C.isExport);
+  const line = (k,v)=> h("div",{style:{display:"flex",gap:8,fontSize:12.5,padding:"2px 0"}},h("span",{style:{color:colors.muted,minWidth:130}},k),h("span",{style:{whiteSpace:"pre-wrap"}},v||"—"));
+  return h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"8px 12px",margin:"8px 0"}},
+    h("div",{style:{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}},
+      h("b",{style:{fontSize:13}},"Despatch details"),
+      h("span",{style:{fontSize:11,fontWeight:700,borderRadius:9,padding:"1px 8px",background:ok?"#e4f3ed":"#fff4d6",color:ok?"#0f6b4f":"#854f0b"}}, ok ? "complete" : (dd ? "incomplete" : "not given yet")),
+      h("span",{style:{fontSize:11.5,color:colors.muted}}, (C.isExport?"Export":"Domestic")+" · "+C.dcCount+" DC"+(C.dcCount===1?"":"s")+" · balance "+C.lines.reduce((n,l)=>n+l.balance,0)+" of "+C.lines.reduce((n,l)=>n+l.ordered,0)+" items"),
+      h("span",{onClick:()=>setOpen(o=>!o),style:{fontSize:11.5,color:"#0f7a5c",fontWeight:700,cursor:"pointer"}}, open?"▾ Hide":"▸ Show"),
+      canEdit ? h("button",{onClick:()=>setEdit(true),style:{...btnSmall,marginLeft:"auto"}}, dd ? "Change" : "Enter details") : null),
+    open ? h("div",{style:{marginTop:6}},
+      line("Ship to", [dd&&dd.ship_contact, dd&&dd.ship_address, dd&&dd.ship_phone].filter(Boolean).join("\n")),
+      C.isExport ? line("Mode of shipment", dd&&dd.mode_of_shipment) : null,
+      C.isExport ? line("Notify / handoff", !dd || dd.handoff_needed===null || dd.handoff_needed===undefined ? "not asked yet" : dd.handoff_needed===false ? "not needed" : [dd.handoff_contact, dd.handoff_address, dd.handoff_phone].filter(Boolean).join("\n")) : null,
+      dd ? h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:4}},"Last changed by "+(dd.updated_by||"")+" · "+fmtDMYTime(dd.updated_at)) : null) : null,
+    edit ? h(DespatchDetailsDialog,{C, user, reason:"Changed on the Sale Order", onCancel:()=>setEdit(false), onSaved:()=>{ setEdit(false); load(); }}) : null);
+}
+// ---- small promise dialogs (outside React state, like the price-validation code) ---------------------
+function despAsk(title, text, buttons){
+  return new Promise(resolve=>{
+    const wrap = document.createElement("div");
+    wrap.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:3000;display:flex;align-items:flex-start;justify-content:center;padding:70px 16px";
+    const box = document.createElement("div"); box.style.cssText = "background:#fff;border-radius:10px;width:480px;max-width:100%;padding:16px 18px;font-family:inherit";
+    const t = document.createElement("div"); t.style.cssText = "font-weight:700;font-size:15px;margin-bottom:6px"; t.textContent = title;
+    const p = document.createElement("div"); p.style.cssText = "font-size:13px;color:#444;white-space:pre-wrap;line-height:1.45"; p.textContent = text;
+    const row = document.createElement("div"); row.style.cssText = "display:flex;gap:8px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap";
+    buttons.forEach(b=>{ const x = document.createElement("button"); x.textContent = b.label;
+      x.style.cssText = b.primary ? "padding:9px 16px;background:#1c1f1a;color:#fff;border:none;font-weight:600;font-size:13px;border-radius:6px;cursor:pointer"
+                                  : "padding:8px 14px;background:#fff;border:1px solid #d8d4c5;color:#6b6f60;font-size:13px;border-radius:6px;cursor:pointer";
+      x.onclick = ()=>{ document.body.removeChild(wrap); resolve(b.key); }; row.appendChild(x); });
+    box.appendChild(t); box.appendChild(p); box.appendChild(row); wrap.appendChild(box); document.body.appendChild(wrap);
+  });
+}
+// ---- PDFs -------------------------------------------------------------------------------------------
+async function despPdfStart(orientation, title, sub, watermark){
+  const co = await pdfCompanyFor(null);
+  const { jsPDF } = window.jspdf; const doc = new jsPDF({ orientation:orientation||"portrait", unit:"mm", format:"a4" });
+  const W = doc.internal.pageSize.getWidth();
+  drawPdfLetterhead(doc, W, co, {logoW:40,logoH:20});
+  doc.setDrawColor(200,197,185); doc.setLineWidth(0.4); doc.line(10, 24, W-10, 24);
+  doc.setFontSize(13); doc.setFont(undefined,"bold"); doc.setTextColor(28,31,26); doc.text(title, W/2, 31, {align:"center"});
+  if(sub){ doc.setFontSize(8); doc.setFont(undefined,"normal"); doc.setTextColor(100,100,100); doc.text(sub, W/2, 35.5, {align:"center"}); }
+  if(watermark){ doc.saveGraphicsState && doc.saveGraphicsState(); try{ doc.setGState(new doc.GState({opacity:0.12})); }catch(e){}
+    doc.setFontSize(70); doc.setTextColor(180,40,40); doc.text(watermark, W/2, doc.internal.pageSize.getHeight()/2, {align:"center", angle:30}); doc.restoreGraphicsState && doc.restoreGraphicsState(); doc.setTextColor(28,31,26); }
+  return { doc, W, co };
+}
+function despPdfFooter(doc, co, label){
+  const pages = doc.internal.getNumberOfPages();
+  for(let pg=1; pg<=pages; pg++){ doc.setPage(pg); doc.setFontSize(7.5); doc.setTextColor(140,140,140);
+    doc.text(pdfFooterCompanyName(co)+" · "+label+" · page "+pg+" of "+pages, doc.internal.pageSize.getWidth()/2, doc.internal.pageSize.getHeight()-6, {align:"center"}); }
+}
+const DESP_TBL = { theme:"grid", headStyles:{ fillColor:[29,58,51], textColor:255, fontSize:8 }, bodyStyles:{ fontSize:8, lineColor:[216,212,197], lineWidth:0.2, textColor:[28,31,26] }, margin:{ left:10, right:10 } };
+function despNo(dc){ return dc.bill_no || dc.draft_no || ("DC "+dc.id); }
+async function despDcPdf(D){
+  const { dc, lines, serials, boxes, C, S, gp } = D;
+  const wm = dc.is_test ? "TEST" : (dc.status==="Approved"||dc.status==="Despatched") ? null : "DRAFT";
+  const { doc, W, co } = await despPdfStart("portrait", "DELIVERY CHALLAN", "Goods sent against the Tax Invoice of the same number · not a tax invoice", wm);
+  let y = 39;
+  doc.setFontSize(7.6); doc.setTextColor(60,60,60); doc.setFont(undefined,"normal");
+  doc.text(["GSTIN: "+(S.our_gstin||"—")+"   PAN: "+(S.our_pan||"—")+"   State: "+(S.our_state||"—")+(S.our_state_code?" ("+S.our_state_code+")":""), "Despatched from: "+(S.factory_address||"—")], 10, y); y += 8;
+  const bill = [C.customer, C.buyerAddr, C.buyerGstin?"GSTIN: "+C.buyerGstin:"", C.country?"Country: "+C.country:""].filter(Boolean).join("\n");
+  const ship = [dc.ship_contact, dc.ship_address, dc.ship_phone].filter(Boolean).join("\n") || "Same as Bill To";
+  const parties = [[{content:"Customer (Bill To)",styles:{fontStyle:"bold"}},{content:"Deliver To",styles:{fontStyle:"bold"}}],[bill, ship]];
+  if(dc.is_export && dc.handoff_contact) parties.push([{content:"Notify / Handoff",styles:{fontStyle:"bold"}},{content:[dc.handoff_contact,dc.handoff_address,dc.handoff_phone].filter(Boolean).join("\n")}]);
+  doc.autoTable({ ...DESP_TBL, startY:y, body:parties, columnStyles:{0:{cellWidth:(W-20)/2},1:{cellWidth:(W-20)/2}} });
+  y = doc.lastAutoTable.finalY + 2;
+  const kv = [["DC No", despNo(dc), "DC Date", dc.dc_date?fmtDMY(dc.dc_date):"—"],
+              ["Contract No", dc.contract_number||"", "Invoice No", dc.bill_no && !dc.is_test ? dc.bill_no+" (same number)" : "—"],
+              ["PO No / Date", [C.po_number, C.po_date?fmtDMY(C.po_date):""].filter(Boolean).join(" / ")||"—", "Packages", boxes.length ? boxes.length+" (see packing slip)" : "—"],
+              ["Prepared by (Stores)", (dc.created_by||"")+(dc.created_at?" · "+fmtDMY(dc.created_at):""), "QC consent", dc.qc_by ? dc.qc_by+" · "+fmtDMY(dc.qc_at) : "—"],
+              ["Accounts approval", dc.acc_by ? dc.acc_by+" · "+fmtDMY(dc.acc_at) : "—", dc.is_export ? "Mode of shipment" : "Gate Pass", dc.is_export ? (dc.mode_of_shipment||"—") : (gp ? gp.gp_no+(gp.vehicle_no?" · "+gp.vehicle_no:"") : "—")]];
+  if(dc.is_export) kv.push(["Gate Pass", gp ? gp.gp_no+(gp.vehicle_no?" · "+gp.vehicle_no:"") : "—", "", ""]);
+  doc.autoTable({ ...DESP_TBL, startY:y, body:kv, columnStyles:{0:{fontStyle:"bold",cellWidth:32},1:{cellWidth:(W-20)/2-32},2:{fontStyle:"bold",cellWidth:32}} });
+  y = doc.lastAutoTable.finalY + 2;
+  const body = lines.map(l=>[String(l.item_sl_no??""), l.item||"", l.description||"", l.hsn||"", (Number(l.qty)||0)+" "+(l.uom||"NOS"), l.customer_tag||"—",
+    l.no_serial ? "no serial" : despSerialRanges(serials.filter(s=>s.dc_line_id===l.id).map(s=>s.serial))]);
+  const tq = lines.reduce((n,l)=>n+(Number(l.qty)||0),0);
+  body.push([{content:"Total",colSpan:4,styles:{fontStyle:"bold",halign:"right"}},{content:tq+" NOS",styles:{fontStyle:"bold"}},"",""]);
+  doc.autoTable({ ...DESP_TBL, startY:y, head:[["Sl No","Item","Description","HSN","Qty","Customer Tag No","Our Product Serial Nos"]], body,
+    columnStyles:{0:{cellWidth:11},1:{cellWidth:26},2:{cellWidth:52},3:{cellWidth:17},4:{cellWidth:16},5:{cellWidth:28}} });
+  y = doc.lastAutoTable.finalY + 4;
+  if(y > doc.internal.pageSize.getHeight()-40){ doc.addPage(); y = 20; }
+  const cw = (W-20)/3;
+  doc.setDrawColor(216,212,197); doc.rect(10,y,W-20,26);
+  [1,2].forEach(i=>doc.line(10+cw*i,y,10+cw*i,y+26));
+  doc.setFontSize(7.5); doc.setTextColor(60,60,60);
+  doc.text("Received the goods in good condition", 12, y+4); doc.text("Customer — name, sign, seal", 12, y+24);
+  doc.text("QC", 10+cw+2, y+24); doc.text("For "+pdfFooterCompanyName(co), 10+cw*2+2, y+4); doc.text("Stores In-charge / Authorised", 10+cw*2+2, y+24);
+  doc.setFontSize(7); doc.setTextColor(120,120,120);
+  doc.text("Rate, value and tax are not shown on a delivery challan. Product serial numbers: format YY-NNNNNNN, each used once only.", 10, y+31);
+  despPdfFooter(doc, co, "Delivery Challan "+despNo(dc));
+  doc.save(("DC_"+despNo(dc)+"_"+(dc.contract_number||"")).replace(/[^A-Za-z0-9_-]+/g,"_")+".pdf");
+}
+// Serials of a line handed out to boxes in box order.
+function despBoxSerials(lines, serials, boxes){
+  const left = new Map(lines.map(l=>[l.id, serials.filter(s=>s.dc_line_id===l.id).map(s=>s.serial).sort()]));
+  const out = new Map();
+  boxes.slice().sort((a,b)=>a.box_no-b.box_no).forEach(b=>(b.contents||[]).forEach(c=>{ const q = Number(c.qty)||0; const arr = left.get(c.dc_line_id)||[]; out.set(b.box_no+"|"+c.dc_line_id, arr.splice(0,q)); }));
+  return out;
+}
+async function despPackingPdf(D){
+  const { dc, lines, serials, boxes, C } = D;
+  const wm = dc.is_test ? "TEST" : (dc.status==="Approved"||dc.status==="Despatched") ? null : "DRAFT";
+  const { doc, W, co } = await despPdfStart("landscape", "PACKING SLIP", null, wm);
+  let y = 37;
+  doc.autoTable({ ...DESP_TBL, startY:y, body:[["Client", C.customer, "Contract No", dc.contract_number||"", "PO No / Date", [C.po_number, C.po_date?fmtDMY(C.po_date):""].filter(Boolean).join(" / ")||"—"],
+      ["DC / Invoice No", despNo(dc), "Date", dc.dc_date?fmtDMY(dc.dc_date):"—", "No of Packages", String(boxes.length)]],
+    columnStyles:{0:{fontStyle:"bold"},2:{fontStyle:"bold"},4:{fontStyle:"bold"}} });
+  y = doc.lastAutoTable.finalY + 2;
+  const bs = despBoxSerials(lines, serials, boxes);
+  const N = boxes.length; const body = []; let tq=0, tn=0, tg=0, vol=0;
+  boxes.slice().sort((a,b)=>a.box_no-b.box_no).forEach(b=>{
+    const cs = b.contents||[]; let net = 0;
+    cs.forEach(c=>{ net += (Number(c.qty)||0)*(Number(c.wt_per_item)||0); });
+    const gross = net + (Number(b.packing_wt)||0); tn += net; tg += gross;
+    if(b.length_mm && b.width_mm && b.height_mm) vol += (b.length_mm*b.width_mm*b.height_mm)/1e9;
+    cs.forEach((c,i)=>{ const l = lines.find(x=>x.id===c.dc_line_id)||{}; tq += Number(c.qty)||0;
+      const sn = l.no_serial ? "no serial" : despSerialRanges(bs.get(b.box_no+"|"+c.dc_line_id)||[]);
+      const first = i===0;
+      body.push([ first ? {content:b.box_no+" of "+N, rowSpan:cs.length} : null, first ? {content:b.packing_mode||"", rowSpan:cs.length} : null,
+        String(l.item_sl_no??""), [l.item,l.description].filter(Boolean).join(" — "), l.customer_tag||"—", sn, l.hsn||"", l.uom||"NOS", String(c.qty||0),
+        first ? {content:(b.length_mm||"—")+" × "+(b.width_mm||"—")+" × "+(b.height_mm||"—"), rowSpan:cs.length} : null,
+        c.wt_per_item!=null && c.wt_per_item!=="" ? String(c.wt_per_item) : "—", ((Number(c.qty)||0)*(Number(c.wt_per_item)||0)).toFixed(1),
+        first ? {content:b.packing_wt!=null&&b.packing_wt!==""?String(b.packing_wt):"—", rowSpan:cs.length} : null,
+        first ? {content:gross.toFixed(1), rowSpan:cs.length} : null ].filter(x=>x!==null));
+    });
+  });
+  body.push([{content:"TOTAL",styles:{fontStyle:"bold"}},{content:N+" boxes",styles:{fontStyle:"bold"}},"","","","","","",{content:String(tq),styles:{fontStyle:"bold"}},{content:"Volume "+vol.toFixed(2)+" m3"},"",{content:tn.toFixed(1),styles:{fontStyle:"bold"}},"",{content:tg.toFixed(1),styles:{fontStyle:"bold"}}]);
+  doc.autoTable({ ...DESP_TBL, startY:y, head:[["Box","Packing","Sl No","Content","Customer Tag","Our Serial Nos","HSN","Unit","Qty","L × W × H (mm)","Wt/Item (kg)","Net (kg)","Packing (kg)","Gross (kg)"]], body,
+    bodyStyles:{ ...DESP_TBL.bodyStyles, fontSize:7.4 }, columnStyles:{3:{cellWidth:62},5:{cellWidth:34}} });
+  y = doc.lastAutoTable.finalY + 3;
+  if(dc.is_export){ doc.setFontSize(8); doc.setTextColor(40,40,40); doc.text("Shipping marks: "+[pdfFooterCompanyName(co).toUpperCase(), C.customer, dc.contract_number, "BOX n of "+N, "MADE IN INDIA"].join(" / "), 10, y+3); y += 6; }
+  if(y > doc.internal.pageSize.getHeight()-30){ doc.addPage(); y = 20; }
+  const cw = (W-20)/3; doc.setDrawColor(216,212,197); doc.rect(10,y+2,W-20,20); [1,2].forEach(i=>doc.line(10+cw*i,y+2,10+cw*i,y+22));
+  doc.setFontSize(7.5); doc.setTextColor(60,60,60);
+  doc.text("Prepared by — Stores In-charge", 12, y+20); doc.text("Checked by — QC", 10+cw+2, y+20); doc.text("Approved by — Production In-charge", 10+cw*2+2, y+20);
+  despPdfFooter(doc, co, "Packing Slip "+despNo(dc));
+  doc.save(("Packing_Slip_"+despNo(dc)+"_"+(dc.contract_number||"")).replace(/[^A-Za-z0-9_-]+/g,"_")+".pdf");
+}
+async function despGatePassPdf(gp, dcs, boxCount){
+  const { doc, W, co } = await despPdfStart("portrait", "GATE PASS — OUTWARD", null, gp.status==="Cancelled" ? "CANCELLED" : null);
+  const H = doc.internal.pageSize.getHeight();
+  const one = (y0, copy)=>{
+    doc.setFontSize(8); doc.setTextColor(90,90,90); doc.text(copy, W/2, y0, {align:"center"});
+    doc.autoTable({ ...DESP_TBL, startY:y0+2, body:[["Gate Pass No", gp.gp_no||"", "Date", gp.gp_date?fmtDMY(gp.gp_date):"—"],["Vehicle No", gp.vehicle_no||"", "Transporter / LR No", [gp.transporter,gp.lr_no].filter(Boolean).join(" / ")||"—"],["Driver Name", gp.driver_name||"—", "Driver Mobile", gp.driver_mobile||"—"]],
+      columnStyles:{0:{fontStyle:"bold",cellWidth:30},2:{fontStyle:"bold",cellWidth:34}} });
+    const body = dcs.map((d,i)=>[String(i+1), despNo(d), d.dc_kind==="sale"?"Sale":d.dc_kind, d.customer_name||"", d.contract_number||"", String(boxCount.get(d.id)||"—")]);
+    body.push(["","",{content:"Total packages",colSpan:3,styles:{fontStyle:"bold",halign:"right"}},{content:String(dcs.reduce((n,d)=>n+(boxCount.get(d.id)||0),0)),styles:{fontStyle:"bold"}}]);
+    doc.autoTable({ ...DESP_TBL, startY:doc.lastAutoTable.finalY+2, head:[["#","DC No","Type","Party","Contract","Packages"]], body });
+    const y = doc.lastAutoTable.finalY + 2; const cw = (W-20)/3;
+    doc.setDrawColor(216,212,197); doc.rect(10,y,W-20,18); [1,2].forEach(i=>doc.line(10+cw*i,y,10+cw*i,y+18));
+    doc.setFontSize(7.5); doc.setTextColor(60,60,60);
+    doc.text("Released by — Stores In-charge", 12, y+16); doc.text("Security — name, sign, out time", 10+cw+2, y+16); doc.text("Driver's signature", 10+cw*2+2, y+16);
+    return y+18;
+  };
+  const end1 = one(40, "Security copy — stays at the gate");
+  const mid = Math.max(end1+6, H/2+4);
+  doc.setFontSize(7); doc.setTextColor(150,150,150); doc.text("- - - - - - - - - - - - - - - - - - - - - - - - - - - - -   cut here   - - - - - - - - - - - - - - - - - - - - - - - - - - - - -", W/2, mid-3, {align:"center"});
+  one(mid+3, "Office copy — Stores scans the signed copy, saves it on the drive and pastes the link in the app");
+  despPdfFooter(doc, co, "Gate Pass "+(gp.gp_no||""));
+  doc.save(("Gate_Pass_"+(gp.gp_no||gp.id)).replace(/[^A-Za-z0-9_-]+/g,"_")+".pdf");
+}
+// Load one DC with everything for the PDFs.
+async function despLoadDc(id){
+  const [{ data: dc }, { data: lines }, { data: serials }, { data: boxes }] = await Promise.all([
+    sb.from("dc_tbl").select("*").eq("id",id).maybeSingle(),
+    sb.from("dc_line_tbl").select("*").eq("dc_id",id).order("sort_order"),
+    sb.from("dc_serial_tbl").select("*").eq("dc_id",id),
+    sb.from("dc_box_tbl").select("*").eq("dc_id",id).order("box_no")]);
+  let bl = [];
+  if((boxes||[]).length){ const { data } = await sb.from("dc_box_line_tbl").select("*").in("box_id",(boxes||[]).map(b=>b.id)); bl = data||[]; }
+  const bx = (boxes||[]).map(b=>({ ...b, contents: bl.filter(x=>x.box_id===b.id) }));
+  let gp = null; if(dc && dc.gate_pass_id){ const { data } = await sb.from("gate_pass_tbl").select("*").eq("id",dc.gate_pass_id).maybeSingle(); gp = data||null; }
+  return { dc, lines:lines||[], serials:serials||[], boxes:bx, gp };
+}
+// ---- the DC editor / viewer -------------------------------------------------------------------------
+function DcEditor({ user, me, P, S, dcId, contract, onClose, onChanged }){
+  const [D,setD] = useState(null);      // {dc, lines, serials, boxes, gp}
+  const [C,setC] = useState(null);      // despContract()
+  const [rows,setRows] = useState([]);  // editable lines
+  const [boxes,setBoxes] = useState([]);
+  const [hdr,setHdr] = useState({ remarks:"", readiness_skipped:false });
+  const [askDetails,setAskDetails] = useState(false);
+  const [busy,setBusy] = useState(false); const [msg,setMsg] = useState("");
+  const [back,setBack] = useState(null);   // send-back reason dialog: {to}
+  const [hist,setHist] = useState([]);
+  const load = useCallback(async()=>{
+    setMsg("");
+    if(dcId){
+      const x = await despLoadDc(dcId); if(!x.dc){ setMsg("This DC was not found."); return; }
+      const c = await despContract(x.dc.contract_number, x.dc.id);
+      setD(x); setC(c);
+      setHdr({ remarks:x.dc.remarks||"", readiness_skipped:!!x.dc.readiness_skipped });
+      setRows(c.lines.map(l=>{ const dl = x.lines.find(z=>z.item_sl_no===l.item_sl_no);
+        return { ...l, key:"sl"+l.item_sl_no, line_id: dl?dl.id:null, qty: dl ? String(dl.qty) : "", no_serial: dl ? !!dl.no_serial : false,
+          customer_tag: dl ? (dl.customer_tag||"") : l.customer_tag, uom: dl ? (dl.uom||"NOS") : "NOS",
+          serials: dl ? x.serials.filter(s=>s.dc_line_id===dl.id).map(s=>s.serial).sort() : [], start:"" }; }));
+      setBoxes(x.boxes.map(b=>({ box_no:b.box_no, packing_mode:b.packing_mode||"Wooden box", length_mm:b.length_mm??"", width_mm:b.width_mm??"", height_mm:b.height_mm??"", packing_wt:b.packing_wt??"", marks:b.marks||"",
+        contents:b.contents.map(c=>{ const dl = x.lines.find(z=>z.id===c.dc_line_id); return { sl: dl?dl.item_sl_no:null, qty:String(c.qty), wt:c.wt_per_item??"" }; }) })));
+      const { data: hs } = await sb.from("dc_history_tbl").select("*").eq("dc_id",dcId).order("at"); setHist(hs||[]);
+    } else {
+      const c = await despContract(contract);
+      setC(c); setD({ dc:{ status:"Draft", contract_number:c.cn, customer_name:c.customer, is_export:c.isExport }, lines:[], serials:[], boxes:[], gp:null });
+      setRows(c.lines.map(l=>({ ...l, key:"sl"+l.item_sl_no, line_id:null, qty:"", no_serial:false, uom:"NOS", serials:[], start:"" })));
+      setBoxes([]);
+      if(!despDetailsComplete(c.despatch, c.isExport)) setAskDetails(true);
+    }
+  },[dcId, contract]);
+  useEffect(()=>{ load(); },[load]);
+  if(!D || !C) return h("div",{style:{padding:20,color:colors.muted}}, msg || "Reading the contract…");
+  const dc = D.dc; const st = dc.status;
+  const editable = st==="Draft" && despCan("stores",user,me,P);
+  const shipRows = rows.filter(r=>Number(r.qty)>0);
+  const setRow = (key, patch)=> setRows(rs=>rs.map(r=>r.key===key ? { ...r, ...patch } : r));
+  const boxQty = (sl)=> boxes.reduce((n,b)=>n+b.contents.filter(c=>c.sl===sl).reduce((m,c)=>m+(Number(c.qty)||0),0),0);
+  // ---- checks shared by Save and Send ----
+  const problems = (strict)=>{
+    const p = [];
+    if(!shipRows.length) p.push("Enter the quantity to send on at least one line.");
+    shipRows.forEach(r=>{
+      const q = Number(r.qty);
+      if(!(q>0) || Math.round(q)!==q) p.push("Sl No "+r.item_sl_no+": quantity must be a whole number.");
+      if(q > r.balance) p.push("Sl No "+r.item_sl_no+": "+q+" is more than the balance of "+r.balance+" (ordered "+r.ordered+", already on other DCs "+r.shipped+").");
+      if(!r.no_serial){
+        const ss = r.serials.map(s=>String(s||"").trim()).filter(Boolean);
+        if(strict && ss.length!==q) p.push("Sl No "+r.item_sl_no+": "+ss.length+" serial number(s) for "+q+" item(s). Fill one per item, or tick No serial.");
+        ss.forEach(s=>{ if(!DESP_SERIAL_RE.test(s)) p.push("Sl No "+r.item_sl_no+": serial “"+s+"” is not in the form YY-NNNNNNN (e.g. 26-0000451)."); });
+      }
+    });
+    const all = shipRows.filter(r=>!r.no_serial).flatMap(r=>r.serials.map(s=>String(s||"").trim()).filter(Boolean));
+    const dup = all.filter((s,i)=>all.indexOf(s)!==i); if(dup.length) p.push("The same serial is entered twice: "+Array.from(new Set(dup)).join(", "));
+    if(strict){
+      if(!boxes.length) p.push("Add the packing: at least one box, with what is in it.");
+      shipRows.forEach(r=>{ const b = boxQty(r.item_sl_no); if(b!==Number(r.qty)) p.push("Sl No "+r.item_sl_no+": "+b+" packed in boxes, but "+r.qty+" being sent."); });
+      boxes.forEach(b=>b.contents.forEach(c=>{ if(!rows.find(r=>r.item_sl_no===c.sl && Number(r.qty)>0)) p.push("Box "+b.box_no+" holds Sl No "+c.sl+", which is not being sent."); }));
+      if(!hdr.readiness_skipped) p.push("Tick the readiness line: Stores confirms these items are ready (the production gateway is not built yet).");
+      if(!despDetailsComplete(C.despatch, C.isExport)) p.push("Despatch details (ship-to"+(C.isExport?", mode, handoff":"")+") are missing — enter them first.");
+    }
+    return p;
+  };
+  const save = async(strict)=>{
+    const p = problems(strict);
+    if(p.length){ setMsg(p.join("\n")); return null; }
+    setBusy(true); setMsg("");
+    try{
+      // serials already used on another DC?
+      const all = shipRows.filter(r=>!r.no_serial).flatMap(r=>r.serials.map(s=>String(s).trim()).filter(Boolean));
+      if(all.length){ const { data: used } = await sb.from("dc_serial_tbl").select("serial,dc_id").in("serial",all);
+        const clash = (used||[]).filter(u=>u.dc_id!==dc.id);
+        if(clash.length){ setBusy(false); setMsg("Already used on another DC (a serial is never used twice): "+clash.map(u=>u.serial).join(", ")); return null; } }
+      let id = dc.id;
+      const dd = C.despatch || {};
+      const headRow = { contract_number:C.cn, customer_name:C.customer, is_export:C.isExport, remarks:hdr.remarks||null, readiness_skipped:!!hdr.readiness_skipped,
+        ship_contact:dd.ship_contact||null, ship_address:dd.ship_address||null, ship_phone:dd.ship_phone||null, mode_of_shipment:dd.mode_of_shipment||null,
+        handoff_contact: dd.handoff_needed ? dd.handoff_contact||null : null, handoff_address: dd.handoff_needed ? dd.handoff_address||null : null, handoff_phone: dd.handoff_needed ? dd.handoff_phone||null : null };
+      if(!id){
+        const fy = despFy(); const n = await despSeriesNext("DCD", fy, 1, user?.username);
+        const { data: ins, error } = await sb.from("dc_tbl").insert({ ...headRow, dc_kind:"sale", status:"Draft", draft_no:"D/"+fy+"/"+despPad(n.no,4), created_by:user?.username||"unknown" }).select().single();
+        if(error) throw error; id = ins.id;
+        await despHist(id, null, "Created", user?.username, "Draft "+ins.draft_no+" for contract "+C.cn);
+        await logAudit("CREATE","dc_tbl",ins.draft_no,"DC draft for contract "+C.cn,user?.username||"unknown",null,null);
+      } else {
+        const { error } = await sb.from("dc_tbl").update(headRow).eq("id",id); if(error) throw error;
+        await sb.from("dc_line_tbl").delete().eq("dc_id",id);   // lines, serials and boxes are rewritten while in Draft (cascade)
+        await sb.from("dc_box_tbl").delete().eq("dc_id",id);
+        await despHist(id, null, "Saved", user?.username, null);
+      }
+      const lineIdBySl = new Map();
+      for(let i=0;i<shipRows.length;i++){ const r = shipRows[i];
+        const { data: dl, error } = await sb.from("dc_line_tbl").insert({ dc_id:id, item_sl_no:r.item_sl_no, item:r.item||null, description:r.description||null, hsn:r.hsn||null, uom:r.uom||"NOS",
+          qty:Number(r.qty), customer_tag:r.customer_tag||null, no_serial:!!r.no_serial, sort_order:i }).select().single();
+        if(error) throw error; lineIdBySl.set(r.item_sl_no, dl.id);
+        const ss = r.no_serial ? [] : r.serials.map(s=>String(s).trim()).filter(Boolean);
+        if(ss.length){ const { error: se } = await sb.from("dc_serial_tbl").insert(ss.map(s=>({ dc_id:id, dc_line_id:dl.id, serial:s }))); if(se) throw new Error("Serial numbers not saved: "+se.message); }
+      }
+      for(const b of boxes){
+        const { data: bx, error } = await sb.from("dc_box_tbl").insert({ dc_id:id, box_no:Number(b.box_no), packing_mode:b.packing_mode||null, length_mm:b.length_mm===""?null:Number(b.length_mm), width_mm:b.width_mm===""?null:Number(b.width_mm),
+          height_mm:b.height_mm===""?null:Number(b.height_mm), packing_wt:b.packing_wt===""?null:Number(b.packing_wt), marks:b.marks||null }).select().single();
+        if(error) throw error;
+        const cs = b.contents.filter(c=>lineIdBySl.has(c.sl) && Number(c.qty)>0).map(c=>({ box_id:bx.id, dc_line_id:lineIdBySl.get(c.sl), qty:Number(c.qty), wt_per_item:c.wt===""?null:Number(c.wt) }));
+        if(cs.length){ const { error: ce } = await sb.from("dc_box_line_tbl").insert(cs); if(ce) throw ce; }
+      }
+      setBusy(false);
+      onChanged && onChanged();
+      return id;
+    }catch(e){ setBusy(false); setMsg("Could not save: "+(e.message||e)+(/relation|does not exist|schema cache/.test(String(e.message||""))?"\n\nRun structure_despatch_dc_gatepass_2026-10-10.sql first.":"")); return null; }
+  };
+  const move = async(id, from, to, patch, action, note, label)=>{
+    setBusy(true); setMsg("");
+    const { data: upd, error } = await sb.from("dc_tbl").update({ status:to, ...(patch||{}) }).eq("id",id).eq("status",from).select();
+    setBusy(false);
+    if(error){ setMsg("Could not move the DC: "+error.message); return false; }
+    if(!upd || !upd.length){ setMsg("Someone else has moved this DC meanwhile — reloaded."); await load(); return false; }
+    await despHist(id, null, action, user?.username, note||null);
+    await logAudit("UPDATE","dc_tbl",label||despNo(upd[0]),action+(note?" — "+note:""),user?.username||"unknown",null,null);
+    onChanged && onChanged(); return true;
+  };
+  const step = async(to, patch, action, note)=>{ const ok = await move(dc.id, st, to, patch, action, note); await load(); return ok; };
+  const who = ()=> user?.username||"unknown";
+  const now = ()=> new Date().toISOString();
+  const saveDraft = async()=>{ const id = await save(false); if(!id) return; if(!dc.id) onClose && onClose(id); else { setMsg(""); await load(); } };
+  const sendToPm = async()=>{ const id = await save(true); if(!id) return;
+    await move(id, "Draft", "With PM", { sent_pm_by:who(), sent_pm_at:now(), returned_note:null }, "Sent to Production Manager");
+    if(!dc.id) onClose && onClose(id); else await load(); };
+  const approveAccounts = async()=>{
+    // the balance may have changed since Stores made the DC: check again
+    const c = await despContract(C.cn, dc.id);
+    const over = D.lines.filter(l=>{ const b = c.lines.find(x=>x.item_sl_no===l.item_sl_no); return !b || Number(l.qty) > b.balance; });
+    if(over.length){ setMsg("Other DCs have used up the balance since this one was made: Sl No "+over.map(l=>l.item_sl_no).join(", ")+". Send it back to Stores."); return; }
+    const S2 = await despSettings(); if(S2._missing){ setMsg("Run the despatch SQL first."); return; }
+    let isTest = false;
+    if(!S2.test_phase_done){
+      const a = await despAsk("Is this a test?", "This is the first DC to get a bill number in the app.\n\nA TEST DC gets a TEST number, uses up no bill number and can be rolled back afterwards. You will be asked again on the next DC until someone answers No.\n\nNo = a real despatch: it takes the next bill number (the same number its invoice will carry).", [{key:"cancel",label:"Cancel"},{key:"test",label:"Yes — test"},{key:"real",label:"No — real",primary:true}]);
+      if(a==="cancel") return; isTest = a==="test";
+    }
+    if(isTest){ return step("Approved",{ acc_by:who(), acc_at:now(), is_test:true, bill_no:"TEST-"+dc.id, dc_date:toISODate(new Date()) },"Approved by Accounts (TEST)"); }
+    const fy = despFy();
+    setBusy(true);
+    try{
+      let r = await despSeriesNext("BILL", fy, null, who());
+      if(r.needStart){
+        setBusy(false);
+        const v = prompt("First bill number of "+fy+" in the app.\n\nEnter the running number this DC (and its invoice) should carry — normally the last paper invoice number + 1.\nFormat printed: "+(S2.bill_prefix||"FFI")+"/0081/"+fy);
+        if(v===null) return;
+        const n = parseInt(String(v).replace(/\D/g,""),10); if(!(n>0)){ setMsg("That is not a number."); return; }
+        const ok = await despAsk("Confirm the starting number", "Bill numbers for "+fy+" will start at "+despBillNo(S2.bill_prefix,n,fy)+" and run on from there.\nThis cannot be changed once used.", [{key:"no",label:"Cancel"},{key:"yes",label:"Start at "+n,primary:true}]);
+        if(ok!=="yes") return;
+        setBusy(true); r = await despSeriesNext("BILL", fy, n, who());
+      }
+      const billNo = despBillNo(S2.bill_prefix, r.no, fy);
+      if(!S2.test_phase_done) await sb.from("billing_settings_tbl").update({ test_phase_done:true, updated_by:who(), updated_at:now() }).eq("id",1);
+      setBusy(false);
+      await step("Approved",{ acc_by:who(), acc_at:now(), bill_no:billNo, bill_seq:r.no, fy, dc_date:toISODate(new Date()) },"Approved by Accounts — "+billNo);
+    }catch(e){ setBusy(false); setMsg("Could not number the DC: "+(e.message||e)); }
+  };
+  const cancelDc = async(reason)=>{
+    await sb.from("dc_serial_tbl").delete().eq("dc_id",dc.id);   // the serials are free again; the history keeps them
+    await step("Cancelled",{ cancelled_by:who(), cancelled_at:now(), cancel_reason:reason },"Cancelled", reason+" · serials released: "+(despSerialRanges(D.serials.map(s=>s.serial))||"none"));
+  };
+  const rollbackTest = async()=>{
+    if(!dc.is_test) return;
+    const a = await despAsk("Roll back this test DC?", "TEST DC "+despNo(dc)+" and its lines, serials and boxes are deleted. No bill number was used.", [{key:"no",label:"Keep it"},{key:"yes",label:"Roll back",primary:true}]);
+    if(a!=="yes") return;
+    await despHist(dc.id, null, "Test rolled back", who(), null);
+    await sb.from("dc_tbl").delete().eq("id",dc.id);
+    await logAudit("DELETE","dc_tbl",despNo(dc),"Test DC rolled back",who(),null,null);
+    onChanged && onChanged(); onClose && onClose();
+  };
+  // ---- actions available now ----
+  const acts = [];
+  const isAdm = user.role==="admin"||user.role==="super_admin";
+  if(st==="Draft" && despCan("stores",user,me,P)){ acts.push(h("button",{key:"s",onClick:saveDraft,disabled:busy,style:btnSecondary},busy?"Saving…":"Save draft"));
+    acts.push(h("button",{key:"p",onClick:sendToPm,disabled:busy,style:btnPrimary},"Send to Production Manager")); }
+  if(st==="With PM" && despCan("pm",user,me,P)){ acts.push(h("button",{key:"b",onClick:()=>setBack({to:"Draft",label:"Send back to Stores"}),style:btnSecondary},"Send back to Stores"));
+    acts.push(h("button",{key:"q",onClick:()=>step("With QC",{ pm_qc_by:who(), pm_qc_at:now() },"Presented to QC"),disabled:busy,style:btnPrimary},"Present to QC")); }
+  if(st==="With QC" && despCan("qc",user,me,P)){ acts.push(h("button",{key:"b",onClick:()=>setBack({to:"Draft",label:"QC objects — back to Stores"}),style:btnSecondary},"QC objects — send back"));
+    acts.push(h("button",{key:"q",onClick:()=>step("QC cleared",{ qc_by:who(), qc_at:now() },"QC consents to despatch"),disabled:busy,style:btnPrimary},"QC consents to despatch")); }
+  if(st==="QC cleared" && despCan("pm",user,me,P)) acts.push(h("button",{key:"a",onClick:()=>step("With Accounts",{ pm_acc_by:who(), pm_acc_at:now() },"Sent to Accounts"),disabled:busy,style:btnPrimary},"Send to Accounts"));
+  if(st==="With Accounts" && despCan("acc",user,me,P)){ acts.push(h("button",{key:"b",onClick:()=>setBack({to:"Draft",label:"Accounts sends back to Stores"}),style:btnSecondary},"Send back"));
+    acts.push(h("button",{key:"a",onClick:approveAccounts,disabled:busy,style:btnPrimary},"Approve and number")); }
+  if(dc.id && ["Draft","With PM","With QC","QC cleared","With Accounts"].includes(st) && (despCan("stores",user,me,P)||despCan("acc",user,me,P)))
+    acts.push(h("button",{key:"c",onClick:()=>setBack({to:"Cancelled",label:"Cancel this DC"}),style:btnDanger},"Cancel DC"));
+  if(st==="Approved" && !dc.is_test && !dc.gate_pass_id && (despCan("acc",user,me,P)||isAdm))
+    acts.push(h("button",{key:"c",onClick:()=>setBack({to:"Cancelled",label:"Cancel an approved DC — its number "+despNo(dc)+" stays used"}),style:btnDanger},"Cancel DC"));
+  if(dc.is_test && (despCan("acc",user,me,P)||isAdm)) acts.push(h("button",{key:"r",onClick:rollbackTest,style:btnDanger},"Roll back test"));
+  const pdfData = ()=>({ ...D, C, S });
+  if(dc.id){ acts.push(h("button",{key:"pd",onClick:()=>despDcPdf(pdfData()).catch(e=>alert("PDF: "+e.message)),style:btnSecondary},"DC PDF"));
+    acts.push(h("button",{key:"pk",onClick:()=>despPackingPdf(pdfData()).catch(e=>alert("PDF: "+e.message)),style:btnSecondary},"Packing slip PDF")); }
+  // ---- view ----
+  const th = (t,w)=> h("th",{style:{textAlign:"left",padding:"5px 7px",fontSize:11,color:colors.muted,borderBottom:"2px solid "+colors.dark,width:w}},t);
+  const td = (c,s)=> h("td",{style:{padding:"5px 7px",borderBottom:"1px solid "+colors.border,verticalAlign:"top",fontSize:12.5,...(s||{})}},c);
+  const inp = (v,on,w,ph,dis)=> h("input",{value:v,disabled:dis,placeholder:ph||"",onChange:e=>on(e.target.value),style:{...inputStyle,padding:"5px 7px",fontSize:12.5,width:w||"100%"}});
+  const linesTbl = h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:860}},
+    h("thead",null,h("tr",null,th("Sl No",50),th("Item / description"),th("Ordered",60),th("On other DCs",70),th("Balance",60),th("Send now",80),th("Customer tag",120),th("Our serial numbers (YY-NNNNNNN)",300))),
+    h("tbody",null, rows.filter(r=>editable || Number(r.qty)>0).map(r=>{
+      const q = Number(r.qty)||0;
+      return h("tr",{key:r.key},
+        td(r.item_sl_no), td(h("div",null,h("b",null,r.item||"—"),h("div",{style:{fontSize:11.5,color:colors.muted}},r.description),r.hsn?h("div",{style:{fontSize:11,color:colors.mutedLight}},"HSN "+r.hsn):h("div",{style:{fontSize:11,color:"#a3312a"}},"HSN missing in the item master"))),
+        td(r.ordered), td(r.shipped), td(h("b",{style:{color:r.balance?colors.text:colors.mutedLight}},r.balance)),
+        td(editable ? inp(r.qty, v=>setRow(r.key,{ qty:v.replace(/[^\d]/g,"") }), 70, r.balance?String(r.balance):"0", !r.balance) : h("b",null,r.qty)),
+        td(editable && q ? inp(r.customer_tag, v=>setRow(r.key,{ customer_tag:v })) : (r.customer_tag||"—")),
+        td(!q ? null : h("div",null,
+          editable ? h("label",{style:{fontSize:11.5,display:"flex",gap:5,alignItems:"center",marginBottom:4}},h("input",{type:"checkbox",checked:r.no_serial,onChange:e=>setRow(r.key,{ no_serial:e.target.checked })}),"No serial for this item") : null,
+          r.no_serial ? h("span",{style:{fontSize:11.5,color:colors.muted}},"no serial") :
+          editable ? h("div",null,
+            h("div",{style:{display:"flex",gap:5,marginBottom:4}}, inp(r.start, v=>setRow(r.key,{ start:v }), 120, "first, e.g. 26-0000451"),
+              h("button",{onClick:()=>{ const b = despSerialBlock(r.start, q); if(!b){ alert("Type the first serial as YY-NNNNNNN, e.g. 26-0000451."); return; } setRow(r.key,{ serials:b }); },style:btnSmall},"Fill "+q)),
+            h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(98px,1fr))",gap:4}},
+              Array.from({length:q}).map((_,i)=>h("input",{key:i,value:r.serials[i]||"",placeholder:"#"+(i+1),onChange:e=>{ const v = e.target.value; setRows(rs=>rs.map(x=>{ if(x.key!==r.key) return x; const s = x.serials.slice(); s[i] = v; return { ...x, serials:s }; })); },
+                style:{...inputStyle,padding:"4px 6px",fontSize:12,borderColor:(r.serials[i]&&!DESP_SERIAL_RE.test(String(r.serials[i]).trim()))?"#b8472f":colors.border}}))))
+          : h("span",{style:{fontSize:12}}, despSerialRanges(r.serials)||"—"))));
+    })));
+  const sendRows = rows.filter(r=>Number(r.qty)>0);
+  const boxEl = h("div",null,
+    boxes.map((b,bi)=>h("div",{key:bi,style:{border:"1px solid "+colors.border,borderRadius:6,padding:"6px 8px",marginBottom:6,background:"#fcfbf7"}},
+      h("div",{style:{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}},
+        h("b",{style:{fontSize:12.5}},"Box "+b.box_no+" of "+boxes.length),
+        editable ? h("select",{value:b.packing_mode,onChange:e=>setBoxes(bs=>bs.map((x,i)=>i===bi?{...x,packing_mode:e.target.value}:x)),style:{...inputStyle,width:"auto",padding:"4px 6px",fontSize:12}},["Wooden box","Carton","Pallet","Crate","Bundle","Loose"].map(m=>h("option",{key:m},m))) : h("span",{style:{fontSize:12}},b.packing_mode),
+        h("span",{style:{fontSize:11.5,color:colors.muted}},"L × W × H mm"),
+        ...["length_mm","width_mm","height_mm"].map(k=> editable ? h("input",{key:k,value:b[k],onChange:e=>{ const v = e.target.value.replace(/[^\d.]/g,""); setBoxes(bs=>bs.map((x,i)=>i===bi?{...x,[k]:v}:x)); },style:{...inputStyle,width:66,padding:"4px 6px",fontSize:12}}) : h("span",{key:k,style:{fontSize:12}},b[k]||"—")),
+        h("span",{style:{fontSize:11.5,color:colors.muted}},"Packing kg"),
+        editable ? h("input",{value:b.packing_wt,onChange:e=>{ const v = e.target.value.replace(/[^\d.]/g,""); setBoxes(bs=>bs.map((x,i)=>i===bi?{...x,packing_wt:v}:x)); },style:{...inputStyle,width:60,padding:"4px 6px",fontSize:12}}) : h("span",{style:{fontSize:12}},b.packing_wt||"—"),
+        editable ? h("button",{onClick:()=>setBoxes(bs=>bs.filter((_,i)=>i!==bi).map((x,i)=>({...x,box_no:i+1}))),style:{...btnSmall,marginLeft:"auto",color:colors.danger}},"Remove box") : null),
+      b.contents.map((c,ci)=>h("div",{key:ci,style:{display:"flex",gap:6,alignItems:"center",marginTop:4,fontSize:12}},
+        editable ? h("select",{value:c.sl==null?"":String(c.sl),onChange:e=>{ const v = e.target.value===""?null:Number(e.target.value); setBoxes(bs=>bs.map((x,i)=>i===bi?{...x,contents:x.contents.map((y,j)=>j===ci?{...y,sl:v}:y)}:x)); },style:{...inputStyle,width:280,padding:"4px 6px",fontSize:12}},
+          h("option",{value:""},"Pick the Sl No…"), sendRows.map(r=>h("option",{key:r.key,value:String(r.item_sl_no)},"Sl No "+r.item_sl_no+" · "+(r.item||"")+" · sending "+r.qty)))
+          : h("span",null,"Sl No "+c.sl+" · "+((rows.find(r=>r.item_sl_no===c.sl)||{}).item||"")),
+        h("span",{style:{color:colors.muted}},"qty"),
+        editable ? h("input",{value:c.qty,onChange:e=>{ const v = e.target.value.replace(/[^\d]/g,""); setBoxes(bs=>bs.map((x,i)=>i===bi?{...x,contents:x.contents.map((y,j)=>j===ci?{...y,qty:v}:y)}:x)); },style:{...inputStyle,width:56,padding:"4px 6px",fontSize:12}}) : h("b",null,c.qty),
+        h("span",{style:{color:colors.muted}},"kg per item"),
+        editable ? h("input",{value:c.wt,onChange:e=>{ const v = e.target.value.replace(/[^\d.]/g,""); setBoxes(bs=>bs.map((x,i)=>i===bi?{...x,contents:x.contents.map((y,j)=>j===ci?{...y,wt:v}:y)}:x)); },style:{...inputStyle,width:60,padding:"4px 6px",fontSize:12}}) : h("span",null,c.wt||"—"),
+        editable ? h("span",{onClick:()=>setBoxes(bs=>bs.map((x,i)=>i===bi?{...x,contents:x.contents.filter((_,j)=>j!==ci)}:x)),style:{cursor:"pointer",color:colors.danger}},"✕") : null)),
+      editable ? h("button",{onClick:()=>setBoxes(bs=>bs.map((x,i)=>i===bi?{...x,contents:[...x.contents,{sl:null,qty:"",wt:""}]}:x)),style:{...btnSmall,marginTop:5}},"+ Add contents to this box") : null)),
+    editable ? h("button",{onClick:()=>setBoxes(bs=>[...bs,{ box_no:bs.length+1, packing_mode:"Wooden box", length_mm:"", width_mm:"", height_mm:"", packing_wt:"", marks:"", contents:[{sl:sendRows.length===1?sendRows[0].item_sl_no:null,qty:"",wt:""}] }]),style:btnSmall},"+ Add box") : null,
+    sendRows.length ? h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:5}}, sendRows.map(r=>{ const b = boxQty(r.item_sl_no); return "Sl No "+r.item_sl_no+": "+b+" of "+r.qty+" packed"+(b===Number(r.qty)?" ✓":""); }).join(" · ")) : null);
+  const dd = C.despatch||{};
+  const flow = h("div",{style:{display:"flex",gap:4,flexWrap:"wrap",alignItems:"center",fontSize:11.5}},
+    DC_FLOW.map((s,i)=>h(React.Fragment,{key:s}, i?h("span",{style:{color:colors.mutedLight}},"→"):null, h("span",{style:{padding:"1px 7px",borderRadius:9,fontWeight:s===st?700:400,background:s===st?(DC_TONE[s]||[])[0]:"transparent",color:s===st?(DC_TONE[s]||[])[1]:colors.mutedLight}},s))),
+    st==="Cancelled" ? despStatusPill("Cancelled") : null);
+  const stepWho = { "Draft":"Stores — "+(P.stores.join(" / ")||"post empty"), "With PM":"Production Manager — "+(P.pm.join(" / ")||"post empty"), "With QC":"QC — "+(P.qc.join(" / ")||"post empty"),
+    "QC cleared":"Production Manager — "+(P.pm.join(" / ")||"post empty"), "With Accounts":"Accounts — "+(P.acc.join(" / ")||"post empty") }[st];
+  return h("div",{style:{padding:"12px 18px"}},
+    h("div",{style:{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}},
+      h("button",{onClick:()=>onClose&&onClose(),style:btnSmall},"← All DCs"),
+      h("h2",{style:{fontSize:18,margin:0}}, dc.id ? "DC "+despNo(dc) : "New DC"), dc.is_test ? despStatusPill("TEST") : null,
+      h("span",{style:{fontSize:13,color:colors.muted}}, "Contract "+C.cn+" · "+C.customer+" · "+(C.isExport?"Export":"Domestic"))),
+    h("div",{style:{margin:"6px 0 8px"}}, flow),
+    stepWho ? h("div",{style:{fontSize:12,color:colors.muted,marginBottom:6}},"Waiting on: ",h("b",null,stepWho)) : null,
+    dc.returned_note && st==="Draft" ? h("div",{style:{background:"#fdecea",color:"#a3312a",borderRadius:6,padding:"6px 10px",fontSize:12.5,marginBottom:8}},"Sent back by "+(dc.returned_by||"")+" ("+fmtDMYTime(dc.returned_at)+"): "+dc.returned_note) : null,
+    h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"8px 12px",marginBottom:10,fontSize:12.5}},
+      h("div",{style:{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}, h("b",null,"Despatch details"), !despDetailsComplete(C.despatch, C.isExport) ? h("span",{style:{color:"#854f0b",fontWeight:700}},"missing") : null,
+        ((dc.id ? st==="Draft" : true) && (despCan("stores",user,me,P)||despCan("acc",user,me,P))) ? h("button",{onClick:()=>setAskDetails(true),style:btnSmall}, C.despatch ? "Change" : "Enter details") : null),
+      h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:8,marginTop:4}},
+        h("div",null,h("div",{style:{fontSize:11,color:colors.muted}},"Ship to"),h("div",{style:{whiteSpace:"pre-wrap"}},[dd.ship_contact,dd.ship_address,dd.ship_phone].filter(Boolean).join("\n")||"—")),
+        C.isExport ? h("div",null,h("div",{style:{fontSize:11,color:colors.muted}},"Mode of shipment"),dd.mode_of_shipment||"—") : null,
+        C.isExport ? h("div",null,h("div",{style:{fontSize:11,color:colors.muted}},"Notify / handoff"),h("div",{style:{whiteSpace:"pre-wrap"}}, dd.handoff_needed===true ? [dd.handoff_contact,dd.handoff_address,dd.handoff_phone].filter(Boolean).join("\n") : dd.handoff_needed===false ? "not needed" : "not asked yet")) : null),
+      dc.id && st!=="Draft" ? h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:4}},"This DC prints the details as they were when Stores last saved it.") : null),
+    h("div",{style:{fontSize:13,fontWeight:700,margin:"4px 0"}},"Items"),
+    h("div",{style:{overflowX:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8}}, linesTbl),
+    h("div",{style:{fontSize:13,fontWeight:700,margin:"12px 0 4px"}},"Packing (prints as the packing slip)"),
+    boxEl,
+    h("div",{style:{marginTop:10,display:"flex",flexDirection:"column",gap:6}},
+      h("label",{style:{fontSize:12.5,display:"flex",gap:6,alignItems:"flex-start",background:"#fff4d6",borderRadius:6,padding:"6px 10px"}},
+        h("input",{type:"checkbox",checked:!!hdr.readiness_skipped,disabled:!editable,onChange:e=>setHdr(x=>({...x,readiness_skipped:e.target.checked}))}),
+        h("span",null,h("b",null,"Readiness: "),"the Stores and Production gateways are not built yet, so the app cannot check what is ready. Stores confirms the items above are made, tested and ready to go.")),
+      h("div",null,h("div",{style:{fontSize:11.5,color:colors.muted}},"Remarks"), editable ? h("textarea",{rows:2,value:hdr.remarks,onChange:e=>setHdr(x=>({...x,remarks:e.target.value})),style:inputStyle}) : h("div",{style:{fontSize:12.5}},hdr.remarks||"—"))),
+    msg ? h("div",{style:{whiteSpace:"pre-wrap",color:colors.danger,fontSize:12.5,marginTop:8,background:"#fdecea",borderRadius:6,padding:"6px 10px"}},msg) : null,
+    h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",marginTop:12}}, acts),
+    hist.length ? h("div",{style:{marginTop:14}},h("div",{style:{fontSize:12,fontWeight:700,color:colors.muted}},"History"),
+      hist.map(x=>h("div",{key:x.id,style:{fontSize:11.5,color:colors.muted,padding:"2px 0"}},fmtDMYTime(x.at)+" · "+(x.by_user||"")+" · "+x.action+(x.note?" — "+x.note:"")))) : null,
+    askDetails ? h(DespatchDetailsDialog,{C, user, reason: dc.id ? "Changed on DC "+despNo(dc) : "Asked on the first DC of the contract",
+      onCancel:()=>{ setAskDetails(false); if(!dc.id && !despDetailsComplete(C.despatch, C.isExport)) onClose && onClose(); },
+      onSaved:async()=>{ setAskDetails(false); const c = await despContract(C.cn, dc.id); setC(c); }}) : null,
+    back ? h(ReasonDialog,{title:back.label, subtitle:"DC "+despNo(dc)+" · contract "+C.cn, placeholder:back.to==="Cancelled"?"Why is it cancelled?":"What needs fixing?", okLabel:back.to==="Cancelled"?"Cancel the DC":"Send back",
+      okStyle: back.to==="Cancelled" ? {background:colors.danger} : null, onCancel:()=>setBack(null),
+      onOk:async(why)=>{ const b = back; setBack(null); if(b.to==="Cancelled") await cancelDc(why); else await step("Draft",{ returned_by:who(), returned_at:now(), returned_note:why },"Sent back to Stores", why); }}) : null);
+}
+// ---- DC list ----------------------------------------------------------------------------------------
+function DespatchScreen({ user }){
+  const [list,setList] = useState(null); const [err,setErr] = useState("");
+  const [me,setMe] = useState(""); const [P,setP] = useState({ stores:[], pm:[], qc:[], acc:[], supers:[] }); const [S,setS] = useState({});
+  const [open,setOpen] = useState(null);        // dc id or {new: contract}
+  const [pick,setPick] = useState(false); const [contracts,setContracts] = useState([]); const [q,setQ] = useState("");
+  const [filter,setFilter] = useState("mine");
+  const load = useCallback(async()=>{
+    const [m, p, s] = await Promise.all([despMe(user), despPeople(), despSettings()]);
+    setMe(m); setP(p); setS(s);
+    const { data, error } = await sb.from("dc_tbl").select("*").order("id",{ascending:false}).limit(1000);
+    if(error){ setErr(error.message); setList([]); return; }
+    let gps = []; const ids = Array.from(new Set((data||[]).map(d=>d.gate_pass_id).filter(Boolean)));
+    if(ids.length){ const { data: g } = await sb.from("gate_pass_tbl").select("id,gp_no,status").in("id",ids); gps = g||[]; }
+    setList((data||[]).map(d=>({ ...d, gp:gps.find(g=>g.id===d.gate_pass_id)||null })));
+  },[user && user.username]);
+  useEffect(()=>{ load(); },[load]);
+  const openPicker = async()=>{
+    setPick(true);
+    const { data } = await sb.from("sale_order_tbl").select("contract_number,customer_name,status").order("contract_number",{ascending:false}).limit(2000);
+    setContracts((data||[]).filter(c=>!/cancel|closed/i.test(c.status||"")));
+  };
+  if(open) return h(DcEditor,{ user, me, P, S, dcId: typeof open==="object" ? null : open, contract: typeof open==="object" ? open.new : null,
+    onChanged:load, onClose:(newId)=>{ if(newId) setOpen(newId); else { setOpen(null); load(); } } });
+  if(!list) return h("div",{style:{padding:20,color:colors.muted}},"Reading the DCs…");
+  const lutNow = despFyLong();
+  const lutWarn = S && !S._missing && (!S.lut_no || S.lut_fy!==lutNow);
+  const myStep = (d)=> (d.status==="Draft" && despCan("stores",user,me,P)) || ((d.status==="With PM"||d.status==="QC cleared") && despCan("pm",user,me,P)) || (d.status==="With QC" && despCan("qc",user,me,P)) || (d.status==="With Accounts" && despCan("acc",user,me,P));
+  const isAdm = user.role==="admin"||user.role==="super_admin";
+  const shown = list.filter(d=> filter==="all" ? true : filter==="open" ? !["Despatched","Cancelled"].includes(d.status) : filter==="mine" ? (isAdm ? !["Approved","Despatched","Cancelled"].includes(d.status) : myStep(d)) : d.status===filter);
+  const chip = (k,l)=> h("button",{key:k,onClick:()=>setFilter(k),style:{...btnSmall,fontSize:12,padding:"4px 10px",background:filter===k?colors.dark:"#fff",color:filter===k?"#fff":colors.text}},l);
+  return h("div",{style:{padding:"14px 18px"}},
+    h("div",{style:{fontSize:11.5,color:colors.muted}},"Order Status → Despatch"),
+    h("div",{style:{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}, h("h2",{style:{fontSize:19,margin:"2px 0 8px"}},"Delivery Challans"),
+      despCan("stores",user,me,P) ? h("button",{onClick:openPicker,style:{...btnPrimary,marginLeft:"auto",padding:"7px 14px"}},"+ New DC") : null),
+    err ? h("div",{style:{color:colors.danger,fontSize:12.5,marginBottom:8}},"The despatch tables are not there yet — run structure_despatch_dc_gatepass_2026-10-10.sql. ("+err+")") : null,
+    lutWarn ? h("div",{style:{background:"#fdecea",color:"#a3312a",borderRadius:6,padding:"6px 10px",fontSize:12.5,marginBottom:8}},"LUT: "+(S.lut_no?"the LUT on record is for "+(S.lut_fy||"no year")+", not "+lutNow+".":"no LUT on record.")+" Export documents need the LUT for "+lutNow+" — Order Status → Despatch Settings & LUT.") : null,
+    h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}, chip("mine",isAdm?"Waiting (all steps)":"Waiting on me"), chip("open","Open"), ...DC_FLOW.map(s=>chip(s,s)), chip("Cancelled","Cancelled"), chip("all","All")),
+    h("div",{style:{overflowX:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8}},
+      h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:820,fontSize:12.5}},
+        h("thead",null,h("tr",null,["DC / bill no","Contract","Customer","Type","Status","Made by","Gate pass",""].map(x=>h("th",{key:x,style:{textAlign:"left",padding:"7px 9px",fontSize:11.5,color:colors.muted,borderBottom:"2px solid "+colors.dark}},x)))),
+        h("tbody",null, shown.length===0 ? h("tr",null,h("td",{colSpan:8,style:{padding:12,color:colors.mutedLight}},"Nothing here.")) :
+          shown.map(d=>h("tr",{key:d.id,onClick:()=>setOpen(d.id),style:{cursor:"pointer"}},
+            ...[h("b",null,despNo(d)), d.contract_number, d.customer_name, (d.is_export?"Export":"Domestic")+(d.is_test?" · TEST":""), despStatusPill(d.status), (d.created_by||"")+" · "+fmtDMY(d.created_at), d.gp?d.gp.gp_no:"—",
+              myStep(d) && !["Approved","Despatched","Cancelled"].includes(d.status) ? h("span",{style:{fontSize:11,fontWeight:700,color:"#0f7a5c"}},"your step") : ""]
+              .map((c,i)=>h("td",{key:i,style:{padding:"6px 9px",borderBottom:"1px solid "+colors.border}},c))))))),
+    pick ? h("div",{onClick:e=>{ if(e.target===e.currentTarget) setPick(false); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:2500,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"60px 16px"}},
+      h("div",{style:{background:"#fff",borderRadius:10,width:520,maxWidth:"100%",padding:"14px 16px"}},
+        h("b",{style:{fontSize:15}},"New DC — which contract?"),
+        h("input",{autoFocus:true,value:q,onChange:e=>setQ(e.target.value),placeholder:"Contract number or customer",style:{...inputStyle,margin:"8px 0"}}),
+        h("div",{style:{maxHeight:360,overflowY:"auto",border:"1px solid "+colors.border,borderRadius:6}},
+          contracts.filter(c=>!q || (String(c.contract_number)+" "+(c.customer_name||"")).toLowerCase().includes(q.toLowerCase())).slice(0,200).map(c=>
+            h("div",{key:c.contract_number,onClick:()=>{ setPick(false); setOpen({ new:String(c.contract_number) }); },style:{padding:"6px 10px",borderBottom:"1px solid "+colors.border,cursor:"pointer",fontSize:13}},
+              h("b",null,c.contract_number)," · ",c.customer_name||"", c.status?h("span",{style:{fontSize:11,color:colors.mutedLight}}," · "+c.status):null))),
+        h("div",{style:{display:"flex",justifyContent:"flex-end",marginTop:10}},h("button",{onClick:()=>setPick(false),style:btnSecondary},"Cancel")))) : null);
+}
+// ---- gate pass --------------------------------------------------------------------------------------
+function GatePassScreen({ user }){
+  const [list,setList] = useState(null); const [dcs,setDcs] = useState([]); const [err,setErr] = useState("");
+  const [me,setMe] = useState(""); const [P,setP] = useState({ stores:[], pm:[], qc:[], acc:[], supers:[] });
+  const [mk,setMk] = useState(null);     // new gate pass form
+  const [ex,setEx] = useState(null);     // record exit form {gp, at, link}
+  const [busy,setBusy] = useState(false);
+  const load = useCallback(async()=>{
+    const [m,p] = await Promise.all([despMe(user), despPeople()]); setMe(m); setP(p);
+    const { data, error } = await sb.from("gate_pass_tbl").select("*").order("id",{ascending:false}).limit(500);
+    if(error){ setErr(error.message); setList([]); return; }
+    const { data: d } = await sb.from("dc_tbl").select("*").in("status",["Approved","Despatched"]).order("id",{ascending:false}).limit(1000);
+    setList(data||[]); setDcs(d||[]);
+  },[user && user.username]);
+  useEffect(()=>{ load(); },[load]);
+  if(!list) return h("div",{style:{padding:20,color:colors.muted}},"Reading the gate passes…");
+  const canStores = despCan("stores",user,me,P);
+  const free = dcs.filter(d=>d.status==="Approved" && !d.gate_pass_id && !d.is_test);
+  const boxCount = async(ids)=>{ const m = new Map(); if(ids.length){ const { data } = await sb.from("dc_box_tbl").select("dc_id").in("dc_id",ids); (data||[]).forEach(b=>m.set(b.dc_id,(m.get(b.dc_id)||0)+1)); } return m; };
+  const printGp = async(gp)=>{ const ds = dcs.filter(d=>d.gate_pass_id===gp.id); despGatePassPdf(gp, ds, await boxCount(ds.map(d=>d.id))).catch(e=>alert("PDF: "+e.message)); };
+  const create = async()=>{
+    const f = mk; if(!f.ids.length){ alert("Tick at least one DC."); return; } if(!String(f.vehicle_no).trim()){ alert("Enter the vehicle number."); return; }
+    setBusy(true);
+    try{
+      const fy = despFy(); const n = await despSeriesNext("GP", fy, 1, user?.username);
+      const gpNo = "GP/"+fy+"/"+despPad(n.no,4);
+      const { data: gp, error } = await sb.from("gate_pass_tbl").insert({ gp_no:gpNo, fy, seq:n.no, gp_date:f.gp_date||toISODate(new Date()), vehicle_no:f.vehicle_no.trim().toUpperCase(), transporter:f.transporter||null, lr_no:f.lr_no||null,
+        driver_name:f.driver_name||null, driver_mobile:f.driver_mobile||null, status:"Open", created_by:user?.username||"unknown" }).select().single();
+      if(error) throw error;
+      const { error: ue } = await sb.from("dc_tbl").update({ gate_pass_id:gp.id }).in("id",f.ids).is("gate_pass_id",null);
+      if(ue) throw ue;
+      await despHist(null, gp.id, "Gate pass made", user?.username, gpNo+" · "+f.ids.length+" DC(s) · "+gp.vehicle_no);
+      for(const id of f.ids) await despHist(id, gp.id, "Put on gate pass", user?.username, gpNo+" · "+gp.vehicle_no);
+      await logAudit("CREATE","gate_pass_tbl",gpNo,f.ids.length+" DC(s) on vehicle "+gp.vehicle_no,user?.username||"unknown",null,null);
+      setMk(null); setBusy(false); await load();
+      const ds = (await sb.from("dc_tbl").select("*").eq("gate_pass_id",gp.id)).data||[];
+      despGatePassPdf(gp, ds, await boxCount(ds.map(d=>d.id))).catch(()=>{});
+    }catch(e){ setBusy(false); alert("Could not make the gate pass: "+(e.message||e)); }
+  };
+  const recordExit = async()=>{
+    const f = ex; if(f.gp.status==="Open" && !f.at){ alert("Enter the date and time the truck left."); return; }
+    setBusy(true);
+    const wasOpen = f.gp.status==="Open";
+    const at = wasOpen ? new Date(f.at).toISOString() : (f.gp.exit_at || new Date().toISOString());
+    const patch = !wasOpen ? { scan_link:f.link||null } : { status:"Exited", exit_at:at, scan_link:f.link||null, exited_by:user?.username||"unknown", exited_at:new Date().toISOString() };
+    const { error } = await sb.from("gate_pass_tbl").update(patch).eq("id",f.gp.id);
+    if(!error && wasOpen){ await sb.from("dc_tbl").update({ status:"Despatched", despatched_at:at }).eq("gate_pass_id",f.gp.id).eq("status","Approved");
+      for(const d of dcs.filter(d=>d.gate_pass_id===f.gp.id)) await despHist(d.id, f.gp.id, "Despatched", user?.username, f.gp.gp_no+" left "+fmtDMYTime(at)); }
+    await despHist(null, f.gp.id, !wasOpen?"Scan link added":"Exit recorded", user?.username, f.link||null);
+    await logAudit("UPDATE","gate_pass_tbl",f.gp.gp_no,(!wasOpen?"Scan link: ":"Exit "+fmtDMYTime(at)+" · link: ")+(f.link||"—"),user?.username||"unknown",null,null);
+    setBusy(false); if(error){ alert("Could not save: "+error.message); return; } setEx(null); load();
+  };
+  const cancelGp = async(gp)=>{
+    const why = prompt("Cancel gate pass "+gp.gp_no+"? The DCs on it become free for another gate pass.\n\nReason:"); if(!why || !why.trim()) return;
+    await sb.from("dc_tbl").update({ gate_pass_id:null }).eq("gate_pass_id",gp.id);
+    await sb.from("gate_pass_tbl").update({ status:"Cancelled", cancelled_by:user?.username||"unknown", cancelled_at:new Date().toISOString(), cancel_reason:why.trim() }).eq("id",gp.id);
+    await despHist(null, gp.id, "Gate pass cancelled", user?.username, why.trim()); await logAudit("UPDATE","gate_pass_tbl",gp.gp_no,"Cancelled: "+why.trim(),user?.username||"unknown",null,null); load();
+  };
+  const lab = (t,c)=> h("label",{style:{display:"flex",flexDirection:"column",gap:3,fontSize:11.5,color:colors.muted,flex:"1 1 180px"}},t,c);
+  return h("div",{style:{padding:"14px 18px"}},
+    h("div",{style:{fontSize:11.5,color:colors.muted}},"Order Status → Despatch"),
+    h("div",{style:{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}, h("h2",{style:{fontSize:19,margin:"2px 0 8px"}},"Gate Passes"),
+      canStores ? h("button",{onClick:()=>setMk({ ids:[], vehicle_no:"", transporter:"", lr_no:"", driver_name:"", driver_mobile:"", gp_date:toISODate(new Date()) }),style:{...btnPrimary,marginLeft:"auto",padding:"7px 14px"}},"+ New gate pass") : null),
+    err ? h("div",{style:{color:colors.danger,fontSize:12.5}},"Run structure_despatch_dc_gatepass_2026-10-10.sql first. ("+err+")") : null,
+    h("div",{style:{fontSize:12.5,color:colors.muted,marginBottom:8}}, free.length+" approved DC"+(free.length===1?"":"s")+" waiting for a gate pass. One gate pass = one truck; it may carry several DCs and leave days after the DCs. Stores gets the security copy signed, scans it to the drive and pastes the link here."),
+    mk ? h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px",marginBottom:10}},
+      h("b",null,"New gate pass"),
+      h("div",{style:{maxHeight:220,overflowY:"auto",border:"1px solid "+colors.border,borderRadius:6,margin:"6px 0"}},
+        free.length===0 ? h("div",{style:{padding:8,color:colors.mutedLight,fontSize:12.5}},"No approved DC is waiting.") :
+        free.map(d=>h("label",{key:d.id,style:{display:"flex",gap:8,alignItems:"center",padding:"5px 8px",borderBottom:"1px solid "+colors.border,fontSize:12.5}},
+          h("input",{type:"checkbox",checked:mk.ids.includes(d.id),onChange:e=>setMk(m=>({...m,ids:e.target.checked?[...m.ids,d.id]:m.ids.filter(x=>x!==d.id)}))}),
+          h("b",null,despNo(d)), " · ", d.contract_number, " · ", d.customer_name||""))),
+      h("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
+        lab("Vehicle no *", h("input",{value:mk.vehicle_no,onChange:e=>setMk(m=>({...m,vehicle_no:e.target.value})),style:inputStyle,placeholder:"TN 01 AB 2345"})),
+        lab("Date", h("input",{type:"date",value:mk.gp_date,onChange:e=>setMk(m=>({...m,gp_date:e.target.value})),style:inputStyle})),
+        lab("Transporter", h("input",{value:mk.transporter,onChange:e=>setMk(m=>({...m,transporter:e.target.value})),style:inputStyle})),
+        lab("LR no", h("input",{value:mk.lr_no,onChange:e=>setMk(m=>({...m,lr_no:e.target.value})),style:inputStyle})),
+        lab("Driver name", h("input",{value:mk.driver_name,onChange:e=>setMk(m=>({...m,driver_name:e.target.value})),style:inputStyle})),
+        lab("Driver mobile", h("input",{value:mk.driver_mobile,onChange:e=>setMk(m=>({...m,driver_mobile:e.target.value})),style:inputStyle}))),
+      h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:10}}, h("button",{onClick:()=>setMk(null),style:btnSecondary},"Cancel"), h("button",{onClick:create,disabled:busy,style:btnPrimary},busy?"Making…":"Make gate pass and print"))) : null,
+    h("div",{style:{overflowX:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8}},
+      h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:820,fontSize:12.5}},
+        h("thead",null,h("tr",null,["Gate pass","Date","Vehicle","DCs","Status","Left at","Signed copy",""].map(x=>h("th",{key:x,style:{textAlign:"left",padding:"7px 9px",fontSize:11.5,color:colors.muted,borderBottom:"2px solid "+colors.dark}},x)))),
+        h("tbody",null, list.length===0 ? h("tr",null,h("td",{colSpan:8,style:{padding:12,color:colors.mutedLight}},"No gate pass yet.")) :
+          list.map(g=>{ const ds = dcs.filter(d=>d.gate_pass_id===g.id);
+            return h("tr",{key:g.id},
+              ...[h("b",null,g.gp_no), fmtDMY(g.gp_date), g.vehicle_no, ds.map(d=>despNo(d)).join(", ")||"—", h("span",{style:{fontSize:11,fontWeight:700,borderRadius:9,padding:"1px 9px",background:g.status==="Exited"?"#d7efe3":g.status==="Cancelled"?"#fdecea":"#fff4d6",color:g.status==="Exited"?"#0b5a40":g.status==="Cancelled"?"#a3312a":"#854f0b"}},g.status==="Open"?"Waiting to leave":g.status),
+                g.exit_at?fmtDMYTime(g.exit_at):"—", g.scan_link ? h("a",{href:g.scan_link,target:"_blank",rel:"noopener noreferrer"},"open") : (g.status==="Exited"?h("span",{style:{color:"#a3312a",fontWeight:700}},"missing"):"—"),
+                h("span",{style:{display:"flex",gap:5,flexWrap:"wrap"}}, h("button",{onClick:()=>printGp(g),style:btnSmall},"PDF"),
+                  canStores && g.status!=="Cancelled" && (g.status==="Open" || !g.scan_link) ? h("button",{onClick:()=>setEx({ gp:g, at:g.exit_at? new Date(new Date(g.exit_at).getTime()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16) : "", link:g.scan_link||"" }),style:btnSmall}, g.status==="Open"?"Record exit":"Add scan link") : null,
+                  canStores && g.status==="Open" ? h("button",{onClick:()=>cancelGp(g),style:{...btnSmall,color:colors.danger}},"Cancel") : null)]
+              .map((c,i)=>h("td",{key:i,style:{padding:"6px 9px",borderBottom:"1px solid "+colors.border,verticalAlign:"top"}},c))); })))),
+    ex ? h("div",{onClick:e=>{ if(e.target===e.currentTarget) setEx(null); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:2500,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"70px 16px"}},
+      h("div",{style:{background:"#fff",borderRadius:10,width:460,maxWidth:"100%",padding:"14px 16px"}},
+        h("b",{style:{fontSize:15}}, (ex.gp.status==="Open"?"Record exit — ":"Signed copy — ")+ex.gp.gp_no),
+        h("div",{style:{fontSize:11.5,color:colors.muted,margin:"3px 0 8px"}},"The exit time on the signed security copy is the real despatch date. The DCs on this gate pass become Despatched."),
+        ex.gp.status==="Open" ? lab("Left the gate at", h("input",{type:"datetime-local",value:ex.at,onChange:e=>setEx(x=>({...x,at:e.target.value})),style:inputStyle})) : null,
+        h("div",{style:{height:6}}),
+        lab("Link to the signed, scanned copy (can be added later)", h("input",{value:ex.link,onChange:e=>setEx(x=>({...x,link:e.target.value})),style:inputStyle,placeholder:"https://…"})),
+        h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}, h("button",{onClick:()=>setEx(null),style:btnSecondary},"Cancel"), h("button",{onClick:recordExit,disabled:busy,style:btnPrimary},busy?"Saving…":"Save")))) : null);
+}
+// ---- settings and LUT -------------------------------------------------------------------------------
+function DespatchSettingsScreen({ user }){
+  const [S,setS] = useState(null); const [f,setF] = useState(null); const [series,setSeries] = useState([]); const [can,setCan] = useState(false); const [busy,setBusy] = useState(false); const [msg,setMsg] = useState("");
+  const load = useCallback(async()=>{
+    const s = await despSettings(); setS(s);
+    setF({ our_gstin:s.our_gstin||"", our_pan:s.our_pan||"", our_state:s.our_state||"", our_state_code:s.our_state_code||"", factory_address:s.factory_address||"", bill_prefix:s.bill_prefix||"FFI", lut_no:s.lut_no||"", lut_fy:s.lut_fy||despFyLong() });
+    const { data } = await sb.from("doc_series_tbl").select("*").order("fy",{ascending:false}); setSeries(data||[]);
+    const me = await despMe(user); const P = await despPeople(); setCan(despCan("acc",user,me,P));
+  },[user && user.username]);
+  useEffect(()=>{ load(); },[load]);
+  if(!S || !f) return h("div",{style:{padding:20,color:colors.muted}},"Reading the settings…");
+  if(S._missing) return h("div",{style:{padding:20,color:colors.danger}},"Run structure_despatch_dc_gatepass_2026-10-10.sql first. ("+S._err+")");
+  const save = async()=>{
+    if(f.lut_no && !/^\d{4}-\d{2}$/.test(f.lut_fy)){ setMsg("LUT year must look like "+despFyLong()+"."); return; }
+    setBusy(true); setMsg("");
+    const row = { id:1, ...f, bill_prefix:(f.bill_prefix||"FFI").trim().toUpperCase(), updated_by:user?.username||"unknown", updated_at:new Date().toISOString() };
+    const { error } = await sb.from("billing_settings_tbl").upsert(row,{ onConflict:"id" });
+    setBusy(false); if(error){ setMsg("Could not save: "+error.message); return; }
+    const changed = Object.keys(f).filter(k=>String(S[k]||"")!==String(f[k]||""));
+    await logAudit("UPDATE","billing_settings_tbl","1","Despatch settings: "+(changed.join(", ")||"no change")+(changed.includes("lut_no")||changed.includes("lut_fy")?" · LUT "+f.lut_no+" for "+f.lut_fy:""),user?.username||"unknown",S,row);
+    setMsg("Saved."); load();
+  };
+  const fld = (k,l,ph,w)=> h("label",{style:{display:"flex",flexDirection:"column",gap:3,fontSize:11.5,color:colors.muted,flex:"1 1 "+(w||220)+"px"}},l,h("input",{value:f[k],disabled:!can,placeholder:ph||"",onChange:e=>setF(x=>({...x,[k]:e.target.value})),style:inputStyle}));
+  const nowFy = despFyLong(); const lutOk = f.lut_no && f.lut_fy===nowFy;
+  return h("div",{style:{padding:"14px 18px",maxWidth:900}},
+    h("div",{style:{fontSize:11.5,color:colors.muted}},"Order Status → Despatch"),
+    h("h2",{style:{fontSize:19,margin:"2px 0 8px"}},"Despatch Settings & LUT"),
+    !can ? h("div",{style:{fontSize:12,color:colors.muted,marginBottom:8}},"Only Accounts, admins and the super admin can change these.") : null,
+    h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px",marginBottom:10}},
+      h("b",null,"LUT — Letter of Undertaking for export without IGST"),
+      h("div",{style:{fontSize:12,color:lutOk?"#0f6b4f":"#a3312a",margin:"3px 0 6px",fontWeight:700}}, lutOk ? "Valid for the current financial year "+nowFy+"." : "Not valid for "+nowFy+" — enter the new LUT."),
+      h("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}}, fld("lut_no","LUT number","AD330723038449X"), fld("lut_fy","For financial year", nowFy, 120)),
+      h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:6}},"Every March, Accounts and the super admin get a Pending Action to renew the LUT for the next year. From 1 April it turns overdue until the new number is saved here.")),
+    h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px",marginBottom:10}},
+      h("b",null,"Our details on DCs, packing slips and invoices"),
+      h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",marginTop:6}}, fld("our_gstin","GSTIN"), fld("our_pan","PAN",null,140), fld("our_state","State",null,140), fld("our_state_code","State code",null,90)),
+      h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",marginTop:6}}, fld("factory_address","Despatched from (factory address)",null,500), fld("bill_prefix","Bill number prefix","FFI",90)),
+      h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:6}},"Bill numbers print as "+(f.bill_prefix||"FFI")+"/0081/"+despFy()+". A sale DC and its invoice carry the same number.")),
+    h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px",marginBottom:10}},
+      h("b",null,"Numbers used"),
+      h("div",{style:{fontSize:12,color:colors.muted,margin:"3px 0 6px"}}, S.test_phase_done ? "Test phase over — every DC now takes a real bill number." : "Test phase: Accounts is asked “Is this a test?” on each DC until someone answers No."),
+      series.length===0 ? h("div",{style:{fontSize:12.5,color:colors.mutedLight}},"No numbers used yet. The first bill number of each year is asked for when Accounts approves the first DC of that year.") :
+      h("table",{style:{borderCollapse:"collapse",fontSize:12.5}}, h("tbody",null, series.map(r=>h("tr",{key:r.series_key+r.fy},
+        h("td",{style:{padding:"3px 10px 3px 0"}},{BILL:"Bill (DC / invoice)",GP:"Gate pass",DCD:"DC draft"}[r.series_key]||r.series_key), h("td",{style:{padding:"3px 10px"}},r.fy), h("td",{style:{padding:"3px 10px"}},h("b",null,"last "+r.last_no)), h("td",{style:{padding:"3px 10px",color:colors.mutedLight}},"started by "+(r.start_set_by||"")+" · "+fmtDMY(r.start_set_at))))))),
+    can ? h("div",{style:{display:"flex",gap:8,alignItems:"center"}}, h("button",{onClick:save,disabled:busy,style:btnPrimary},busy?"Saving…":"Save"), msg ? h("span",{style:{fontSize:12.5,color:/Saved/.test(msg)?"#0f6b4f":colors.danger}},msg) : null) : null);
+}
+// ---- Pending Actions --------------------------------------------------------------------------------
+async function despPendingItems(){
+  const out = [];
+  const P = await despPeople();
+  const today = toISODate(new Date());
+  const days = (ts)=> ts ? Math.max(0, Math.floor((Date.now()-new Date(ts).getTime())/86400000)) : 0;
+  const to = (people, base)=>{ (people.length ? people : [""]).forEach(p=>out.push({ ...base, owed_by_person:p, client_side:true })); };
+  const { data: dcs, error } = await sb.from("dc_tbl").select("*").in("status",["Draft","With PM","With QC","QC cleared","With Accounts","Approved"]);
+  if(error) return out;   // despatch SQL not run yet
+  (dcs||[]).forEach(d=>{
+    const no = despNo(d)+" · contract "+d.contract_number+(d.customer_name?" ("+d.customer_name+")":"");
+    let who = null, what = "", since = d.created_at, role = "";
+    if(d.status==="Draft" && d.returned_note){ who = P.stores; role = "stores"; what = "DC "+no+" sent back to Stores: "+d.returned_note; since = d.returned_at; }
+    else if(d.status==="With PM"){ who = P.pm; role = "production_manager"; what = "DC "+no+" — present to QC"; since = d.sent_pm_at; }
+    else if(d.status==="With QC"){ who = P.qc; role = "qc"; what = "DC "+no+" — QC consent to despatch"; since = d.pm_qc_at; }
+    else if(d.status==="QC cleared"){ who = P.pm; role = "production_manager"; what = "DC "+no+" — QC cleared, send to Accounts"; since = d.qc_at; }
+    else if(d.status==="With Accounts"){ who = P.acc; role = "accounts"; what = "DC "+no+" — approve and number"; since = d.pm_acc_at; }
+    else if(d.status==="Approved" && !d.gate_pass_id && !d.is_test && days(d.acc_at)>=1){ who = P.stores; role = "stores"; what = "DC "+no+" approved — make the gate pass when the truck is ready"; since = d.acc_at; }
+    if(!who) return;
+    const dw = days(since);
+    to(who, { what, entity_key:despNo(d), detail_key:"dc|"+d.id+"|"+d.status, owed_by_role:role, days_waiting:dw||null, urgency: dw>=2 ? "overdue" : "due", source:"despatch_dc" });
+  });
+  const { data: gps } = await sb.from("gate_pass_tbl").select("*").neq("status","Cancelled");
+  (gps||[]).forEach(g=>{
+    if(g.status==="Open" && days(g.created_at)>=2) to(P.stores, { what:"Gate pass "+g.gp_no+" ("+(g.vehicle_no||"")+") — has the truck left? Record the exit", entity_key:g.gp_no, detail_key:"gp-exit", owed_by_role:"stores", days_waiting:days(g.created_at), urgency:"overdue", source:"despatch_gp" });
+    if(g.status==="Exited" && !g.scan_link) to(P.stores, { what:"Gate pass "+g.gp_no+" — paste the link to the signed, scanned security copy", entity_key:g.gp_no, detail_key:"gp-scan", owed_by_role:"stores", days_waiting:days(g.exit_at)||null, urgency: days(g.exit_at)>=2 ? "overdue" : "due", source:"despatch_gp" });
+  });
+  // LUT: March = renew for next year (due); a new year without its LUT = overdue.
+  const S = await despSettings();
+  if(!S._missing && (S.lut_no || S.lut_fy)){
+    const nowFy = despFyLong(), m = new Date().getMonth()+1;
+    const who = Array.from(new Set([...P.acc, ...P.supers]));
+    if(S.lut_fy!==nowFy && S.lut_fy!==despNextFyLong()) to(who, { what:"LUT for "+nowFy+" not entered — export documents print the "+(S.lut_fy||"old")+" LUT (Despatch Settings & LUT)", entity_key:"LUT", detail_key:"lut|"+nowFy, owed_by_role:"accounts", days_waiting:null, urgency:"overdue", source:"despatch_lut" });
+    else if(m===3 && S.lut_fy===nowFy) to(who, { what:"Renew the LUT for "+despNextFyLong()+" before 1 April and enter it in Despatch Settings & LUT", entity_key:"LUT", detail_key:"lut|"+despNextFyLong(), owed_by_role:"accounts", days_waiting:null, urgency:"due", source:"despatch_lut" });
+  }
+  return out;
 }
 
 function PendingActionsScreen({ user }){
@@ -50402,6 +51559,8 @@ function PendingActionsScreen({ user }){
         if(q.urgency==="overdue") heads.filter(p=>p!==q.owner).forEach(p=>extra.push({ ...base, what:"Escalated: "+base.what+" — built by "+(q.owner||"unknown"), owed_by_person:p }));
       });
     }catch(e){ console.error("Draft quotes not read", e); }
+    // 10 Oct 2026 — despatch: DCs waiting at each step, gate passes, the LUT.
+    try{ (await despPendingItems()).forEach(x=>extra.push(x)); }catch(e){ console.error("Despatch pending items", e); }
     setRows([...(data||[]), ...extra]);
     setLoading(false);
   },[user?.username]);
