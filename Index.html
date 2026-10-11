@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-10T16:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-10T18:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -2126,7 +2126,7 @@ function MenuTabs({ user, active, onChange }) {
   const salesSubgroups = (isApprovalRole && !isAdmin && !isHrAdmin) ? [
     { label:"Sale Order", tabs:[{key:"sale_order_entry",label:"Sale Order"}] },
   ] : [
-    { label:"Enquiry", tabs:[{key:"quote_register",label:"Quote Register"},{key:"enquiries_list",label:"Enquiries"}] },   // 129: moved in from its own top-level tab; 137: Quote Register
+    { label:"Enquiry", tabs:[{key:"quote_register",label:"Quote Register"},{key:"contract_register",label:"Contract Register"},{key:"enquiries_list",label:"Enquiries"}] },   // 168: Contract Register next to the Quote Register   // 129: moved in from its own top-level tab; 137: Quote Register
     ...(canSeeValvePrice(user)?[{ label:"Pricelist", tabs:[{key:"valve_price",label:"Valve Price List"}] }]:[]),   // 136 Build 5: was its own top-level tab
     { label:"Quotes", tabs:[{key:"saved",label:"Quotes"}, ...(isAdmin?[{key:"datasheet_master",label:"Datasheet Master"}]:[])] },   // 129: Datasheet Master moved here from Engineering master
     { label:"Sale Order", tabs:[{key:"sale_order_entry",label:"Sale Order"}] },
@@ -14457,7 +14457,9 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       alert("Contract Numbering hasn't been set up yet. An Admin needs to set the starting Contract Number first (Admin → Contract Numbering) before any Sale Order can be created.");
       return;
     }
-    const typed = prompt("Contract Number (6 digits — YY + 4-digit sequence):", suggested);
+    // 168: the number is given automatically; only a Super Admin may type another
+    const typed = user?.role==="super_admin" ? prompt("Contract Number (6 digits — YY + 4-digit sequence). Given automatically; change it only to make the Sale Order of a legacy contract:", suggested)
+      : (confirm("This Sale Order becomes contract "+suggested+".\n\nOK to continue?") ? suggested : null);
     if(typed===null) return;
     const contractNumber = typed.trim();
     if(!CONTRACT_NUMBER_RE.test(contractNumber)){ alert("Contract Number must be exactly 6 digits (YY + 4-digit sequence)."); return; }
@@ -23401,15 +23403,21 @@ async function cloneQuoteIntoContract(quoteRef, contractNumber, customerName, us
 // prompts for the one-time setup instead of guessing a starting point.
 const CONTRACT_NUMBER_RE = /^\d{6}$/;
 async function suggestNextContractNumber(){
-  const [{ data: cfg }, { data: contracts }] = await Promise.all([
+  // 168: also counts the Contract Register (legacy contracts loaded from the old Excel), and starts
+  // a new series every calendar year: 260169 … then 270001 from 1 January 2027.
+  const [{ data: cfg }, { data: contracts }, reg] = await Promise.all([
     sb.from("contract_number_config_tbl").select("*").order("id",{ascending:false}).limit(1).maybeSingle(),
-    sb.from("sale_order_tbl").select("contract_number")
+    sb.from("sale_order_tbl").select("contract_number"),
+    (async()=>{ try{ const { data, error } = await sb.from("contract_register_tbl").select("contract_number"); return error ? [] : (data||[]); }catch(e){ return []; } })()
   ]);
+  const yy = String(new Date().getFullYear()%100).padStart(2,"0");
   const cfgVal = cfg && CONTRACT_NUMBER_RE.test(String(cfg.next_suggested_number||"").trim()) ? Number(String(cfg.next_suggested_number).trim()) : null;
-  const existing = (contracts||[]).map(r=>String(r.contract_number||"").trim()).filter(v=>CONTRACT_NUMBER_RE.test(v)).map(Number);
-  const afterExisting = existing.length ? Math.max(...existing)+1 : null;
-  const best = Math.max(cfgVal||0, afterExisting||0);
-  return best>0 ? String(best).padStart(6,"0") : null;
+  const existing = [...(contracts||[]), ...reg].map(r=>String(r.contract_number||"").trim()).filter(v=>CONTRACT_NUMBER_RE.test(v));
+  if(!existing.length && !cfgVal) return null;
+  const thisYear = existing.filter(v=>v.slice(0,2)===yy).map(Number);
+  let best = thisYear.length ? Math.max(...thisYear)+1 : Number(yy+"0001");
+  if(cfgVal && String(cfgVal).padStart(6,"0").slice(0,2)===yy) best = Math.max(best, cfgVal);
+  return String(best).padStart(6,"0");
 }
 async function advanceContractNumberSuggestion(usedNumber, username){
   const n = Number(usedNumber);
@@ -23704,7 +23712,10 @@ function SaleOrderContractPicker({ user, onOpenContract }){
   const checkAddNumberDup = async(num)=>{
     if(!CONTRACT_NUMBER_RE.test(num)) { setDupError(null); return; }
     const { data } = await sb.from("sale_order_tbl").select("contract_number,customer_name").eq("contract_number",num).maybeSingle();
-    setDupError(data||null);
+    if(data){ setDupError(data); return; }
+    try{ const { data: lg } = await sb.from("contract_register_tbl").select("contract_number,client,source").eq("contract_number",num).maybeSingle();   // 168
+      if(lg){ setDupError({ contract_number:lg.contract_number, customer_name:lg.client, legacy:true }); return; } }catch(e){}
+    setDupError(null);
   };
 
   // PO/LOI gate (22 Sep): the customer's order document is asked for
@@ -23838,9 +23849,11 @@ function SaleOrderContractPicker({ user, onOpenContract }){
         showAdd && h("div",{style:{borderTop:"1px solid "+colors.border,paddingTop:14,marginTop:showNoMatchPrompt?0:14}},
           h("div",{style:{fontSize:12,fontWeight:700,marginBottom:8}},"Add New Contract"),
           h("label",{style:{display:"block",fontSize:10.5,color:colors.muted,marginBottom:4}},"Contract Number"),
-          h("input",{value:addNumber,onChange:e=>{ setAddNumber(e.target.value); checkAddNumberDup(e.target.value.trim()); },style:{...inputStyle,padding:"7px 9px",width:"100%",boxSizing:"border-box",marginBottom:4}}),
-          h("div",{style:{fontSize:10,color:colors.mutedLight,marginBottom:12}},"6 digits — YY + 4-digit sequence. Suggested next shown by default; if you type one that already exists, you'll be offered that Contract instead of creating a duplicate."),
-          dupError && h("div",{style:{background:"#fdecea",border:"1px solid #f3c6c1",borderRadius:6,padding:"9px 11px",marginBottom:12,fontSize:11.5,color:"#a3312a"}},
+          h("input",{value:addNumber,readOnly:user?.role!=="super_admin",onChange:e=>{ setAddNumber(e.target.value); checkAddNumberDup(e.target.value.trim()); },style:{...inputStyle,padding:"7px 9px",width:"100%",boxSizing:"border-box",marginBottom:4,...(user?.role!=="super_admin"?{background:"#f4f2ea",fontWeight:700}:{})}}),
+          h("div",{style:{fontSize:10,color:colors.mutedLight,marginBottom:12}}, user?.role==="super_admin" ? "Given automatically: the next number after every contract in the app and the Contract Register (YY + 4-digit sequence, a new series each year). Only a Super Admin can type another — e.g. to make the Sale Order of a legacy contract." : "Given automatically: the next number after every contract in the app and the Contract Register."),
+          dupError && dupError.legacy && h("div",{style:{background:"#fff4d6",border:"1px solid #f0d9a0",borderRadius:6,padding:"9px 11px",marginBottom:12,fontSize:11.5,color:"#854f0b"}},
+            h("b",null,"Contract "+dupError.contract_number+" is a legacy contract")," in the Contract Register — "+(dupError.customer_name||"—")+". Creating the Sale Order joins it to that contract."),
+          dupError && !dupError.legacy && h("div",{style:{background:"#fdecea",border:"1px solid #f3c6c1",borderRadius:6,padding:"9px 11px",marginBottom:12,fontSize:11.5,color:"#a3312a"}},
             h("b",null,"Contract "+dupError.contract_number+" already exists")," — "+(dupError.customer_name||"—")+". ",
             h("span",{onClick:()=>openExisting(dupError),style:{textDecoration:"underline",cursor:"pointer",fontWeight:600}},"Open it instead →")
           ),
@@ -27307,6 +27320,43 @@ const MANUAL_SECTIONS = [
         ]
       },
       {
+        "key": "contract_register",
+        "title": "Contract Register \u2014 every contract, with its quotation",
+        "tag": "Sales \u2192 Enquiry \u2192 Contract Register",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "One row per contract. A contract made in the app from its won quote (Sale Order) appears here by itself. The contracts of the old Excel register were loaded once and are marked Legacy. From now on the register is kept here \u2014 there are no more Excel uploads."
+          },
+          {
+            "type": "steps",
+            "items": [
+              "A new contract always starts from its won quote: + New contract takes you to the Sale Order screen. The contract number is given automatically \u2014 the next after every contract in the app and the register, a new series each year (260169 \u2026 then 270001 from 1 January 2027). Only a Super Admin can type another number, for example to make the Sale Order of a legacy contract.",
+              "Click a row to open the contract. Status: Pending, On Hold, Closed or Cancelled \u2014 On Hold and Cancelled ask for a reason. TPI (Yes / No and the agency), the material certificate (EN 10204 3.1 or 3.2) and remarks are kept here; 3.2 without TPI is flagged.",
+              "Items and despatch schedule: every item line has its own despatch date. On a contract made from a quote, the items, prices, client, PO, currency and terms come from the Sale Order and are changed there; only the dates, status, TPI, certificate and remarks are changed here.",
+              "On a legacy contract everything can be filled in or corrected: quotation number (optional), client, PO, currency and rate, terms, end user, and the items themselves (qty, rate, value; a discount as a minus line)."
+            ]
+          },
+          {
+            "type": "p",
+            "text": "Values: Value (INR) for rupee orders, Value (USD) for dollar orders, and Value in INR for all orders \u2014 a dollar order converted at its own rate. The strip at the top is the order intake by month for the financial year, with the running total; cancelled contracts are left out."
+          },
+          {
+            "type": "tip",
+            "text": "The old register had no currency, so every legacy contract was loaded in INR. Tick Check currency to list the INR contracts whose client is outside India, and set USD and the rate where the order was in dollars."
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "\u25b8 on a row shows its items; Item lines shows every line, the way Sheet1 of the old Excel did.",
+              "Columns \u25be adds Items, Payment terms, Despatch schedule, End user, TPI, Material certificate, Freight, Incoterm and Legacy ref (remembered on your computer).",
+              "Download Excel gives the list in the register layout, one row per item, so it can be laid beside the team's own sheet while both are kept.",
+              "Super Admins, admins, the Document Controller and the Sales Coordinator can change contracts; everyone else can view. Every change is kept in the contract's History."
+            ]
+          }
+        ]
+      },
+      {
         "key": "quote_register",
         "title": "Quote Register \u2014 Quote# first, then the enquiry",
         "tag": "Sales \u2192 Enquiry \u2192 Quote Register / CRM \u2192 CRM Setup \u2192 Register Tabs & People",
@@ -28673,6 +28723,42 @@ const MANUAL_TA = {
   ],
   "en_sig": "54e72b83"
  },
+ "contract_register": {
+  "title": "Contract Register \u2014 \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 contract-\u0b89\u0bae\u0bcd, \u0b85\u0ba4\u0ba9\u0bcd quotation-\u0b89\u0b9f\u0ba9\u0bcd",
+  "blocks": [
+   {
+    "type": "p",
+    "text": "\u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 contract-\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0b92\u0bb0\u0bc1 \u0bb5\u0bb0\u0bbf. Won quote-\u0b87\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 app-\u0b87\u0bb2\u0bcd \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0baa\u0bcd\u0baa\u0b9f\u0bcd\u0b9f contract (Sale Order) \u0ba4\u0bbe\u0ba9\u0bbe\u0b95 \u0b87\u0b99\u0bcd\u0b95\u0bc7 \u0bb5\u0bb0\u0bc1\u0bae\u0bcd. \u0baa\u0bb4\u0bc8\u0baf Excel register-\u0b87\u0ba9\u0bcd contracts \u0b92\u0bb0\u0bc1 \u0bae\u0bc1\u0bb1\u0bc8 \u0b8f\u0bb1\u0bcd\u0bb1\u0baa\u0bcd\u0baa\u0b9f\u0bcd\u0b9f\u0ba9; \u0b85\u0bb5\u0bc8 Legacy \u0b8e\u0ba9\u0b95\u0bcd \u0b95\u0bc1\u0bb1\u0bbf\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bc1\u0bae\u0bcd. \u0b87\u0ba9\u0bbf register \u0b87\u0b99\u0bcd\u0b95\u0bc7\u0baf\u0bc7 \u0baa\u0bb0\u0bbe\u0bae\u0bb0\u0bbf\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bc1\u0bae\u0bcd \u2014 Excel upload \u0b87\u0ba9\u0bbf \u0b87\u0bb2\u0bcd\u0bb2\u0bc8."
+   },
+   {
+    "type": "steps",
+    "items": [
+     "\u0baa\u0bc1\u0ba4\u0bbf\u0baf contract \u0b8e\u0baa\u0bcd\u0baa\u0bcb\u0ba4\u0bc1\u0bae\u0bcd won quote-\u0b87\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc7 \u0ba4\u0bca\u0b9f\u0b99\u0bcd\u0b95\u0bc1\u0bae\u0bcd: + New contract \u0b89\u0b99\u0bcd\u0b95\u0bb3\u0bc8 Sale Order \u0ba4\u0bbf\u0bb0\u0bc8\u0b95\u0bcd\u0b95\u0bc1 \u0b85\u0bb4\u0bc8\u0ba4\u0bcd\u0ba4\u0bc1\u0b9a\u0bcd \u0b9a\u0bc6\u0bb2\u0bcd\u0bb2\u0bc1\u0bae\u0bcd. Contract \u0b8e\u0ba3\u0bcd \u0ba4\u0bbe\u0ba9\u0bbe\u0b95 \u0bb5\u0bb4\u0b99\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bc1\u0bae\u0bcd \u2014 app \u0bae\u0bb1\u0bcd\u0bb1\u0bc1\u0bae\u0bcd register-\u0b87\u0bb2\u0bcd \u0b89\u0bb3\u0bcd\u0bb3 \u0b95\u0b9f\u0bc8\u0b9a\u0bbf \u0b8e\u0ba3\u0bcd\u0ba3\u0bc1\u0b95\u0bcd\u0b95\u0bc1 \u0b85\u0b9f\u0bc1\u0ba4\u0bcd\u0ba4\u0ba4\u0bc1; \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 \u0b86\u0ba3\u0bcd\u0b9f\u0bc1\u0bae\u0bcd \u0baa\u0bc1\u0ba4\u0bbf\u0baf \u0bb5\u0bb0\u0bbf\u0b9a\u0bc8 (260169 \u2026 \u0baa\u0bbf\u0ba9\u0bcd 1 \u0b9c\u0ba9\u0bb5\u0bb0\u0bbf 2027 \u0bae\u0bc1\u0ba4\u0bb2\u0bcd 270001). Super Admin \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bc7 \u0bb5\u0bc7\u0bb1\u0bc1 \u0b8e\u0ba3\u0bcd type \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bb2\u0bbe\u0bae\u0bcd (\u0b89.\u0ba4\u0bbe. legacy contract-\u0b87\u0ba9\u0bcd Sale Order).",
+     "\u0bb5\u0bb0\u0bbf\u0baf\u0bc8 click \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bc1 contract-\u0b90\u0ba4\u0bcd \u0ba4\u0bbf\u0bb1\u0b95\u0bcd\u0b95\u0bb5\u0bc1\u0bae\u0bcd. Status: Pending, On Hold, Closed, Cancelled \u2014 On Hold, Cancelled-\u0b95\u0bcd\u0b95\u0bc1 \u0b95\u0bbe\u0bb0\u0ba3\u0bae\u0bcd \u0b95\u0bc7\u0b9f\u0bcd\u0b95\u0bc1\u0bae\u0bcd. TPI (Yes / No, agency), material certificate (EN 10204 3.1 \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 3.2), remarks \u0b87\u0b99\u0bcd\u0b95\u0bc7; TPI \u0b87\u0bb2\u0bcd\u0bb2\u0bbe\u0bae\u0bb2\u0bcd 3.2 \u0b8e\u0ba9\u0bcd\u0bb1\u0bbe\u0bb2\u0bcd \u0b8e\u0b9a\u0bcd\u0b9a\u0bb0\u0bbf\u0b95\u0bcd\u0b95\u0bc8.",
+     "Items \u0bae\u0bb1\u0bcd\u0bb1\u0bc1\u0bae\u0bcd despatch schedule: \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 item \u0bb5\u0bb0\u0bbf\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0ba4\u0ba9\u0bbf despatch \u0ba4\u0bc7\u0ba4\u0bbf. Quote-\u0b87\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 \u0b9a\u0bc6\u0baf\u0bcd\u0ba4 contract-\u0b87\u0bb2\u0bcd items, \u0bb5\u0bbf\u0bb2\u0bc8, client, PO, currency, terms \u0b8e\u0bb2\u0bcd\u0bb2\u0bbe\u0bae\u0bcd Sale Order-\u0b87\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 \u2014 \u0b85\u0b99\u0bcd\u0b95\u0bc7\u0baf\u0bc7 \u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bb5\u0bc1\u0bae\u0bcd; \u0ba4\u0bc7\u0ba4\u0bbf\u0b95\u0bb3\u0bcd, status, TPI, certificate, remarks \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd \u0b87\u0b99\u0bcd\u0b95\u0bc7.",
+     "Legacy contract-\u0b87\u0bb2\u0bcd \u0b8e\u0bb2\u0bcd\u0bb2\u0bbe\u0bb5\u0bb1\u0bcd\u0bb1\u0bc8\u0baf\u0bc1\u0bae\u0bcd \u0ba8\u0bbf\u0bb0\u0baa\u0bcd\u0baa\u0bb2\u0bbe\u0bae\u0bcd / \u0ba4\u0bbf\u0bb0\u0bc1\u0ba4\u0bcd\u0ba4\u0bb2\u0bbe\u0bae\u0bcd: quotation \u0b8e\u0ba3\u0bcd (\u0bb5\u0bbf\u0bb0\u0bc1\u0bae\u0bcd\u0baa\u0bbf\u0ba9\u0bbe\u0bb2\u0bcd), client, PO, currency \u0bae\u0bb1\u0bcd\u0bb1\u0bc1\u0bae\u0bcd rate, terms, end user, items (qty, rate, value; discount \u0b8e\u0ba9\u0bcd\u0bb1\u0bbe\u0bb2\u0bcd minus \u0bb5\u0bb0\u0bbf)."
+    ]
+   },
+   {
+    "type": "p",
+    "text": "\u0bae\u0ba4\u0bbf\u0baa\u0bcd\u0baa\u0bc1\u0b95\u0bb3\u0bcd: rupee order-\u0b95\u0bcd\u0b95\u0bc1 Value (INR), dollar order-\u0b95\u0bcd\u0b95\u0bc1 Value (USD), \u0b85\u0ba9\u0bc8\u0ba4\u0bcd\u0ba4\u0bc1 order-\u0b95\u0bb3\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd Value in INR \u2014 dollar order \u0b85\u0ba4\u0ba9\u0bcd \u0b9a\u0bca\u0ba8\u0bcd\u0ba4 rate-\u0b87\u0bb2\u0bcd. \u0bae\u0bc7\u0bb2\u0bc7 \u0b89\u0bb3\u0bcd\u0bb3 strip \u0ba8\u0bbf\u0ba4\u0bbf\u0baf\u0bbe\u0ba3\u0bcd\u0b9f\u0bbf\u0ba9\u0bcd \u0bae\u0bbe\u0ba4\u0bbe\u0ba8\u0bcd\u0ba4\u0bbf\u0bb0 order intake, running total \u0b89\u0b9f\u0ba9\u0bcd; Cancelled \u0b9a\u0bc7\u0bb0\u0bcd\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bbe\u0ba4\u0bc1."
+   },
+   {
+    "type": "tip",
+    "text": "\u0baa\u0bb4\u0bc8\u0baf register-\u0b87\u0bb2\u0bcd currency \u0b87\u0bb2\u0bcd\u0bb2\u0bc8, \u0b8e\u0ba9\u0bb5\u0bc7 legacy contracts \u0b85\u0ba9\u0bc8\u0ba4\u0bcd\u0ba4\u0bc1\u0bae\u0bcd INR-\u0b87\u0bb2\u0bcd \u0b8f\u0bb1\u0bcd\u0bb1\u0baa\u0bcd\u0baa\u0b9f\u0bcd\u0b9f\u0ba9. Check currency-\u0b90 tick \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd \u0b87\u0ba8\u0bcd\u0ba4\u0bbf\u0baf\u0bbe\u0bb5\u0bc1\u0b95\u0bcd\u0b95\u0bc1 \u0bb5\u0bc6\u0bb3\u0bbf\u0baf\u0bc7 \u0b89\u0bb3\u0bcd\u0bb3 client-\u0b87\u0ba9\u0bcd INR contracts \u0bb5\u0bb0\u0bc1\u0bae\u0bcd; dollar order \u0b8e\u0ba9\u0bcd\u0bb1\u0bbe\u0bb2\u0bcd USD \u0bae\u0bb1\u0bcd\u0bb1\u0bc1\u0bae\u0bcd rate-\u0b90 \u0b85\u0bae\u0bc8\u0b95\u0bcd\u0b95\u0bb5\u0bc1\u0bae\u0bcd."
+   },
+   {
+    "type": "bullets",
+    "items": [
+     "\u0bb5\u0bb0\u0bbf\u0baf\u0bbf\u0bb2\u0bcd \u25b8 items-\u0b90\u0b95\u0bcd \u0b95\u0bbe\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd; Item lines \u0baa\u0bb4\u0bc8\u0baf Excel Sheet1 \u0baa\u0bcb\u0bb2 \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 \u0bb5\u0bb0\u0bbf\u0baf\u0bc8\u0baf\u0bc1\u0bae\u0bcd \u0b95\u0bbe\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd.",
+     "Columns \u25be: Items, Payment terms, Despatch schedule, End user, TPI, Material certificate, Freight, Incoterm, Legacy ref (\u0b89\u0b99\u0bcd\u0b95\u0bb3\u0bcd computer-\u0b87\u0bb2\u0bcd \u0ba8\u0bbf\u0ba9\u0bc8\u0bb5\u0bbf\u0bb2\u0bcd \u0b87\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd).",
+     "Download Excel register layout-\u0b87\u0bb2\u0bcd, \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 item-\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0b92\u0bb0\u0bc1 \u0bb5\u0bb0\u0bbf \u2014 team-\u0b87\u0ba9\u0bcd sheet-\u0b89\u0b9f\u0ba9\u0bcd \u0b92\u0baa\u0bcd\u0baa\u0bbf\u0b9f.",
+     "Super Admins, admins, Document Controller, Sales Coordinator \u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bb2\u0bbe\u0bae\u0bcd; \u0bae\u0bb1\u0bcd\u0bb1\u0bb5\u0bb0\u0bcd\u0b95\u0bb3\u0bcd \u0baa\u0bbe\u0bb0\u0bcd\u0b95\u0bcd\u0b95 \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd. \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 \u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bc1\u0bae\u0bcd History-\u0b87\u0bb2\u0bcd."
+    ]
+   }
+  ],
+  "en_sig": "a12c67dc"
+ },
  "tax_invoice": {
   "title": "\u0b85\u0b99\u0bcd\u0b95\u0bc0\u0b95\u0bb0\u0bbf\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bcd\u0b9f DC-\u0baf\u0bbf\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 Tax invoice",
   "blocks": [
@@ -28838,6 +28924,8 @@ function downloadManualPdf(){
 // added to over time; not wired to a database table yet, so edits currently
 // mean updating this array directly.
 const FAQ_ENTRIES = [
+  { q:"How do I add a new contract to the Contract Register?", a:"Make it from its won quote on the Sale Order screen (+ New contract in the register takes you there). The contract number is given automatically and the contract appears in the register by itself. Old contracts from the Excel register are already loaded and marked Legacy." },
+  { q:"Why does a legacy contract show a ? next to INR?", a:"The old register had no currency, so every legacy contract was loaded in INR. The ? means the client is outside India: open the contract and, if the order was in dollars, set the currency to USD and enter the rate." },
   { q:"How do I filter the Quotes Report by several regions or countries?", a:"Click Region, Country, State or City \u2014 each drops down into a list. Click every entry you want (Shift-click picks a run), then OK. The lists narrow left to right. Press Apply filters: the list opens full screen with the filters as badges along the top; \u00d7 on a badge removes it, Change filters (or Esc) goes back to the boxes." },
   { q:"Where do I make a tax invoice?", a:"Accounts \u2192 Billing \u2192 Tax Invoices. An invoice is made only from an approved sale DC (Make invoice) and carries the DC's number. Check it, press Ready for IRN, upload it to the IRP, then Enter IRN and issue." },
   { q:"An export invoice says there is no LUT.", a:"The invoice prints the LUT of its own date's financial year. Enter that year's LUT in Order Status \u2192 Despatch \u2192 Despatch Settings & LUT (+ LUT for the year), then save the invoice again." },
@@ -28924,6 +29012,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"10 Oct 2026 (168)", summary:"Built on 2026-10-10T18:00:00Z, on top of 16:30. SQL: structure_contract_register_2026-10-10.sql (both companies), then data_contract_register_load_FLOMETRIQ_2026-10-10.sql (Flometriq only: 304 contracts, 892 item lines from the corrected register with the team's 7 answers and the 2025 recheck applied). CONTRACT REGISTER, Sales \u2192 Enquiry, next to the Quote Register (contract_register_tbl, contract_register_line_tbl, contract_line_due_tbl, contract_register_hist_tbl). One row per contract: Sale Order contracts (from the won quote, read live: client, PO, currency and rate, value from the value snapshot, terms, end user, items with prices worked out on opening) and Legacy contracts loaded from the old register (everything editable). Columns: Contract, Quotation No (link; Legacy tag on loaded ones \u2014 the old Ref No is kept only as Legacy ref), PO date, client, PO No, Items, Ccy \u00b7 rate, Value (INR), Value (USD), Value in INR for all orders, Status, Made from; optional (Columns \u25be, remembered per computer): Payment terms, Despatch schedule, End user, TPI, Material certificate, Freight, Incoterm, Legacy ref. Status Pending / On Hold / Closed / Cancelled (reason for Hold and Cancel); TPI + agency; EN 10204 3.1 / 3.2 (3.2 without TPI flagged); despatch date per item line (multiline). \u25b8 shows a contract's items; Item lines view = one row per line. Filters: financial year, status, search, Check currency (legacy INR contracts whose client is outside India). Month strip of order intake in rupees with the running total. Download Excel in register layout. History of every change. Edit: Super Admin, admin, Document Controller and Sales Coordinator posts; others view. CONTRACT NUMBER now automatic: suggestNextContractNumber counts the register too and starts a new series every calendar year (YY0001); the Add new contract box and the quote screen no longer ask for it (a Super Admin may still type one, e.g. to make the Sale Order of a legacy contract \u2014 the two join by number). + New contract opens the Sale Order screen, so every new contract comes from its won quote. Manual: Contract Register article (English and Tamil); 2 FAQs." },
   { date:"10 Oct 2026 (167)", summary:"Built on 2026-10-10T16:30:00Z, on top of 15:30 (invoice build). No SQL. QUOTES REPORT \u2014 PLACE FILTERS: Region (Zone), Country, State and City are now four drop-downs that open into Access-style multi-select lists (MultiPickDrop): click to pick or clear, Shift-click a run, arrow keys + Space, Select all / Clear / OK, closes on Esc or a click outside; each entry shows how many quotes it has; the closed box shows the picks (\u201cTamil Nadu + 2 more\u201d). The entries come from the quotes in the report (latest revisions unless All revisions). CASCADING left to right: Region narrows Country, Region + Country narrow State, all three narrow City; a pick that drops out of a narrowed list is cleared. BRANCH RULE: a pick narrows only its own branch \u2014 Tamil Nadu narrows India to Tamil Nadu while UAE and Oman stay whole; Dubai narrows UAE while Oman stays whole (qrPassPlaces). Dashboard click-throughs ({zone}) still work (qrNormPlaces). APPLY \u2192 FULL SCREEN: Apply filters (after the sort question) opens the report full screen with a strip of badges showing every filter in force (\u00d7 removes one); the filter boxes are hidden there; Change filters (or Esc) leaves full screen. Manual: Quotes Report paragraph; 1 FAQ." },
   { date:"10 Oct 2026 (166)", summary:"Built on 2026-10-10T15:30:00Z (replaces 15:00, which printed DC / gate pass / invoice PDFs without the logo when the first company in Company Master had none: these PDFs now take the company picked at login, else the first company with a logo). SQL, in order, on BOTH companies unless marked: structure_despatch_dc_gatepass_2026-10-10.sql (if not yet run), structure_lut_register_settings_history_2026-10-10.sql, data_lut_register_settings_history_2026-10-10.sql (Flometriq only), structure_invoice_2026-10-10.sql, data_invoice_bank_2026-10-10.sql (Flometriq only). (1) TAX INVOICE, new menu Accounts → Billing → Tax Invoices (also for accounts_admin). Made only from an approved, numbered (not test) sale DC, one per DC, same number (invoice_tbl, invoice_line_tbl). Draft fills from the DC and contract: Bill To, Deliver To, notify / handoff (export), PO / OA dates, terms, unit price per Sl No from computeSlNoPricing (PO price exact in its own currency, else the offer rounding), HSN from the item. P&F per the contract: Percentage of this invoice's basic (follows a price edit), Lumpsum shared by value and capped by what is left, the rest on the last shipment. Freight / insurance recovered typed. Domestic: GST from sale_order_tbl.gst_components_snapshot on the taxable value, place of supply from the buyer GSTIN state code (GST_STATES), warning when CGST+SGST goes to another state or IGST within the state; round off to the rupee; HSN summary. Export: contract currency, ₹ rate from the contract (editable), no tax, LUT of the invoice date's financial year from lut_register_tbl, IEC, ports, destination, shipping bill. Amount in words (lakh / crore for INR, million for others). A unit price changed from the contract needs a reason (line Edited, audit log). (2) STATES: Draft → Ready for IRN (checks HSN, GST structure / LUT, fx, place of supply; B2C confirm without GSTIN) → Enter IRN and issue (IRN 64 hex, unique; Ack No; Ack date; signed QR text) → Issued and locked; e-way bill, vehicle and shipping bill stay editable. Back to draft / Discard draft before the IRN; Record IRN cancellation after (reason) → Cancelled. (3) POSTING QUEUE (posting_queue_tbl, SOP 4.3): each issued invoice → To post; cancellation → Withdrawn. (4) PDF: three copies (Original for Recipient / Duplicate for Transporter / Triplicate for Supplier; export Original for Buyer), letterhead, IRN block with QR from the signed QR (qrcode-generator 1.4.4, loaded only when needed), LUT endorsement, bank with SWIFT, INR equivalent, DRAFT / CANCELLED watermark. (5) REGISTER: Download Excel per month (taxable, CGST, SGST, IGST, round off, totals, IRN, e-way, shipping bill). (6) DESPATCH SETTINGS & LUT rebuilt: LUT register (one row per year, ARN, filed on, drive link to the acknowledgement, Correct with reason keeping the old number); our details now with bank and IEC; a change asks the effective date and reason and is kept in billing_settings_hist_tbl; documents take the details in force on their date (invSettingsAt). Each DC copies GSTIN / PAN / state / factory / LUT on approval (despSnapshotDc). (7) PENDING ACTIONS (Accounts): approved DC without invoice over 1 day; draft not made ready; waiting for IRN; domestic over ₹50,000 without e-way bill; export without shipping bill after 7 days; LUT from the register (current year missing = overdue; in March, next year missing = due) to Accounts + super admins. Manual: Sale Order → Tax invoice from an approved DC (English and Tamil); the Despatch article's LUT section updated; 2 FAQs." },
   { date:"10 Oct 2026 (165)", summary:"Built on 2026-10-10T08:45:00Z. SQL: structure_despatch_dc_gatepass_2026-10-10.sql (both companies; seeds Flometriq's GSTIN / LUT only on Flometriq). DESPATCH, Order Status \u2192 Despatch. (1) DESPATCH DETAILS per contract (contract_despatch_tbl, with history): ship-to contact / address / phone (default: the Sale Order's shipping address), export also mode of shipment (Sea / Air / Courier / Road) and notify / handoff (No skips; Yes asks contact and address). Panel on the Sale Order; asked on the first DC of a contract when missing; domestic = ship-to only. (2) ACCOUNTS HEAD CARD: approving the Commercial Terms creates \u201cDespatch details \u2014 contract\u201d for the Accounts Head post, due +3 days, with sub-tasks Confirm shipping address (+ mode, export) and Notify / handoff (export); they tick themselves when the details are saved (task_tbl.despatch_contract / despatch_part). (3) SALE DC (dc_tbl, dc_line_tbl, dc_serial_tbl, dc_box_tbl, dc_box_line_tbl, dc_history_tbl): lines from the contract Sl Nos with ordered / on other DCs / balance \u2014 never more than the balance (checked again when Accounts approves); product serials YY-NNNNNNN with Fill from a start number, each editable, No serial per line, unique across all DCs (database index); packing by box (mode, L\u00d7W\u00d7H mm, packing kg, contents with kg per item) = the packing slip; readiness tick in place of the stores / production gateway. Sequential: Stores \u2192 Production Manager (Present to QC) \u2192 QC (consents) \u2192 Production Manager (Send to Accounts) \u2192 Accounts (Approve and number); send back with a reason at any step; cancel with a reason (approved: number stays used; serials released). Posts decide who acts (stores, production_manager, qc, accounts; qc / accounts_admin logins too); admins may act at any step. (4) NUMBERS (doc_series_tbl): DC draft D/26-27/0001; on approval the bill number FFI/0081/26-27 (prefix in settings), the same number the invoice will carry; first time each year Accounts types the starting number (confirmed); \u201cIs this a test?\u201d asked on each approval until someone answers No \u2014 a test DC gets TEST-n, uses no number and can be rolled back. (5) GATE PASS (gate_pass_tbl): several approved DCs on one truck, vehicle / transporter / LR / driver, GP/26-27/0001, PDF with two copies (security and office); Record exit (time from the signed copy) makes the DCs Despatched; scan link can follow. (6) PDFs: DC (no values; Bill To / Deliver To / Notify-Handoff; serial ranges; DRAFT / TEST watermark), packing slip (landscape, serials split box by box, net / gross / volume, shipping marks for export), gate pass. (7) SETTINGS & LUT (billing_settings_tbl): GSTIN, PAN, state, factory address, bill prefix, LUT no and year; March: Pending Action to Accounts + super admins to renew; from April overdue if not entered. (8) PENDING ACTIONS: DCs at each step owed by that post; DC sent back \u2192 Stores; approved DC without gate pass \u2192 Stores; gate pass not exited / no scan link \u2192 Stores; LUT. Manual: Sale Order \u2192 Despatch (English and Tamil). The invoice comes next build." },
@@ -45992,6 +46081,8 @@ function App() {
       openTaskId: (enqNav&&enqNav.taskId) || myDayTaskId, onBackToEnquiry: enqNav ? ()=>{ setEnqNav(n=>n?{enqId:n.enqId,back:true}:null); setTab("enquiries_list"); } : null,
       onOpenQuote:(ref,slNo)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo||1});setTab("saved");},
       onStartQuote:(ref,enquiryId,prefillCustomerName)=>{ setPendingNewSlNo({reference_number:ref,item_sl_no:1,linked_enquiry_id:enquiryId,prefillCustomerName}); setTab("estimator"); } }):
+    tab==="contract_register"?h(ContractRegisterScreen,{user, onGoToTab:setTab, onOpenContract:openContract,   // 168
+      onOpenQuote:(ref)=>{setQuoteToOpen({reference_number:ref,item_sl_no:1});setTab("saved");} }):
     tab==="quote_register"?h(QuoteRegisterScreen,{user,   // 137
       onOpenQuote:(ref,slNo)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo||1});setTab("saved");},
       onStartQuote:(ref,enquiryId,prefillCustomerName)=>{ setPendingNewSlNo({reference_number:ref,item_sl_no:1,linked_enquiry_id:enquiryId,prefillCustomerName}); setTab("estimator"); },
@@ -52173,6 +52264,335 @@ async function invLutPending(P){
   if(!have.has(nowFy)) to({ what:"LUT for "+nowFy+" not entered — export invoices cannot be issued (Despatch Settings & LUT)", detail_key:"lut|"+nowFy, urgency:"overdue" });
   else if(m===3 && !have.has(nextFy)) to({ what:"Renew the LUT for "+nextFy+" before 1 April and enter it in Despatch Settings & LUT", detail_key:"lut|"+nextFy, urgency:"due" });
   return out;
+}
+
+// =====================================================================================================
+// CONTRACT REGISTER (10 Oct 2026) — Sales → Enquiry → Contract Register, next to the Quote Register.
+// One row per contract: contracts made in the app (Sale Order, from a won quote) and the contracts
+// loaded once from the old Excel register (Legacy). Kept here from now on — no more Excel uploads.
+// A new contract is made from its won quote on the Sale Order screen (number given automatically).
+// Needs structure_contract_register_2026-10-10.sql (+ the Flometriq load file).
+// =====================================================================================================
+const CR_STATUSES = ["Pending","On Hold","Closed","Cancelled"];
+const CR_TONE = { "Pending":["#fff4d6","#854f0b"], "On Hold":["#e6f1fb","#0c447c"], "Closed":["#e4f3ed","#0f6b4f"], "Cancelled":["#fdecea","#a3312a"] };
+const crPill = (s)=>{ const t = CR_TONE[s]||CR_TONE.Pending; return h("span",{style:{display:"inline-block",fontSize:11,fontWeight:700,borderRadius:9,padding:"1px 9px",background:t[0],color:t[1],whiteSpace:"nowrap"}},s||"Pending"); };
+const CR_OPT = [["items","Items (lines · qty)",true],["pay","Payment terms",false],["due","Despatch schedule",false],["endUser","End user",false],["tpi","TPI",false],["cert","Material certificate",false],["freight","Freight",false],["inco","Incoterm",false],["legacyRef","Legacy ref",false]];
+const CR_TPI_AGENCIES = ["BV","TÜV","Lloyd's","DNV","SGS","Intertek","Client's own"];
+const CR_INCOTERMS = ["EXW","FCA","FOB","CFR","CIF","CPT","CIP","DAP","DPU","DDP","Door delivery"];
+const crN0 = (v)=> Math.round(Number(v)||0).toLocaleString("en-IN");
+const crN2 = (v)=> (Number(v)||0).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+const crFyOf = (iso)=>{ if(!iso) return null; const d = new Date(String(iso).slice(0,10)+"T12:00:00"); if(isNaN(d)) return null; const y = d.getMonth()>=3 ? d.getFullYear() : d.getFullYear()-1; return y; };
+async function crCanEdit(user){
+  if(!user) return false;
+  if(user.role==="admin" || user.role==="super_admin") return true;
+  try{ await loadPostPeople(); const me = await despMe(user); return !!me && (postHolders("doc_controller").includes(me) || postHolders("sales_coordinator").includes(me)); }catch(e){ return false; }
+}
+async function crHist(cn, by, what){ try{ await sb.from("contract_register_hist_tbl").insert({ contract_number:cn, by_user:by||"unknown", what }); }catch(e){} }
+// Everything on one list: register rows + Sale Orders, joined by contract number.
+async function crLoadAll(){
+  const [reg, regLines, sos, dues] = await Promise.all([
+    fetchPaged(()=>sb.from("contract_register_tbl").select("*").order("contract_number")),
+    fetchPaged(()=>sb.from("contract_register_line_tbl").select("*").order("contract_number").order("sl")),
+    fetchPaged(()=>sb.from("sale_order_tbl").select("contract_number,customer_name,quote_reference_number,basis_number,basis_date,oa_issued_on,created_at").order("contract_number")),
+    fetchPaged(()=>sb.from("contract_line_due_tbl").select("*").order("id")),
+  ]);
+  const soNums = (sos||[]).map(s=>String(s.contract_number));
+  const est = [], snaps = [], terms = [];
+  for(let k=0;k<soNums.length;k+=150){
+    const part = soNums.slice(k,k+150);
+    const [{ data: e }, { data: s }, { data: t }] = await Promise.all([
+      sb.from("estimates").select("reference_number,item_sl_no,description,model,order_qty,currency,conversion_rate,end_user_name,po_number,po_date,tag_number").in("reference_number",part),
+      sb.from("quote_value_snapshot_tbl").select("reference_number,total_value,total_value_in_currency,currency").in("reference_number",part),
+      sb.from("quote_commercial_terms").select("reference_number,payment_term,freight,incoterms").in("reference_number",part)]);
+    est.push(...(e||[])); snaps.push(...(s||[])); terms.push(...(t||[]));
+  }
+  let countryOf = new Map();
+  try{ const cs = await fetchPaged(()=>sb.from("companies").select("company_name,billing_country").order("id")); (cs||[]).forEach(c=>{ if(c.company_name) countryOf.set(String(c.company_name).trim().toLowerCase(), String(c.billing_country||"").trim()); }); }catch(e){}
+  const regBy = new Map((reg||[]).map(r=>[String(r.contract_number), r]));
+  const linesBy = new Map(); (regLines||[]).forEach(l=>{ const k = String(l.contract_number); if(!linesBy.has(k)) linesBy.set(k,[]); linesBy.get(k).push(l); });
+  const dueBy = new Map((dues||[]).map(d=>[d.contract_number+"|"+d.item_sl_no, d.due_date]));
+  const estBy = new Map(); est.forEach(e=>{ const k = String(e.reference_number); if(!estBy.has(k)) estBy.set(k,[]); estBy.get(k).push(e); });
+  const snapBy = new Map(snaps.map(s=>[String(s.reference_number), s]));
+  const termBy = new Map(terms.map(t=>[String(t.reference_number), t]));
+  const out = [];
+  const seen = new Set();
+  (sos||[]).forEach(so=>{
+    const cn = String(so.contract_number); seen.add(cn);
+    const r = regBy.get(cn) || {}; const es = (estBy.get(cn)||[]).sort((a,b)=>a.item_sl_no-b.item_sl_no); const head = es[0]||{};
+    const ccy = String(head.currency||"INR").toUpperCase(); const fx = ccy==="INR" ? 1 : (Number(head.conversion_rate)||null);
+    const sn = snapBy.get(cn); const tm = termBy.get(cn)||{};
+    const valCcy = sn ? Number(sn.total_value_in_currency ?? sn.total_value)||0 : null;
+    out.push({ cn, source:"app", quote:so.quote_reference_number||r.quote_number||"", legacyRef:r.legacy_ref||"", client:so.customer_name||r.client||"",
+      po: so.basis_number || head.po_number || r.po_no || "", poDate: toISODate(so.basis_date || head.po_date || so.oa_issued_on || so.created_at) || r.po_date || "",
+      ccy, fx, valCcy, valInr: sn ? Number(sn.total_value)||0 : (valCcy!=null && fx ? valCcy*fx : null),
+      status:r.status||"Pending", reason:r.status_reason||"", pay:tm.payment_term||"", freight:tm.freight||"", inco:tm.incoterms||"", endUser:head.end_user_name||"",
+      tpi:r.tpi||"", tpiAgency:r.tpi_agency||"", cert:r.material_cert||"", remarks:r.remarks||"", hasReg:!!r.contract_number,
+      lines: es.map(e=>({ key:"sl:"+e.item_sl_no, sl:e.item_sl_no, d:[e.description, e.model&&!String(e.description||"").includes(e.model)?e.model:""].filter(Boolean).join(" · "), q:Number(e.order_qty)||null, r:null, v:null, due:dueBy.get(cn+"|"+e.item_sl_no)||"", est:e })),
+      checkCcy:false });
+  });
+  (reg||[]).forEach(r=>{
+    const cn = String(r.contract_number); if(seen.has(cn)) return;
+    const ls = (linesBy.get(cn)||[]).map(l=>({ key:"lg:"+l.id, id:l.id, sl:l.sl, d:l.description||"", q:l.qty!=null?Number(l.qty):null, r:l.rate!=null?Number(l.rate):null, v:l.value!=null?Number(l.value):null, due:l.due_date||"" }));
+    const ccy = String(r.currency||"INR").toUpperCase(); const fx = ccy==="INR" ? 1 : (Number(r.fx_rate)||null);
+    const valCcy = ls.reduce((n,l)=>n+(Number(l.v)||0),0);
+    const country = countryOf.get(String(r.client||"").trim().toLowerCase())||"";
+    out.push({ cn, source:r.source||"legacy", quote:r.quote_number||"", legacyRef:r.legacy_ref||"", client:r.client||"", po:r.po_no||"", poDate:r.po_date||"", poDateText:r.po_date_text||"",
+      ccy, fx, valCcy, valInr: fx ? valCcy*fx : null, status:r.status||"Pending", reason:r.status_reason||"", pay:r.payment_terms||"", freight:r.freight||"", inco:r.incoterm||"", endUser:r.end_user||"",
+      tpi:r.tpi||"", tpiAgency:r.tpi_agency||"", cert:r.material_cert||"", remarks:r.remarks||"", hasReg:true, lines:ls,
+      checkCcy: ccy==="INR" && !!country && !/^india$/i.test(country), country });
+  });
+  out.sort((a,b)=> String(b.cn).localeCompare(String(a.cn)));
+  return out;
+}
+function crDownloadExcel(list){
+  const rows = [["Contract No","Quotation No","Legacy Ref","Client Name","PO no","PO Date","Item Description","Qty","Rate","Value","Currency","Exchange rate (INR)","Value INR","Despatch due","Status","Status reason","Payment terms","Freight","Incoterm","End user","TPI","TPI agency","Material certificate","Made from"]];
+  list.forEach(c=>{
+    const base = (l)=>[c.cn, c.quote||"", c.legacyRef||"", c.client, c.po, c.poDate?fmtDMY(c.poDate):(c.poDateText||""), l?l.d:"", l&&l.q!=null?l.q:"", l&&l.r!=null?l.r:"", l&&l.v!=null?l.v:"", c.ccy, c.fx||"",
+      l ? (l.v!=null&&c.fx ? Math.round(l.v*c.fx*100)/100 : "") : (c.valInr!=null?Math.round(c.valInr):""), l&&l.due?fmtDMY(l.due):"", c.status, c.reason||"", c.pay||"", c.freight||"", c.inco||"", c.endUser||"", c.tpi||"", c.tpiAgency||"", c.cert?"EN 10204 "+c.cert:"", c.source==="app"?"Sale Order":"Register (legacy)"];
+    if(c.lines.length) c.lines.forEach(l=>rows.push(base(l))); else rows.push(base(null));
+  });
+  try{ const ws = XLSX.utils.aoa_to_sheet(rows); ws["!cols"] = rows[0].map((_,i)=>({wch:i===6?60:16})); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Contract Register"); XLSX.writeFile(wb, "Contract_Register_"+toISODate(new Date())+".xlsx"); }
+  catch(e){ alert("Excel: "+(e.message||e)); }
+}
+// ---- the contract panel ------------------------------------------------------------------------------
+function ContractRegisterDrawer({ c, user, canEdit, onClose, onSaved, onOpenQuote, onOpenSaleOrder, priced }){
+  const app = c.source==="app";
+  const [d,setD] = useState(()=>JSON.parse(JSON.stringify({ ...c, lines:c.lines.map(l=>({ ...l, est:undefined })) })));
+  const [why,setWhy] = useState(""); const [busy,setBusy] = useState(false); const [msg,setMsg] = useState(""); const [hist,setHist] = useState([]);
+  useEffect(()=>{ sb.from("contract_register_hist_tbl").select("*").eq("contract_number",c.cn).order("at",{ascending:false}).limit(60).then(({data})=>setHist(data||[])); },[c.cn]);
+  const set = (k,v)=> setD(x=>({...x,[k]:v}));
+  const setLine = (i,k,v)=> setD(x=>({ ...x, lines:x.lines.map((l,j)=> j!==i ? l : (()=>{ const n = { ...l, [k]:v }; if(k==="q"||k==="r"){ const q = Number(n.q), r = Number(n.r); if(String(n.q)!=="" && String(n.r)!=="" && isFinite(q) && isFinite(r)) n.v = Math.round(q*r*100)/100; } return n; })()) }));
+  const needWhy = ["On Hold","Cancelled"].includes(d.status) && d.status!==c.status;
+  const ro = !canEdit;
+  const lockHead = ro || app;
+  const total = d.lines.reduce((n,l)=>n+(Number(l.v)||0),0);
+  const save = async()=>{
+    if(needWhy && !why.trim()){ setMsg("Give the reason for "+d.status+"."); return; }
+    if(!app && d.ccy!=="INR" && !(Number(d.fx)>0)){ setMsg("Enter the exchange rate (₹ per "+d.ccy+")."); return; }
+    if(d.cert==="3.2" && d.tpi!=="Yes" && !confirm("EN 10204 3.2 needs a third party to witness, but TPI is not Yes.\n\nSave anyway?")) return;
+    setBusy(true); setMsg("");
+    const who = user?.username||"unknown"; const now = new Date().toISOString();
+    const ch = [];
+    const cmp = (label, a, b)=>{ if(String(a||"")!==String(b||"")) ch.push(label+": "+(a||"—")+" → "+(b||"—")); };
+    cmp("Status", c.status, d.status); cmp("TPI", c.tpi, d.tpi); cmp("TPI agency", c.tpiAgency, d.tpiAgency); cmp("Certificate", c.cert, d.cert); cmp("Remarks", c.remarks, d.remarks);
+    let row = { contract_number:c.cn, status:d.status, status_reason: needWhy ? why.trim() : (d.status===c.status ? (c.reason||null) : null), tpi:d.tpi||null, tpi_agency:d.tpiAgency||null, material_cert:d.cert||null, remarks:d.remarks||null, updated_by:who, updated_at:now };
+    if(app){ if(!c.hasReg) Object.assign(row, { source:"app", quote_number:c.quote||null, client:c.client||null, created_by:who }); }
+    else {
+      cmp("Quotation No", c.quote, d.quote); cmp("Client", c.client, d.client); cmp("PO No", c.po, d.po); cmp("PO date", c.poDate, d.poDate); cmp("Currency", c.ccy, d.ccy); cmp("Rate", c.fx, d.ccy==="INR"?1:d.fx);
+      cmp("Payment terms", c.pay, d.pay); cmp("Freight", c.freight, d.freight); cmp("Incoterm", c.inco, d.inco); cmp("End user", c.endUser, d.endUser);
+      Object.assign(row, { quote_number:String(d.quote||"").trim()||null, client:d.client||null, po_no:d.po||null, po_date:toISODate(d.poDate)||null, currency:d.ccy, fx_rate: d.ccy==="INR" ? 1 : Number(d.fx)||null,
+        payment_terms:d.pay||null, freight:d.freight||null, incoterm:d.inco||null, end_user:d.endUser||null });
+    }
+    const { error } = await sb.from("contract_register_tbl").upsert(row,{ onConflict:"contract_number" });
+    if(error){ setBusy(false); setMsg(/quote/.test(error.message) ? "That quotation number is already on another contract." : "Could not save: "+error.message); return; }
+    // lines
+    if(!app){
+      const before = JSON.stringify(c.lines.map(l=>[l.d,l.q,l.r,l.v,l.due||""])); const after = JSON.stringify(d.lines.map(l=>[l.d,l.q===""?null:l.q,l.r===""?null:l.r,l.v,l.due||""]));
+      if(before!==after){
+        const { error: de } = await sb.from("contract_register_line_tbl").delete().eq("contract_number",c.cn);
+        const ins = d.lines.filter(l=>String(l.d||"").trim() || l.v!=null).map((l,i)=>({ contract_number:c.cn, sl:i+1, description:String(l.d||"").trim()||null, qty:l.q===""||l.q==null?null:Number(l.q), rate:l.r===""||l.r==null?null:Number(l.r), value:l.v==null||l.v===""?null:Number(l.v), due_date:toISODate(l.due)||null }));
+        const { error: ie } = ins.length ? await sb.from("contract_register_line_tbl").insert(ins) : { error:null };
+        if(de || ie){ setBusy(false); setMsg("Could not save the lines: "+((de||ie).message)); return; }
+        ch.push("Items: "+c.lines.length+" lines, "+c.ccy+" "+crN2(c.valCcy)+" → "+ins.length+" lines, "+d.ccy+" "+crN2(ins.reduce((n,l)=>n+(Number(l.value)||0),0)));
+      }
+    } else {
+      for(const l of d.lines){ const o = c.lines.find(x=>x.key===l.key)||{}; if(String(o.due||"")!==String(l.due||"")){
+        await sb.from("contract_line_due_tbl").upsert({ contract_number:c.cn, item_sl_no:l.sl, due_date:toISODate(l.due)||null },{ onConflict:"contract_number,item_sl_no" });
+        ch.push("Sl No "+l.sl+" due: "+(o.due?fmtDMY(o.due):"—")+" → "+(l.due?fmtDMY(l.due):"—")); } }
+    }
+    if(needWhy) ch.push("Reason: "+why.trim());
+    if(ch.length){ await crHist(c.cn, who, ch.join("; ")); await logAudit("UPDATE","contract_register_tbl",c.cn,ch.join("; ").slice(0,900),who,null,null); }
+    setBusy(false); onSaved(ch.length ? "Saved — "+c.cn : "Nothing changed");
+  };
+  const lab = (t, el, span)=> h("label",{style:{display:"flex",flexDirection:"column",gap:3,fontSize:10.5,color:colors.muted,gridColumn:span?"span "+span:undefined,minWidth:0}},t,el);
+  const inp = (k, opt)=> h("input",{value:d[k]==null?"":d[k],disabled:(opt&&opt.lock)!==undefined?opt.lock:lockHead,list:opt&&opt.list,placeholder:(opt&&opt.ph)||"",onChange:e=>set(k,e.target.value),style:{...inputStyle,padding:"6px 8px",fontSize:12.5}});
+  const sel = (k, opts, lock)=> h("select",{value:d[k]||"",disabled:lock,onChange:e=>set(k,e.target.value),style:{...inputStyle,padding:"6px 8px",fontSize:12.5}}, h("option",{value:""},""), opts.map(o=>h("option",{key:o,value:o},o)));
+  const grid = (...kids)=> h("div",{style:{display:"grid",gridTemplateColumns:"repeat(3,minmax(0,1fr))",gap:8}},...kids);
+  const th = (t,al)=> h("th",{style:{textAlign:al||"left",padding:"5px 6px",fontSize:10.5,color:colors.muted,borderBottom:"1px solid "+colors.border}},t);
+  return h("div",null,
+    h("div",{onClick:onClose,style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.35)",zIndex:1300}}),
+    h("div",{role:"dialog","aria-label":"Contract "+c.cn,style:{position:"fixed",top:0,right:0,bottom:0,width:"min(760px,100%)",background:"#fff",zIndex:1301,boxShadow:"-8px 0 26px rgba(0,0,0,0.2)",display:"flex",flexDirection:"column"}},
+      h("div",{style:{padding:"12px 16px",borderBottom:"1px solid "+colors.border,display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}},
+        h("b",{style:{fontSize:16}},"Contract "+c.cn), crPill(c.status),
+        h("span",{style:{fontSize:10.5,borderRadius:8,padding:"1px 7px",border:"1px solid "+(app?"#0f7a5c":colors.border),color:app?"#0f7a5c":colors.muted}}, app?"Sale Order":"Register (legacy)"),
+        h("span",{style:{flex:1}}),
+        app && onOpenSaleOrder ? h("button",{onClick:()=>onOpenSaleOrder(c.cn),style:btnSmall},"Open Sale Order") : null,
+        h("button",{onClick:onClose,style:btnSmall},"Close")),
+      h("div",{style:{padding:"12px 16px",overflow:"auto",flex:1,display:"flex",flexDirection:"column",gap:12}},
+        app ? h("div",{style:{background:"#fff4d6",color:"#854f0b",borderRadius:6,padding:"6px 10px",fontSize:12}},"Made from a quote: client, PO, currency, terms and items come from the Sale Order and are changed there. Status, TPI, certificate, despatch dates and remarks are kept here.") : null,
+        ro ? h("div",{style:{fontSize:12,color:colors.muted}},"View only — Super Admins, admins, the Document Controller and the Sales Coordinator can change contracts.") : null,
+        grid(
+          lab("Contract No", h("input",{value:c.cn,disabled:true,style:{...inputStyle,padding:"6px 8px",fontSize:12.5}})),
+          lab(app?"Quotation No":"Quotation No (legacy — optional)", app ? h("div",{style:{padding:"6px 0"}}, c.quote ? h("a",{href:"#",onClick:e=>{ e.preventDefault(); onOpenQuote && onOpenQuote(c.quote); },style:{color:"#0c447c",fontFamily:"monospace"}},c.quote) : "—") : inp("quote",{lock:ro})),
+          lab("Status", sel("status", CR_STATUSES, ro)),
+          lab("Client", inp("client"), 2),
+          lab("Currency", h("select",{value:d.ccy,disabled:lockHead,onChange:e=>{ const v=e.target.value; setD(x=>({...x,ccy:v,fx:v==="INR"?1:(x.fx>1?x.fx:"")})); },style:{...inputStyle,padding:"6px 8px",fontSize:12.5}}, ["INR","USD","EUR","GBP","AED","SAR","OMR","QAR","KWD","SGD"].map(o=>h("option",{key:o,value:o},o)))),
+          lab("PO No", inp("po"), d.ccy==="INR"?2:1),
+          d.ccy!=="INR" ? lab("Rate (₹ per "+d.ccy+")", inp("fx",{ph:"e.g. 88.20"})) : null,
+          lab("PO date", h("input",{type:"date",value:d.poDate?String(d.poDate).slice(0,10):"",disabled:lockHead,onChange:e=>set("poDate",e.target.value),style:{...inputStyle,padding:"6px 8px",fontSize:12.5}})),
+          !app && c.legacyRef ? lab("Legacy ref (old register)", h("input",{value:c.legacyRef,disabled:true,style:{...inputStyle,padding:"6px 8px",fontSize:12.5}}), 3) : null),
+        needWhy ? lab("Reason for "+d.status+" (required)", h("input",{value:why,onChange:e=>setWhy(e.target.value),autoFocus:true,style:{...inputStyle,padding:"6px 8px",fontSize:12.5}})) : (c.reason ? h("div",{style:{fontSize:12,color:colors.muted}},"Reason: "+c.reason) : null),
+        c.checkCcy ? h("div",{style:{background:"#e6f1fb",color:"#0c447c",borderRadius:6,padding:"6px 10px",fontSize:12}},"The client is in "+c.country+" but this contract is in INR (the old register had no currency). If the order is in dollars, set the currency and the rate.") : null,
+        h("div",null, h("b",{style:{fontSize:13}},"Terms and requirements"), h("div",{style:{marginTop:6}}, grid(
+          lab("Payment terms", inp("pay"), 2), lab("Incoterm", inp("inco",{list:"cr-incoterms"})),
+          lab("Freight", inp("freight")), lab("End user", inp("endUser"), 2),
+          lab("TPI", sel("tpi",["Yes","No"],ro)), lab("TPI agency", h("input",{value:d.tpiAgency||"",disabled:ro,list:"cr-tpi",onChange:e=>set("tpiAgency",e.target.value),style:{...inputStyle,padding:"6px 8px",fontSize:12.5}})),
+          lab("Material certificate (EN 10204)", sel("cert",["3.1","3.2"],ro)))),
+          d.cert==="3.2" && d.tpi!=="Yes" ? h("div",{style:{marginTop:6,background:"#fff4d6",color:"#854f0b",borderRadius:6,padding:"6px 10px",fontSize:12}},"3.2 needs a third party to witness — set TPI to Yes and pick the agency.") : null,
+          h("datalist",{id:"cr-tpi"}, CR_TPI_AGENCIES.map(a=>h("option",{key:a,value:a}))), h("datalist",{id:"cr-incoterms"}, CR_INCOTERMS.map(a=>h("option",{key:a,value:a})))),
+        h("div",null,
+          h("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:4}}, h("b",{style:{fontSize:13}},"Items and despatch schedule"),
+            h("span",{style:{fontSize:11.5,color:colors.mutedLight}}, d.lines.length+" lines"+(!app?" · "+d.ccy+" "+(d.ccy==="INR"?crN0(total):crN2(total))+(d.ccy!=="INR"&&Number(d.fx)>0?" = ₹ "+crN0(total*Number(d.fx)):""):"")),
+            h("span",{style:{flex:1}}), !app && !ro ? h("button",{onClick:()=>setD(x=>({...x,lines:[...x.lines,{key:"new"+Date.now(),d:"",q:"",r:"",v:null,due:""}]})),style:btnSmall},"+ Line") : null),
+          h("div",{style:{overflowX:"auto"}}, h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:600,fontSize:12}},
+            h("thead",null,h("tr",null, th("#"), th("Item"), th("Qty","right"), th("Rate ("+d.ccy+")","right"), th("Value ("+d.ccy+")","right"), th("Despatch due"), !app&&!ro?th(""):null)),
+            h("tbody",null, d.lines.map((l,i)=>{ const pr = app && priced ? priced[l.key] : null;
+              return h("tr",{key:l.key||i},
+                h("td",{style:{padding:"3px 6px",color:colors.mutedLight}}, app?l.sl:i+1),
+                h("td",{style:{padding:"3px 6px",minWidth:220}}, app||ro ? h("span",{style:{whiteSpace:"pre-wrap"}},l.d) : h("textarea",{rows:2,value:l.d,onChange:e=>setLine(i,"d",e.target.value),style:{...inputStyle,padding:"4px 6px",fontSize:12}})),
+                h("td",{style:{padding:"3px 6px",textAlign:"right",width:70}}, app||ro ? (l.q??"—") : h("input",{value:l.q??"",onChange:e=>setLine(i,"q",e.target.value.replace(/[^\d.]/g,"")),style:{...inputStyle,padding:"4px 6px",fontSize:12,textAlign:"right"}})),
+                h("td",{style:{padding:"3px 6px",textAlign:"right",width:110}}, app ? (pr?crN2(pr.unit):"…") : ro ? (l.r!=null?crN2(l.r):"—") : h("input",{value:l.r??"",onChange:e=>setLine(i,"r",e.target.value.replace(/[^\d.\-]/g,"")),style:{...inputStyle,padding:"4px 6px",fontSize:12,textAlign:"right"}})),
+                h("td",{style:{padding:"3px 6px",textAlign:"right",width:110,fontFamily:"monospace"}}, app ? (pr?crN2(pr.unit*(l.q||0)):"…") : (ro || (l.q!==""&&l.q!=null&&l.r!==""&&l.r!=null)) ? (l.v!=null?crN2(l.v):"—") : h("input",{value:l.v??"",title:"Value (when there is no qty / rate, e.g. a discount as a minus value)",onChange:e=>{ const v=e.target.value.replace(/[^\d.\-]/g,""); setD(x=>({...x,lines:x.lines.map((y,j)=>j===i?{...y,v:v===""?null:Number(v)}:y)})); },style:{...inputStyle,padding:"4px 6px",fontSize:12,textAlign:"right"}})),
+                h("td",{style:{padding:"3px 6px",width:140}}, h("input",{type:"date",value:l.due?String(l.due).slice(0,10):"",disabled:ro,onChange:e=>setLine(i,"due",e.target.value),style:{...inputStyle,padding:"4px 6px",fontSize:12}})),
+                !app&&!ro ? h("td",{style:{padding:"3px 6px",width:30}}, h("button",{title:"Remove this line",onClick:()=>setD(x=>({...x,lines:x.lines.filter((_,j)=>j!==i)})),style:{...btnSmall,padding:"1px 7px"}},"×")) : null); }))))),
+        lab("Remarks", h("textarea",{rows:2,value:d.remarks||"",disabled:ro,onChange:e=>set("remarks",e.target.value),style:{...inputStyle,padding:"6px 8px",fontSize:12.5}})),
+        hist.length ? h("div",null, h("b",{style:{fontSize:13}},"History"), hist.map(x=>h("div",{key:x.id,style:{fontSize:11.5,color:colors.muted,padding:"2px 0"}},fmtDMYTime(x.at)+" · "+(x.by_user||"")+" · "+(x.what||"")))) : null,
+        msg ? h("div",{style:{color:colors.danger,fontSize:12.5}},msg) : null),
+      h("div",{style:{padding:"10px 16px",borderTop:"1px solid "+colors.border,display:"flex",gap:8,justifyContent:"flex-end"}},
+        h("button",{onClick:onClose,style:btnSecondary},"Cancel"),
+        canEdit ? h("button",{onClick:save,disabled:busy,style:btnPrimary},busy?"Saving…":"Save changes") : null)));
+}
+// ---- the register screen -----------------------------------------------------------------------------
+function ContractRegisterScreen({ user, onOpenQuote, onOpenContract, onGoToTab }){
+  const [list,setList] = useState(null); const [err,setErr] = useState("");
+  const [canEdit,setCanEdit] = useState(false);
+  const [q,setQ] = useState(""); const [st,setSt] = useState("Pending"); const [chk,setChk] = useState(false);
+  const nowFy = crFyOf(toISODate(new Date()));
+  const [fy,setFy] = useState(String(nowFy));
+  const [view,setViewS] = useState(()=>{ try{ return localStorage.getItem("cr_view")||"c"; }catch(e){ return "c"; } });
+  const setView = (v)=>{ setViewS(v); try{ localStorage.setItem("cr_view",v); }catch(e){} };
+  const [cols,setColsS] = useState(()=>{ try{ const x = JSON.parse(localStorage.getItem("cr_cols")||"null"); if(x) return x; }catch(e){} return Object.fromEntries(CR_OPT.map(o=>[o[0],o[2]])); });
+  const setCol = (k,v)=>{ setColsS(c=>{ const n = {...c,[k]:v}; try{ localStorage.setItem("cr_cols",JSON.stringify(n)); }catch(e){} return n; }); };
+  const [colsOpen,setColsOpen] = useState(false);
+  const [open,setOpen] = useState({}); const [priced,setPriced] = useState({});
+  const [edit,setEdit] = useState(null); const [toast,setToast] = useState("");
+  const load = useCallback(async()=>{
+    try{ setList(await crLoadAll()); setErr(""); }catch(e){ setErr(e.message||String(e)); setList([]); }
+  },[]);
+  useEffect(()=>{ load(); crCanEdit(user).then(setCanEdit); },[load]);
+  // Unit prices of a Sale Order contract, worked out when its items are opened.
+  const priceApp = async(c)=>{
+    if(c.source!=="app" || c.lines.every(l=>priced[l.key])) return;
+    const out = {};
+    for(const l of c.lines){ try{ out[l.key] = await invUnitPrice(c.cn, l.est, c.ccy, c.fx||1); }catch(e){ out[l.key] = { unit:0 }; } }
+    setPriced(p=>({ ...p, ...out }));
+  };
+  if(!list) return h("div",{style:{padding:20,color:colors.muted}},"Reading the contract register…");
+  const fyOk = (c)=> fy==="all" || crFyOf(c.poDate)===Number(fy);
+  const qq = q.trim().toLowerCase();
+  const base = list.filter(c=> fyOk(c) && (!chk || c.checkCcy) && (!qq || [c.cn,c.quote,c.legacyRef,c.client,c.po,c.endUser,...c.lines.map(l=>l.d)].join(" ").toLowerCase().includes(qq)));
+  const shown = base.filter(c=> st==="All" || c.status===st);
+  const cnt = (s)=> base.filter(c=>s==="All"||c.status===s).length;
+  const T = { inr:0, usd:0, other:{}, all:0, noRate:0 };
+  shown.forEach(c=>{ const v = Number(c.valCcy)||0; if(c.ccy==="INR") T.inr += v; else if(c.ccy==="USD") T.usd += v; else T.other[c.ccy] = (T.other[c.ccy]||0)+v; if(c.valInr!=null) T.all += c.valInr; else if(c.ccy!=="INR") T.noRate++; });
+  // month strip: order intake by PO date in the financial year (cancelled left out)
+  const stripFy = fy==="all" ? nowFy : Number(fy);
+  const months = ["Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb","Mar"].map(m=>({ m, v:0 }));
+  list.forEach(c=>{ if(c.status==="Cancelled" || crFyOf(c.poDate)!==stripFy || c.valInr==null) return; const mo = new Date(String(c.poDate).slice(0,10)+"T12:00:00").getMonth(); months[(mo+9)%12].v += c.valInr; });
+  const mx = Math.max(1, ...months.map(m=>m.v)); let cum = 0;
+  const thisMonthIdx = stripFy===nowFy ? (new Date().getMonth()+9)%12 : 11;
+  const on = CR_OPT.filter(o=>cols[o[0]] && o[0]!=="items").map(o=>o[0]);
+  const optText = (c,k)=>{
+    if(k==="tpi") return c.tpi ? c.tpi+(c.tpiAgency?" · "+c.tpiAgency:"") : "";
+    if(k==="cert") return c.cert ? "EN 10204 "+c.cert : "";
+    if(k==="due"){ const ds = c.lines.map(l=>l.due).filter(Boolean).sort(); if(!ds.length) return ""; return ds.length===1 || ds[0]===ds[ds.length-1] ? fmtDMY(ds[0]) : fmtDMY(ds[0])+" → "+fmtDMY(ds[ds.length-1])+" ("+ds.length+" dates)"; }
+    return c[k]||"";
+  };
+  const chip = (k,l,n)=> h("button",{key:k,onClick:()=>setSt(k),style:{fontSize:12,padding:"4px 11px",borderRadius:14,border:"1px solid "+(st===k?colors.dark:colors.border),background:st===k?colors.dark:"#fff",color:st===k?"#fff":colors.text,cursor:"pointer"}},l,h("span",{style:{opacity:.7,marginLeft:4}},n));
+  const cell = (c,k,extra)=> h("td",{key:k,style:{padding:"7px 9px",borderBottom:"1px solid "+colors.border,verticalAlign:"top",...(extra||{})}},c);
+  const num = (c,k,b)=> cell(c,k,{textAlign:"right",fontFamily:"monospace",fontSize:12,whiteSpace:"nowrap",fontWeight:b?700:400});
+  const thS = {textAlign:"left",padding:"8px 9px",fontSize:11,color:"#4c6a61",background:"#eef6f3",borderBottom:"2px solid #0f7a5c",whiteSpace:"nowrap",position:"sticky",top:0,zIndex:2};
+  const quoteCell = (c)=> c.quote ? h("a",{href:"#",onClick:e=>{ e.preventDefault(); e.stopPropagation(); onOpenQuote && onOpenQuote(c.quote); },style:{color:"#0c447c",fontFamily:"monospace",fontSize:12}},c.quote)
+    : h("span",{title:"Loaded from the old register — no quotation number",style:{fontSize:10.5,color:colors.mutedLight,border:"1px solid "+colors.border,borderRadius:6,padding:"0 6px"}},"Legacy");
+  const ccyCell = (c)=> c.ccy==="INR" ? h("span",{style:{fontSize:10.5,color:colors.mutedLight}},"INR", c.checkCcy?h("span",{title:"Client in "+c.country+" — check the currency",style:{marginLeft:4,color:"#0c447c",fontWeight:700}},"?"):null)
+    : h("span",null, h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:6,padding:"0 6px",background:"#e6f1fb",color:"#0c447c"}},c.ccy), " ", h("span",{style:{fontSize:11,color:c.fx?colors.muted:"#a3312a"}}, c.fx?"₹"+c.fx:"no rate"));
+  const openSaleOrder = async(cn)=>{ const { data } = await sb.from("sale_order_tbl").select("*").eq("contract_number",cn).maybeSingle(); if(data && onOpenContract) onOpenContract(data); };
+  let body;
+  if(view==="c"){
+    const nCols = 13 + on.length + (cols.items?1:0);
+    body = h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:1100,fontSize:12.5}},
+      h("thead",null,h("tr",null, h("th",{style:{...thS,width:26}}), ...["Contract","Quotation No","PO date","Client","PO No"].map(t=>h("th",{key:t,style:thS},t)), cols.items?h("th",{style:thS},"Items"):null,
+        ...on.map(k=>h("th",{key:k,style:thS},CR_OPT.find(o=>o[0]===k)[1])), h("th",{style:thS},"Ccy · rate"), h("th",{style:{...thS,textAlign:"right"}},"Value (INR)"), h("th",{style:{...thS,textAlign:"right"}},"Value (USD)"),
+        h("th",{style:{...thS,textAlign:"right"}},"Value in INR, all orders"), h("th",{style:thS},"Status"), h("th",{style:thS},"Made from"))),
+      h("tbody",null, shown.length===0 ? h("tr",null,h("td",{colSpan:nCols,style:{padding:14,color:colors.mutedLight}},"No contracts match.")) :
+        shown.flatMap(c=>{ const isOpen = !!open[c.cn];
+          const r1 = h("tr",{key:c.cn,onClick:()=>{ setEdit(c); priceApp(c); },style:{cursor:"pointer"}},
+            cell(h("button",{onClick:e=>{ e.stopPropagation(); setOpen(o=>({...o,[c.cn]:!o[c.cn]})); if(!isOpen) priceApp(c); },title:"Show the items",style:{...btnSmall,padding:"0 6px"}},isOpen?"▾":"▸"),"t"),
+            cell(h("b",{style:{fontFamily:"monospace"}},c.cn),"cn"), cell(quoteCell(c),"q"), cell(c.poDate?fmtDMY(c.poDate):(c.poDateText||"—"),"pd"), cell(c.client,"cl"), cell(c.po||"—","po"),
+            cols.items ? cell(c.lines.length+" · qty "+c.lines.reduce((n,l)=>n+(Number(l.q)||0),0),"it",{whiteSpace:"nowrap"}) : null,
+            ...on.map(k=>{ const v = optText(c,k); return cell(v || h("span",{style:{color:colors.mutedLight}},"—"),k,{minWidth:k==="pay"||k==="due"?150:undefined}); }),
+            cell(ccyCell(c),"ccy"), num(c.ccy==="INR"&&c.valCcy!=null?crN0(c.valCcy):"","vi"), num(c.ccy!=="INR"&&c.valCcy!=null?(c.ccy==="USD"?"":c.ccy+" ")+crN2(c.valCcy):"","vu"),
+            num(c.valInr!=null?crN0(c.valInr):(c.ccy!=="INR"?"no rate":"—"),"va",true), cell(crPill(c.status),"st"),
+            cell(h("span",{style:{fontSize:10.5,borderRadius:8,padding:"1px 7px",border:"1px solid "+(c.source==="app"?"#0f7a5c":colors.border),color:c.source==="app"?"#0f7a5c":colors.muted,whiteSpace:"nowrap"}},c.source==="app"?"Sale Order":"Register (legacy)"),"src"));
+          if(!isOpen) return [r1];
+          const r2 = h("tr",{key:c.cn+"-l"}, h("td",{colSpan:nCols,style:{background:"#faf9f4",padding:"4px 9px 10px 40px",borderBottom:"1px solid "+colors.border}},
+            h("table",{style:{borderCollapse:"collapse",width:"100%",fontSize:12}},
+              h("thead",null,h("tr",null,["#","Item","Qty","Rate ("+c.ccy+")","Value ("+c.ccy+")",...(c.ccy!=="INR"?["Value in INR"]:[]),"Despatch due"].map((t,i)=>h("th",{key:t,style:{textAlign:i>=2&&i<=5?"right":"left",padding:"4px 6px",fontSize:10.5,color:colors.mutedLight,borderBottom:"1px solid "+colors.border}},t)))),
+              h("tbody",null, c.lines.length===0 ? h("tr",null,h("td",{colSpan:7,style:{padding:6,color:colors.mutedLight}},"No items.")) :
+                c.lines.map((l,i)=>{ const pr = c.source==="app" ? priced[l.key] : null; const unit = c.source==="app" ? (pr?pr.unit:null) : l.r; const val = c.source==="app" ? (pr?pr.unit*(l.q||0):null) : l.v;
+                  const td = (x,al,mono)=> h("td",{style:{padding:"4px 6px",borderBottom:"1px dashed "+colors.border,textAlign:al||"left",fontFamily:mono?"monospace":undefined,verticalAlign:"top"}},x);
+                  return h("tr",{key:l.key}, td(c.source==="app"?l.sl:i+1), td(h("span",{style:{whiteSpace:"pre-wrap"}},l.d)), td(l.q??"—","right"), td(unit!=null?(c.ccy==="INR"?crN0(unit):crN2(unit)):(c.source==="app"?"…":"—"),"right",true),
+                    td(val!=null?(c.ccy==="INR"?crN0(val):crN2(val)):(c.source==="app"?"…":"—"),"right",true), ...(c.ccy!=="INR"?[td(val!=null&&c.fx?crN0(val*c.fx):"—","right",true)]:[]), td(l.due?fmtDMY(l.due):"—")); })))));
+          return [r1, r2]; })),
+      shown.length ? h("tfoot",null,h("tr",{style:{background:"#eef6f3",fontWeight:700}},
+        h("td",{colSpan:6+(cols.items?1:0)+on.length+1,style:{padding:"7px 9px",borderTop:"2px solid #0f7a5c"}},shown.length+" contracts"+(T.noRate?" · "+T.noRate+" without a rate (left out of the INR total)":"")),
+        h("td",{style:{padding:"7px 9px",borderTop:"2px solid #0f7a5c"}}),
+        h("td",{style:{padding:"7px 9px",textAlign:"right",fontFamily:"monospace",borderTop:"2px solid #0f7a5c"}},crN0(T.inr)),
+        h("td",{style:{padding:"7px 9px",textAlign:"right",fontFamily:"monospace",borderTop:"2px solid #0f7a5c"}},crN2(T.usd), ...Object.entries(T.other).map(([k,v])=>h("div",{key:k},k+" "+crN2(v)))),
+        h("td",{style:{padding:"7px 9px",textAlign:"right",fontFamily:"monospace",borderTop:"2px solid #0f7a5c"}},crN0(T.all)),
+        h("td",{colSpan:2,style:{borderTop:"2px solid #0f7a5c"}}))) : null);
+  } else {
+    const rows = []; shown.forEach(c=>c.lines.forEach((l,i)=>rows.push({c,l,i})));
+    body = h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:1100,fontSize:12.5}},
+      h("thead",null,h("tr",null, ...["Contract","Quotation No","PO date","Client","#","Item"].map(t=>h("th",{key:t,style:thS},t)), h("th",{style:{...thS,textAlign:"right"}},"Qty"), h("th",{style:{...thS,textAlign:"right"}},"Rate"), h("th",{style:thS},"Ccy"),
+        h("th",{style:{...thS,textAlign:"right"}},"Value (INR)"), h("th",{style:{...thS,textAlign:"right"}},"Value (USD)"), h("th",{style:{...thS,textAlign:"right"}},"Value in INR, all orders"), h("th",{style:thS},"Despatch due"), h("th",{style:thS},"Status"))),
+      h("tbody",null, rows.length===0 ? h("tr",null,h("td",{colSpan:14,style:{padding:14,color:colors.mutedLight}},"No item lines match.")) :
+        rows.map(({c,l,i})=>{ const app = c.source==="app"; const pr = app ? priced[l.key] : null; const unit = app ? (pr?pr.unit:null) : l.r; const val = app ? (pr?pr.unit*(l.q||0):null) : l.v;
+          return h("tr",{key:c.cn+l.key,onClick:()=>setEdit(c),style:{cursor:"pointer"}},
+            cell(i===0?h("b",{style:{fontFamily:"monospace"}},c.cn):h("span",{style:{fontFamily:"monospace",color:colors.mutedLight}},c.cn),"cn"), cell(i===0?quoteCell(c):"","q"), cell(i===0?(c.poDate?fmtDMY(c.poDate):""):"","pd"), cell(i===0?c.client:"","cl"),
+            cell(app?l.sl:i+1,"n"), cell(h("span",{style:{whiteSpace:"pre-wrap"}},l.d),"d",{maxWidth:420}), num(l.q??"—","qy"), num(unit!=null?(c.ccy==="INR"?crN0(unit):crN2(unit)):(app?"open ▸":"—"),"r"), cell(c.ccy,"cc",{fontSize:11,color:colors.mutedLight}),
+            num(c.ccy==="INR"&&val!=null?crN0(val):"","vi"), num(c.ccy!=="INR"&&val!=null?crN2(val):"","vu"), num(val!=null&&c.fx?crN0(val*c.fx):"","va"), cell(l.due?fmtDMY(l.due):"—","du"), cell(i===0?crPill(c.status):"","st")); })));
+  }
+  const fys = Array.from(new Set(list.map(c=>crFyOf(c.poDate)).filter(Boolean))).sort((a,b)=>b-a);
+  return h("div",{style:{padding:"14px 18px"}},
+    h("div",{style:{background:"#fff",border:"1px solid #cfe3dd",borderLeft:"4px solid #0f7a5c",borderRadius:6,padding:"10px 16px",marginBottom:12}},
+      h("div",{style:{fontWeight:700,fontSize:16,color:"#124c3d"}},"Contract Register"),
+      h("div",{style:{fontSize:11.5,color:"#8a9d97",marginTop:2}},"Every contract: made in the app from its won quote (Sale Order), or loaded once from the old register (Legacy). Kept here from now on. Click a row to open it; ▸ shows its items.")),
+    err ? h("div",{style:{color:colors.danger,fontSize:12.5,marginBottom:8}},"Run structure_contract_register_2026-10-10.sql first. ("+err+")") : null,
+    h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:10}},
+      h("input",{value:q,onChange:e=>setQ(e.target.value),placeholder:"Search contract, quote, client, PO no, item…",style:{...inputStyle,width:270,padding:"6px 8px",fontSize:12}}),
+      h("select",{value:fy,onChange:e=>setFy(e.target.value),style:{...inputStyle,width:130,padding:"6px 8px",fontSize:12}}, fys.map(y=>h("option",{key:y,value:String(y)},"FY "+y+"-"+String((y+1)%100).padStart(2,"0"))), h("option",{value:"all"},"All years")),
+      ...[...CR_STATUSES,"All"].map(s=>chip(s,s,cnt(s))),
+      h("label",{title:"Contracts in INR whose client is outside India — the old register had no currency",style:{display:"inline-flex",gap:5,alignItems:"center",fontSize:12,color:"#0c447c",marginLeft:4}},h("input",{type:"checkbox",checked:chk,onChange:e=>setChk(e.target.checked)}),"Check currency ("+list.filter(c=>c.checkCcy && fyOk(c)).length+")"),
+      h("span",{style:{flex:1}}),
+      h("span",{style:{display:"inline-flex",border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden"}}, [["c","Contracts"],["l","Item lines"]].map(([v,l])=>h("button",{key:v,onClick:()=>{ setView(v); if(v==="l") shown.filter(c=>c.source==="app").forEach(priceApp); },style:{border:0,padding:"5px 10px",fontSize:12,cursor:"pointer",background:view===v?colors.dark:"#fff",color:view===v?"#fff":colors.text,fontWeight:view===v?700:400}},l))),
+      h("div",{style:{position:"relative"}},
+        h("button",{onClick:()=>setColsOpen(o=>!o),style:{...btnSecondary,fontSize:12,padding:"6px 12px"}},"Columns ▾"),
+        colsOpen ? h("div",{style:{position:"absolute",right:0,top:"calc(100% + 4px)",zIndex:20,background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"8px 12px",width:230,boxShadow:"0 6px 18px rgba(0,0,0,0.12)"}},
+          h("div",{style:{fontSize:11,color:colors.muted,marginBottom:4}},"Show columns (remembered on this computer)"),
+          CR_OPT.map(o=>h("label",{key:o[0],style:{display:"flex",gap:6,alignItems:"center",fontSize:12.5,padding:"2px 0",cursor:"pointer"}},h("input",{type:"checkbox",checked:!!cols[o[0]],onChange:e=>setCol(o[0],e.target.checked)}),o[1])),
+          h("button",{onClick:()=>setColsOpen(false),style:{...btnSmall,marginTop:6}},"Done")) : null),
+      h("button",{onClick:()=>crDownloadExcel(shown),style:{...btnSecondary,fontSize:12,padding:"6px 12px"}},"Download Excel"),
+      h("button",{onClick:()=>{ if(onGoToTab){ onGoToTab("sale_order_entry"); } },title:"A new contract is made from its won quote on the Sale Order screen; it gets the next contract number automatically and appears here.",style:{...btnPrimary,fontSize:12,padding:"7px 14px"}},"+ New contract")),
+    h("div",{style:{display:"grid",gridTemplateColumns:"repeat(12,minmax(0,1fr))",gap:4,background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"8px 10px",marginBottom:6}},
+      months.map((m,i)=>{ cum += m.v; const fut = i>thisMonthIdx; return h("div",{key:m.m,style:{display:"flex",flexDirection:"column",gap:2,fontSize:10.5,color:colors.muted,opacity:fut?0.45:1,minWidth:0}},
+        h("span",null,m.m), h("div",{style:{height:34,display:"flex",alignItems:"flex-end"}},h("i",{style:{display:"block",width:"100%",height:Math.max(2,m.v/mx*34),background:"#0f7a5c",borderRadius:"2px 2px 0 0",opacity:.85}})),
+        h("b",{style:{fontSize:11,color:colors.text}}, m.v ? "₹"+(m.v/1e5).toFixed(1)+"L" : "—"), h("span",null, fut ? "" : "cum ₹"+(cum/1e5).toFixed(1)+"L")); })),
+    h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:8}},"Order intake by PO date, FY "+stripFy+"-"+String((stripFy+1)%100).padStart(2,"0")+", all orders in rupees (dollar orders at each contract's own rate); cancelled contracts left out."),
+    h("div",{style:{overflow:"auto",maxHeight:"calc(100vh - 330px)",minHeight:260,background:"#fff",border:"1px solid #cfe3dd",borderRadius:6}}, body),
+    edit ? h(ContractRegisterDrawer,{ c:edit, user, canEdit, priced, onOpenQuote:(ref)=>onOpenQuote&&onOpenQuote(ref), onOpenSaleOrder:openSaleOrder,
+      onClose:()=>setEdit(null), onSaved:(t)=>{ setEdit(null); setToast(t); setTimeout(()=>setToast(""),2500); load(); } }) : null,
+    toast ? h("div",{style:{position:"fixed",left:"50%",bottom:24,transform:"translateX(-50%)",background:colors.dark,color:"#fff",padding:"8px 16px",borderRadius:6,fontSize:12.5,zIndex:1400}},toast) : null);
 }
 
 function PendingActionsScreen({ user }){
