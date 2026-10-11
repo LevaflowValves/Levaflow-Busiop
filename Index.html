@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-11T07:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-11T08:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -11752,9 +11752,10 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
   const refresh = async()=>{ await load(true); if(onChanged) await onChanged(); if(isContract) docBoardLoad().then(d=>docTasksSync(d,"App")).catch(e=>console.error(e)); };   // 129: keep document task cards in step
 
   const statusBucket = (label)=> (statuses.find(s=>docStatusName(s)===label)||{}).action_type;
-  const dotColor = (label)=>{ if(!label) return "#b9b6aa"; const b=statusBucket(label); return b==="our_action" ? "#a3312a" : b==="third_party_action" ? "#c98a1b" : "#1f5c40"; };
-  const chipStyle = (label)=>{ const b=statusBucket(label); return b==="our_action" ? {background:"#fdecea",color:"#a3312a"} : b==="third_party_action" ? {background:"#fff4d6",color:"#854f0b"} : label ? {background:"#eaf9f4",color:"#085041"} : {background:"#f1efe8",color:colors.muted}; };
-  const statusNames = statuses.map(docStatusName).filter(Boolean);
+  const skipLbl = (label)=> docSkips(statuses.find(s=>docStatusName(s)===label));   // 175: Status to confirm is grey
+  const dotColor = (label)=>{ if(!label) return "#b9b6aa"; if(skipLbl(label)) return "#6f7377"; const b=statusBucket(label); return b==="our_action" ? "#a3312a" : b==="third_party_action" ? "#c98a1b" : "#1f5c40"; };
+  const chipStyle = (label)=>{ if(skipLbl(label)) return {background:"#eceeef",color:"#3d4144"}; const b=statusBucket(label); return b==="our_action" ? {background:"#fdecea",color:"#a3312a"} : b==="third_party_action" ? {background:"#fff4d6",color:"#854f0b"} : label ? {background:"#eaf9f4",color:"#085041"} : {background:"#f1efe8",color:colors.muted}; };
+  const statusNames = docPickable(statuses).map(docStatusName).filter(Boolean);   // 175: Status to confirm can't be picked by hand
   const catNames = cats.map(c=>c.value).filter(Boolean);
   const perSl = (cat)=> !!(docCategoryRow(cats,cat)||{}).per_sl_no;
   const prodDefault = (cat)=> !!(docCategoryRow(cats,cat)||{}).for_production_default;
@@ -13134,7 +13135,8 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
       if(reason===null) return;
       if(!String(reason).trim()){ alert("A backward move needs a reason."); return; }
     } else if(toState.indexOf("Start Production")===0 && !readyForGoAhead){
-      if(!confirm("Full Hold documents are still short of Code 2"+(holdOpen&&holdOpen.documents?(" ("+holdOpen.documents+")"):"")+".\n\nRelease production anyway?")) return;
+      const held = await docHoldNotesFor(contractInfo.contract_number);   // 175: name the Production Hold documents and why
+      if(!confirm("Full Hold documents are still short of Code 2"+(holdOpen&&holdOpen.documents?(" ("+holdOpen.documents+")"):"")+"."+(held.length?"\n\nOn Production Hold:\n• "+held.join("\n• "):"")+"\n\nRelease production anyway?")) return;
     }
     setGoBusy(true);
     const res = await setGoAheadState(contractInfo.contract_number, goState, toState, user?.username, reason);
@@ -22920,6 +22922,25 @@ const GO_AHEAD_STATES = ["Hold","Start Engineering","Start Production Code 2","S
 // app proposes the Code 2 state, never Code 1 — "nothing outstanding to
 // resubmit" is a judgement about documents the app cannot make on its
 // own, so the releaser picks Code 1 deliberately if that is the case.
+// 175: documents of a contract sitting in Production Hold, with the client's hold condition — for the release warning.
+async function docHoldNotesFor(ct){
+  try{
+    const { data:docs } = await sb.from("universal_documents_tbl").select("id,doc_number,is_archived").eq("entity_type","contract").eq("entity_id",String(ct));
+    const live = (docs||[]).filter(d=>!d.is_archived); if(!live.length) return [];
+    const { data:hs, error } = await sb.from("universal_document_history_tbl").select("*").in("document_id", live.map(d=>d.id));
+    if(error) return [];
+    const by = {}; (hs||[]).forEach(r=>{ (by[r.document_id]=by[r.document_id]||[]).push(r); });
+    const out = [];
+    live.forEach(d=>{
+      const revs = (by[d.id]||[]).sort((x,y)=> (Number(x.rev_number)||0)-(Number(y.rev_number)||0) || String(x.changed_at||"").localeCompare(String(y.changed_at||"")) || (Number(x.id)||0)-(Number(y.id)||0));
+      const last = revs[revs.length-1];
+      if(!last || !/production\s*hold/i.test(last.status||"")) return;
+      const withNote = [...revs].reverse().find(r=>r.hold_note && /production\s*hold/i.test(r.status||""));
+      out.push(d.doc_number+(withNote ? " — hold: “"+withNote.hold_note+"” ("+(withNote.changed_by||"")+(withNote.changed_at?", "+fmtDMY(withNote.changed_at):"")+")" : " — Production Hold"));
+    });
+    return out;
+  }catch(e){ return []; }
+}
 function isReadyForGoAhead(holdRow){
   return !holdRow || (Number(holdRow.full_hold_docs_open)||0)===0;
 }
@@ -27288,6 +27309,10 @@ const MANUAL_SECTIONS = [
         "blocks": [
           {
             "type": "p",
+            "text": "Changed 11 October 2026 (build 175). \u2713 COMPLETED ON EVERY CARD, beside \ud83d\udcc5 Due, \u21c4 Move and \u29c9 Copy, without opening the card. The card's holder presses it to send the card to Under Approval; an approver (or a Super Admin) presses it to complete the card at once. If checklist items are still open it says how many and ticks them. On an Under Approval card the approver gets \u2713 Approve and \u21a9 Send back (the reason is asked and goes into the history). A document card (Document \u2013 initial submission / resubmission) completes when the document goes to the client: \u2713 Completed asks the date and the file link and logs the revision Out on the Document Control board. A chase-letter card completes when the letter is marked sent."
+          },
+          {
+            "type": "p",
             "text": "Changed 8 October 2026 (build 154). ON EVERY CARD: \ud83d\udcc5 Due, \u21c4 Move, \u29c9 Copy at the bottom (and as icons in the \u229e table). Move: department, then a person or that department's Unassigned pile, and the due date; into another department it asks the reason, sub-tasks go with it and the receiver gets a bell. Copy (anyone who can see the card): title, department, who gets it \u2014 tick several people to make one copy each \u2014, due date, and whether checklists (all unticked), sub-tasks (as new, open) and labels / links / reference / customer come along. A copy is a separate card: both histories record it, and a procurement or enquiry card copies as a plain task."
           },
           {
@@ -27344,6 +27369,14 @@ const MANUAL_SECTIONS = [
         "title": "Document Control board \u2014 documents, owners, chase letters",
         "tag": "Order Status \u2192 Document Control",
         "blocks": [
+          {
+            "type": "p",
+            "text": "Changed 11 October 2026 (build 176). STATUS LABELS: every card carries a coloured strip with a word. Red \u2014 Our action (never sent); Pink \u2014 Comments \u2013 resubmit; Yellow \u2014 With client; Code 2 \u2013 ours: yellow fading through pink to red; Code 2 \u2013 with client: yellow fading to green; Hold \u2013 ours: pink fading to red; Hold \u2013 with client: yellow fading to red; Green \u2014 Approved. Status to confirm cards are grey with no label. The same label shows on the document's task card on the Task board."
+          },
+          {
+            "type": "p",
+            "text": "Changed 11 October 2026 (build 175). SIX LISTS: Status to confirm (grey) \u2192 Not submitted \u2192 Submitted \u2192 Code 2 \u2014 Production Hold (new) \u2192 Code 2 \u2014 proceed \u2192 All approved. \u2713 COMPLETED on every card where the move is ours: it means the document goes to the client now. It opens the revision box already set to the next Rev Out and the right list, you give the date and the file link, and saving closes the card's task card and starts the 7-day chase. STATUS TO CONFIRM: documents loaded from the old OneDrive folders arrive grey. They make no task card, chase letter or age alert, count in no KPI or Pending Action, and the Full Hold check skips them (they neither hold the production release nor clear it). Press Set status \u25b8 on the card: pick the status, the date it was sent or returned, and a note; it sets the revision already loaded (no new revision). Save and open next goes to the next grey card. Nobody can pick Status to confirm by hand and a card can't go back to it. PRODUCTION HOLD: the client's Code 2 with production held. Two statuses: Production Hold \u2014 Resubmission Pending (pink, ours) and Production Hold \u2014 Resubmission Done (yellow, with the client, chased after 7 days). Moving a card in needs a hold note (the client's condition), shown on the card as \u23f8. A Full Hold document here does not clear the delivery clock, so Release production on the Sale Order warns and lists each held document with its note. A Full Hold document falling back from Code 2 \u2014 proceed to Production Hold is reported like a fall back to Code 3. New tiles: Production Hold and Status to confirm."
+          },
           {
             "type": "p",
             "text": "Every document on a contract (and every document requested but not yet made) is one card on the Document Control board, in four lists: Not submitted \u2014 our action, Submitted \u2014 client action pending, Code 2 \u2014 proceed, resubmission outstanding, All approved. The list follows the status of the latest revision (Setup \u2192 Documents \u2192 Document Status Master; the board_list column can pin a status to a list)."
@@ -28246,6 +28279,10 @@ const MANUAL_TA = {
   "blocks": [
    {
     "type": "p",
+    "text": "\u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bcd 11 \u0b85\u0b95\u0bcd\u0b9f\u0bcb\u0baa\u0bb0\u0bcd 2026 (build 175). \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 card-\u0b87\u0bb2\u0bc1\u0bae\u0bcd \u2713 Completed, \ud83d\udcc5 Due, \u21c4 Move, \u29c9 Copy \u0b85\u0bb0\u0bc1\u0b95\u0bbf\u0bb2\u0bcd. Card \u0b89\u0bb3\u0bcd\u0bb3\u0bb5\u0bb0\u0bcd \u0b85\u0bb4\u0bc1\u0ba4\u0bcd\u0ba4\u0bbf\u0ba9\u0bbe\u0bb2\u0bcd Under Approval-\u0b95\u0bcd\u0b95\u0bc1\u0b9a\u0bcd \u0b9a\u0bc6\u0bb2\u0bcd\u0bb2\u0bc1\u0bae\u0bcd; approver (\u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 Super Admin) \u0b85\u0bb4\u0bc1\u0ba4\u0bcd\u0ba4\u0bbf\u0ba9\u0bbe\u0bb2\u0bcd \u0b89\u0b9f\u0ba9\u0bc7 \u0bae\u0bc1\u0b9f\u0bbf\u0baf\u0bc1\u0bae\u0bcd. Checklist \u0bae\u0bc0\u0ba4\u0bae\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd \u0b8e\u0ba4\u0bcd\u0ba4\u0ba9\u0bc8 \u0b8e\u0ba9\u0bcd\u0bb1\u0bc1 \u0b9a\u0bca\u0bb2\u0bcd\u0bb2\u0bbf tick \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bc1\u0bae\u0bcd. Under Approval card-\u0b87\u0bb2\u0bcd approver-\u0b95\u0bcd\u0b95\u0bc1 \u2713 Approve, \u21a9 Send back (\u0b95\u0bbe\u0bb0\u0ba3\u0bae\u0bcd \u0b95\u0bc7\u0b9f\u0bcd\u0b95\u0bc1\u0bae\u0bcd). Document card: \u0b86\u0bb5\u0ba3\u0bae\u0bcd client-\u0b95\u0bcd\u0b95\u0bc1 \u0b9a\u0bc6\u0bb2\u0bcd\u0bb2\u0bc1\u0bae\u0bcd\u0baa\u0bcb\u0ba4\u0bc1 \u0bae\u0bc1\u0b9f\u0bbf\u0baf\u0bc1\u0bae\u0bcd; \u2713 Completed \u0ba4\u0bc7\u0ba4\u0bbf, file link \u0b95\u0bc7\u0b9f\u0bcd\u0b9f\u0bc1 Document Control board-\u0b87\u0bb2\u0bcd revision Out \u0baa\u0ba4\u0bbf\u0baf\u0bc1\u0bae\u0bcd."
+   },
+   {
+    "type": "p",
     "text": "8 \u0b85\u0b95\u0bcd\u0b9f\u0bcb\u0baa\u0bb0\u0bcd 2026 \u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bcd (build 154). \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 card-\u0b87\u0ba9\u0bcd \u0b95\u0bc0\u0bb4\u0bc1\u0bae\u0bcd: \ud83d\udcc5 Due, \u21c4 Move, \u29c9 Copy (\u229e table-\u0b87\u0bb2\u0bc1\u0bae\u0bcd icon-\u0b95\u0bb3\u0bbe\u0b95). Move: \u0ba4\u0bc1\u0bb1\u0bc8, \u0baa\u0bbf\u0bb1\u0b95\u0bc1 \u0b92\u0bb0\u0bc1\u0bb5\u0bb0\u0bcd \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 \u0b85\u0ba8\u0bcd\u0ba4\u0ba4\u0bcd \u0ba4\u0bc1\u0bb1\u0bc8\u0baf\u0bbf\u0ba9\u0bcd Unassigned pile, \u0bae\u0bb1\u0bcd\u0bb1\u0bc1\u0bae\u0bcd due date; \u0bb5\u0bc7\u0bb1\u0bc1 \u0ba4\u0bc1\u0bb1\u0bc8\u0b95\u0bcd\u0b95\u0bc1 \u0ba8\u0b95\u0bb0\u0bcd\u0ba4\u0bcd\u0ba4\u0bbf\u0ba9\u0bbe\u0bb2\u0bcd \u0b95\u0bbe\u0bb0\u0ba3\u0bae\u0bcd \u0b95\u0bc7\u0b9f\u0bcd\u0b95\u0bc1\u0bae\u0bcd, sub-task-\u0b95\u0bb3\u0bc1\u0bae\u0bcd \u0b95\u0bc2\u0b9f\u0bb5\u0bc7 \u0b9a\u0bc6\u0bb2\u0bcd\u0bb2\u0bc1\u0bae\u0bcd, \u0baa\u0bc6\u0bb1\u0bc1\u0baa\u0bb5\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1 bell \u0b85\u0bb1\u0bbf\u0bb5\u0bbf\u0baa\u0bcd\u0baa\u0bc1 \u0bb5\u0bb0\u0bc1\u0bae\u0bcd. Copy (card-\u0b90\u0baa\u0bcd \u0baa\u0bbe\u0bb0\u0bcd\u0b95\u0bcd\u0b95\u0b95\u0bcd\u0b95\u0bc2\u0b9f\u0bbf\u0baf \u0baf\u0bbe\u0bb0\u0bc1\u0bae\u0bcd): \u0ba4\u0bb2\u0bc8\u0baa\u0bcd\u0baa\u0bc1, \u0ba4\u0bc1\u0bb1\u0bc8, \u0baf\u0bbe\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1 \u2014 \u0baa\u0bb2\u0bb0\u0bc8 tick \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1\u0bb5\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0b92\u0bb0\u0bc1 copy \u2014, due date, checklist (\u0b8e\u0bb2\u0bcd\u0bb2\u0bbe\u0bae\u0bcd untick), sub-task-\u0b95\u0bb3\u0bcd (\u0baa\u0bc1\u0ba4\u0bbf\u0baf\u0ba4\u0bbe\u0b95, open), label / link / reference / customer \u0b9a\u0bc7\u0bb0\u0bcd\u0b95\u0bcd\u0b95 \u0bb5\u0bc7\u0ba3\u0bcd\u0b9f\u0bc1\u0bae\u0bbe. Copy \u0ba4\u0ba9\u0bbf card; \u0b87\u0bb0\u0ba3\u0bcd\u0b9f\u0bbf\u0ba9\u0bcd history-\u0baf\u0bbf\u0bb2\u0bc1\u0bae\u0bcd \u0baa\u0ba4\u0bbf\u0bb5\u0bbe\u0b95\u0bc1\u0bae\u0bcd."
    },
    {
@@ -28296,12 +28333,20 @@ const MANUAL_TA = {
     "text": "Setup \u2192 Tasks-\u0b87\u0bb2\u0bcd \u0b85\u0bae\u0bc8\u0b95\u0bcd\u0b95\u0bb5\u0bc1\u0bae\u0bcd: Task Labels, Task Approvers (\u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 \u0ba4\u0bc1\u0bb1\u0bc8\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0b92\u0ba9\u0bcd\u0bb1\u0bc1 \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 \u0baa\u0bb2). approver \u0b86\u0b95 \u0b87\u0bb0\u0bc1\u0baa\u0bcd\u0baa\u0ba4\u0bc1\u0ba4\u0bbe\u0ba9\u0bcd \u0b85\u0ba8\u0bcd\u0ba4\u0ba4\u0bcd \u0ba4\u0bc1\u0bb1\u0bc8\u0baf\u0bbf\u0ba9\u0bcd Task Assignment Board-\u0b90\u0b95\u0bcd \u0b95\u0bca\u0b9f\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd. Document Controller post \u0bb5\u0bc8\u0ba4\u0bcd\u0ba4\u0bbf\u0bb0\u0bc1\u0baa\u0bcd\u0baa\u0bb5\u0bb0\u0bcd \u0b8e\u0bb2\u0bcd\u0bb2\u0bbe\u0ba4\u0bcd \u0ba4\u0bc1\u0bb1\u0bc8\u0b95\u0bb3\u0bbf\u0bb2\u0bc1\u0bae\u0bcd \u0bb5\u0bc7\u0bb2\u0bc8\u0baf\u0bc8\u0baa\u0bcd \u0baa\u0bbe\u0bb0\u0bcd\u0ba4\u0bcd\u0ba4\u0bc1 \u0b92\u0baa\u0bcd\u0baa\u0b9f\u0bc8\u0b95\u0bcd\u0b95\u0bb2\u0bbe\u0bae\u0bcd, \u0b86\u0ba9\u0bbe\u0bb2\u0bcd approver \u0b86\u0b95 \u0b89\u0bb3\u0bcd\u0bb3 \u0b87\u0b9f\u0ba4\u0bcd\u0ba4\u0bbf\u0bb2\u0bcd \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bc7 approve \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bb2\u0bbe\u0bae\u0bcd. approver \u0b87\u0bb2\u0bcd\u0bb2\u0bbe\u0ba4 \u0ba4\u0bc1\u0bb1\u0bc8\u0baf\u0bc8 Admin-\u0b95\u0bb3\u0bcd \u0ba8\u0b9f\u0ba4\u0bcd\u0ba4\u0bc1\u0bb5\u0bb0\u0bcd. Task Department Limits \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 \u0ba4\u0bc1\u0bb1\u0bc8\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0bae\u0b9e\u0bcd\u0b9a\u0bb3\u0bcd/\u0b9a\u0bbf\u0bb5\u0baa\u0bcd\u0baa\u0bc1 \u0b8e\u0ba3\u0bcd\u0ba3\u0bbf\u0b95\u0bcd\u0b95\u0bc8\u0baf\u0bc8\u0baf\u0bc1\u0bae\u0bcd Stale, Waiting approval \u0ba8\u0bbe\u0b9f\u0bcd\u0b95\u0bb3\u0bc8\u0baf\u0bc1\u0bae\u0bcd \u0b85\u0bae\u0bc8\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd; \u0b87\u0bb2\u0bcd\u0bb2\u0bc8\u0baf\u0bc6\u0ba9\u0bbf\u0bb2\u0bcd 15 / 25 / 7 / 2."
    }
   ],
-  "en_sig": "48da09cf"
+  "en_sig": "c82ceac2"
  },
  "document_control": {
   "title": "Document Control board \u2014 \u0b86\u0bb5\u0ba3\u0b99\u0bcd\u0b95\u0bb3\u0bcd, \u0baa\u0bca\u0bb1\u0bc1\u0baa\u0bcd\u0baa\u0bbe\u0bb3\u0bb0\u0bcd\u0b95\u0bb3\u0bcd, \u0ba8\u0bbf\u0ba9\u0bc8\u0bb5\u0bc2\u0b9f\u0bcd\u0b9f\u0bb2\u0bcd \u0b95\u0b9f\u0bbf\u0ba4\u0b99\u0bcd\u0b95\u0bb3\u0bcd",
   "tag": "Order Status \u2192 Document Control",
   "blocks": [
+   {
+    "type": "p",
+    "text": "\u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bcd 11 \u0b85\u0b95\u0bcd\u0b9f\u0bcb\u0baa\u0bb0\u0bcd 2026 (build 176). Status label: \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 card-\u0b87\u0ba9\u0bcd \u0bae\u0bc7\u0bb2\u0bc7\u0baf\u0bc1\u0bae\u0bcd \u0ba8\u0bbf\u0bb1\u0b95\u0bcd \u0b95\u0bc0\u0bb1\u0bc1. \u0b9a\u0bbf\u0bb5\u0baa\u0bcd\u0baa\u0bc1 \u2014 Our action (\u0b85\u0ba9\u0bc1\u0baa\u0bcd\u0baa\u0baa\u0bcd\u0baa\u0b9f\u0bb5\u0bbf\u0bb2\u0bcd\u0bb2\u0bc8); Pink \u2014 Comments \u2013 resubmit; \u0bae\u0b9e\u0bcd\u0b9a\u0bb3\u0bcd \u2014 With client; Code 2 \u2013 ours: \u0bae\u0b9e\u0bcd\u0b9a\u0bb3\u0bcd \u2192 pink \u2192 \u0b9a\u0bbf\u0bb5\u0baa\u0bcd\u0baa\u0bc1; Code 2 \u2013 with client: \u0bae\u0b9e\u0bcd\u0b9a\u0bb3\u0bcd \u2192 \u0baa\u0b9a\u0bcd\u0b9a\u0bc8; Hold \u2013 ours: pink \u2192 \u0b9a\u0bbf\u0bb5\u0baa\u0bcd\u0baa\u0bc1; Hold \u2013 with client: \u0bae\u0b9e\u0bcd\u0b9a\u0bb3\u0bcd \u2192 \u0b9a\u0bbf\u0bb5\u0baa\u0bcd\u0baa\u0bc1; \u0baa\u0b9a\u0bcd\u0b9a\u0bc8 \u2014 Approved. Status to confirm card \u0b9a\u0bbe\u0bae\u0bcd\u0baa\u0bb2\u0bcd, label \u0b87\u0bb2\u0bcd\u0bb2\u0bc8. Task board-\u0b87\u0bb2\u0bcd \u0b85\u0ba4\u0ba9\u0bcd task card-\u0b87\u0bb2\u0bc1\u0bae\u0bcd \u0b85\u0ba4\u0bc7 label."
+   },
+   {
+    "type": "p",
+    "text": "\u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bcd 11 \u0b85\u0b95\u0bcd\u0b9f\u0bcb\u0baa\u0bb0\u0bcd 2026 (build 175). \u0b86\u0bb1\u0bc1 list-\u0b95\u0bb3\u0bcd: Status to confirm (\u0b9a\u0bbe\u0bae\u0bcd\u0baa\u0bb2\u0bcd) \u2192 Not submitted \u2192 Submitted \u2192 Code 2 \u2014 Production Hold (\u0baa\u0bc1\u0ba4\u0bbf\u0baf\u0ba4\u0bc1) \u2192 Code 2 \u2014 proceed \u2192 All approved. \u2713 Completed: \u0ba8\u0bae\u0bcd \u0bb5\u0bc7\u0bb2\u0bc8 \u0b89\u0bb3\u0bcd\u0bb3 \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 card-\u0b87\u0bb2\u0bc1\u0bae\u0bcd \u0b89\u0ba3\u0bcd\u0b9f\u0bc1. \u0b85\u0ba4\u0ba9\u0bcd \u0baa\u0bca\u0bb0\u0bc1\u0bb3\u0bcd: \u0b86\u0bb5\u0ba3\u0bae\u0bcd \u0b87\u0baa\u0bcd\u0baa\u0bcb\u0ba4\u0bc1 client-\u0b95\u0bcd\u0b95\u0bc1 \u0b9a\u0bc6\u0bb2\u0bcd\u0b95\u0bbf\u0bb1\u0ba4\u0bc1. \u0ba4\u0bc7\u0ba4\u0bbf, file link \u0b95\u0bca\u0b9f\u0bc1\u0ba4\u0bcd\u0ba4\u0bc1 save \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd \u0b85\u0b9f\u0bc1\u0ba4\u0bcd\u0ba4 Rev Out \u0baa\u0ba4\u0bbf\u0baf\u0bc1\u0bae\u0bcd, task card \u0bae\u0bc1\u0b9f\u0bbf\u0baf\u0bc1\u0bae\u0bcd, 7 \u0ba8\u0bbe\u0bb3\u0bcd chase \u0ba4\u0bca\u0b9f\u0b99\u0bcd\u0b95\u0bc1\u0bae\u0bcd. Status to confirm: \u0baa\u0bb4\u0bc8\u0baf OneDrive folder-\u0b95\u0bb3\u0bbf\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 \u0b8f\u0bb1\u0bcd\u0bb1\u0baa\u0bcd\u0baa\u0b9f\u0bcd\u0b9f \u0b86\u0bb5\u0ba3\u0b99\u0bcd\u0b95\u0bb3\u0bcd \u0b9a\u0bbe\u0bae\u0bcd\u0baa\u0bb2\u0bcd \u0ba8\u0bbf\u0bb1\u0ba4\u0bcd\u0ba4\u0bbf\u0bb2\u0bcd \u0bb5\u0bb0\u0bc1\u0bae\u0bcd. Task card, chase letter, alert, KPI, Pending Action \u0b8e\u0ba4\u0bc1\u0bb5\u0bc1\u0bae\u0bcd \u0b87\u0bb2\u0bcd\u0bb2\u0bc8; Full Hold check-\u0b87\u0bb2\u0bcd \u0b9a\u0bc7\u0bb0\u0bbe\u0ba4\u0bc1. Card-\u0b87\u0bb2\u0bcd Set status \u25b8 \u0b85\u0bb4\u0bc1\u0ba4\u0bcd\u0ba4\u0bbf status, \u0ba4\u0bc7\u0ba4\u0bbf, note \u0b95\u0bca\u0b9f\u0bc1\u0b95\u0bcd\u0b95\u0bb5\u0bc1\u0bae\u0bcd; \u0b8f\u0bb1\u0bcd\u0bb1\u0bbf\u0baf revision-\u0b95\u0bcd\u0b95\u0bc7 status \u0b85\u0bae\u0bc8\u0baf\u0bc1\u0bae\u0bcd (\u0baa\u0bc1\u0ba4\u0bbf\u0baf revision \u0b87\u0bb2\u0bcd\u0bb2\u0bc8). Save and open next \u0b85\u0b9f\u0bc1\u0ba4\u0bcd\u0ba4 \u0b9a\u0bbe\u0bae\u0bcd\u0baa\u0bb2\u0bcd card-\u0b90\u0ba4\u0bcd \u0ba4\u0bbf\u0bb1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd. Production Hold: client Code 2 \u0b95\u0bca\u0b9f\u0bc1\u0ba4\u0bcd\u0ba4\u0bc1 production-\u0b90 \u0ba8\u0bbf\u0bb1\u0bc1\u0ba4\u0bcd\u0ba4\u0bbf \u0bb5\u0bc8\u0ba4\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd. Resubmission Pending (pink, \u0ba8\u0bae\u0bcd \u0bb5\u0bc7\u0bb2\u0bc8), Resubmission Done (\u0bae\u0b9e\u0bcd\u0b9a\u0bb3\u0bcd, client-\u0b87\u0b9f\u0bae\u0bcd). \u0b89\u0bb3\u0bcd\u0bb3\u0bc7 \u0ba8\u0b95\u0bb0\u0bcd\u0ba4\u0bcd\u0ba4 hold note (client-\u0b87\u0ba9\u0bcd \u0ba8\u0bbf\u0baa\u0ba8\u0bcd\u0ba4\u0ba9\u0bc8) \u0b95\u0b9f\u0bcd\u0b9f\u0bbe\u0baf\u0bae\u0bcd; card-\u0b87\u0bb2\u0bcd \u23f8 \u0b86\u0b95\u0ba4\u0bcd \u0ba4\u0bc6\u0bb0\u0bbf\u0baf\u0bc1\u0bae\u0bcd. Full Hold \u0b86\u0bb5\u0ba3\u0bae\u0bcd \u0b87\u0b99\u0bcd\u0b95\u0bc1 \u0b87\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd Sale Order-\u0b87\u0bb2\u0bcd Release production \u0b8e\u0b9a\u0bcd\u0b9a\u0bb0\u0bbf\u0b95\u0bcd\u0b95\u0bc8 \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bc1\u0bae\u0bcd, hold note-\u0b89\u0b9f\u0ba9\u0bcd."
+   },
    {
     "type": "p",
     "text": "\u0b92\u0bb0\u0bc1 contract-\u0b87\u0ba9\u0bcd \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 \u0b86\u0bb5\u0ba3\u0bae\u0bc1\u0bae\u0bcd (\u0b95\u0bc7\u0b9f\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bcd\u0b9f\u0bc1 \u0b87\u0ba9\u0bcd\u0ba9\u0bc1\u0bae\u0bcd \u0ba4\u0baf\u0bbe\u0bb0\u0bbf\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bbe\u0ba4 \u0b86\u0bb5\u0ba3\u0bae\u0bc1\u0bae\u0bcd) Document Control board-\u0b87\u0bb2\u0bcd \u0b92\u0bb0\u0bc1 card. \u0ba8\u0bbe\u0ba9\u0bcd\u0b95\u0bc1 list-\u0b95\u0bb3\u0bcd: Not submitted \u2014 \u0ba8\u0bae\u0bcd \u0bb5\u0bc7\u0bb2\u0bc8, Submitted \u2014 \u0bb5\u0bbe\u0b9f\u0bbf\u0b95\u0bcd\u0b95\u0bc8\u0baf\u0bbe\u0bb3\u0bb0\u0bcd \u0bb5\u0bc7\u0bb2\u0bc8 \u0ba8\u0bbf\u0bb2\u0bc1\u0bb5\u0bc8, Code 2 \u2014 proceed, \u0bae\u0bb1\u0bc1 \u0b9a\u0bae\u0bb0\u0bcd\u0baa\u0bcd\u0baa\u0bbf\u0baa\u0bcd\u0baa\u0bc1 \u0ba8\u0bbf\u0bb2\u0bc1\u0bb5\u0bc8, All approved. \u0b95\u0b9f\u0bc8\u0b9a\u0bbf revision-\u0b87\u0ba9\u0bcd status-\u0b90\u0baa\u0bcd \u0baa\u0bca\u0bb1\u0bc1\u0ba4\u0bcd\u0ba4\u0bc1 card \u0b8e\u0ba8\u0bcd\u0ba4 list \u0b8e\u0ba9\u0bcd\u0bb1\u0bc1 \u0bae\u0bc1\u0b9f\u0bbf\u0bb5\u0bbe\u0b95\u0bc1\u0bae\u0bcd (Setup \u2192 Documents \u2192 Document Status Master)."
@@ -28330,7 +28375,7 @@ const MANUAL_TA = {
     "text": "Document Categories-\u0b87\u0bb2\u0bcd Department column-\u0b90 \u0ba8\u0bbf\u0bb0\u0baa\u0bcd\u0baa\u0bbf\u0ba9\u0bbe\u0bb2\u0bcd board-\u0b90\u0ba4\u0bcd \u0ba4\u0bc1\u0bb1\u0bc8 \u0bb5\u0bbe\u0bb0\u0bbf\u0baf\u0bbe\u0b95 filter \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bb2\u0bbe\u0bae\u0bcd. Full Hold \u0b86\u0bb5\u0ba3\u0bae\u0bcd Code 2-\u0b87\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 \u0baa\u0bbf\u0ba9\u0bcd\u0ba9\u0bcb\u0b95\u0bcd\u0b95\u0bbf \u0bb5\u0ba8\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd Super Admin-\u0b95\u0bb3\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0ba4\u0bcd \u0ba4\u0bc6\u0bb0\u0bbf\u0bb5\u0bbf\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bc1\u0bae\u0bcd (delivery \u0b95\u0b9f\u0bbf\u0b95\u0bbe\u0bb0\u0bae\u0bcd reset \u0b86\u0b95\u0bbe\u0ba4\u0bc1)."
    }
   ],
-  "en_sig": "1db8a4b4"
+  "en_sig": "3bc2d375"
  },
  "enquiry_followups": {
   "title": "Enquiries \u2014 \u0baa\u0ba4\u0bbf\u0bb5\u0bc1, Design & Estimation card, offer sent",
@@ -30828,6 +30873,9 @@ function downloadManualPdf(){
 // added to over time; not wired to a database table yet, so edits currently
 // mean updating this array directly.
 const FAQ_ENTRIES = [
+  { q:"What does a grey “Status to confirm” card mean?", a:"It was loaded from the old OneDrive folders and its status is not known yet. It makes no task card, chase letter or alert and is skipped by the Full Hold check. Press Set status ▸ on the card, pick the status and the date it was sent or returned: that sets the loaded revision and the card behaves normally from then on." },
+  { q:"How do I finish a task card without dragging it?", a:"Press ✓ Completed on the card. If you hold the card it goes to Under Approval; if you are its approver it is completed at once. A document card asks the date and the file link sent to the client and logs the revision Out. On Under Approval cards the approver has ✓ Approve and ↩ Send back." },
+  { q:"Why does Release production warn about a Production Hold?", a:"A Full Hold document whose client returned Code 2 with production held does not clear the delivery clock. The warning lists each held document and the client's hold condition. Only the Sales Head or a Super Admin can release anyway." },
   { q:"How do I add a new contract to the Contract Register?", a:"Press + New contract: a line appears at the bottom with the next contract number. Pick the won quote (the client and items come from it), type the PO number and date, and Save line. When the PO is in hand, press Sale Order + on that line \u2014 only the PO / LOI document is asked, and the Sale Order is created." },
   { q:"Why does a legacy contract show a ? next to INR?", a:"The old register had no currency, so every legacy contract was loaded in INR. The ? means the client is outside India: open the contract and, if the order was in dollars, set the currency to USD and enter the rate." },
   { q:"How do I filter the Quotes Report by several regions or countries?", a:"Click Region, Country, State or City \u2014 each drops down into a list. Click every entry you want (Shift-click picks a run), then OK. The lists narrow left to right. Press Apply filters: the list opens full screen with the filters as badges along the top; \u00d7 on a badge removes it, Change filters (or Esc) goes back to the boxes." },
@@ -30916,6 +30964,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"11 Oct 2026 (176)", summary:"Built on 2026-10-11T08:30:00Z, on top of 08:00 (which carries build 175 and its SQL). No new SQL. STATUS LABELS ON DOCUMENT CARDS: a coloured strip across the top of every card on the Document Control board, and on each open document task card on the Task boards, with a short word. Red \u2014 Our action (never sent); Pink \u2014 Comments \u2013 resubmit (Code 3 / returned); Yellow \u2014 With client; Code 2 \u2013 ours (Code 2 proceed, resubmission pending): yellow for the first half, fading through pink to red; Code 2 \u2013 with client (resubmission done): yellow fading to green; Hold \u2013 ours (Production Hold, resubmission pending): pink fading to red; Hold \u2013 with client (resubmission done): yellow fading to red; Green \u2014 Approved. Status to confirm cards have no label and a grey card. The label follows the list and whose move it is, so a status added to the master later gets the right label by itself." },
+  { date:"11 Oct 2026 (175)", summary:"Built on 2026-10-11T08:00:00Z, on top of 07:00. SQL: structure_doc_confirm_prodhold_2026-10-11.sql (BOTH companies; safe to re-run). doc_status_tbl: colour, skip_checks, hold_note_required; board lists confirm and phold; three statuses \u2014 Status to confirm (grey, skip_checks, legacy load only), Code2-Approved-Production Hold-Resubmission Pending (pink, ours, hold note required), Code2-Approved-Production Hold-Resubmission Done (yellow, client); none clears the delivery clock. universal_documents_tbl: source_path, load_batch, loaded_on. universal_document_history_tbl: hold_note, legacy_unsent; direction may be empty for a loaded revision never sent. v_full_hold_outstanding skips skip_checks statuses. DOCUMENT CONTROL BOARD: six lists (Status to confirm, Not submitted, Submitted, Code 2 \u2014 Production Hold, Code 2 \u2014 proceed, All approved); tiles Production Hold and Status to confirm. STATUS TO CONFIRM cards make no task card, chase letter or age alert, count in no KPI or Pending Action and are skipped by the Full Hold counts; Set status \u25b8 sets the loaded revision in place (status, Out/In from the status, real date, note, hold note) with Save and open next; it can't be picked by hand or dragged back to. PRODUCTION HOLD: hold note required on the way in, shown on the card (\u23f8); Resubmission Done is chased after 7 days; a Full Hold fall back from Code 2 \u2014 proceed to Production Hold is reported like a fall back to Code 3; Release production lists each held document with its hold note. \u2713 COMPLETED on every card: document cards (board and Task board) log the next Rev Out into the right list with date and link, closing the task card and starting the chase; a loaded never-sent revision goes out at its own Rev. Task cards: the holder sends to Under Approval, an approver or Super Admin completes; open checklist items are ticked; Under Approval cards carry \u2713 Approve and \u21a9 Send back. Status master shows colour, legacy-only and hold-note settings; the board's statuses can't be deleted there. Contract Documents panel: Status to confirm is grey and can't be picked. Manual (English and Tamil) and 3 FAQs." },
   { date:"11 Oct 2026 (174)", summary:"Built on 2026-10-11T07:00:00Z, on top of 06:00. No SQL. DOCUMENT CONTROL BOARD \u2014 COUNT TILES (replacing the counters on the Trello Contract board), counted live on every load: Initial submission pending (red \u2014 never sent to the client); Comments received \u2014 resubmission pending (pink \u2014 Code 3 returns plus Code 2 Resubmission Pending, with how many are Code 2); Submitted \u2014 waiting for the client (with how many are past the 7-day chase); Unassigned cards; Delivery overdue (with the worst days late); Delivery due this week (today and the next 6 days). A document tile filters the board to its cards; a delivery tile shows the contracts instead \u2014 contract (opens it), client, delivery date, days late/left, where the date comes from (the contract's own date, Firm or Anticipated; otherwise the earliest line despatch date in the Contract Register) and Full Hold documents still short of Code 2. Click the tile again to clear. Only Pending contracts count (Closed, Cancelled and On Hold left out). \u201cMy cards only\u201d makes the document tiles and the board show only your cards; the delivery tiles stay company-wide."},
   { date:"11 Oct 2026 (173)", summary:"Built on 2026-10-11T06:00:00Z, on top of 05:00. No SQL. MENU IN WORK-FLOW ORDER: CRM \u2192 Sales \u2192 Engineering Calc \u2192 BOM \u2192 Order Status \u2192 Purchase \u2192 Stores \u2192 Accounts, then Tasks, Reports, HR, Setup, Admin. Inside the tabs too: CRM opens on Daily (My Worklist, Log Follow-ups); Sales goes Enquiry \u2192 Quotes \u2192 Sale Order \u2192 Registers; Stores goes Inward (Material Inward Register, Tag Register) \u2192 Despatch. PO REGISTER moved to Purchase \u2192 Registers. REPORTS split the same way: General (Pending Actions, Weekly & Monthly, Activity by User), Sales, Purchase & Stores (Procurement reports, PO Register, GRN Status), Employee, Admin only. No permission changes \u2014 each login still sees only what it may open."},
   { date:"11 Oct 2026 (172)", summary:"Built on 2026-10-11T05:00:00Z. No SQL. MENU REGROUPED (each tab shows only what the login may open; empty tabs are hidden): Sales \u2192 Registers holds the Quote Register and the Contract Register (out of Enquiry). Dashboards moved under Reports (first group). New STORES tab: Despatch (Delivery Challans, Gate Passes) and Inventory (PO Register, Material Inward Register, Tag Register). New SETUP tab holds all masters and settings: Company (Company Master, Contract Numbering, Posts, Despatch Settings & LUT, Sale Order Status, Data Quality Flags), Commercial terms, Items, Raw material, Rules, CRM, Documents, Tasks; the masters left the Sales, Engineering Calc, CRM and Tasks tabs. Admin keeps Access control, Logs and Data; the BOM tab keeps the BOM Entry Form. Manual paths updated. OFFER CURRENCY CHECK: when the client picked on an offer (new quote, header edit, quote header box) is outside India, the app asks which currency (USD / EUR / AED / INR); with INR a red note shows under the header and saving asks once to confirm \u2014 a warning only, never a block. POP-UPS IN ENGLISH AND TAMIL: every message box (alert, confirm, prompt and the despatch dialogs) shows the English and then the Tamil underneath; parts without a Tamil entry stay in English. MANUAL: Tamil added for the 66 chapters that had none (all 87 now bilingual) \u2014 machine-drafted, to be proof-read once the app is ready."},
@@ -31422,6 +31472,7 @@ function DocStatusEditor({ user }){
     await sb.from("doc_status_tbl").update({action_type:bucket}).eq(col,docStatusName(row));
   };
   const deleteStatus = async(row)=>{
+    if(row.skip_checks || row.board_list==="phold"){ alert("“"+docStatusName(row)+"” is part of the Document Control board (build 175) and can't be deleted here."); return; }   // 175
     if(!confirm("Delete status \""+docStatusName(row)+"\"? Documents already using it keep the label, just lose the color mapping.")) return;
     await sb.from("doc_status_tbl").delete().eq(docStatusNameCol([row]),docStatusName(row));
     load();
@@ -31435,8 +31486,12 @@ function DocStatusEditor({ user }){
     h("div",{style:{display:"flex",flexDirection:"column",gap:6,marginBottom:16}},
       rows.map(r=>h("div",{key:docStatusName(r),style:{display:"flex",alignItems:"center",gap:10,background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"9px 12px"}},
         h("span",{style:{fontSize:11,padding:"2px 9px",borderRadius:10,...bucketMeta(r.action_type).swatch,whiteSpace:"nowrap"}},r.action_type?bucketMeta(r.action_type).label.split(" — ")[0]:"Unset"),
-        h("span",{style:{flex:1,fontSize:12.5}},docStatusName(r)),
-        h("select",{value:r.action_type||"",onChange:e=>changeBucket(r,e.target.value),style:{...inputStyle,padding:"4px 8px",fontSize:11.5}},
+        h("span",{style:{flex:1,fontSize:12.5}},docStatusName(r),
+          r.colour ? h("span",{title:"Colour on the board",style:{display:"inline-block",width:10,height:10,borderRadius:3,background:r.colour,marginLeft:6,verticalAlign:-1}}) : null,
+          r.skip_checks ? h("span",{style:{marginLeft:6,fontSize:10,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#eceeef",color:"#3d4144"}},"legacy load only · skipped by every check") : null,
+          r.hold_note_required ? h("span",{style:{marginLeft:6,fontSize:10,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#fcebdc",color:"#8a3d0a"}},"hold note required") : null,
+          r.board_list==="phold" ? h("span",{style:{marginLeft:6,fontSize:10,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#fcebdc",color:"#8a3d0a"}},"Production Hold list") : null),   // 175
+        h("select",{value:r.action_type||"",disabled:!!r.skip_checks,onChange:e=>changeBucket(r,e.target.value),style:{...inputStyle,padding:"4px 8px",fontSize:11.5}},
           h("option",{value:""},"— pick bucket —"),
           BUCKETS.map(b=>h("option",{key:b.value,value:b.value},b.label))
         ),
@@ -49559,8 +49614,10 @@ let DOC_DEPT = "Document Control";
 const DOC_TT_INITIAL = "Document – initial submission", DOC_TT_RESUB = "Document – resubmission", DOC_TT_CHASE = "Document – chase letter";
 const DOC_CHASE_DAYS = 7;
 const DOC_LISTS = [
+  { key:"confirm", label:"Status to confirm",                     short:"To confirm",    color:"#6f7377", bg:"#eceeef", sub:"Loaded from the old files. Set the status (Trello, Phase 2.1, or the Document Controller). No task card, chase or alert until then." },   // 175
   { key:"our",    label:"Not submitted — our action",              short:"Not submitted", color:"#a3312a", bg:"#fdecea", sub:"Requested and not yet sent, or returned for resubmission." },
   { key:"client", label:"Submitted — client action pending",       short:"Submitted",     color:"#b8860b", bg:"#fff4d6", sub:"We sent it; waiting for the client's code. Chased after "+DOC_CHASE_DAYS+" days." },
+  { key:"phold",  label:"Code 2 — Production Hold",                short:"Production Hold", color:"#b4520f", bg:"#fcebdc", sub:"Client approved with a hold. A Full Hold document here holds the production release." },   // 175
   { key:"code2",  label:"Code 2 — proceed, resubmission outstanding", short:"Code 2",     color:"#6b4fa0", bg:"#efeaf8", sub:"Client lets us proceed; a corrected copy is still owed or awaited." },
   { key:"done",   label:"All approved",                                 short:"All approved",  color:"#0f7a5c", bg:"#e4f3ed", sub:"Code 1 / All Cleared / For Info — no action left." },
 ];
@@ -49569,7 +49626,9 @@ const DOC_LETTER_LEVELS = ["","First reminder","Second reminder","Final reminder
 const DOC_LETTER_OPENING = "Dear Sir / Madam,\n\nWe refer to the documents listed below, submitted for your review and approval. We request you to kindly return them with your comments / approval code at the earliest.";
 const DOC_LETTER_DELIVERY = "Please note that as per the contract, the delivery period runs from Code 2 approval of the documents marked Full Hold below. Delay in approval will shift the delivery date correspondingly.";
 function docStatusListKey(row, label){
-  if(row && ["our","client","code2","done"].includes(row.board_list)) return row.board_list;
+  if(row && ["confirm","our","client","phold","code2","done"].includes(row.board_list)) return row.board_list;
+  if(row && row.skip_checks) return "confirm";   // 175
+  if(/production\s*hold/i.test(label||"")) return "phold";   // 175
   if(/code\s*-?\s*2/i.test(label||"") && !/code\s*-?\s*3/i.test(label||"")) return "code2";
   const b = docStatusBucketOf(row, label);
   return b==="third_party_action" ? "client" : b==="no_action" ? "done" : "our";
@@ -49586,6 +49645,47 @@ function docStatusBucketOf(row, label){
 // 130: commercial papers are not client-approval documents — never on the board.
 const DOC_BOARD_SKIP = /^(purchase order|order acceptance|oa|po|customer po|letter of intent|loi)$/i;
 const docOnBoard = (category)=> !DOC_BOARD_SKIP.test(String(category||"").trim());
+// 175: "Status to confirm" (legacy load) — skipped by every check, alert, task card and KPI until a status is set.
+const docSkips = (row)=> !!(row && row.skip_checks);
+const docPickable = (rows)=> (rows||[]).filter(r=>!docSkips(r));
+// 175: the next revision after the latest. A loaded revision never sent (legacy_unsent) goes out at the same Rev.
+function docExpectedNext(revs){
+  if(!revs || !revs.length) return { rev:0, direction:"Out" };
+  const last = revs[revs.length-1];
+  if(last.legacy_unsent || !last.direction) return { rev:Number(last.rev_number)||0, direction:"Out" };
+  return last.direction==="Out" ? { rev:last.rev_number, direction:"In" } : { rev:(Number(last.rev_number)||0)+1, direction:"Out" };
+}
+// 175: ✓ Completed on a document card = it goes to the client. Which list it lands in, and with which status.
+function docSentTarget(it, statuses){
+  const to = it.list==="phold" ? "phold" : it.list==="code2" ? "code2" : "client";
+  const firstTime = !(it.revs||[]).some(r=>r.direction==="Out" && !r.legacy_unsent);
+  const cands = docPickable(statuses).filter(s=>{ const n = docStatusName(s); return n && docStatusListKey(s,n)===to && docStatusBucketOf(s,n)==="third_party_action"; }).map(docStatusName);
+  const pick = (re)=> cands.find(x=>re.test(x));
+  const status = (firstTime ? pick(/third party|submitted|approval/i) : pick(/resubmission done/i)) || pick(/resubmission done|third party|submitted/i) || cands[0] || "";
+  return { to, status };
+}
+// 176: the status label on a document card — colour and word follow the list and whose move it is,
+// so a status added to the master later gets the right label by itself.
+const DOC_LBL = { red:"#c62828", pink:"#d6458f", yellow:"#e8b100", green:"#1e8a5e" };
+function docLabelOf(list, bucket, sentBefore){
+  const C = DOC_LBL, ours = bucket==="our_action";
+  if(list==="confirm") return null;
+  if(list==="our") return sentBefore ? { word:"Comments \u2013 resubmit", bg:C.pink } : { word:"Our action", bg:C.red };
+  if(list==="client") return { word:"With client", bg:C.yellow };
+  if(list==="code2") return ours ? { word:"Code 2 \u2013 ours", bg:"linear-gradient(90deg,"+C.yellow+" 0%,"+C.yellow+" 55%,"+C.pink+" 80%,"+C.red+" 100%)" }
+                                 : { word:"Code 2 \u2013 with client", bg:"linear-gradient(90deg,"+C.yellow+","+C.green+")" };
+  if(list==="phold") return ours ? { word:"Hold \u2013 ours", bg:"linear-gradient(90deg,"+C.pink+","+C.red+")" }
+                                 : { word:"Hold \u2013 with client", bg:"linear-gradient(90deg,"+C.yellow+","+C.red+")" };
+  if(list==="done") return { word:"Approved", bg:C.green };
+  return null;
+}
+const docItemLabel = (it)=> docLabelOf(it.list, it.bucket, (it.revs||[]).some(r=>r.direction==="Out" && !r.legacy_unsent));
+const docLabelStrip = (lb, key)=> lb ? h("div",{key:key||"lbl",title:lb.word,style:{margin:"-7px -9px 6px",height:18,lineHeight:"18px",padding:"0 8px",background:lb.bg,color:"#fff",fontSize:9.5,fontWeight:700,letterSpacing:".07em",textTransform:"uppercase",textShadow:"0 1px 1px rgba(0,0,0,.3)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},lb.word) : null;
+// 175: latest hold note while the document sits in Production Hold.
+function docHoldNoteOf(revs){
+  for(let i=(revs||[]).length-1;i>=0;i--){ const r = revs[i]; if(!/production\s*hold/i.test(r.status||"")) break; if(r.hold_note) return r.hold_note; }
+  return "";
+}
 async function loadDocDept(){
   try{
     const { data } = await sb.from("department_tbl").select("department");
@@ -49631,17 +49731,18 @@ async function docBoardLoad(){
     const last = revs[revs.length-1]||null;
     const status = last ? (last.status||"") : "";
     const st = stBy[status];
-    const list = last ? docStatusListKey(st, status) : "our";
-    const bucket = last ? docStatusBucketOf(st, status) : "our_action";
+    const skip = !!last && docSkips(st);   // 175
+    const list = skip ? "confirm" : last ? docStatusListKey(st, status) : "our";
+    const bucket = skip ? "no_action" : last ? docStatusBucketOf(st, status) : "our_action";
     const lastOut = [...revs].reverse().find(r=>r.direction==="Out")||null;
     const ltrs = (sentFor["d"+d.id]||[]);
     const lastChase = ltrs.reduce((m,l)=> l.sent_at && l.sent_at>m ? l.sent_at : m, "");
-    const waitingClient = list==="client" || (list==="code2" && bucket==="third_party_action");
+    const waitingClient = list==="client" || ((list==="code2" || list==="phold") && bucket==="third_party_action");   // 175: Production Hold Done is chased too
     const chaseBase = [docD10(lastOut&&lastOut.changed_at), docD10(lastChase)].filter(Boolean).sort().pop();
     const chaseDate = waitingClient && chaseBase ? addDaysISO(chaseBase, DOC_CHASE_DAYS) : "";
     const req = (reqs||[]).find(r=>String(r.fulfilled_document_id)===String(d.id))||null;
     items.push({ key:"d"+d.id, kind:"doc", doc:d, req, ct:String(d.entity_id||""), name:d.doc_name||d.category||d.doc_number, no:d.doc_number||"", cat:d.category||"", sl:d.item_sl_no,
-      revs, last, status, bucket, list, needsUs: bucket==="our_action" || !last, waitingClient, chaseDate, chased:ltrs.length, lastChase,
+      revs, last, status, bucket, list, needsUs: !skip && (bucket==="our_action" || !last), waitingClient, chaseDate, chased:ltrs.length, lastChase, skip, holdNote: docHoldNoteOf(revs),
       since: last ? last.changed_at : d.created_at, owner: d.owner||null, round: last ? "h"+last.id : "new" });
   });
   (reqs||[]).filter(r=>r.entity_type==="contract" && docOnBoard(r.category) && (!r.fulfilled_document_id || !docIds.has(String(r.fulfilled_document_id)))).forEach(r=>{
@@ -49657,7 +49758,7 @@ async function docBoardLoad(){
     it.tasks = taskArr.filter(t=> (it.doc && String(t.doc_id)===String(it.doc.id)) || (it.req && String(t.doc_request_id)===String(it.req.id)));
     it.openTask = it.tasks.filter(t=>t.status!=="done").sort((a,b)=>String(b.created_at||"").localeCompare(String(a.created_at||"")))[0]||null;
     if(!it.owner && it.openTask && !taskIsPile(it.openTask)) it.owner = it.openTask.assignee;
-    it.due = it.list==="done" ? "" : it.waitingClient ? it.chaseDate : (it.openTask && it.openTask.due_date) || "";
+    it.due = (it.list==="done" || it.list==="confirm") ? "" : it.waitingClient ? it.chaseDate : (it.openTask && it.openTask.due_date) || "";
     it.late = !!it.due && it.due < today;
     it.days = it.since ? docDaysBetween(it.since, today) : 0;
   });
@@ -49764,6 +49865,27 @@ async function docChaseSweep(data, by){
   }catch(e){ console.error("Chase letters not made", e); }
   return made;
 }
+// 175: ✓ Completed on a document's task card (Task board) — log the revision Out, exactly as the board does.
+async function docSendFromTask(t, f, username){
+  const d = await docBoardLoad();
+  const it = d.items.find(x=> (x.doc && String(x.doc.id)===String(t.doc_id)) || (!t.doc_id && x.req && String(x.req.id)===String(t.doc_request_id)));
+  if(!it) return { error:"This document is no longer on the Document Control board." };
+  if(it.kind==="req") return { error:"This document has no number yet. Open Order Status → Document Control and press ✓ Completed on its card there: the first submission gives it its number." };
+  if(!it.needsUs) return { error:"The document is already with the client. The card closes by itself." };
+  const exp = docExpectedNext(it.revs);
+  if(exp.direction!=="Out") return { error:"The latest entry is already Out (sent). Log the client's reply on the Document Control board first." };
+  const tg = docSentTarget(it, d.statuses);
+  if(!tg.status) return { error:"No status in the Document Status Master moves this card to “"+docListOf(tg.to).label+"” as sent. Add one in Setup → Document Status Master." };
+  const at = (f.date && f.date!==toISODate(new Date())) ? f.date+"T12:00:00" : new Date().toISOString();
+  const what = String(f.what||"").trim() || (exp.rev>0 ? "Resubmitted Rev "+exp.rev : "First submission");
+  const { error } = await sb.from("universal_document_history_tbl").insert({ document_id:it.doc.id, doc_number:it.no, rev_number:Number(exp.rev)||0, direction:"Out", status:tg.status,
+    link:String(f.link||"").trim(), reason:what, notes:what+" (✓ Completed on the task card)", changed_by:username||"unknown", changed_at:at });
+  if(error) return { error:error.message };
+  await logAudit("UPDATE","universal_documents_tbl",it.ct,"New entry on "+it.no+" — Rev"+exp.rev+"-Out · "+tg.status+" (✓ Completed on the task card): "+what, username||"unknown", null, null);
+  try{ await supersedeHandovers(it.doc.id, Number(exp.rev)||0, username); }catch(e){}
+  try{ await docTasksSync(await docBoardLoad(), "App"); }catch(e){}
+  return { ok:true, msg: it.no+" Rev "+exp.rev+" logged as sent ("+tg.status+"). The task card is completed and the "+DOC_CHASE_DAYS+"-day chase starts from "+fmtDMY(at)+"." };
+}
 // 130: from the Task board — document cards every time it opens; chase letters once a day per browser.
 async function docTaskBoardSync(){
   try{
@@ -49833,7 +49955,7 @@ async function docContractReportPdf(cts, data, ext, company, me){
     const body = [];
     DOC_LISTS.forEach(L=>{
       const ys = xs.filter(it=>it.list===L.key); if(!ys.length) return;
-      body.push([{ content:(ext ? ({our:"With "+((co&&co.company_name)||"us")+" — to submit / resubmit",client:"With client — awaiting review",code2:"Code 2 — proceed, resubmission outstanding",done:"Approved / no action"})[L.key] : L.label)+" — "+ys.length, colSpan: ext?7:11, styles:{ fontStyle:"bold", fillColor:[234,243,238], halign:"left" } }]);
+      body.push([{ content:(ext ? ({confirm:"Status being confirmed",our:"With "+((co&&co.company_name)||"us")+" — to submit / resubmit",client:"With client — awaiting review",phold:"Code 2 — approved, production on hold",code2:"Code 2 — proceed, resubmission outstanding",done:"Approved / no action"})[L.key] : L.label)+" — "+ys.length, colSpan: ext?7:11, styles:{ fontStyle:"bold", fillColor:[234,243,238], halign:"left" } }]);
       ys.forEach((it,i)=>{
         const out = [...it.revs].reverse().find(r=>r.direction==="Out"), inn = [...it.revs].reverse().find(r=>r.direction==="In");
         const st = it.kind==="req" ? (ext?"To be submitted":"Requested — no document yet") : String(it.status||"").replace(/-Awarded|-Proceed/g,"");
@@ -49855,10 +49977,12 @@ async function docContractReportPdf(cts, data, ext, company, me){
 // 174: count tiles on the Document Control Board (replace the Trello Contract board's counters).
 // Document tiles filter the board; delivery tiles open a contract list. Counted live on every load.
 const DOC_TILES = [
-  { key:"init",   grp:"Documents", label:"Initial submission pending", color:"#a3312a", f:it=> it.list==="our" && !(it.revs||[]).some(r=>r.direction==="Out") },
-  { key:"resub",  grp:"Documents", label:"Comments received \u2014 resubmission pending", color:"#b03a78", f:it=> (it.list==="our" && (it.revs||[]).some(r=>r.direction==="Out")) || (it.list==="code2" && it.bucket==="our_action") },
+  { key:"init",   grp:"Documents", label:"Initial submission pending", color:"#a3312a", f:it=> it.list==="our" && !(it.revs||[]).some(r=>r.direction==="Out" && !r.legacy_unsent) },
+  { key:"resub",  grp:"Documents", label:"Comments received \u2014 resubmission pending", color:"#b03a78", f:it=> (it.list==="our" && (it.revs||[]).some(r=>r.direction==="Out" && !r.legacy_unsent)) || ((it.list==="code2" || it.list==="phold") && it.bucket==="our_action") },
   { key:"client", grp:"Documents", label:"Submitted \u2014 waiting for the client", color:"#8a6400", f:it=> it.list==="client" },
-  { key:"unas",   grp:"Documents", label:"Unassigned cards", color:"#6b4fa0", f:it=> !it.owner && it.list!=="done" },
+  { key:"phold",  grp:"Documents", label:"Production Hold", color:"#b4520f", f:it=> it.list==="phold" },   // 175
+  { key:"unas",   grp:"Documents", label:"Unassigned cards", color:"#6b4fa0", f:it=> !it.owner && it.list!=="done" && it.list!=="confirm" },
+  { key:"confirm",grp:"Documents", label:"Status to confirm", color:"#6f7377", f:it=> it.list==="confirm" },   // 175
   { key:"over",   grp:"Delivery",  label:"Delivery overdue", color:"#a3312a", d:c=> c.off<0 },
   { key:"week",   grp:"Delivery",  label:"Delivery due this week", color:"#1d5f9e", d:c=> c.off>=0 && c.off<=6 },
 ];
@@ -49961,7 +50085,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
   const itemByKey = (k)=> data.items.find(it=>it.key===k);
   const outOf = (it)=> [...it.revs].reverse().find(r=>r.direction==="Out")||null;
   const inOf = (it)=> [...it.revs].reverse().find(r=>r.direction==="In")||null;
-  const fullHoldOpen = (xs)=> xs.filter(it=>it.hold==="Full Hold" && !["code2","done"].includes(it.list)).length;
+  const fullHoldOpen = (xs)=> xs.filter(it=>it.hold==="Full Hold" && !["code2","done","confirm"].includes(it.list)).length;   // 175: Status to confirm is skipped
 
   // ---- assign ----
   const assign = async(its, who)=>{
@@ -49991,11 +50115,13 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
   };
 
   // ---- move = log the next revision ----
-  const expectedNext = (revs)=>{ if(!revs || !revs.length) return { rev:0, direction:"Out" }; const last = revs[revs.length-1]; return last.direction==="Out" ? { rev:last.rev_number, direction:"In" } : { rev:(Number(last.rev_number)||0)+1, direction:"Out" }; };
-  const startMove = async(it, to)=>{
+  const expectedNext = docExpectedNext;   // 175: a loaded, never-sent revision goes out at the same Rev
+  const startMove = async(it, to, forceStatus, viaComplete)=>{
     if(!canTouch(it)){ alert("Only the Document Controller, an Admin or "+(it.owner?it.owner+" (the card's owner)":"the card's owner")+" can move this card."); return; }
+    if(to==="confirm"){ alert("“Status to confirm” comes only from the legacy load. A card can't be moved back to it."); return; }   // 175
+    if(it.list==="confirm"){ startSetStatus(it); return; }   // 175: a loaded card gets its status set, not a new revision
     const exp = expectedNext(it.revs);
-    const sts = data.statuses.filter(s=>docStatusListKey(s, docStatusName(s))===to).map(docStatusName);
+    const sts = docPickable(data.statuses).filter(s=>docStatusListKey(s, docStatusName(s))===to).map(docStatusName);
     let num = it.no;
     if(it.kind==="req"){
       const base = docNumberPrefix(data.cats, it.cat)+"-"+it.ct;
@@ -50005,14 +50131,26 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     const pref = exp.direction==="Out" && Number(exp.rev)===0 ? /third party/i : exp.direction==="Out" ? /resubmission done/i : null;
     const prevCode = it.last && /code\s*-?\s*2/i.test(it.last.status||"") ? /code\s*-?\s*2/i : it.last && /code\s*-?\s*3/i.test(it.last.status||"") ? /code\s*-?\s*3/i : null;
     const guess = (pref && (sts.find(x=>pref.test(x) && (!prevCode || prevCode.test(x))) || sts.find(x=>pref.test(x)))) || (sts.length===1 ? sts[0] : "");
-    setMv({ key:it.key, to, status: guess, rev:exp.rev, dir:exp.direction, date:today, link: it.last ? (it.last.link||"") : "", what:"", notes:"", num, title:it.kind==="req"?it.cat:"" });
+    setMv({ key:it.key, to, status: forceStatus || guess, rev:exp.rev, dir:exp.direction, date:today, link: it.last ? (it.last.link||"") : "", what: viaComplete ? (exp.rev>0 ? "Resubmitted Rev "+exp.rev : "First submission") : "", notes:"", hold:"", num, title:it.kind==="req"?it.cat:"", viaComplete:!!viaComplete });
     setPanel({ kind:"move", key:it.key, to });
+  };
+  // 175: ✓ Completed on a card = the document goes to the client now.
+  const completeCard = (it)=>{
+    if(!canTouch(it)){ alert("Only the Document Controller, an Admin or "+(it.owner?it.owner+" (the card's owner)":"the card's owner")+" can complete this card."); return; }
+    if(!it.needsUs){ alert("This card is waiting on the client — there is nothing of ours to complete."); return; }
+    const exp = expectedNext(it.revs);
+    if(exp.direction!=="Out"){ alert("The latest entry on this card is already Out (sent). Log the client's reply first: drag the card to the right list, or use + Add revision in 🕘 History."); return; }
+    const tg = docSentTarget(it, data.statuses);
+    if(!tg.status){ alert("No status in the Document Status Master moves a card to “"+docListOf(tg.to).label+"” as sent to the client. Add one (Setup → Document Status Master), then try again."); return; }
+    startMove(it, tg.to, tg.status, true);
   };
   const saveMove = async()=>{
     const it = itemByKey(mv.key); if(!it) return;
     if(!mv.status){ alert("Pick the new status."); return; }
     if(!confirmDocumentLink(mv.link, "Document "+(it.no||mv.num))) return;
     if(!String(mv.what).trim()){ alert("Say what changed, or what the client said."); return; }
+    const mvRow = data.statuses.find(s=>docStatusName(s)===mv.status);   // 175
+    if(mvRow && mvRow.hold_note_required && !String(mv.hold||"").trim()){ alert("A Production Hold needs the client's condition, e.g. “hold until revised calc approved”. It shows on the card and in the release warning."); return; }
     setBusy(true);
     try{
       const at = (mv.date && mv.date!==today) ? mv.date+"T12:00:00" : new Date().toISOString();
@@ -50029,28 +50167,88 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
         await sb.from("document_requests_tbl").update({ fulfilled_document_id:docId }).eq("id",it.req.id);
       }
       const { error } = await sb.from("universal_document_history_tbl").insert({ document_id:docId, doc_number:docNo, rev_number:Number(mv.rev)||0, direction:mv.dir, status:mv.status,
-        link:String(mv.link).trim(), reason:String(mv.what).trim(), notes:String(mv.notes||mv.what).trim(), changed_by:user?.username||"unknown", changed_at:at });
-      if(error) throw error;
+        link:String(mv.link).trim(), reason:String(mv.what).trim(), notes:String(mv.notes||mv.what).trim(), changed_by:user?.username||"unknown", changed_at:at,
+        ...(String(mv.hold||"").trim() ? { hold_note:String(mv.hold).trim() } : {}) });
+      if(error){ if(/hold_note/.test(error.message||"")) throw new Error("Run structure_doc_confirm_prodhold_2026-10-11.sql first — the hold note has nowhere to go yet."); throw error; }
       await logAudit(it.kind==="req"?"INSERT":"UPDATE","universal_documents_tbl",it.ct,(it.kind==="req"?"Logged ":"New entry on ")+docNo+" — Rev"+mv.rev+"-"+mv.dir+" · "+mv.status+" (Document Control board): "+String(mv.what).trim(),user?.username||"unknown",null,null);
       if(it.kind==="doc"){
         const superseded = await supersedeHandovers(docId, Number(mv.rev)||0, user?.username);
         if(superseded) alert(docNo+" was handed over to production at an earlier revision. The work order now shows Rev "+mv.rev+" as current, and the Technical Head has been flagged to reissue it.");
       }
       const toList = docStatusListKey(data.statuses.find(s=>docStatusName(s)===mv.status), mv.status);
-      if(it.hold==="Full Hold" && ["code2","done"].includes(it.list) && toList==="our"){
-        const msg = "Contract "+it.ct+": Full Hold document "+docNo+" fell back from "+it.status+" to "+mv.status+". The delivery clock was NOT reset — the contract owner decides.";
+      if(it.hold==="Full Hold" && ["code2","done"].includes(it.list) && (toList==="our" || toList==="phold")){   // 175: a fall back to Production Hold is flagged too
+        const msg = "Contract "+it.ct+": Full Hold document "+docNo+" fell back from "+it.status+" to "+mv.status+(toList==="phold" && String(mv.hold||"").trim()?" (hold: "+String(mv.hold).trim()+")":"")+". The delivery clock was NOT reset — the contract owner decides.";
         await logAudit("UPDATE","universal_documents_tbl",it.ct,msg,user?.username||"unknown",null,null);
         try{ await notifySuperAdmins(msg, company && company.company_name, "doc_full_hold_fallback"); }catch(e){}
         alert(msg+"\n\nSuper Admins have been told.");
       }
       if(it.hold==="Full Hold" && ["code2","done"].includes(toList)){
-        const others = data.items.filter(x=>x.ct===it.ct && x.key!==it.key && x.hold==="Full Hold" && !["code2","done"].includes(x.list));
+        const others = data.items.filter(x=>x.ct===it.ct && x.key!==it.key && x.hold==="Full Hold" && !["code2","done","confirm"].includes(x.list));
         if(!others.length) alert("Every Full Hold document on contract "+it.ct+" is now at Code 2 or better.\n\nIf this contract's delivery runs from Code 2 approval, open the contract and set the Code 2 date to start the delivery clock (the app does not start it by itself).");
       }
       setPanel(null);
       await load(true);
     }catch(e){ alert(documentSaveErrorText(e, docNo||it.no)); }
     finally{ setBusy(false); }
+  };
+
+  // ---- 175: Set status on a loaded ("Status to confirm") card — sets the loaded revision, makes no new one ----
+  const startSetStatus = (it)=>{
+    if(!canTouch(it)){ alert("Only the Document Controller, an Admin or "+(it.owner?it.owner+" (the card's owner)":"the card's owner")+" can set this status."); return; }
+    if(!it.last){ alert("This card has no loaded revision to set."); return; }
+    setMv({ key:it.key, status:"", date: String(it.last.changed_at||"").slice(0,10) || today, what:"", hold:"" });
+    setPanel({ kind:"setst", key:it.key });
+  };
+  const saveSetStatus = async(next)=>{
+    const it = itemByKey(mv.key); if(!it || !it.last) return;
+    const row = data.statuses.find(s=>docStatusName(s)===mv.status);
+    if(!row || docSkips(row)){ alert("Pick a status from the list. The card stays in “Status to confirm” until one is set."); return; }
+    if(!mv.date){ alert("Enter the date it was sent to the client, or returned by them. The chase timer runs from it."); return; }
+    if(mv.date>today){ alert("The date can't be after today."); return; }
+    if(row.hold_note_required && !String(mv.hold||"").trim()){ alert("A Production Hold needs the client's condition, e.g. “hold until revised calc approved”."); return; }
+    const name = docStatusName(row), bucket = docStatusBucketOf(row, name);
+    const returned = /code\s*-?\s*[123]|resubmission|comment|hold|approved|cleared/i.test(name);
+    const unsent = bucket==="our_action" && !returned;   // e.g. "Initial submission pending": never went out
+    const dir = bucket==="third_party_action" ? "Out" : unsent ? null : "In";
+    setBusy(true);
+    try{
+      const patch = { status:name, direction:dir, legacy_unsent:unsent, changed_at:mv.date+"T12:00:00",
+        notes:[String(mv.what||"").trim(), "Status set on the Document Control board (was Status to confirm)"].filter(Boolean).join(" — "),
+        ...(String(mv.hold||"").trim() ? { hold_note:String(mv.hold).trim() } : {}) };
+      const { error } = await sb.from("universal_document_history_tbl").update(patch).eq("id", it.last.id);
+      if(error){ if(/legacy_unsent|hold_note|direction/.test(error.message||"")) throw new Error("Run structure_doc_confirm_prodhold_2026-10-11.sql first.\n\n"+error.message); throw error; }
+      await logAudit("UPDATE","universal_document_history_tbl",it.ct,(it.no||it.cat)+" Rev "+it.last.rev_number+": Status to confirm → "+name+" (dated "+fmtDMY(mv.date)+")"+(patch.hold_note?" · hold: "+patch.hold_note:""),user?.username||"unknown",{status:it.status},{status:name});
+      const nextIt = next ? vis.filter(x=>x.list==="confirm" && x.key!==it.key && canTouch(x)).sort(cmp)[0] : null;
+      setPanel(null);
+      await load(true);
+      if(nextIt) setTimeout(()=>startSetStatus(nextIt), 0);
+      else if(next) alert("No more cards to confirm in this view.");
+    }catch(e){ alert("Could not set the status:\n\n"+(e&&e.message||e)); }
+    finally{ setBusy(false); }
+  };
+  const setStatusModal = ()=>{
+    const it = itemByKey(mv.key); if(!it) return null;
+    const groups = DOC_LISTS.filter(l=>l.key!=="confirm").map(l=>[l, docPickable(data.statuses).filter(s=>docStatusListKey(s, docStatusName(s))===l.key).map(docStatusName).filter(Boolean)]).filter(([l,s])=>s.length);
+    const row = data.statuses.find(s=>docStatusName(s)===mv.status);
+    const lab = (t)=> h("div",{style:{fontSize:11.5,color:colors.muted,margin:"9px 0 3px"}},t);
+    const inp = (k, ph, type)=> h("input",{type:type||"text",value:mv[k]||"",placeholder:ph||"",onChange:e=>setMv(m=>({...m,[k]:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12}});
+    const d = it.doc||{};
+    return modal(500, [
+      h("b",{key:"t",style:{fontSize:14}},"Set status"),
+      h("div",{key:"s",style:{fontSize:11.5,color:colors.muted,marginTop:3}},it.name+" · "+it.ct+(it.no?" · "+it.no:"")+" · Rev "+it.last.rev_number),
+      h("div",{key:"i",style:{background:"#eceeef",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:8,lineHeight:1.45}},
+        "Loaded"+(d.loaded_on?" on "+fmtDMY(d.loaded_on):"")+(d.load_batch?" (batch "+d.load_batch+")":"")+". This sets the status of Rev "+it.last.rev_number+", the revision already loaded — it does not make a new revision.",
+        d.source_path ? h("div",{style:{fontFamily:"monospace",fontSize:10.5,color:"#2a6db0",marginTop:4,wordBreak:"break-all"}},d.source_path) : null),
+      h("div",{key:"st"},lab("Status (from the master)"),h("select",{value:mv.status,onChange:e=>setMv(m=>({...m,status:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12}},
+        h("option",{value:""},"— pick —"), groups.map(([l,s])=>h("optgroup",{key:l.key,label:l.label},s.map(x=>h("option",{key:x,value:x},x)))))),
+      h("div",{key:"d"},lab("Date sent to the client, or returned by them"),inp("date","","date")),
+      row && row.hold_note_required ? h("div",{key:"hn"},lab("Hold note (required): the client's condition for releasing production"),inp("hold","e.g. hold until revised nozzle load calc approved")) : null,
+      h("div",{key:"w"},lab("Note (optional)"),inp("what","e.g. Code 2 per client mail 14.03.2026")),
+      h("div",{key:"b",style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14,flexWrap:"wrap"}},
+        h("button",{style:btnSmall,onClick:()=>setPanel(null)},"Cancel"),
+        h("button",{style:btnSmall,disabled:busy,onClick:()=>saveSetStatus(true)},"Save and open next"),
+        h("button",{style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},disabled:busy,onClick:()=>saveSetStatus(false)},busy?"Saving…":"Save status"))
+    ], ()=>setPanel(null));
   };
 
   // ---- small pieces ----
@@ -50068,7 +50266,8 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     const o = !!openC[it.key];
     const lst = docListOf(it.list);
     return h("div",{key:it.key, draggable:true, onDragStart:()=>setDrag(it.key), onDragEnd:()=>{ setDrag(null); setOver(""); },
-      style:{background:"#fff",border:"1px solid "+colors.border,borderLeft:it.late?"4px solid #a3312a":"1px solid "+colors.border,borderRadius:7,padding:"7px 9px",marginBottom:7,fontSize:12,cursor:"grab"}},
+      style:{background:it.list==="confirm"?"#f4f5f5":"#fff",border:"1px solid "+colors.border,borderLeft:it.late?"4px solid #a3312a":"1px solid "+colors.border,borderRadius:7,padding:"7px 9px",marginBottom:7,fontSize:12,cursor:"grab",overflow:"hidden"}},
+      docLabelStrip(docItemLabel(it)),   // 176
       h("div",{style:{display:"flex",gap:6,alignItems:"flex-start"}}, h("b",{style:{flex:1,minWidth:0,lineHeight:1.3}},it.name), latestLink(it)),
       h("div",{style:{fontSize:11,color:colors.muted,marginTop:2}}, h("b",{style:{color:"#2a6db0"}},it.ct), it.customer?" · "+it.customer:""),
       h("div",{style:{marginTop:4,display:"flex",flexWrap:"wrap",gap:2,alignItems:"center"}},
@@ -50082,6 +50281,13 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
         h("span",{style:it.late?{color:"#a3312a",fontWeight:700}:{}}, "📅 "+dueText(it)),
         h("span",{title:"History",onClick:e=>{e.stopPropagation(); setPanel({kind:"hist",key:it.key});},style:{marginLeft:"auto",cursor:"pointer",color:"#0f7a5c",fontWeight:700,fontSize:11}},"🕘"),
         h("span",{onClick:e=>{e.stopPropagation(); setOpenC(c=>({...c,[it.key]:!c[it.key]}));},style:{cursor:"pointer",color:"#0f7a5c",fontWeight:700,fontSize:11,whiteSpace:"nowrap"}}, o?"▴ less":"▾ more")),
+      it.holdNote ? h("div",{title:"Client's hold condition",style:{marginTop:4,fontSize:11,background:"#fcebdc",color:"#8a3d0a",borderRadius:5,padding:"3px 6px",lineHeight:1.35}},"⏸ "+it.holdNote) : null,   // 175
+      // 175: actions on the card, shown by default
+      it.list==="confirm" && canTouch(it) ? h("div",{onMouseDown:e=>e.stopPropagation(),style:{display:"flex",gap:5,flexWrap:"wrap",borderTop:"1px dashed "+colors.border,marginTop:6,paddingTop:6}},
+          h("button",{onClick:e=>{ e.stopPropagation(); startSetStatus(it); },style:{font:"inherit",fontSize:11,fontWeight:700,border:"1px solid #6f7377",background:"#eceeef",color:"#3d4144",borderRadius:6,padding:"2px 9px",cursor:"pointer"}},"Set status ▸"))
+      : it.needsUs && canTouch(it) ? h("div",{onMouseDown:e=>e.stopPropagation(),style:{display:"flex",gap:5,flexWrap:"wrap",borderTop:"1px dashed "+colors.border,marginTop:6,paddingTop:6}},
+          h("button",{onClick:e=>{ e.stopPropagation(); completeCard(it); },title:"The document goes to the client: logs the revision Out and closes the task card",style:{font:"inherit",fontSize:11,fontWeight:700,border:"1px solid #0f7a5c",background:"#0f7a5c",color:"#fff",borderRadius:6,padding:"2px 9px",cursor:"pointer"}},"✓ Completed"))
+      : null,
       o && h("div",{style:{borderTop:"1px dashed "+colors.border,marginTop:6,paddingTop:6,fontSize:11,color:colors.muted,lineHeight:1.6}},
         h("div",null,"Owner ",ownerSel(it,true)),
         h("div",null,"Doc # ",h("b",{style:{color:colors.text}},it.no||"—"),it.sl!=null?" · Sl "+it.sl:""),
@@ -50095,7 +50301,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
   };
   const onDrop = async(C)=>{
     const it = itemByKey(drag); setOver(""); setDrag(null); if(!it) return;
-    if(view==="stage"){ if(it.list!==C.list) await startMove(it, C.list); }
+    if(view==="stage"){ if(it.list!==C.list) await startMove(it, C.list); }   // 175: startMove refuses the confirm list and sends a confirm card to Set status
     else { if((it.owner||"")!==(C.person||"")) await assign([it], C.person||""); }
   };
 
@@ -50210,7 +50416,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
         : h("div",{key:"e",style:{fontSize:12,color:colors.muted,margin:"14px 0"}},"No revisions yet — "+(it.kind==="req"?"requested on the contract, nothing sent.":"nothing logged.")),
       ltrs.length ? h("div",{key:"l",style:{fontSize:11.5,color:colors.muted,borderTop:"1px dashed "+colors.border,paddingTop:8}},"✉ Chase letters: "+ltrs.map(l=>l.letter_no+" · "+fmtDMY(l.sent_at)).join(", ")) : null,
       h("div",{key:"b",style:{display:"flex",gap:8,marginTop:12,flexWrap:"wrap",alignItems:"center"}},
-        canTouch(it) ? h("button",{style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},onClick:()=>startMove(it, it.list)},"+ Add revision") : null,
+        canTouch(it) ? h("button",{style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},onClick:()=>startMove(it, it.list)},it.list==="confirm"?"Set status":"+ Add revision") : null,
         onOpenContract && it.so && it.so.contract_number ? h("button",{style:btnSmall,onClick:()=>onOpenContract(it.so)},"Open in contract →") : null,
         h("span",{style:{fontSize:11,color:colors.mutedLight}},"Each revision keeps its own file link; the 🔗 on the card opens the newest."))
     ], close);
@@ -50220,12 +50426,14 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
   const moveModal = ()=>{
     const it = itemByKey(mv.key); if(!it) return null;
     const L = docListOf(panel.to);
-    const groups = DOC_LISTS.map(l=>[l, data.statuses.filter(s=>docStatusListKey(s, docStatusName(s))===l.key).map(docStatusName).filter(Boolean)]).filter(([l,s])=>s.length);
+    const groups = DOC_LISTS.filter(l=>l.key!=="confirm").map(l=>[l, docPickable(data.statuses).filter(s=>docStatusListKey(s, docStatusName(s))===l.key).map(docStatusName).filter(Boolean)]).filter(([l,s])=>s.length);
     const toList = docStatusListKey(data.statuses.find(s=>docStatusName(s)===mv.status), mv.status);
+    const needHold = !!(data.statuses.find(s=>docStatusName(s)===mv.status)||{}).hold_note_required;   // 175
     const lab = (t)=> h("div",{style:{fontSize:11.5,color:colors.muted,margin:"9px 0 3px"}},t);
     const inp = (k, ph, type)=> h("input",{type:type||"text",value:mv[k]||"",placeholder:ph||"",onChange:e=>setMv(m=>({...m,[k]:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12}});
     return modal(500, [
-      h("b",{key:"t",style:{fontSize:14}},panel.to===it.list ? "Add revision" : "Move to “"+L.label+"”"),
+      h("b",{key:"t",style:{fontSize:14}},mv.viaComplete ? "✓ Completed — send to the client" : panel.to===it.list ? "Add revision" : "Move to “"+L.label+"”"),
+      mv.viaComplete ? h("div",{key:"vc",style:{background:"#e4f3ed",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:8}},"This task is done when the document goes to the client. Saving logs Rev "+mv.rev+" Out, moves the card to “"+L.label+"”, closes its task card and starts the "+DOC_CHASE_DAYS+"-day chase from the date below.") : null,
       h("div",{key:"s",style:{fontSize:11.5,color:colors.muted,marginTop:3}},it.name+" · "+it.ct+(it.no?" · "+it.no:"")),
       it.kind==="req" ? h("div",{key:"rq",style:{display:"flex",gap:8}},h("div",{style:{flex:1}},lab("Document number"),inp("num")),h("div",{style:{flex:1.4}},lab("Title"),inp("title"))) : null,
       h("div",{key:"st"},lab("New status"),h("select",{value:mv.status,onChange:e=>setMv(m=>({...m,status:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12}},
@@ -50238,11 +50446,12 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
       h("div",{key:"l"},lab("Link to the file (Google Drive / OneDrive)"),inp("link","https://…")),
       h("div",{key:"w"},lab(mv.dir==="In"?"Client's code / comment (required)":"What changed (required)"),inp("what", mv.dir==="In"?"e.g. Code 3 — nozzle orientation to be revised":"e.g. Revised as per CRS")),
       h("div",{key:"n"},lab("Notes (optional)"),inp("notes")),
-      it.hold==="Full Hold" && ["code2","done"].includes(it.list) && toList==="our" ? h("div",{key:"w1",style:{background:"#fff4d6",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:10}},"⚠ This Full Hold document is falling back from Code 2. The delivery clock is not reset — Super Admins are told and the contract owner decides.") : null,
+      needHold ? h("div",{key:"hn"},lab("Hold note (required): the client's condition for releasing production"),inp("hold","e.g. hold until revised nozzle load calc approved")) : null,
+      it.hold==="Full Hold" && ["code2","done"].includes(it.list) && (toList==="our" || toList==="phold") ? h("div",{key:"w1",style:{background:"#fff4d6",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:10}},"⚠ This Full Hold document is falling back from Code 2. The delivery clock is not reset — Super Admins are told and the contract owner decides.") : null,
       it.hold==="Full Hold" && ["code2","done"].includes(toList) && !["code2","done"].includes(it.list) ? h("div",{key:"w2",style:{background:"#fff4d6",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:10}},"If this is the last Full Hold document to reach Code 2, the app will remind you to start the delivery clock on the contract (it does not start it by itself).") : null,
       h("div",{key:"b",style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}},
         h("button",{style:btnSmall,onClick:()=>setPanel(null)},"Cancel"),
-        h("button",{style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},disabled:busy,onClick:saveMove},busy?"Saving…":"Save revision & move"))
+        h("button",{style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},disabled:busy,onClick:saveMove},busy?"Saving…":mv.viaComplete?"✓ Completed — document sent":"Save revision & move"))
     ], ()=>setPanel(null));
   };
 
@@ -50404,13 +50613,15 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     data.tasksMissing || data.lettersMissing ? h("div",{style:{background:"#fdecea",color:"#a3312a",borderRadius:6,padding:"7px 10px",fontSize:12,marginBottom:8}},"Run the build-129 structure and data SQL — task cards and chase letters are switched off until then.") : null,
     // 174: count tiles
     (()=>{
-      const fhOpen = (ct)=> data.items.filter(it=>it.ct===ct && it.hold==="Full Hold" && !["code2","done"].includes(it.list)).length;
+      const fhOpen = (ct)=> data.items.filter(it=>it.ct===ct && it.hold==="Full Hold" && !["code2","done","confirm"].includes(it.list)).length;
       const cnt = (t)=> t.f ? tileItems.filter(t.f).length : (del ? del.filter(t.d).length : "\u2026");
       const subOf = (t)=>{
         if(t.key==="init") return "Never sent to the client";
         if(t.key==="resub"){ const c2 = tileItems.filter(it=>t.f(it) && it.list==="code2").length; return c2+" of them Code 2"; }
         if(t.key==="client"){ const o = tileItems.filter(it=>t.f(it) && it.chaseDate && it.chaseDate<data.today).length; return o+" past the "+DOC_CHASE_DAYS+"-day chase"; }
         if(t.key==="unas") return "Nobody owns them yet";
+        if(t.key==="phold"){ const f = tileItems.filter(it=>t.f(it) && it.hold==="Full Hold").length; return f+" Full Hold \u2014 hold the release"; }   // 175
+        if(t.key==="confirm") return "Loaded \u2014 status still to set";
         if(t.key==="over"){ const w = (del||[]).filter(t.d).reduce((m,c)=>Math.max(m,-c.off),0); return del ? (w ? "worst "+w+" days late" : "none late") : "reading\u2026"; }
         if(t.key==="week") return "Today and the next 6 days";
         return "";
@@ -50484,6 +50695,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     panel && panel.kind==="table" ? tableModal(panel.key) : null,
     panel && panel.kind==="hist" ? histModal(panel.key, panel.back) : null,
     panel && panel.kind==="move" ? moveModal() : null,
+    panel && panel.kind==="setst" ? setStatusModal() : null,   // 175
     panel==="letters" ? lettersModal() : null,
     panel==="report" ? reportModal() : null);
 }
@@ -51006,6 +51218,8 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
   const [dueEd,setDueEd] = useState(null);         // 151: id of the card / sub-task whose due date is being changed in place
   const [dueOk,setDueOk] = useState(null);
   const [cardAct,setCardAct] = useState(null);   // { kind:"move"|"copy", t, dept, to, due, why, title, people:{}, chk, sub, lnk, busy }
+  const [docDone,setDocDone] = useState(null);   // 175: { t, date, link, what, busy } — ✓ Completed on a document card
+  const [docLab,setDocLab] = useState({});       // 176: document id -> status label for document task cards
   // 151: All boards — every department's board as a band; folded / open and the band order are kept per person in this browser
   const [abOpen,setAbOpen] = useState(()=>{ try{ return JSON.parse(localStorage.getItem("ab_open")||"null"); }catch(e){ return null; } });
   const [abOrder,setAbOrder] = useState(()=>{ try{ return JSON.parse(localStorage.getItem("ab_order")||"[]"); }catch(e){ return []; } });
@@ -51061,6 +51275,24 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     }catch(ex){ console.error("Enquiry cards not read", ex); }
     const aAll = mergeAutoApprovers(a);   // 131: post holders approve their boards automatically
     setEmps(live); setTasks(tl); setLabels(l||[]); setApprovers(aAll); setMe(name);
+    try{   // 176: the document's status label on its task cards
+      const dIds = Array.from(new Set(tl.filter(x=>x.doc_id && x.status!=="done" && !x.chase_letter_id).map(x=>String(x.doc_id))));
+      if(dIds.length){
+        const [hs, sts] = [[], await loadDocStatuses()];
+        for(let k=0;k<dIds.length;k+=150){ const { data:hr } = await sb.from("universal_document_history_tbl").select("*").in("document_id",dIds.slice(k,k+150)); (hr||[]).forEach(r=>hs.push(r)); }
+        const by = {}; hs.forEach(r=>{ (by[r.document_id]=by[r.document_id]||[]).push(r); });
+        const m = {};
+        dIds.forEach(id=>{
+          const revs = (by[id]||[]).sort((x,y)=> (Number(x.rev_number)||0)-(Number(y.rev_number)||0) || String(x.changed_at||"").localeCompare(String(y.changed_at||"")) || (Number(x.id)||0)-(Number(y.id)||0));
+          const last = revs[revs.length-1];
+          if(!last){ m[id] = docLabelOf("our","our_action",false); return; }
+          const row = sts.find(r=>docStatusName(r)===last.status);
+          if(docSkips(row)) return;
+          m[id] = docLabelOf(docStatusListKey(row,last.status), docStatusBucketOf(row,last.status), revs.some(r=>r.direction==="Out" && !r.legacy_unsent));
+        });
+        setDocLab(m);
+      } else setDocLab({});
+    }catch(ex){ console.error("Document labels not read", ex); }
     if(first){
       const myDepts = (isAdmin || dcNames.includes(name)) ? Array.from(new Set([...masterDepts, ...live.flatMap(x=>empBoards(x))].filter(Boolean))).sort() : Array.from(new Set(aAll.filter(x=>x.employee_name===name).map(x=>x.department)));
       const auth = isAdmin || myDepts.length>0;
@@ -51273,10 +51505,59 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
       style:{font:"inherit",fontSize:small?10.5:11,fontWeight:600,border:"1px solid "+colors.border,background:"#fff",color:dis?colors.mutedLight:colors.text,borderRadius:6,padding:small?"1px 6px":"2px 8px",cursor:"pointer",display:"inline-flex",gap:3,alignItems:"center"}},icon,small?null:label);
     const noMove = canEdit(t) ? null : "Only "+(t.assignee||"its holder")+", whoever created it, the board's approver or an Admin can move this card.";
     const noDue = (t.proc_plan_id && t.parent_id) ? "This date comes from the Procurement Gantt \u2014 change it there." : noMove;
+    const gb = (label, on, title, dis)=> h("button",{onClick:ev=>{ ev.stopPropagation(); if(dis){ alert(dis); return; } on(); },onMouseDown:ev=>ev.stopPropagation(),title:dis||title,
+      style:{font:"inherit",fontSize:small?10.5:11,fontWeight:700,border:"1px solid "+(dis?colors.border:"#0f7a5c"),background:dis?"#fff":"#0f7a5c",color:dis?colors.mutedLight:"#fff",borderRadius:6,padding:small?"1px 6px":"2px 8px",cursor:"pointer",display:"inline-flex",gap:3,alignItems:"center"}},label);   // 175
+    const appr = t.status==="approval";   // 175: Under Approval — the approver approves or sends back from the card
     return h("div",{onClick:ev=>ev.stopPropagation(),style:{display:"flex",gap:5,flexWrap:"wrap",borderTop:small?"none":"1px dashed "+colors.border,marginTop:small?0:6,paddingTop:small?0:6,cursor:"default"}},
+      appr ? (canApprove(t) ? gb(small?"\u2713":"\u2713 Approve",()=>approveCard(t),"Approve: the card is completed") : null)
+           : gb(small?"\u2713":"\u2713 Completed",()=>completeCard(t), canApprove(t)?"Complete the card (you approve it)":"Send the card for approval", noMove),   // 175
+      appr && canApprove(t) ? b("\u21a9","Send back",()=>sendBackCard(t),"Send it back to "+taskWho(t)+" with a reason",null) : null,
       b("\ud83d\udcc5","Due",()=>setDueEd(t.id),"Change the due date",noDue),
       b("\u21c4","Move",()=>openCardMove(t),"Move to another person, pile or department",noMove),
       b("\u29c9","Copy",()=>openCardCopy(t),"Make a copy (or several) of this card",null));
+  };
+  // 175: ✓ Completed on every card. The holder sends it to Under Approval; an approver (or a Super Admin) completes it.
+  const tickAll = (items)=> (items||[]).map(i=>({ ...i, done:true, items:tickAll(i.items) }));
+  const openItems = (t)=>{ const [d,n] = taskProgress(t); return Math.max(0,(n||0)-(d||0)); };
+  const completeCard = async(t)=>{
+    if(t.doc_id || t.doc_request_id){ if(t.chase_letter_id){ alert("A chase letter card completes when the letter is marked sent: Order Status → Document Control → ✉ Chase letters."); return; }
+      setDocDone({ t, date:today, link:"", what:"", busy:false }); return; }
+    const left = openItems(t);
+    const self = canApprove(t);
+    if(!confirm("“"+t.title+"”\n\n"+(left?left+" checklist item"+(left===1?" is":"s are")+" still open; they will be ticked.\n\n":"")+(self?"Complete the card now? It counts in Tasks Completed.":"Send it for approval to "+(approversFor(t).join(" / ")||"an Admin")+"?"))) return;
+    const now = new Date().toISOString();
+    const chk = left && (t.checklists||[]).length ? { checklists:(t.checklists||[]).map(c=>({ ...c, items:tickAll(c.items) })) } : {};
+    const from = taskStageLabel(taskStage(t,today));
+    if(self) await move(t,{ status:"done", approved_by:me, approved_at:now, sent_at:t.sent_at||now, ...chk }, from+" → Completed (✓ Completed on the card, approved)");
+    else await move(t,{ status:"approval", sent_at:now, ...chk }, from+" → Under Approval (✓ Completed on the card)");
+  };
+  const approveCard = async(t)=>{ const now = new Date().toISOString(); await move(t,{ status:"done", approved_by:me, approved_at:now, sent_at:t.sent_at||now }, "Under Approval → Completed (approved on the card)"); };
+  const sendBackCard = async(t)=>{ const why = prompt("Why is “"+t.title+"” sent back to "+taskWho(t)+"?"); if(why===null) return; if(!why.trim()){ alert("Say what needs fixing."); return; } await move(t,{ status:"open", sent_at:null }, "Under Approval → sent back: "+why.trim()); };
+  const docDoneModal = ()=>{
+    if(!docDone) return null;
+    const a = docDone, t = a.t; const set = (p)=> setDocDone(x=>({...x,...p}));
+    const close = ()=>{ if(!a.busy) setDocDone(null); };
+    const lab = (l,c)=> h("label",{style:{display:"grid",gap:3,fontSize:11.5,color:colors.muted,marginTop:8}},l,c);
+    const go = async()=>{
+      if(!a.date || a.date>today){ alert("Give the date it was sent (today or earlier)."); return; }
+      if(!confirmDocumentLink(a.link, "The file sent")) return;
+      set({busy:true});
+      const r = await docSendFromTask(t, a, me||user?.username);
+      set({busy:false});
+      if(r.error){ alert(r.error); return; }
+      setDocDone(null); alert(r.msg); load(false);
+    };
+    return h("div",{onClick:e=>{ if(e.target===e.currentTarget) close(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:12}},
+      h("div",{style:{background:"#fff",borderRadius:8,padding:"18px 20px",width:420,maxWidth:"100%"}},
+        h("div",{style:{fontWeight:700,fontSize:14}},"\u2713 Completed \u2014 send to the client"),
+        h("div",{style:{fontSize:12,color:colors.muted,marginTop:2}},"\u201c"+t.title+"\u201d"+(t.ref?" \u00b7 "+t.ref:"")),
+        h("div",{style:{background:"#e4f3ed",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:10,lineHeight:1.45}},"A document card is done when the document goes to the client. This logs the revision Out on the Document Control board, completes this card and starts the "+DOC_CHASE_DAYS+"-day chase."),
+        lab("Sent to the client on", h("input",{type:"date",value:a.date,max:today,onChange:e=>set({date:e.target.value}),style:{...inputStyle,padding:"6px 8px"}})),
+        lab("Link to the file sent (OneDrive / Google Drive)", h("input",{value:a.link,placeholder:"https://\u2026",onChange:e=>set({link:e.target.value}),style:{...inputStyle,padding:"6px 8px"}})),
+        lab("What changed (optional)", h("input",{value:a.what,placeholder:"e.g. Revised as per CRS",onChange:e=>set({what:e.target.value}),style:{...inputStyle,padding:"6px 8px"}})),
+        h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}},
+          h("button",{style:btnSmall,onClick:close,disabled:a.busy},"Cancel"),
+          h("button",{style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},disabled:a.busy,onClick:go},a.busy?"Saving\u2026":"\u2713 Completed \u2014 document sent"))));
   };
   const allDeptsList = Array.from(new Set([...deptMaster, ...emps.flatMap(x=>empBoards(x)), ...emps.map(x=>x.department)].filter(x=>x && !isInterDept(x)))).sort();
   const peopleIn = (d)=> emps.filter(e=>e.employee_name!=="Unassigned" && empInDept(e,d)).map(e=>e.employee_name).sort();
@@ -51393,7 +51674,8 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     const line2 = e ? (e.enquiry_number+" · "+fmtDMY(e.enquiry_date)) : [t.task_type, t.customer, t.ref].filter(Boolean).join(" · ") || (t.created_at?"created "+fmtDMY(t.created_at):"");
     const dueTxt = (st!=="done" && t.start_date ? "starts "+fmtDMY(t.start_date)+" · " : "")+(st==="done" ? "✓ completed "+(t.approved_at?fmtDMY(t.approved_at):"") : t.due_date ? "Task due "+fmtDMY(t.due_date)+(od?" · "+over+" day"+(over===1?"":"s")+" over":"") : "No task due date");   // 139: start date
     return h("div",{key:t.id, draggable:true, onDragStart:ev=>ev.dataTransfer.setData("text/plain",String(t.id)), onClick:()=>setOpenId(t.id),
-        style:{background:"#fff",border:"1px solid "+colors.border,borderLeft:edge,borderRadius:7,padding:"7px 9px",marginBottom:7,cursor:"grab",opacity:st==="done"?0.8:1}},
+        style:{background:"#fff",border:"1px solid "+colors.border,borderLeft:edge,borderRadius:7,padding:"7px 9px",marginBottom:7,cursor:"grab",opacity:st==="done"?0.8:1,overflow:"hidden"}},
+      t.doc_id && st!=="done" ? docLabelStrip(docLab[String(t.doc_id)], "dl") : null,   // 176
       (()=>{ const sm = taskSourceMeta(taskSource(t)); return h("span",{title:"From: "+sm[1],style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:sm[2],color:sm[3],marginBottom:3,marginRight:4}},sm[1]); })(),   // 130
       sharedChip(t),   // 150
       prog ? h("span",{style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#fff6d5",color:"#7a5c00",marginBottom:3}},"In progress") : null,
@@ -52017,6 +52299,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     listTableModal(),
     doneListModal(),
     cardActModal(),   // 154
+    docDoneModal(),   // 175
     xferModal(),   // 145
     dateAsk && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center"}},
       h("div",{style:{background:"#fff",borderRadius:8,padding:"18px 20px",width:360}},
