@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-12T14:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-12T14:40:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -23924,6 +23924,58 @@ function PredictiveTextField({ value, onChange, options, placeholder, onPick, st
   );
 }
 
+// 12 Oct 2026 (182) — an MS Access style combo box: type and the first match
+// fills in with the rest highlighted; the list narrows as you type (a match
+// anywhere, the ones starting with what you typed first); ↑ ↓ move, Enter or
+// Tab picks, Esc closes, ▾ shows the whole list. Limit to list: leaving it
+// with text that matches nothing puts back what was there.
+// options: [{ value, text, cols:[...] }]  — text is what the box shows; cols are the list columns.
+function AccessCombo({ options, value, onPick, placeholder, style, testid, colWidths }){
+  const cur = (options||[]).find(o=>String(o.value)===String(value));
+  const [txt,setTxt] = useState(cur ? cur.text : "");
+  const [open,setOpen] = useState(false);
+  const [hi,setHi] = useState(0);
+  const [q,setQ] = useState("");
+  const inpRef = useRef(null); const listRef = useRef(null);
+  useEffect(()=>{ const c=(options||[]).find(o=>String(o.value)===String(value)); setTxt(c ? c.text : ""); },[value, options]);
+  const ql = q.trim().toLowerCase();
+  const items = useMemo(()=>{
+    const all = options||[];
+    const m = ql ? all.filter(o=>o.text.toLowerCase().includes(ql)) : all.slice();
+    if(ql) m.sort((a,b)=>(a.text.toLowerCase().startsWith(ql)?0:1)-(b.text.toLowerCase().startsWith(ql)?0:1));
+    return m.slice(0,400);
+  },[options, ql]);
+  useEffect(()=>{ if(!listRef.current) return; const r = listRef.current.children[hi]; if(r && r.scrollIntoView) r.scrollIntoView({block:"nearest"}); },[hi, open]);
+  const pick = (o)=>{ setTxt(o.text); setOpen(false); setQ(""); if(onPick) onPick(o); };
+  const revert = ()=>{ const c=(options||[]).find(o=>String(o.value)===String(value)); setTxt(c ? c.text : ""); setQ(""); };
+  const onInput = (e)=>{
+    const v = e.target.value; setQ(v); setHi(0); setOpen(true);
+    const typing = e.nativeEvent && e.nativeEvent.inputType && /^insert/.test(e.nativeEvent.inputType);
+    const first = v ? (options||[]).filter(o=>o.text.toLowerCase().startsWith(v.toLowerCase()))[0] : null;
+    if(typing && first){ setTxt(first.text); setTimeout(()=>{ try{ inpRef.current.setSelectionRange(v.length, first.text.length); }catch(_){} },0); }
+    else setTxt(v);
+  };
+  const onKey = (e)=>{
+    if(e.key==="ArrowDown"){ e.preventDefault(); if(!open){ setOpen(true); setHi(0); } else setHi(h=>Math.min(h+1, items.length-1)); }
+    else if(e.key==="ArrowUp"){ e.preventDefault(); setHi(h=>Math.max(h-1,0)); }
+    else if(e.key==="Enter" || e.key==="Tab"){ if(open && items[hi]){ if(e.key==="Enter") e.preventDefault(); pick(items[hi]); } }
+    else if(e.key==="Escape"){ setOpen(false); revert(); }
+  };
+  const grid = colWidths || "auto 1fr";
+  return h("div",{style:{position:"relative",...(style||{})},"data-testid":testid},
+    h("input",{ref:inpRef, value:txt, placeholder:placeholder||"", autoComplete:"off",
+      onChange:onInput, onKeyDown:onKey, onFocus:e=>{ try{ e.target.select(); }catch(_){} },
+      onBlur:()=>setTimeout(()=>{ setOpen(false); const hit=(options||[]).find(o=>o.text===(inpRef.current&&inpRef.current.value)); if(hit){ if(String(hit.value)!==String(value)) pick(hit); } else revert(); },160),
+      style:{...inputStyle,padding:"8px 34px 8px 10px",width:"100%",boxSizing:"border-box"}}),
+    h("button",{type:"button",tabIndex:-1,"aria-label":"Show the list",onMouseDown:e=>{ e.preventDefault(); if(open) setOpen(false); else { setQ(""); setHi(0); setOpen(true); try{ inpRef.current.focus(); }catch(_){} } },
+      style:{position:"absolute",right:1,top:1,bottom:1,width:30,border:"none",borderLeft:"1px solid #ddd",background:"#f7f6f1",borderRadius:"0 5px 5px 0",cursor:"pointer",fontSize:12}},"▾"),
+    open && h("div",{ref:listRef,style:{position:"absolute",zIndex:60,left:0,right:0,top:"100%",maxHeight:280,overflowY:"auto",background:"#fff",border:"1px solid #c9c5b8",borderTop:"none",boxShadow:"0 6px 16px rgba(0,0,0,.12)"}},
+      items.length ? items.map((o,i)=>h("div",{key:String(o.value),onMouseDown:e=>{ e.preventDefault(); pick(o); },onMouseEnter:()=>setHi(i),
+        style:{display:"grid",gridTemplateColumns:grid,gap:10,padding:"4px 10px",fontSize:12.5,cursor:"pointer",background:i===hi?"#1f5c40":"#fff",color:i===hi?"#fff":colors.text}},
+        (o.cols||[o.text]).map((c,j)=>h("span",{key:j,style:{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",fontWeight:j===0&&o.cols&&o.cols.length>1?700:400,textAlign:j>0&&o.alignLastRight&&j===o.cols.length-1?"right":"left"}},c))))
+      : h("div",{style:{padding:"6px 10px",fontSize:12,color:colors.mutedLight}},"No match"))
+  );
+}
 function SaleOrderContractPicker({ user, onOpenContract, startCreate, onConsumedStart }){
   const [contracts,setContracts] = useState([]); // [{contract_number,customer_name,status}]
   const [loading,setLoading] = useState(true);
@@ -24159,21 +24211,14 @@ function SaleOrderContractPicker({ user, onOpenContract, startCreate, onConsumed
       loading ? h("div",{style:{fontSize:12,color:colors.mutedLight}},"Loading…") :
       h(React.Fragment,null,
         h("label",{style:{display:"block",fontSize:10.5,color:colors.muted,marginBottom:4}},"Contract Number"),
-        h(PredictiveTextField,{
-          value:search, onChange:handleMainSearchChange,
-          options:contracts.map(contractLabel),
-          placeholder:"Contract number or customer name…",
-          onPick:(label)=>{ setSearch(label); const hit=contracts.find(c=>contractLabel(c)===label); if(hit) openExisting(hit); },
-          style:{...inputStyle,padding:"8px 10px",width:"100%",boxSizing:"border-box",marginBottom:6}
-        }),
-        h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginBottom:14}},"Limit to list — matches an existing Contract exactly, opens it directly."),
+        // 182: an Access-style combo box (type-ahead, ↑ ↓, Enter, ▾, limit to list); picking opens the Sale Order
+        h(AccessCombo,{ testid:"so-contract-combo", value:"",
+          options:contracts.map(c=>({ value:c.contract_number, text:c.contract_number+" \u2013 "+(c.customer_name||"\u2014"), cols:[c.contract_number, c.customer_name||"\u2014"] })),
+          placeholder:"Contract number or customer\u2026", onPick:(o)=>{ const hit=contracts.find(c=>c.contract_number===o.value); if(hit) openExisting(hit); },
+          style:{marginBottom:6} }),
+        h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginBottom:14}},"Type the number or any part of the customer \u2014 the rest fills in. \u2191 \u2193 move, Enter opens, \u25be shows the whole list. Limit to list."),
 
-        showNoMatchPrompt && h("div",{style:{background:"#fff4d6",border:"1px solid #f0d9a8",borderRadius:6,padding:"10px 12px",marginBottom:16}},
-          h("div",{style:{fontSize:12,color:"#854f0b",marginBottom:8}},h("b",null,"No contract found for \""+trimmedSearch+"\"")," — nothing matches."),
-          h("button",{onClick:openAddFlow,style:btnPrimary},"+ Add new contract")
-        ),
-
-        !showAdd && !showNoMatchPrompt && h("button",{onClick:openAddFlow,style:{...btnSecondary,fontSize:11.5}},"+ Add new contract"),
+        !showAdd && h("button",{onClick:openAddFlow,style:{...btnSecondary,fontSize:11.5}},"+ Add new contract"),
 
         showAdd && h("div",{style:{borderTop:"1px solid "+colors.border,paddingTop:14,marginTop:showNoMatchPrompt?0:14}},
           h("div",{style:{fontSize:12,fontWeight:700,marginBottom:8}},"Add New Contract"),
@@ -24206,15 +24251,13 @@ function SaleOrderContractPicker({ user, onOpenContract, startCreate, onConsumed
     ),
     h("div",{style:{flex:"1 1 320px",background:"#fff",border:"1px solid "+colors.border,borderRadius:6,padding:"16px 18px",maxWidth:400}},
       h("div",{style:{fontWeight:700,fontSize:13,marginBottom:2}},"Browse by Customer"),
-      h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:12}},"Double-click a contract to open it."),
+      h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:12}},"Only customers that have a Sale Order. Pick one, then double-click a contract to open it."),
       h("label",{style:{display:"block",fontSize:10.5,color:colors.muted,marginBottom:4}},"Customer"),
-      h(PredictiveTextField,{
-        value:custSearch, onChange:handleCustSearchChange,
-        options:customerOptions,
-        placeholder:"Customer name…",
-        onPick:pickCustomer,
-        style:{...inputStyle,padding:"7px 9px",width:"100%",boxSizing:"border-box",marginBottom:12}
-      }),
+      // 182: built from the Sale Orders themselves, so a customer with no order never appears
+      h(AccessCombo,{ testid:"so-customer-combo", value:custSearch, colWidths:"1fr auto",
+        options:(()=>{ const m=new Map(); contracts.forEach(c=>{ const n=String(c.customer_name||"").trim(); if(!n) return; const k=n.toLowerCase(); const e=m.get(k)||{name:n,count:0}; e.count++; m.set(k,e); });
+          return Array.from(m.values()).sort((a,b)=>a.name.localeCompare(b.name)).map(e=>({ value:e.name, text:e.name, cols:[e.name, e.count+" SO"], alignLastRight:true })); })(),
+        placeholder:"Customer name\u2026", onPick:(o)=>pickCustomer(o.value), style:{marginBottom:12} }),
       custLoading ? h("div",{style:{fontSize:11.5,color:colors.mutedLight}},"Loading…") :
       custSearch && h("div",{style:{border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden"}},
         h("div",{style:{background:colors.bg,padding:"7px 10px",fontSize:10.5,fontWeight:700,color:colors.muted,display:"flex",justifyContent:"space-between"}},
@@ -26213,6 +26256,10 @@ const MANUAL_SECTIONS = [
         "title": "Opening or creating a Sale Order",
         "tag": "Sales \u2192 Sale Order",
         "blocks": [
+          {
+            "type": "p",
+            "text": "Changed 12 October 2026 (build 182). Both boxes on the Sale Order screen work like an Access combo box: type the number or any part of the customer and the first match fills in; the list narrows as you type; up / down arrows move, Enter opens, the \u25be button shows the whole list; text that matches nothing is not kept. Browse by Customer lists only customers that have a Sale Order, with how many each has."
+          },
           {
             "type": "p",
             "text": "Contract Number leads here (31 Aug), not the Quote/Offer Number \u2014 pick an existing Contract (limit-to-list combo, Contract# \u2014 Customer) to open it directly."
@@ -29547,6 +29594,10 @@ const MANUAL_TA = {
   "blocks": [
    {
     "type": "p",
+    "text": "\u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bcd 12 \u0b85\u0b95\u0bcd\u0b9f\u0bcb\u0baa\u0bb0\u0bcd 2026 (build 182). Sale Order \u0ba4\u0bbf\u0bb0\u0bc8\u0baf\u0bbf\u0ba9\u0bcd \u0b87\u0bb0\u0ba3\u0bcd\u0b9f\u0bc1 box-\u0b95\u0bb3\u0bc1\u0bae\u0bcd Access combo box \u0baa\u0bcb\u0bb2 \u0bb5\u0bc7\u0bb2\u0bc8 \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bc1\u0bae\u0bcd: \u0b8e\u0ba3\u0bcd\u0ba3\u0bc8 \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 customer \u0baa\u0bc6\u0baf\u0bb0\u0bbf\u0ba9\u0bcd \u0b8f\u0ba4\u0bbe\u0bb5\u0ba4\u0bc1 \u0baa\u0b95\u0bc1\u0ba4\u0bbf\u0baf\u0bc8 type \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd \u0bae\u0bc1\u0ba4\u0bb2\u0bcd \u0baa\u0bca\u0bb0\u0bc1\u0ba4\u0bcd\u0ba4\u0bae\u0bcd \u0ba4\u0bbe\u0ba9\u0bbe\u0b95 \u0ba8\u0bbf\u0bb0\u0bae\u0bcd\u0baa\u0bc1\u0bae\u0bcd; type \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0b9a\u0bcd \u0b9a\u0bc6\u0baf\u0bcd\u0baf \u0baa\u0b9f\u0bcd\u0b9f\u0bbf\u0baf\u0bb2\u0bcd \u0b95\u0bc1\u0bb1\u0bc8\u0baf\u0bc1\u0bae\u0bcd; \u0bae\u0bc7\u0bb2\u0bcd / \u0b95\u0bc0\u0bb4\u0bcd \u0b85\u0bae\u0bcd\u0baa\u0bc1\u0b95\u0bb3\u0bcd \u0ba8\u0b95\u0bb0\u0bcd\u0ba4\u0bcd\u0ba4\u0bc1\u0bae\u0bcd, Enter \u0ba4\u0bbf\u0bb1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd, \u25be \u0bae\u0bc1\u0bb4\u0bc1 \u0baa\u0b9f\u0bcd\u0b9f\u0bbf\u0baf\u0bb2\u0bc8\u0baf\u0bc1\u0bae\u0bcd \u0b95\u0bbe\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd; \u0baa\u0bca\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bbe\u0ba4 \u0b8e\u0bb4\u0bc1\u0ba4\u0bcd\u0ba4\u0bc1 \u0bb5\u0bc8\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bbe\u0ba4\u0bc1. Browse by Customer-\u0b87\u0bb2\u0bcd Sale Order \u0b89\u0bb3\u0bcd\u0bb3 customer-\u0b95\u0bb3\u0bcd \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd, \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1\u0bb5\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0b8e\u0ba4\u0bcd\u0ba4\u0ba9\u0bc8 \u0b8e\u0ba9\u0bcd\u0bb1 \u0b8e\u0ba3\u0bcd\u0ba3\u0bbf\u0b95\u0bcd\u0b95\u0bc8\u0baf\u0bc1\u0b9f\u0ba9\u0bcd \u0bb5\u0bb0\u0bc1\u0bae\u0bcd."
+   },
+   {
+    "type": "p",
     "text": "\u0b87\u0b99\u0bcd\u0b95\u0bc7 Quote/Offer Number \u0b85\u0bb2\u0bcd\u0bb2, Contract Number \u0bae\u0bc1\u0ba4\u0bb2\u0bbf\u0bb2\u0bcd \u0bb5\u0bb0\u0bc1\u0bae\u0bcd (31 Aug) \u2014 \u0b8f\u0bb1\u0bcd\u0b95\u0ba9\u0bb5\u0bc7 \u0b89\u0bb3\u0bcd\u0bb3 Contract-\u0b90 (limit-to-list combo, Contract# \u2014 Customer) \u0ba4\u0bc7\u0bb0\u0bcd\u0bb5\u0bc1 \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd \u0ba8\u0bc7\u0bb0\u0b9f\u0bbf\u0baf\u0bbe\u0b95\u0ba4\u0bcd \u0ba4\u0bbf\u0bb1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd."
    },
    {
@@ -29560,7 +29611,7 @@ const MANUAL_TA = {
     ]
    }
   ],
-  "en_sig": "87582377"
+  "en_sig": "f7cfd52f"
  },
  "reports": {
   "title": "Reports",
@@ -31270,6 +31321,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"12 Oct 2026 (182)", summary:"Built on 2026-10-12T14:00:00Z (build 181). No SQL. SALE ORDER SCREEN: both boxes are AccessCombo, an MS Access style combo box \u2014 type and the first match fills in with the rest highlighted; the list narrows to matches anywhere (those starting with what you typed first); \u2191 \u2193 move, Enter or Tab picks, Esc closes, \u25be shows the whole list; limit to list (text that matches nothing goes back). Contract Number lists number and customer in two columns and opens the Sale Order on pick; the \u201cNo contract found\u201d box is gone and + Add new contract is always a button. Browse by Customer lists only customers that have a Sale Order, taken from the Sale Orders (case-insensitive), with a count each; picking one lists its contracts (double-click opens)." },
   { date:"12 Oct 2026 (181)", summary:"Built on 2026-10-12T12:30:00Z (build 180). SQL: legacy_SO_datasheets_as_OA_2026-10-12.sql (FLOMETRIQ only; adds datasheets.source / oa_item / oa_link and refills every legacy Sale Order). DATASHEETS FROM THE OA, AS IS: a datasheet with source \u201cOA\u201d holds the OA's Annexure III rows exactly as printed ({section, label, value} in custom_free_fields, in the OA's order). Opening the datasheet on such a Sl No shows OaDatasheetView \u2014 read-only, sections as in the OA, the OA file name and an Open the OA link \u2014 instead of the template form (DatasheetModal now checks for it first; the template form is DatasheetModalTemplate). The Sale Order PDF's Annexure III prints the same rows under the OA's section headings, then the usual Price Data, whatever the item's template. The template-mapped datasheets and the \u201cfields the app's datasheet does not have\u201d notes made by the legacy load are replaced. Quotes and app-made Sale Orders keep their template datasheets." },
   { date:"12 Oct 2026 (180)", summary:"Built on 2026-10-12T02:15:00Z (build 179). SQL: structure_price_check_2026-10-12.sql (BOTH companies; safe to re-run). PRICE CHECK: a quote or Sale Order with a Direct Price line still Pending shows PriceCheckBanner at the top (the Sl Nos, their prices, and that every PDF prints PRICE NOT CHECKED \u2013 NOT FOR ISSUE). User: Ask an Admin to check (bell to every Admin, request in price_check_request_tbl) and ONE code box. Admin: Approve (no code), Give a code instead (authorization_codes code_type price_check with reference_number; one use; 24 hours; this quote only; sent to the requester's bell), Send back with a note. The code clears every Pending line on the quote, signed \u201c<admin> (code used by <user>)\u201d; a code for another quote is refused; an old Direct Price or validate-pending-line code still works once. PDF: while any price is Pending every page is watermarked PRICE NOT CHECKED / NOT FOR ISSUE with a red band naming the Sl Nos (DRAFT is added only when something else is also missing); merged pages carry it too. The Generate box groups it under Needs an Admin with one code box and a red warning; the clean Generate stays off. An Admin pressing Generate gets one confirm that approves the prices in his name (was: Admins bypassed and printed clean). Stage move: the same quote code, plus Ask an Admin, in the stage dialog. Reports \u2192 Pending Validation groups lines by quote (asked by, Approve all, Give a code, Send back). Authorization Codes shows the quote. The quote screen's \u201cGenerate validate-pending-line code\u201d button is gone. SALE ORDER: Validity removed completely \u2014 not required, not on the terms form or amendment form, not on Annexure I, not in Quick edits; copying a quote into a Sale Order no longer carries it; the SQL clears it on existing Sale Orders." },
   { date:"12 Oct 2026 (179)", summary:"Built on 2026-10-12T01:00:00Z. No SQL. TASK ASSIGNMENT BOARD: every list (the Unassigned pile and each person) gets its own + New task, opening the same New task dialog with Assigned to filled from the list (pile = Unassigned, due date as the dialog asks). Who sees it: Super Admin every list; an Admin every list of their HOME department's board; the board's approvers (task_approver_tbl and post auto-approvers) every list of that board including the pile; each person their own list. The header + New task is unchanged. + ADD PERSON'S LIST (Super Admin any board; Admin their home department's board): pick any employee not on the board, optionally Can approve on this board; writes board_member_tbl (and task_approver_tbl), logged in the Audit Log, and Setup \u2192 Tasks \u2192 Board Membership shows it. \u2715 on a list added this way (Extra) takes the person off the board: board_member_tbl / second_department / approver row removed, their open cards from that board go back to its Unassigned pile with a history line, and the board's approvers get a bell message \u2014 the same as Board Membership. Home and Post lists can't be removed here. Manual updated." },
