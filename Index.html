@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-11T08:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-12T01:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -881,6 +881,7 @@ const MASTER_TABLES = [
   { key: "task_label_tbl", label: "Task Labels", columns: ["label","color"], addLabel:"New label", freeText:["label","color"], colorCols:["color"] },   // 134: colour shown as colour
   { key: "task_type_tbl", label: "Task Types", columns: ["type_name","department","due_days","checklist_items","sort_order"], colLabels:{type_name:"Task type",due_days:"Due in (days)",checklist_items:"Standard checklist (one item per line, or ; between items)",sort_order:"Order"}, addLabel:"New task type", cascade:[{col:"department",from:"department_tbl",field:"department"}], freeText:["type_name","due_days","checklist_items","sort_order"], nullableCols:["department","due_days","checklist_items"] },   // 128
   { key: "task_dept_setting_tbl", label: "Task Department Limits", columns: ["department","amber_open","red_open","stale_days","approval_wait_days"], colLabels:{amber_open:"Amber at (open cards)",red_open:"Red at (open cards)",stale_days:"Stale after (days)",approval_wait_days:"Approval wait (days)"}, addLabel:"New department limits", cascade:[{col:"department",from:"department_tbl",field:"department"}], freeText:["amber_open","red_open","stale_days","approval_wait_days"] },   // 122: departments not listed use 15 / 25 / 7 / 2
+  { key: "handover_reason_tbl", label: "Hand-over Reasons", columns: ["reason","offers_deactivate","sort_order","is_active"], colLabels:{reason:"Reason for transfer",offers_deactivate:"Offer to switch off the login",sort_order:"Order",is_active:"In use"}, addLabel:"New reason", freeText:["reason","sort_order"], boolCols:["offers_deactivate","is_active"] },   // 178
   { key: "task_approver_tbl", label: "Task Approvers", columns: ["department","employee_name"], addLabel:"New approver", cascade:[{col:"department",from:"department_tbl",field:"department"},{col:"employee_name",from:"employee_tbl",field:"employee_name"}], groupBy:["department"] },
   { key: "designation_tbl", label: "Designations", columns: ["value"], addLabel:"New designation", freeText:["value"] },
   { key: "state_zone_tbl", label: "States and Zones (India)", columns: ["state","zone"], addLabel:"New state", freeText:["state","zone"], editAllEnabled:true, exportEnabled:true },
@@ -2016,6 +2017,7 @@ function NotificationBell({ user }){
     const { data: emp } = await sb.from("employee_tbl").select("employee_name").eq("app_user_id",user.id).limit(1).maybeSingle();
     if(!emp){ setEmployeeName(null); setItems([]); return; }
     setEmployeeName(emp.employee_name);
+    await taskDailyDigest(emp.employee_name);   // 178: one in-app reminder a day
     const { data } = await sb.from("notifications_tbl").select("*").eq("employee_name",emp.employee_name).order("created_at",{ascending:false}).limit(25);
     setItems(data||[]);
   },[user?.id]);
@@ -2202,7 +2204,7 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
       ...byKeys(["state_zone_tbl","country_zone_tbl","city_tbl", ...(REG.people.length ? [] : ["territory_rule_state_tbl","territory_rule_country_tbl","territory_rule_zone_tbl"]),"crm_status_tbl"]),
       {key:"crm_helper_masters",label:"Package & Type Masters"} ] },
     { label:"Documents", tabs:[{key:"doc_status_master",label:"Document Status Master"},...byKeys(["doc_category_tbl"])] },
-    { label:"Tasks", tabs:[{key:"board_grid",label:"Board Membership"}, ...byKeys(["task_type_tbl","task_label_tbl","task_approver_tbl","task_dept_setting_tbl"])] },
+    { label:"Tasks", tabs:[{key:"board_grid",label:"Board Membership"}, ...byKeys(["task_type_tbl","task_label_tbl","task_approver_tbl","task_dept_setting_tbl","handover_reason_tbl"])] },
   ] : [
     { label:"Company", tabs:[{key:"despatch_settings",label:"Despatch Settings & LUT"}] },
   ]};
@@ -2247,7 +2249,7 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
     ]};
   // Task Manager (3 Oct, build 118) — one board per employee.
   const tasksGroup = { label:"Tasks", subgroups:[
-      { label:"Tasks", tabs:[{key:"task_board",label:"Task Boards & Dashboards"},{key:"task_report",label:"Tasks Completed Report"}] },
+      { label:"Tasks", tabs:[{key:"task_board",label:"Task Boards & Dashboards"},{key:"task_report",label:"Tasks Completed Report"},...((isAdmin||isHrAdmin)?[{key:"task_handover",label:"Hand Over Work"}]:[])] },   // 178
     ]};
   const reportsGroup = { label:"Reports", subgroups:[
       { label:"Dashboards", tabs:[{key:"dashboards",label:"Dashboards"}] },   // 172: was its own top tab
@@ -2305,7 +2307,7 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
     reportsGroup,
   ];
   // HR (24 Aug) — visible to Admin/Super Admin, plus the hr_admin role, who sees ONLY this.
-  if(isAdmin || isHrAdmin) groups.push({ label:"HR", tabs:[{key:"hr_home",label:"HR"}] });
+  if(isAdmin || isHrAdmin) groups.push({ label:"HR", tabs:[{key:"hr_home",label:"HR"},{key:"task_handover",label:"Hand Over Work"}] });   // 178
   groups.push(setupGroup);
   if(isAdmin) {
     groups.push({ label:"Admin", subgroups:[
@@ -3795,6 +3797,8 @@ function HrHomeScreen({ user, onOpenTab }){
     { key:"designation_tbl", title:"Designations", blurb:"Job titles available on an Employee record." },
     { key:"crm_role_tbl", title:"CRM Role", blurb:"FSE / Telecaller / BDE and other CRM-facing roles." },
     { key:"employee_status_tbl", title:"Employee Status", blurb:"Active, on leave, exited, and any other status values." },
+    { key:"task_handover", title:"Hand Over Work", blurb:"Move a person's open task cards, document cards, approver roles and posts to someone else, with a reason. Undo within 7 days." },   // 178
+    { key:"handover_reason_tbl", title:"Reasons for transfer", blurb:"The reasons offered in Hand Over Work (Responsibility transfer, Leave cover, Left the company…)." },
   ];
   return h("div",{style:{padding:"20px 24px"}},
     h("h2",{style:{margin:"0 0 4px",fontSize:18,fontWeight:700}},"HR"),
@@ -27309,6 +27313,10 @@ const MANUAL_SECTIONS = [
         "blocks": [
           {
             "type": "p",
+            "text": "Changed 12 October 2026 (build 178). URGENT: tick \ud83d\udd25 Urgent under the due date \u2014 the card shows a red chip and sits at the top of every list. WAITING ON SOMEONE: \u23f3 Waiting on someone on the card names who (a colleague, a supplier, anyone) and for what; the card is not counted as overdue while it waits, and a colleague gets a bell message. Press \u25b6 Got it from \u2026 when it comes. REPEAT: under Repeat pick every day / working day / week / month / quarter / year (and an end date if you want one). When the latest copy is due, the board makes the next copy on the same board with the checklist unticked; pick \u201cDoes not repeat\u201d to stop it. COMMENTS: write at the bottom of the card; type @ and a name \u2014 that person gets a bell message, and so does the card's holder. DAILY REMINDER: once a day the bell lists your overdue, due-today and urgent cards, and cards where someone is waiting on you; a board's approver also sees the overdue cards per person. WORKLOAD: Tasks \u2192 Workload shows each person's open cards by due week (Overdue, This week, Next week, Later, No date, Urgent, Waiting, Under approval); click a name to open their board. CLIENT NAME: a card with a contract number shows the contract and the first two words of the client (full name on hover). DOCUMENT CARDS: the button says what it does \u2014 Send to client \u25b8 (first time) or Send resubmission \u25b8 (outlined) \u2014 instead of \u2713 Completed. HAND OVER WORK (Tasks \u2192 Hand Over Work, also under HR): Super Admin, Admin and the HR & Admin Manager move one person's open task cards, document cards, document requests, approver roles and posts to another person in one go, with a reason for transfer (Setup \u2192 Tasks \u2192 Hand-over Reasons) and a note. Customers are listed but not ticked. Untick anything that should stay. Each card gets a history line; both people get a bell message. Undo within 7 days puts back whatever has not moved since. \u201cLeft the company\u201d also offers to switch off the login (Admin only)."
+          },
+          {
+            "type": "p",
             "text": "Changed 11 October 2026 (build 175). \u2713 COMPLETED ON EVERY CARD, beside \ud83d\udcc5 Due, \u21c4 Move and \u29c9 Copy, without opening the card. The card's holder presses it to send the card to Under Approval; an approver (or a Super Admin) presses it to complete the card at once. If checklist items are still open it says how many and ticks them. On an Under Approval card the approver gets \u2713 Approve and \u21a9 Send back (the reason is asked and goes into the history). A document card (Document \u2013 initial submission / resubmission) completes when the document goes to the client: \u2713 Completed asks the date and the file link and logs the revision Out on the Document Control board. A chase-letter card completes when the letter is marked sent."
           },
           {
@@ -27369,6 +27377,10 @@ const MANUAL_SECTIONS = [
         "title": "Document Control board \u2014 documents, owners, chase letters",
         "tag": "Order Status \u2192 Document Control",
         "blocks": [
+          {
+            "type": "p",
+            "text": "Changed 12 October 2026 (build 178). CLIENT ON EVERY CARD: 260116 \u00b7 Alfa Laval (the first two words; hover for the full name). Contract pick lists show \u201c260116 \u2013 Alfa Laval India Private Limited\u201d and you can type the number or any part of the name. The name comes from the Sale Order, else the Contract Register. BUTTONS SAY WHAT THEY DO: Send to client \u25b8 on a card never sent; Send resubmission \u25b8 (outlined in the card's colour) when the client asked for changes; Log client reply \u25b8 on a card with the client \u2014 pick the code they gave, paste the link to the returned file and the date it came back (Rev In); the card moves to the list of that status. GREY CARDS now count in the Full Hold check: a Status to confirm document in a Full Hold category holds the contract until its status is set."
+          },
           {
             "type": "p",
             "text": "Changed 11 October 2026 (build 176). STATUS LABELS: every card carries a coloured strip with a word. Red \u2014 Our action (never sent); Pink \u2014 Comments \u2013 resubmit; Yellow \u2014 With client; Code 2 \u2013 ours: yellow fading through pink to red; Code 2 \u2013 with client: yellow fading to green; Hold \u2013 ours: pink fading to red; Hold \u2013 with client: yellow fading to red; Green \u2014 Approved. Status to confirm cards are grey with no label. The same label shows on the document's task card on the Task board."
@@ -28279,6 +28291,10 @@ const MANUAL_TA = {
   "blocks": [
    {
     "type": "p",
+    "text": "\u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bcd 12 \u0b85\u0b95\u0bcd\u0b9f\u0bcb\u0baa\u0bb0\u0bcd 2026 (build 178). URGENT: due date-\u0b95\u0bcd\u0b95\u0bc1\u0b95\u0bcd \u0b95\u0bc0\u0bb4\u0bc7 \ud83d\udd25 Urgent-\u0b90 tick \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bc1\u0b99\u0bcd\u0b95\u0bb3\u0bcd \u2014 card-\u0b87\u0bb2\u0bcd \u0b9a\u0bbf\u0bb5\u0baa\u0bcd\u0baa\u0bc1 chip \u0bb5\u0bb0\u0bc1\u0bae\u0bcd, \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 list-\u0b87\u0bb2\u0bc1\u0bae\u0bcd \u0bae\u0bc7\u0bb2\u0bc7 \u0b87\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd. WAITING ON SOMEONE: card-\u0b87\u0bb2\u0bcd \u23f3 Waiting on someone \u0b85\u0bb4\u0bc1\u0ba4\u0bcd\u0ba4\u0bbf, \u0baf\u0bbe\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bbe\u0b95 (\u0b9a\u0b95 \u0b8a\u0bb4\u0bbf\u0baf\u0bb0\u0bcd, supplier, \u0baf\u0bbe\u0bb0\u0bbe\u0baf\u0bbf\u0ba9\u0bc1\u0bae\u0bcd), \u0b8e\u0ba4\u0bb1\u0bcd\u0b95\u0bbe\u0b95\u0b95\u0bcd \u0b95\u0bbe\u0ba4\u0bcd\u0ba4\u0bbf\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bbf\u0bb1\u0bcb\u0bae\u0bcd \u0b8e\u0ba9\u0bcd\u0bb1\u0bc1 \u0b8e\u0bb4\u0bc1\u0ba4\u0bc1\u0b99\u0bcd\u0b95\u0bb3\u0bcd; \u0b95\u0bbe\u0ba4\u0bcd\u0ba4\u0bbf\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0bb5\u0bb0\u0bc8 card overdue-\u0b86\u0b95 \u0b8e\u0ba3\u0bcd\u0ba3\u0baa\u0bcd\u0baa\u0b9f\u0bbe\u0ba4\u0bc1; \u0b9a\u0b95 \u0b8a\u0bb4\u0bbf\u0baf\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1 bell \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbf \u0baa\u0bcb\u0b95\u0bc1\u0bae\u0bcd. \u0bb5\u0ba8\u0bcd\u0ba4\u0ba4\u0bc1\u0bae\u0bcd \u25b6 Got it from \u2026 \u0b85\u0bb4\u0bc1\u0ba4\u0bcd\u0ba4\u0bc1\u0b99\u0bcd\u0b95\u0bb3\u0bcd. REPEAT: Repeat-\u0b87\u0bb2\u0bcd every day / working day / week / month / quarter / year \u0ba4\u0bc7\u0bb0\u0bcd\u0ba8\u0bcd\u0ba4\u0bc6\u0b9f\u0bc1\u0b99\u0bcd\u0b95\u0bb3\u0bcd (\u0bb5\u0bc7\u0ba3\u0bcd\u0b9f\u0bc1\u0bae\u0bbe\u0ba9\u0bbe\u0bb2\u0bcd \u0bae\u0bc1\u0b9f\u0bbf\u0bb5\u0bc1 \u0ba4\u0bc7\u0ba4\u0bbf\u0baf\u0bc1\u0bae\u0bcd). \u0b95\u0b9f\u0bc8\u0b9a\u0bbf copy-\u0b87\u0ba9\u0bcd due \u0bb5\u0ba8\u0bcd\u0ba4\u0ba4\u0bc1\u0bae\u0bcd, \u0b85\u0ba4\u0bc7 board-\u0b87\u0bb2\u0bcd \u0b85\u0b9f\u0bc1\u0ba4\u0bcd\u0ba4 copy checklist tick \u0b87\u0bb2\u0bcd\u0bb2\u0bbe\u0bae\u0bb2\u0bcd \u0b89\u0bb0\u0bc1\u0bb5\u0bbe\u0b95\u0bc1\u0bae\u0bcd; \u0ba8\u0bbf\u0bb1\u0bc1\u0ba4\u0bcd\u0ba4 \u201cDoes not repeat\u201d \u0ba4\u0bc7\u0bb0\u0bcd\u0ba8\u0bcd\u0ba4\u0bc6\u0b9f\u0bc1\u0b99\u0bcd\u0b95\u0bb3\u0bcd. COMMENTS: card-\u0b87\u0ba9\u0bcd \u0b95\u0bc0\u0bb4\u0bc7 \u0b8e\u0bb4\u0bc1\u0ba4\u0bc1\u0b99\u0bcd\u0b95\u0bb3\u0bcd; @ \u0bae\u0bb1\u0bcd\u0bb1\u0bc1\u0bae\u0bcd \u0baa\u0bc6\u0baf\u0bb0\u0bc8 type \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd \u0b85\u0bb5\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd card holder-\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd bell \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbf \u0baa\u0bcb\u0b95\u0bc1\u0bae\u0bcd. DAILY REMINDER: \u0ba4\u0bbf\u0ba9\u0bae\u0bc1\u0bae\u0bcd \u0b92\u0bb0\u0bc1\u0bae\u0bc1\u0bb1\u0bc8 bell-\u0b87\u0bb2\u0bcd \u0b89\u0b99\u0bcd\u0b95\u0bb3\u0bcd overdue, \u0b87\u0ba9\u0bcd\u0bb1\u0bc1 due, urgent cards, \u0b89\u0b99\u0bcd\u0b95\u0bb3\u0bc1\u0b95\u0bcd\u0b95\u0bbe\u0b95 \u0baf\u0bbe\u0bb0\u0bbe\u0bb5\u0ba4\u0bc1 \u0b95\u0bbe\u0ba4\u0bcd\u0ba4\u0bbf\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd cards \u0bb5\u0bb0\u0bc1\u0bae\u0bcd; board approver-\u0b95\u0bcd\u0b95\u0bc1 \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1\u0bb5\u0bb0\u0bbf\u0ba9\u0bcd overdue \u0b8e\u0ba3\u0bcd\u0ba3\u0bbf\u0b95\u0bcd\u0b95\u0bc8\u0baf\u0bc1\u0bae\u0bcd \u0bb5\u0bb0\u0bc1\u0bae\u0bcd. WORKLOAD: Tasks \u2192 Workload \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1\u0bb5\u0bb0\u0bbf\u0ba9\u0bcd open cards-\u0b90 due \u0bb5\u0bbe\u0bb0\u0bae\u0bcd \u0bb5\u0bbe\u0bb0\u0bbf\u0baf\u0bbe\u0b95\u0b95\u0bcd \u0b95\u0bbe\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd (Overdue, This week, Next week, Later, No date, Urgent, Waiting, Under approval); \u0baa\u0bc6\u0baf\u0bb0\u0bc8 \u0b85\u0bb4\u0bc1\u0ba4\u0bcd\u0ba4\u0bbf\u0ba9\u0bbe\u0bb2\u0bcd \u0b85\u0bb5\u0bb0\u0bcd board \u0ba4\u0bbf\u0bb1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd. CLIENT NAME: contract number \u0b89\u0bb3\u0bcd\u0bb3 card-\u0b87\u0bb2\u0bcd contract-\u0b89\u0bae\u0bcd client \u0baa\u0bc6\u0baf\u0bb0\u0bbf\u0ba9\u0bcd \u0bae\u0bc1\u0ba4\u0bb2\u0bcd \u0b87\u0bb0\u0ba3\u0bcd\u0b9f\u0bc1 \u0b9a\u0bca\u0bb1\u0bcd\u0b95\u0bb3\u0bc1\u0bae\u0bcd \u0bb5\u0bb0\u0bc1\u0bae\u0bcd (hover \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd \u0bae\u0bc1\u0bb4\u0bc1\u0baa\u0bcd \u0baa\u0bc6\u0baf\u0bb0\u0bcd). DOCUMENT CARDS: \u2713 Completed-\u0b95\u0bcd\u0b95\u0bc1\u0baa\u0bcd \u0baa\u0ba4\u0bbf\u0bb2\u0bcd button \u0ba4\u0bbe\u0ba9\u0bcd \u0b9a\u0bc6\u0baf\u0bcd\u0bb5\u0ba4\u0bc8\u0b9a\u0bcd \u0b9a\u0bca\u0bb2\u0bcd\u0bb2\u0bc1\u0bae\u0bcd \u2014 Send to client \u25b8 (\u0bae\u0bc1\u0ba4\u0bb2\u0bcd \u0bae\u0bc1\u0bb1\u0bc8) \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 Send resubmission \u25b8 (outline). HAND OVER WORK (Tasks \u2192 Hand Over Work, HR-\u0b87\u0bb2\u0bc1\u0bae\u0bcd): Super Admin, Admin, HR & Admin Manager \u0b92\u0bb0\u0bc1\u0bb5\u0bb0\u0bbf\u0ba9\u0bcd open task cards, document cards, document requests, approver \u0baa\u0bca\u0bb1\u0bc1\u0baa\u0bcd\u0baa\u0bc1\u0b95\u0bb3\u0bcd, posts \u0b85\u0ba9\u0bc8\u0ba4\u0bcd\u0ba4\u0bc8\u0baf\u0bc1\u0bae\u0bcd \u0b92\u0bb0\u0bc7 \u0bae\u0bc1\u0bb1\u0bc8\u0baf\u0bbf\u0bb2\u0bcd \u0b87\u0ba9\u0bcd\u0ba9\u0bca\u0bb0\u0bc1\u0bb5\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1 \u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bb2\u0bbe\u0bae\u0bcd \u2014 Reason for transfer (Setup \u2192 Tasks \u2192 Hand-over Reasons) \u0bae\u0bb1\u0bcd\u0bb1\u0bc1\u0bae\u0bcd note \u0b89\u0b9f\u0ba9\u0bcd. Customers \u0baa\u0b9f\u0bcd\u0b9f\u0bbf\u0baf\u0bb2\u0bbf\u0bb2\u0bcd \u0bb5\u0bb0\u0bc1\u0bae\u0bcd, \u0b86\u0ba9\u0bbe\u0bb2\u0bcd tick \u0b86\u0b95\u0bbe\u0ba4\u0bc1. \u0b87\u0bb0\u0bc1\u0b95\u0bcd\u0b95 \u0bb5\u0bc7\u0ba3\u0bcd\u0b9f\u0bbf\u0baf\u0ba4\u0bc8 untick \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bc1\u0b99\u0bcd\u0b95\u0bb3\u0bcd. \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 card-\u0b87\u0bb2\u0bc1\u0bae\u0bcd history \u0bb5\u0bb0\u0bbf \u0b9a\u0bc7\u0bb0\u0bc1\u0bae\u0bcd; \u0b87\u0bb0\u0bc1\u0bb5\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd bell \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbf \u0baa\u0bcb\u0b95\u0bc1\u0bae\u0bcd. 7 \u0ba8\u0bbe\u0b9f\u0bcd\u0b95\u0bb3\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bb3\u0bcd Undo \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd, \u0b85\u0ba4\u0ba9\u0bcd\u0baa\u0bbf\u0ba9\u0bcd \u0ba8\u0b95\u0bb0\u0bbe\u0ba4\u0bb5\u0bc8 \u0ba4\u0bbf\u0bb0\u0bc1\u0bae\u0bcd\u0baa \u0bb5\u0bb0\u0bc1\u0bae\u0bcd. \u201cLeft the company\u201d \u0ba4\u0bc7\u0bb0\u0bcd\u0ba8\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd login-\u0b90 \u0ba8\u0bbf\u0bb1\u0bc1\u0ba4\u0bcd\u0ba4\u0bb5\u0bc1\u0bae\u0bcd \u0b95\u0bc7\u0b9f\u0bcd\u0b95\u0bc1\u0bae\u0bcd (Admin \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd)."
+   },
+   {
+    "type": "p",
     "text": "\u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bcd 11 \u0b85\u0b95\u0bcd\u0b9f\u0bcb\u0baa\u0bb0\u0bcd 2026 (build 175). \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 card-\u0b87\u0bb2\u0bc1\u0bae\u0bcd \u2713 Completed, \ud83d\udcc5 Due, \u21c4 Move, \u29c9 Copy \u0b85\u0bb0\u0bc1\u0b95\u0bbf\u0bb2\u0bcd. Card \u0b89\u0bb3\u0bcd\u0bb3\u0bb5\u0bb0\u0bcd \u0b85\u0bb4\u0bc1\u0ba4\u0bcd\u0ba4\u0bbf\u0ba9\u0bbe\u0bb2\u0bcd Under Approval-\u0b95\u0bcd\u0b95\u0bc1\u0b9a\u0bcd \u0b9a\u0bc6\u0bb2\u0bcd\u0bb2\u0bc1\u0bae\u0bcd; approver (\u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 Super Admin) \u0b85\u0bb4\u0bc1\u0ba4\u0bcd\u0ba4\u0bbf\u0ba9\u0bbe\u0bb2\u0bcd \u0b89\u0b9f\u0ba9\u0bc7 \u0bae\u0bc1\u0b9f\u0bbf\u0baf\u0bc1\u0bae\u0bcd. Checklist \u0bae\u0bc0\u0ba4\u0bae\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd \u0b8e\u0ba4\u0bcd\u0ba4\u0ba9\u0bc8 \u0b8e\u0ba9\u0bcd\u0bb1\u0bc1 \u0b9a\u0bca\u0bb2\u0bcd\u0bb2\u0bbf tick \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bc1\u0bae\u0bcd. Under Approval card-\u0b87\u0bb2\u0bcd approver-\u0b95\u0bcd\u0b95\u0bc1 \u2713 Approve, \u21a9 Send back (\u0b95\u0bbe\u0bb0\u0ba3\u0bae\u0bcd \u0b95\u0bc7\u0b9f\u0bcd\u0b95\u0bc1\u0bae\u0bcd). Document card: \u0b86\u0bb5\u0ba3\u0bae\u0bcd client-\u0b95\u0bcd\u0b95\u0bc1 \u0b9a\u0bc6\u0bb2\u0bcd\u0bb2\u0bc1\u0bae\u0bcd\u0baa\u0bcb\u0ba4\u0bc1 \u0bae\u0bc1\u0b9f\u0bbf\u0baf\u0bc1\u0bae\u0bcd; \u2713 Completed \u0ba4\u0bc7\u0ba4\u0bbf, file link \u0b95\u0bc7\u0b9f\u0bcd\u0b9f\u0bc1 Document Control board-\u0b87\u0bb2\u0bcd revision Out \u0baa\u0ba4\u0bbf\u0baf\u0bc1\u0bae\u0bcd."
    },
    {
@@ -28333,12 +28349,16 @@ const MANUAL_TA = {
     "text": "Setup \u2192 Tasks-\u0b87\u0bb2\u0bcd \u0b85\u0bae\u0bc8\u0b95\u0bcd\u0b95\u0bb5\u0bc1\u0bae\u0bcd: Task Labels, Task Approvers (\u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 \u0ba4\u0bc1\u0bb1\u0bc8\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0b92\u0ba9\u0bcd\u0bb1\u0bc1 \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 \u0baa\u0bb2). approver \u0b86\u0b95 \u0b87\u0bb0\u0bc1\u0baa\u0bcd\u0baa\u0ba4\u0bc1\u0ba4\u0bbe\u0ba9\u0bcd \u0b85\u0ba8\u0bcd\u0ba4\u0ba4\u0bcd \u0ba4\u0bc1\u0bb1\u0bc8\u0baf\u0bbf\u0ba9\u0bcd Task Assignment Board-\u0b90\u0b95\u0bcd \u0b95\u0bca\u0b9f\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd. Document Controller post \u0bb5\u0bc8\u0ba4\u0bcd\u0ba4\u0bbf\u0bb0\u0bc1\u0baa\u0bcd\u0baa\u0bb5\u0bb0\u0bcd \u0b8e\u0bb2\u0bcd\u0bb2\u0bbe\u0ba4\u0bcd \u0ba4\u0bc1\u0bb1\u0bc8\u0b95\u0bb3\u0bbf\u0bb2\u0bc1\u0bae\u0bcd \u0bb5\u0bc7\u0bb2\u0bc8\u0baf\u0bc8\u0baa\u0bcd \u0baa\u0bbe\u0bb0\u0bcd\u0ba4\u0bcd\u0ba4\u0bc1 \u0b92\u0baa\u0bcd\u0baa\u0b9f\u0bc8\u0b95\u0bcd\u0b95\u0bb2\u0bbe\u0bae\u0bcd, \u0b86\u0ba9\u0bbe\u0bb2\u0bcd approver \u0b86\u0b95 \u0b89\u0bb3\u0bcd\u0bb3 \u0b87\u0b9f\u0ba4\u0bcd\u0ba4\u0bbf\u0bb2\u0bcd \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bc7 approve \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bb2\u0bbe\u0bae\u0bcd. approver \u0b87\u0bb2\u0bcd\u0bb2\u0bbe\u0ba4 \u0ba4\u0bc1\u0bb1\u0bc8\u0baf\u0bc8 Admin-\u0b95\u0bb3\u0bcd \u0ba8\u0b9f\u0ba4\u0bcd\u0ba4\u0bc1\u0bb5\u0bb0\u0bcd. Task Department Limits \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 \u0ba4\u0bc1\u0bb1\u0bc8\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0bae\u0b9e\u0bcd\u0b9a\u0bb3\u0bcd/\u0b9a\u0bbf\u0bb5\u0baa\u0bcd\u0baa\u0bc1 \u0b8e\u0ba3\u0bcd\u0ba3\u0bbf\u0b95\u0bcd\u0b95\u0bc8\u0baf\u0bc8\u0baf\u0bc1\u0bae\u0bcd Stale, Waiting approval \u0ba8\u0bbe\u0b9f\u0bcd\u0b95\u0bb3\u0bc8\u0baf\u0bc1\u0bae\u0bcd \u0b85\u0bae\u0bc8\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd; \u0b87\u0bb2\u0bcd\u0bb2\u0bc8\u0baf\u0bc6\u0ba9\u0bbf\u0bb2\u0bcd 15 / 25 / 7 / 2."
    }
   ],
-  "en_sig": "c82ceac2"
+  "en_sig": "3d86dd37"
  },
  "document_control": {
   "title": "Document Control board \u2014 \u0b86\u0bb5\u0ba3\u0b99\u0bcd\u0b95\u0bb3\u0bcd, \u0baa\u0bca\u0bb1\u0bc1\u0baa\u0bcd\u0baa\u0bbe\u0bb3\u0bb0\u0bcd\u0b95\u0bb3\u0bcd, \u0ba8\u0bbf\u0ba9\u0bc8\u0bb5\u0bc2\u0b9f\u0bcd\u0b9f\u0bb2\u0bcd \u0b95\u0b9f\u0bbf\u0ba4\u0b99\u0bcd\u0b95\u0bb3\u0bcd",
   "tag": "Order Status \u2192 Document Control",
   "blocks": [
+   {
+    "type": "p",
+    "text": "\u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bcd 12 \u0b85\u0b95\u0bcd\u0b9f\u0bcb\u0baa\u0bb0\u0bcd 2026 (build 178). \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 card-\u0b87\u0bb2\u0bc1\u0bae\u0bcd CLIENT: 260116 \u00b7 Alfa Laval (\u0bae\u0bc1\u0ba4\u0bb2\u0bcd \u0b87\u0bb0\u0ba3\u0bcd\u0b9f\u0bc1 \u0b9a\u0bca\u0bb1\u0bcd\u0b95\u0bb3\u0bcd; hover \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd \u0bae\u0bc1\u0bb4\u0bc1\u0baa\u0bcd \u0baa\u0bc6\u0baf\u0bb0\u0bcd). Contract \u0baa\u0b9f\u0bcd\u0b9f\u0bbf\u0baf\u0bb2\u0bcd\u0b95\u0bb3\u0bbf\u0bb2\u0bcd \u201c260116 \u2013 Alfa Laval India Private Limited\u201d \u0b8e\u0ba9\u0bcd\u0bb1\u0bc1 \u0bb5\u0bb0\u0bc1\u0bae\u0bcd; number \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 \u0baa\u0bc6\u0baf\u0bb0\u0bbf\u0ba9\u0bcd \u0b8e\u0ba8\u0bcd\u0ba4\u0baa\u0bcd \u0baa\u0b95\u0bc1\u0ba4\u0bbf\u0baf\u0bc8\u0baf\u0bc1\u0bae\u0bcd type \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bc1 \u0ba4\u0bc7\u0b9f\u0bb2\u0bbe\u0bae\u0bcd. \u0baa\u0bc6\u0baf\u0bb0\u0bcd Sale Order-\u0b87\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1, \u0b87\u0bb2\u0bcd\u0bb2\u0bc8\u0baf\u0bc6\u0ba9\u0bbf\u0bb2\u0bcd Contract Register-\u0b87\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1. BUTTONS: \u0b87\u0ba4\u0bc1\u0bb5\u0bb0\u0bc8 \u0b85\u0ba9\u0bc1\u0baa\u0bcd\u0baa\u0bbe\u0ba4 card-\u0b87\u0bb2\u0bcd Send to client \u25b8; client \u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0b99\u0bcd\u0b95\u0bb3\u0bcd \u0b95\u0bc7\u0b9f\u0bcd\u0b9f\u0bbe\u0bb2\u0bcd Send resubmission \u25b8 (card \u0ba8\u0bbf\u0bb1\u0ba4\u0bcd\u0ba4\u0bbf\u0bb2\u0bcd outline); client-\u0b87\u0b9f\u0bae\u0bcd \u0b89\u0bb3\u0bcd\u0bb3 card-\u0b87\u0bb2\u0bcd Log client reply \u25b8 \u2014 \u0b85\u0bb5\u0bb0\u0bcd\u0b95\u0bb3\u0bcd \u0b95\u0bca\u0b9f\u0bc1\u0ba4\u0bcd\u0ba4 code-\u0b90\u0ba4\u0bcd \u0ba4\u0bc7\u0bb0\u0bcd\u0ba8\u0bcd\u0ba4\u0bc1, \u0ba4\u0bbf\u0bb0\u0bc1\u0bae\u0bcd\u0baa\u0bbf \u0bb5\u0ba8\u0bcd\u0ba4 file-\u0b87\u0ba9\u0bcd link, \u0bb5\u0ba8\u0bcd\u0ba4 \u0ba4\u0bc7\u0ba4\u0bbf (Rev In) \u0b95\u0bca\u0b9f\u0bc1\u0b99\u0bcd\u0b95\u0bb3\u0bcd; card \u0b85\u0ba8\u0bcd\u0ba4 status-\u0b87\u0ba9\u0bcd list-\u0b95\u0bcd\u0b95\u0bc1 \u0ba8\u0b95\u0bb0\u0bc1\u0bae\u0bcd. GREY CARDS \u0b87\u0baa\u0bcd\u0baa\u0bcb\u0ba4\u0bc1 Full Hold check-\u0b87\u0bb2\u0bcd \u0b8e\u0ba3\u0bcd\u0ba3\u0baa\u0bcd\u0baa\u0b9f\u0bc1\u0bae\u0bcd: Full Hold category-\u0b87\u0bb2\u0bcd \u0b89\u0bb3\u0bcd\u0bb3 Status to confirm \u0b86\u0bb5\u0ba3\u0bae\u0bcd, status \u0b85\u0bae\u0bc8\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0bb5\u0bb0\u0bc8 contract-\u0b90 hold \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bc1\u0bae\u0bcd."
+   },
    {
     "type": "p",
     "text": "\u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bcd 11 \u0b85\u0b95\u0bcd\u0b9f\u0bcb\u0baa\u0bb0\u0bcd 2026 (build 176). Status label: \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 card-\u0b87\u0ba9\u0bcd \u0bae\u0bc7\u0bb2\u0bc7\u0baf\u0bc1\u0bae\u0bcd \u0ba8\u0bbf\u0bb1\u0b95\u0bcd \u0b95\u0bc0\u0bb1\u0bc1. \u0b9a\u0bbf\u0bb5\u0baa\u0bcd\u0baa\u0bc1 \u2014 Our action (\u0b85\u0ba9\u0bc1\u0baa\u0bcd\u0baa\u0baa\u0bcd\u0baa\u0b9f\u0bb5\u0bbf\u0bb2\u0bcd\u0bb2\u0bc8); Pink \u2014 Comments \u2013 resubmit; \u0bae\u0b9e\u0bcd\u0b9a\u0bb3\u0bcd \u2014 With client; Code 2 \u2013 ours: \u0bae\u0b9e\u0bcd\u0b9a\u0bb3\u0bcd \u2192 pink \u2192 \u0b9a\u0bbf\u0bb5\u0baa\u0bcd\u0baa\u0bc1; Code 2 \u2013 with client: \u0bae\u0b9e\u0bcd\u0b9a\u0bb3\u0bcd \u2192 \u0baa\u0b9a\u0bcd\u0b9a\u0bc8; Hold \u2013 ours: pink \u2192 \u0b9a\u0bbf\u0bb5\u0baa\u0bcd\u0baa\u0bc1; Hold \u2013 with client: \u0bae\u0b9e\u0bcd\u0b9a\u0bb3\u0bcd \u2192 \u0b9a\u0bbf\u0bb5\u0baa\u0bcd\u0baa\u0bc1; \u0baa\u0b9a\u0bcd\u0b9a\u0bc8 \u2014 Approved. Status to confirm card \u0b9a\u0bbe\u0bae\u0bcd\u0baa\u0bb2\u0bcd, label \u0b87\u0bb2\u0bcd\u0bb2\u0bc8. Task board-\u0b87\u0bb2\u0bcd \u0b85\u0ba4\u0ba9\u0bcd task card-\u0b87\u0bb2\u0bc1\u0bae\u0bcd \u0b85\u0ba4\u0bc7 label."
@@ -28375,7 +28395,7 @@ const MANUAL_TA = {
     "text": "Document Categories-\u0b87\u0bb2\u0bcd Department column-\u0b90 \u0ba8\u0bbf\u0bb0\u0baa\u0bcd\u0baa\u0bbf\u0ba9\u0bbe\u0bb2\u0bcd board-\u0b90\u0ba4\u0bcd \u0ba4\u0bc1\u0bb1\u0bc8 \u0bb5\u0bbe\u0bb0\u0bbf\u0baf\u0bbe\u0b95 filter \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bb2\u0bbe\u0bae\u0bcd. Full Hold \u0b86\u0bb5\u0ba3\u0bae\u0bcd Code 2-\u0b87\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 \u0baa\u0bbf\u0ba9\u0bcd\u0ba9\u0bcb\u0b95\u0bcd\u0b95\u0bbf \u0bb5\u0ba8\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd Super Admin-\u0b95\u0bb3\u0bc1\u0b95\u0bcd\u0b95\u0bc1\u0ba4\u0bcd \u0ba4\u0bc6\u0bb0\u0bbf\u0bb5\u0bbf\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bc1\u0bae\u0bcd (delivery \u0b95\u0b9f\u0bbf\u0b95\u0bbe\u0bb0\u0bae\u0bcd reset \u0b86\u0b95\u0bbe\u0ba4\u0bc1)."
    }
   ],
-  "en_sig": "3bc2d375"
+  "en_sig": "47a28337"
  },
  "enquiry_followups": {
   "title": "Enquiries \u2014 \u0baa\u0ba4\u0bbf\u0bb5\u0bc1, Design & Estimation card, offer sent",
@@ -30873,7 +30893,9 @@ function downloadManualPdf(){
 // added to over time; not wired to a database table yet, so edits currently
 // mean updating this array directly.
 const FAQ_ENTRIES = [
-  { q:"What does a grey “Status to confirm” card mean?", a:"It was loaded from the old OneDrive folders and its status is not known yet. It makes no task card, chase letter or alert and is skipped by the Full Hold check. Press Set status ▸ on the card, pick the status and the date it was sent or returned: that sets the loaded revision and the card behaves normally from then on." },
+  { q:"Someone is leaving, or taking over another person's work. How do I move everything at once?", a:"Tasks → Hand Over Work (also under HR). Super Admin, Admin and the HR & Admin Manager can use it. Pick who hands over, who receives and the reason for transfer, add a note if useful. The screen lists their open task cards, document cards, document requests, approver roles and posts (all ticked) and the customers they own (not ticked). Untick what should stay, then press Hand over. Each card gets a history line and both people get a bell message. Undo is offered for 7 days and puts back everything that has not been moved again since." },
+  { q:"A card is stuck because I am waiting on a colleague or a supplier. How do I stop it showing as overdue?", a:"Open the card and press ⏳ Waiting on someone. Say who and for what. The card shows “Waiting on <name> – <what>” and is not counted as overdue while it waits; a colleague gets a bell message. Press ▶ Got it from <name> when it arrives." },
+  { q:"What does a grey “Status to confirm” card mean?", a:"It was loaded from the old OneDrive folders and its status is not known yet. It makes no task card, chase letter or alert, but it does hold the contract: a grey card in a Full Hold category counts as “not at Code 2” until its status is set. Press Set status ▸ on the card, pick the status and the date it was sent or returned: that sets the loaded revision and the card behaves normally from then on." },
   { q:"How do I finish a task card without dragging it?", a:"Press ✓ Completed on the card. If you hold the card it goes to Under Approval; if you are its approver it is completed at once. A document card asks the date and the file link sent to the client and logs the revision Out. On Under Approval cards the approver has ✓ Approve and ↩ Send back." },
   { q:"Why does Release production warn about a Production Hold?", a:"A Full Hold document whose client returned Code 2 with production held does not clear the delivery clock. The warning lists each held document and the client's hold condition. Only the Sales Head or a Super Admin can release anyway." },
   { q:"How do I add a new contract to the Contract Register?", a:"Press + New contract: a line appears at the bottom with the next contract number. Pick the won quote (the client and items come from it), type the PO number and date, and Save line. When the PO is in hand, press Sale Order + on that line \u2014 only the PO / LOI document is asked, and the Sale Order is created." },
@@ -30964,6 +30986,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"12 Oct 2026 (178)", summary:"Built on 2026-10-12T01:00:00Z, on top of 08:30 (build 176). SQL: structure_tasks_handover_2026-10-12.sql (BOTH companies; safe to re-run; adds only). CLIENT NAME: every card with a contract number shows the contract and the first two words of the client (Triveni Engineering Works \u2192 Triveni Engineering; one- and two-word names in full; full name on hover), on the Document Control board and the Task boards. Contract pick lists (Document Control report and contract view, Procurement reports, procurement upload) show \u201cnumber \u2013 full client name\u201d and can be searched by number or any part of the name. Name = Sale Order customer, else the Contract Register client. BUTTONS BY ACTION: document cards no longer say \u2713 Completed. Never sent \u2192 Send to client \u25b8 (blue); resubmission \u2192 Send resubmission \u25b8 (outlined in the card colour); with the client \u2192 Log client reply \u25b8 (records the code, the returned file and the date as Rev In). Same on document task cards. Ordinary task cards keep \u2713 Completed; approvers keep \u2713 Approve / \u21a9 Send back. FULL HOLD: grey Status to confirm cards in a Full Hold category now count in the Full Hold counts. HAND OVER WORK (Tasks and HR): Super Admin, Admin, HR & Admin Manager move one person's open task cards, document cards, document requests, approver roles and posts to another, with a reason (new master Hand-over Reasons) and a note; customers listed unticked; per-item untick; history line on each card; bell message to both; 7-day undo of whatever has not moved since; Left the company offers to switch off the login (Admin). TASKS: Urgent flag (top of every list); Waiting on <person> \u2013 <what> (not overdue while waiting; bell message to a colleague); repeating cards (day / working day / week / month / quarter / year, optional end date; next copy made when the latest is due); comments with @name (bell message); one in-app reminder a day in the bell (overdue, due today, urgent, waiting on you; approvers also get overdue per person); Workload tab (open cards per person by due week). No email." },
   { date:"11 Oct 2026 (176)", summary:"Built on 2026-10-11T08:30:00Z, on top of 08:00 (which carries build 175 and its SQL). No new SQL. STATUS LABELS ON DOCUMENT CARDS: a coloured strip across the top of every card on the Document Control board, and on each open document task card on the Task boards, with a short word. Red \u2014 Our action (never sent); Pink \u2014 Comments \u2013 resubmit (Code 3 / returned); Yellow \u2014 With client; Code 2 \u2013 ours (Code 2 proceed, resubmission pending): yellow for the first half, fading through pink to red; Code 2 \u2013 with client (resubmission done): yellow fading to green; Hold \u2013 ours (Production Hold, resubmission pending): pink fading to red; Hold \u2013 with client (resubmission done): yellow fading to red; Green \u2014 Approved. Status to confirm cards have no label and a grey card. The label follows the list and whose move it is, so a status added to the master later gets the right label by itself." },
   { date:"11 Oct 2026 (175)", summary:"Built on 2026-10-11T08:00:00Z, on top of 07:00. SQL: structure_doc_confirm_prodhold_2026-10-11.sql (BOTH companies; safe to re-run). doc_status_tbl: colour, skip_checks, hold_note_required; board lists confirm and phold; three statuses \u2014 Status to confirm (grey, skip_checks, legacy load only), Code2-Approved-Production Hold-Resubmission Pending (pink, ours, hold note required), Code2-Approved-Production Hold-Resubmission Done (yellow, client); none clears the delivery clock. universal_documents_tbl: source_path, load_batch, loaded_on. universal_document_history_tbl: hold_note, legacy_unsent; direction may be empty for a loaded revision never sent. v_full_hold_outstanding skips skip_checks statuses. DOCUMENT CONTROL BOARD: six lists (Status to confirm, Not submitted, Submitted, Code 2 \u2014 Production Hold, Code 2 \u2014 proceed, All approved); tiles Production Hold and Status to confirm. STATUS TO CONFIRM cards make no task card, chase letter or age alert, count in no KPI or Pending Action and are skipped by the Full Hold counts; Set status \u25b8 sets the loaded revision in place (status, Out/In from the status, real date, note, hold note) with Save and open next; it can't be picked by hand or dragged back to. PRODUCTION HOLD: hold note required on the way in, shown on the card (\u23f8); Resubmission Done is chased after 7 days; a Full Hold fall back from Code 2 \u2014 proceed to Production Hold is reported like a fall back to Code 3; Release production lists each held document with its hold note. \u2713 COMPLETED on every card: document cards (board and Task board) log the next Rev Out into the right list with date and link, closing the task card and starting the chase; a loaded never-sent revision goes out at its own Rev. Task cards: the holder sends to Under Approval, an approver or Super Admin completes; open checklist items are ticked; Under Approval cards carry \u2713 Approve and \u21a9 Send back. Status master shows colour, legacy-only and hold-note settings; the board's statuses can't be deleted there. Contract Documents panel: Status to confirm is grey and can't be picked. Manual (English and Tamil) and 3 FAQs." },
   { date:"11 Oct 2026 (174)", summary:"Built on 2026-10-11T07:00:00Z, on top of 06:00. No SQL. DOCUMENT CONTROL BOARD \u2014 COUNT TILES (replacing the counters on the Trello Contract board), counted live on every load: Initial submission pending (red \u2014 never sent to the client); Comments received \u2014 resubmission pending (pink \u2014 Code 3 returns plus Code 2 Resubmission Pending, with how many are Code 2); Submitted \u2014 waiting for the client (with how many are past the 7-day chase); Unassigned cards; Delivery overdue (with the worst days late); Delivery due this week (today and the next 6 days). A document tile filters the board to its cards; a delivery tile shows the contracts instead \u2014 contract (opens it), client, delivery date, days late/left, where the date comes from (the contract's own date, Firm or Anticipated; otherwise the earliest line despatch date in the Contract Register) and Full Hold documents still short of Code 2. Click the tile again to clear. Only Pending contracts count (Closed, Cancelled and On Hold left out). \u201cMy cards only\u201d makes the document tiles and the board show only your cards; the delivery tiles stay company-wide."},
@@ -38751,7 +38774,7 @@ function ProcReportsScreen({ user, onOpenGantt }){
       Object.entries(titles).map(([k,l])=>h("button",{key:k,onClick:()=>setRep(k),style:{...btnSmall,fontSize:12.5,padding:"6px 11px",background:rep===k?colors.dark:"#fff",color:rep===k?"#fff":colors.text,borderColor:rep===k?colors.dark:colors.border}},l))),
     h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",background:"#efece2",borderRadius:8,padding:"8px 10px",marginBottom:8}},
       seg([["one","One contract"],["all","All contracts"]], scope, setScope),
-      lab("Contract", sel(ct, setCt, data.plans.map(p=>h("option",{key:p.id,value:String(p.contract_number)},p.contract_number+" · "+(p.client||""))), scope!=="one")),
+      lab("Contract", h(SearchPick,{value:ct, onChange:setCt, disabled:scope!=="one", width:300, options:data.plans.map(p=>[String(p.contract_number), ctOptLabel(p.contract_number, p.client)])})),
       lab("Purchase engineer", sel(eng, setEng, [h("option",{key:"",value:""},"Everyone"), ...people.map(p=>h("option",{key:p,value:p},p))])),
       rep==="past" ? lab("Late by at least", sel(String(minLate), v=>setMinLate(Number(v)), [1,3,7,14].map(n=>h("option",{key:n,value:String(n)},n+" day"+(n===1?"":"s"))))) : null,
       rep==="pend" ? lab("Show", sel(show, setShow, [h("option",{key:"p",value:"pending"},"Pending only"),h("option",{key:"r",value:"recent"},"Pending + received in the last 30 days"),h("option",{key:"a",value:"all"},"Everything")])) : null,
@@ -39120,7 +39143,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
     return h("div",null,
       h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))",gap:10}},
         fl("Contract No *",h("span",null,h("input",{list:"pg-contracts",value:u.contract,onChange:e=>{ const v = e.target.value; const c = contracts.find(x=>String(x.contract_number)===v); setUp(x=>({...x, contract:v, ...(c?{ client:c.customer_name||x.client, po:c.basis_number||x.po }:{}) })); },placeholder:"from the file, or pick",style:inputStyle}),
-          h("datalist",{id:"pg-contracts"},contracts.map(c=>h("option",{key:c.contract_number,value:c.contract_number},c.customer_name||""))))),
+          h("datalist",{id:"pg-contracts"},contracts.map(c=>h("option",{key:c.contract_number,value:c.contract_number},ctOptLabel(c.contract_number,c.customer_name)))))),
         fl("Client Name *",h(CustomerSelect,{value:u.client,user,compact:true,onSelect:c=>setUp(x=>({...x,client:(c&&c.company_name)||""}))})),
         fl("P O No (if known)",h("input",{value:u.po,onChange:e=>setUp(x=>({...x,po:e.target.value})),placeholder:"can follow \u2014 filled from the Sale Order",style:inputStyle})),   // 142
         fl("Delivery date",h("input",{type:"date",value:u.deliv||"",onChange:e=>setUp(x=>({...x,deliv:e.target.value})),style:inputStyle})),
@@ -48045,6 +48068,7 @@ function App() {
     tab==="lookup_package"?h(EntityLookupScreen,{user,entityType:"package",preselect:entityLookupPreselect,onGoTo:goToEntityLookup,returnTo:entityReturnTo}):
     tab==="lookup_customer"?h(EntityLookupScreen,{user,entityType:"customer",preselect:entityLookupPreselect,onGoTo:goToEntityLookup,returnTo:entityReturnTo}):
     tab==="task_report"?h(TaskCompletedReport,{user,company:sessionCompany}):
+    tab==="task_handover"?h(HandOverScreen,{user}):   // 178
     tab==="board_grid"?h(BoardGridScreen,{user}):
     (tab==="doc_board"||tab==="doc_report"||tab==="doc_letters")?h(DocControlScreen,{user,company:sessionCompany,initialPanel:tab==="doc_report"?"report":tab==="doc_letters"?"letters":null,onOpenContract:(row)=>{ setTab("sale_order_entry"); openContract(row); }}):
     tab==="task_board"?h(TaskBoardScreen,{user, company:sessionCompany, onGoToTab:setTab,
@@ -49476,7 +49500,96 @@ const TASK_PILE = "__pile__";
 const taskIsPile = (t)=> !t.assignee || t.assignee==="Unassigned";
 const taskWho = (t)=> taskIsPile(t) ? "Unassigned pile" : t.assignee;
 // 128 — overdue whatever list it sits in (Tasks Assigned / Today's / In Progress).
-const taskOverdue = (t, today)=> (t.status==="open" || t.status==="progress") && !!t.due_date && String(t.due_date).slice(0,10) < today;
+const taskOverdue = (t, today)=> (t.status==="open" || t.status==="progress") && !!t.due_date && String(t.due_date).slice(0,10) < today && !t.wait_on;   // 178: waiting on someone is not overdue
+// ---- 178: task manager additions -------------------------------------------------------------------
+// Urgent flag; "Waiting on <person> – <what>" (not overdue while it waits); repeating cards; comments with @name;
+// one in-app reminder a day (the bell). Needs structure_tasks_handover_2026-10-12.sql (both companies).
+function urgentChip(t){ return t && t.urgent && t.status!=="done" ? h("span",{title:"Urgent",style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#a3312a",color:"#fff",marginBottom:3,marginRight:4}},"🔥 Urgent") : null; }
+function waitOnBadge(t, block){
+  if(!t || !t.wait_on || t.status==="done") return null;
+  return h("div",{style:{display:block?"block":"inline-block",fontSize:10.5,fontWeight:700,borderRadius:6,padding:"3px 7px",marginTop:block?5:0,lineHeight:1.35,background:"#eef0fb",color:"#3b3f9a",border:"1px solid #b9bde8"}},
+    "⏳ Waiting on "+t.wait_on+(t.wait_what?" – "+t.wait_what:""), t.wait_on_since ? h("div",{style:{fontWeight:400}},"since "+fmtDMY(t.wait_on_since)+" · not counted as overdue") : null);
+}
+const TASK_REPEAT_EVERY = [["day","Every day"],["weekday","Every working day (Mon–Sat)"],["week","Every week"],["month","Every month"],["quarter","Every quarter"],["year","Every year"]];
+function taskRepeatLabel(r){ if(!r || !r.every) return ""; const n = Number(r.n)||1; const base = (TASK_REPEAT_EVERY.find(x=>x[0]===r.every)||[,""])[1];
+  return (n>1 && r.every!=="weekday" ? "Every "+n+" "+({day:"days",week:"weeks",month:"months",quarter:"quarters",year:"years"}[r.every]||r.every) : base)+(r.until?" until "+fmtDMY(r.until):""); }
+function taskRepeatStep(iso, r){
+  const n = Math.max(1, Number(r.n)||1); const x = new Date(String(iso).slice(0,10)+"T12:00:00");
+  if(r.every==="day") x.setDate(x.getDate()+n);
+  else if(r.every==="weekday"){ do { x.setDate(x.getDate()+1); } while(x.getDay()===0); }
+  else if(r.every==="week") x.setDate(x.getDate()+7*n);
+  else if(r.every==="month" || r.every==="quarter" || r.every==="year"){ const m = r.every==="month"?n:r.every==="quarter"?3*n:12*n; const day = x.getDate(); x.setDate(1); x.setMonth(x.getMonth()+m); const last = new Date(x.getFullYear(), x.getMonth()+1, 0).getDate(); x.setDate(Math.min(day,last)); }
+  else x.setDate(x.getDate()+7);
+  return toISODate(x);
+}
+// Called when a board loads. For every repeating card (the first card of the series carries repeat_rule):
+// when the latest card of the series is due today or earlier, the next one is made (one at a time; missed
+// periods are skipped up to today). The unique index (repeat_of, due_date) stops two screens making the same card.
+async function taskRepeatRun(tasks, today){
+  const roots = (tasks||[]).filter(t=>t.repeat_rule && t.repeat_rule.every && !t.repeat_of && t.due_date);
+  let made = 0;
+  for(const r of roots){
+    const rule = r.repeat_rule; const series = (tasks||[]).filter(t=>t.id===r.id || String(t.repeat_of)===String(r.id));
+    const latest = series.map(t=>String(t.due_date||"").slice(0,10)).filter(Boolean).sort().pop(); if(!latest || latest>today) continue;
+    let next = taskRepeatStep(latest, rule); let guard = 0;
+    while(next < today && guard++ < 400) next = taskRepeatStep(next, rule);
+    if(rule.until && next > String(rule.until).slice(0,10)) continue;
+    if(series.some(t=>String(t.due_date||"").slice(0,10)===next)) continue;
+    const untick = (items)=> (items||[]).map(i=>({ ...i, done:false, items:untick(i.items) }));
+    const row = { title:r.title, assignee:r.assignee||null, department:r.department||null, due_date:next, status:"open", labels:r.labels||[], links:r.links||[],
+      checklists:(r.checklists||[]).map(c=>({ ...c, items:untick(c.items) })), ref:r.ref||null, customer:r.customer||null, notes:r.notes||null, task_type:r.task_type||null,
+      urgent:!!r.urgent, repeat_of:r.id, created_by:"App (repeats)" };
+    const { data, error } = await sb.from("task_tbl").insert(row).select("id").single();
+    if(!error && data){ made++; await taskLog(data.id, "App", "Made by the repeat of “"+r.title+"” ("+taskRepeatLabel(rule)+"), due "+fmtDMY(next)); }
+  }
+  return made;
+}
+// Bell messages; "kind" is dropped when the 178 SQL has not been run yet.
+async function notifyRows(rows){
+  if(!(rows||[]).length) return;
+  try{ let r = await sb.from("notifications_tbl").insert(rows);
+    if(r.error && /kind/.test(r.error.message||"")) r = await sb.from("notifications_tbl").insert(rows.map(x=>{ const y={...x}; delete y.kind; return y; }));
+  }catch(e){ console.warn("Notification", e); }
+}
+// @name in a comment: the employees whose full name (or first name, when only one person has it) follows an @.
+function taskMentions(text, emps){
+  const t = " "+String(text||"").toLowerCase(); const out = new Set();
+  const names = (emps||[]).map(e=>e.employee_name).filter(n=>n && n!=="Unassigned");
+  const firsts = {}; names.forEach(n=>{ const f = n.toLowerCase().replace(/^[a-z]\.\s*/,"").split(/\s+/)[0]; firsts[f] = (firsts[f]||[]).concat([n]); });
+  names.slice().sort((a,b)=>b.length-a.length).forEach(n=>{ if(t.includes("@"+n.toLowerCase())) out.add(n); });
+  (t.match(/@([a-z][a-z.]*)/g)||[]).forEach(m=>{ const f = m.slice(1).replace(/^[a-z]\.\s*/,""); if(firsts[f] && firsts[f].length===1) out.add(firsts[f][0]); });
+  return Array.from(out);
+}
+// One reminder a day per person, in the bell: their overdue / due today / urgent / waiting-on-them cards; a board's
+// approver also gets the overdue count per person on that board.
+async function taskDailyDigest(name){
+  if(!name) return;
+  const today = toISODate(new Date()); const KEY = "digest_"+name+"_"+today;
+  try{ if(localStorage.getItem(KEY)) return; }catch(e){}
+  try{
+    const { data: got } = await sb.from("notifications_tbl").select("id").eq("employee_name",name).gte("created_at",today+"T00:00:00").ilike("message","☀ Today%").limit(1);
+    if((got||[]).length){ try{ localStorage.setItem(KEY,"1"); }catch(e){} return; }
+    const { data: mine } = await sb.from("task_tbl").select("id,assignee,department,due_date,status,urgent,wait_on,title").eq("assignee",name).neq("status","done").limit(3000);
+    const { data: onMe } = await sb.from("task_tbl").select("id,assignee,title,wait_what").eq("wait_on",name).neq("status","done").limit(500);
+    const xs = mine||[];
+    const od = xs.filter(t=>taskOverdue(t,today)).length, dt = xs.filter(t=>String(t.due_date||"").slice(0,10)===today && t.status!=="approval" && !t.wait_on).length;
+    const ur = xs.filter(t=>t.urgent).length, wo = (onMe||[]).length;
+    const parts = [];
+    if(od) parts.push(od+" overdue"); if(dt) parts.push(dt+" due today"); if(ur) parts.push(ur+" urgent");
+    if(wo) parts.push(wo+" waiting on you ("+(onMe||[]).slice(0,3).map(t=>t.assignee+(t.wait_what?": "+t.wait_what:"")).join("; ")+(wo>3?"…":"")+")");
+    let msg = parts.length ? "☀ Today: "+parts.join(", ")+"." : "";
+    const { data: ap } = await sb.from("task_approver_tbl").select("department").eq("employee_name",name);
+    const deps = Array.from(new Set((ap||[]).map(a=>a.department).filter(Boolean)));
+    if(deps.length){
+      const { data: dt2 } = await sb.from("task_tbl").select("assignee,department,due_date,status,wait_on").in("department",deps).neq("status","done").limit(5000);
+      const by = {}; (dt2||[]).filter(t=>taskOverdue(t,today) && t.assignee && t.assignee!==name).forEach(t=>{ by[t.assignee]=(by[t.assignee]||0)+1; });
+      const top = Object.entries(by).sort((a,b)=>b[1]-a[1]);
+      if(top.length) msg = (msg||"☀ Today:")+" Your board"+(deps.length>1?"s":"")+" ("+deps.join(", ")+"): "+top.reduce((n,x)=>n+x[1],0)+" overdue — "+top.slice(0,6).map(x=>x[0]+" "+x[1]).join(", ")+(top.length>6?"…":"")+".";
+    }
+    if(msg) await notifyRows([{ employee_name:name, message:msg, kind:"daily_digest" }]);
+    try{ localStorage.setItem(KEY,"1"); }catch(e){}
+  }catch(e){ console.warn("Daily reminder", e); }
+}
 const taskDaysOver = (t, today)=> taskOverdue(t,today) ? Math.round((new Date(today+"T12:00:00")-new Date(String(t.due_date).slice(0,10)+"T12:00:00"))/864e5) : 0;
 // 128 — Completed lists on an employee board. A card sits in exactly one: today, this week
 // (Mon-Sun), this month, then the quarter of this year it was done in; earlier years = archive.
@@ -49614,7 +49727,7 @@ let DOC_DEPT = "Document Control";
 const DOC_TT_INITIAL = "Document – initial submission", DOC_TT_RESUB = "Document – resubmission", DOC_TT_CHASE = "Document – chase letter";
 const DOC_CHASE_DAYS = 7;
 const DOC_LISTS = [
-  { key:"confirm", label:"Status to confirm",                     short:"To confirm",    color:"#6f7377", bg:"#eceeef", sub:"Loaded from the old files. Set the status (Trello, Phase 2.1, or the Document Controller). No task card, chase or alert until then." },   // 175
+  { key:"confirm", label:"Status to confirm",                     short:"To confirm",    color:"#6f7377", bg:"#eceeef", sub:"Loaded from the old files. Set the status (Trello, Phase 2.1, or the Document Controller). No task card, chase or alert until then — but it counts in the Full Hold check." },   // 175/178
   { key:"our",    label:"Not submitted — our action",              short:"Not submitted", color:"#a3312a", bg:"#fdecea", sub:"Requested and not yet sent, or returned for resubmission." },
   { key:"client", label:"Submitted — client action pending",       short:"Submitted",     color:"#b8860b", bg:"#fff4d6", sub:"We sent it; waiting for the client's code. Chased after "+DOC_CHASE_DAYS+" days." },
   { key:"phold",  label:"Code 2 — Production Hold",                short:"Production Hold", color:"#b4520f", bg:"#fcebdc", sub:"Client approved with a hold. A Full Hold document here holds the production release." },   // 175
@@ -49699,8 +49812,48 @@ const docDaysBetween = (a,b)=>{ if(!a||!b) return 0; return Math.round((new Date
 const docHoldTag = (h)=> h==="Full Hold" ? {background:"#fdecea",color:"#a3312a"} : h==="Inspection Hold" ? {background:"#fff4d6",color:"#8a6100"} : h==="Final Hold" ? {background:"#efeaf8",color:"#6b4fa0"} : null;
 
 // Everything the board, the tasks sync and the letters need, in one pass.
+// 178: searchable drop-down. options = [[value,label],...]. Type any part of the label (number or client).
+function SearchPick({ value, onChange, options, style, disabled, placeholder, width }){
+  const [open,setOpen] = useState(false); const [q,setQ] = useState("");
+  const cur = (options||[]).find(o=>String(o[0])===String(value));
+  const ql = q.trim().toLowerCase();
+  const list = (options||[]).filter(o=> !ql || String(o[1]).toLowerCase().includes(ql) || String(o[0]).toLowerCase().includes(ql)).slice(0,300);
+  const pick = v=>{ setOpen(false); setQ(""); onChange && onChange(v); };
+  return h("span",{style:{position:"relative",display:"inline-block",width:width||"auto",minWidth:180,opacity:disabled?0.5:1}},
+    h("input",{value: open ? q : (cur?cur[1]:(value||"")), disabled:!!disabled, placeholder: open ? ((cur&&cur[1])||placeholder||"Type number or client") : (placeholder||""),
+      title: cur?cur[1]:"", onFocus:()=>{ setOpen(true); setQ(""); }, onChange:e=>{ setQ(e.target.value); setOpen(true); },
+      onBlur:()=>setTimeout(()=>setOpen(false),180),
+      onKeyDown:e=>{ if(e.key==="Enter" && list.length){ e.preventDefault(); pick(list[0][0]); e.target.blur(); } else if(e.key==="Escape"){ setOpen(false); e.target.blur(); } },
+      style:{fontSize:12,padding:"4px 6px",borderRadius:4,border:"1px solid #d8d4c5",width:"100%",boxSizing:"border-box",...(style||{})}}),
+    open ? h("div",{style:{position:"absolute",zIndex:60,top:"100%",left:0,minWidth:"100%",maxWidth:460,maxHeight:300,overflowY:"auto",background:"#fff",border:"1px solid #d8d4c5",borderRadius:6,boxShadow:"0 6px 18px rgba(0,0,0,.15)",marginTop:2}},
+      list.length ? list.map(o=>h("div",{key:String(o[0]),onMouseDown:e=>{ e.preventDefault(); pick(o[0]); },
+        style:{padding:"5px 9px",fontSize:12,cursor:"pointer",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",background:String(o[0])===String(value)?"#eef4fb":"#fff"}},o[1]))
+      : h("div",{style:{padding:"6px 9px",fontSize:12,color:"#888"}},"No match")) : null);
+}
+// 178: client name beside every contract number. Name = Sale Order customer, else Contract Register client.
+const CT_CLIENT = { map:{}, at:0, p:null };
+async function ctClientLoad(force){
+  if(!force && CT_CLIENT.at && Date.now()-CT_CLIENT.at<60000) return CT_CLIENT.map;
+  if(CT_CLIENT.p) return CT_CLIENT.p;
+  CT_CLIENT.p = (async()=>{
+    const m = {};
+    try{ const reg = await fetchAll("contract_register_tbl","contract_number,client"); (reg||[]).forEach(r=>{ const k=String(r.contract_number||"").trim(); if(k && r.client && !m[k]) m[k]=String(r.client).trim(); }); }catch(e){}
+    try{ const so = await fetchAll("sale_order_tbl","contract_number,customer_name"); (so||[]).forEach(r=>{ const k=String(r.contract_number||"").trim(); if(k && r.customer_name) m[k]=String(r.customer_name).trim(); }); }catch(e){}
+    CT_CLIENT.map = m; CT_CLIENT.at = Date.now(); CT_CLIENT.p = null; return m;
+  })();
+  return CT_CLIENT.p;
+}
+function clientShort(n){ const w=String(n||"").replace(/\s+/g," ").trim().split(" ").filter(Boolean); return w.length<=2 ? w.join(" ") : w.slice(0,2).join(" "); }
+function ctClientOf(ct){ return CT_CLIENT.map[String(ct||"").trim()]||""; }
+function ctOptLabel(ct, name){ const n = name||ctClientOf(ct); return String(ct)+(n?" \u2013 "+n:""); }
+function taskContractOf(t){ if(!t) return ""; if(t.doc_contract) return String(t.doc_contract); const m=String(t.ref||"").match(/(?<![A-Za-z0-9])(\d{6})(?![0-9])/); return m?m[1]:""; }
+// Card header bit: "260116 · Alfa Laval" with the full name on hover.
+function ctClientTag(ct, name, color){
+  const full = name||ctClientOf(ct);
+  return h("span",{title: full?ct+" \u2013 "+full:ct}, h("b",{style:{color:color||"#2a6db0"}},ct), full?" \u00b7 "+clientShort(full):"");
+}
 async function docBoardLoad(){
-  await loadDocDept(); await loadEnquiryDept(); await loadBoardMembership();
+  await ctClientLoad(); await loadDocDept(); await loadEnquiryDept(); await loadBoardMembership();
   const [docs, hist, reqs, statuses, catsR, sos, tasks, letters, empsR, dcR, ttR] = await Promise.all([
     fetchAll("universal_documents_tbl","*"),
     fetchAll("universal_document_history_tbl","*"),
@@ -49752,7 +49905,7 @@ async function docBoardLoad(){
   });
   items.forEach(it=>{
     const so = soBy[it.ct]||{};
-    it.so = so; it.customer = so.customer_name||"";
+    it.so = so; it.customer = so.customer_name||ctClientOf(it.ct)||"";
     const c = docCategoryRow(cats, it.cat)||{};
     it.hold = c.hold_level||""; it.dept = c.department||"";
     it.tasks = taskArr.filter(t=> (it.doc && String(t.doc_id)===String(it.doc.id)) || (it.req && String(t.doc_request_id)===String(it.req.id)));
@@ -49870,7 +50023,7 @@ async function docSendFromTask(t, f, username){
   const d = await docBoardLoad();
   const it = d.items.find(x=> (x.doc && String(x.doc.id)===String(t.doc_id)) || (!t.doc_id && x.req && String(x.req.id)===String(t.doc_request_id)));
   if(!it) return { error:"This document is no longer on the Document Control board." };
-  if(it.kind==="req") return { error:"This document has no number yet. Open Order Status → Document Control and press ✓ Completed on its card there: the first submission gives it its number." };
+  if(it.kind==="req") return { error:"This document has no number yet. Open Order Status → Document Control and press Send to client ▸ on its card there: the first submission gives it its number." };
   if(!it.needsUs) return { error:"The document is already with the client. The card closes by itself." };
   const exp = docExpectedNext(it.revs);
   if(exp.direction!=="Out") return { error:"The latest entry is already Out (sent). Log the client's reply on the Document Control board first." };
@@ -49879,9 +50032,9 @@ async function docSendFromTask(t, f, username){
   const at = (f.date && f.date!==toISODate(new Date())) ? f.date+"T12:00:00" : new Date().toISOString();
   const what = String(f.what||"").trim() || (exp.rev>0 ? "Resubmitted Rev "+exp.rev : "First submission");
   const { error } = await sb.from("universal_document_history_tbl").insert({ document_id:it.doc.id, doc_number:it.no, rev_number:Number(exp.rev)||0, direction:"Out", status:tg.status,
-    link:String(f.link||"").trim(), reason:what, notes:what+" (✓ Completed on the task card)", changed_by:username||"unknown", changed_at:at });
+    link:String(f.link||"").trim(), reason:what, notes:what+" (sent from the task card)", changed_by:username||"unknown", changed_at:at });
   if(error) return { error:error.message };
-  await logAudit("UPDATE","universal_documents_tbl",it.ct,"New entry on "+it.no+" — Rev"+exp.rev+"-Out · "+tg.status+" (✓ Completed on the task card): "+what, username||"unknown", null, null);
+  await logAudit("UPDATE","universal_documents_tbl",it.ct,"New entry on "+it.no+" — Rev"+exp.rev+"-Out · "+tg.status+" (sent from the task card): "+what, username||"unknown", null, null);
   try{ await supersedeHandovers(it.doc.id, Number(exp.rev)||0, username); }catch(e){}
   try{ await docTasksSync(await docBoardLoad(), "App"); }catch(e){}
   return { ok:true, msg: it.no+" Rev "+exp.rev+" logged as sent ("+tg.status+"). The task card is completed and the "+DOC_CHASE_DAYS+"-day chase starts from "+fmtDMY(at)+"." };
@@ -49941,7 +50094,7 @@ async function docContractReportPdf(cts, data, ext, company, me){
   let y = 41;
   if(cts.length>1 && !ext){
     doc.autoTable({ startY:y, head:[["Contract","Customer","With us","With client","Code 2","Approved","Total","% approved","Overdue"]],
-      body: cts.map(ct=>{ const xs=data.items.filter(it=>it.ct===ct); const n=k=>xs.filter(it=>it.list===k).length; return [ct, (data.soBy[ct]||{}).customer_name||"", n("our"), n("client"), n("code2"), n("done"), xs.length, xs.length?Math.round(n("done")/xs.length*100)+"%":"—", xs.filter(it=>it.late).length||""]; }),
+      body: cts.map(ct=>{ const xs=data.items.filter(it=>it.ct===ct); const n=k=>xs.filter(it=>it.list===k).length; return [ct, (data.soBy[ct]||{}).customer_name||ctClientOf(ct)||"", n("our"), n("client"), n("code2"), n("done"), xs.length, xs.length?Math.round(n("done")/xs.length*100)+"%":"—", xs.filter(it=>it.late).length||""]; }),
       theme:"grid", headStyles:hs, bodyStyles:bs, margin:{left:12,right:12} });
     doc.addPage(); head(); y = 41;
   }
@@ -50085,7 +50238,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
   const itemByKey = (k)=> data.items.find(it=>it.key===k);
   const outOf = (it)=> [...it.revs].reverse().find(r=>r.direction==="Out")||null;
   const inOf = (it)=> [...it.revs].reverse().find(r=>r.direction==="In")||null;
-  const fullHoldOpen = (xs)=> xs.filter(it=>it.hold==="Full Hold" && !["code2","done","confirm"].includes(it.list)).length;   // 175: Status to confirm is skipped
+  const fullHoldOpen = (xs)=> xs.filter(it=>it.hold==="Full Hold" && !["code2","done"].includes(it.list)).length;   // 178: Status to confirm counts (holds the contract until set)
 
   // ---- assign ----
   const assign = async(its, who)=>{
@@ -50116,7 +50269,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
 
   // ---- move = log the next revision ----
   const expectedNext = docExpectedNext;   // 175: a loaded, never-sent revision goes out at the same Rev
-  const startMove = async(it, to, forceStatus, viaComplete)=>{
+  const startMove = async(it, to, forceStatus, viaComplete, viaReply)=>{
     if(!canTouch(it)){ alert("Only the Document Controller, an Admin or "+(it.owner?it.owner+" (the card's owner)":"the card's owner")+" can move this card."); return; }
     if(to==="confirm"){ alert("“Status to confirm” comes only from the legacy load. A card can't be moved back to it."); return; }   // 175
     if(it.list==="confirm"){ startSetStatus(it); return; }   // 175: a loaded card gets its status set, not a new revision
@@ -50131,7 +50284,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     const pref = exp.direction==="Out" && Number(exp.rev)===0 ? /third party/i : exp.direction==="Out" ? /resubmission done/i : null;
     const prevCode = it.last && /code\s*-?\s*2/i.test(it.last.status||"") ? /code\s*-?\s*2/i : it.last && /code\s*-?\s*3/i.test(it.last.status||"") ? /code\s*-?\s*3/i : null;
     const guess = (pref && (sts.find(x=>pref.test(x) && (!prevCode || prevCode.test(x))) || sts.find(x=>pref.test(x)))) || (sts.length===1 ? sts[0] : "");
-    setMv({ key:it.key, to, status: forceStatus || guess, rev:exp.rev, dir:exp.direction, date:today, link: it.last ? (it.last.link||"") : "", what: viaComplete ? (exp.rev>0 ? "Resubmitted Rev "+exp.rev : "First submission") : "", notes:"", hold:"", num, title:it.kind==="req"?it.cat:"", viaComplete:!!viaComplete });
+    setMv({ key:it.key, to, status: forceStatus || guess, rev:exp.rev, dir:exp.direction, date:today, link: it.last ? (it.last.link||"") : "", what: viaComplete ? (exp.rev>0 ? "Resubmitted Rev "+exp.rev : "First submission") : "", notes:"", hold:"", num, title:it.kind==="req"?it.cat:"", viaComplete:!!viaComplete, viaReply:!!viaReply });
     setPanel({ kind:"move", key:it.key, to });
   };
   // 175: ✓ Completed on a card = the document goes to the client now.
@@ -50143,6 +50296,13 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     const tg = docSentTarget(it, data.statuses);
     if(!tg.status){ alert("No status in the Document Status Master moves a card to “"+docListOf(tg.to).label+"” as sent to the client. Add one (Setup → Document Status Master), then try again."); return; }
     startMove(it, tg.to, tg.status, true);
+  };
+  // 178: Log client reply ▸ on a card that is with the client: records the returned file, code and date (Rev In).
+  const logReply = (it)=>{
+    if(!canTouch(it)){ alert("Only the Document Controller, an Admin or "+(it.owner?it.owner+" (the card's owner)":"the card's owner")+" can log the client's reply."); return; }
+    const exp = expectedNext(it.revs);
+    if(exp.direction!=="In"){ alert("The latest entry on this card is not a submission, so there is no reply to log. Use 🕘 History → + Add revision."); return; }
+    startMove(it, it.list, "", false, true);
   };
   const saveMove = async()=>{
     const it = itemByKey(mv.key); if(!it) return;
@@ -50269,7 +50429,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
       style:{background:it.list==="confirm"?"#f4f5f5":"#fff",border:"1px solid "+colors.border,borderLeft:it.late?"4px solid #a3312a":"1px solid "+colors.border,borderRadius:7,padding:"7px 9px",marginBottom:7,fontSize:12,cursor:"grab",overflow:"hidden"}},
       docLabelStrip(docItemLabel(it)),   // 176
       h("div",{style:{display:"flex",gap:6,alignItems:"flex-start"}}, h("b",{style:{flex:1,minWidth:0,lineHeight:1.3}},it.name), latestLink(it)),
-      h("div",{style:{fontSize:11,color:colors.muted,marginTop:2}}, h("b",{style:{color:"#2a6db0"}},it.ct), it.customer?" · "+it.customer:""),
+      h("div",{style:{fontSize:11,color:colors.muted,marginTop:2}}, ctClientTag(it.ct, it.customer)),
       h("div",{style:{marginTop:4,display:"flex",flexWrap:"wrap",gap:2,alignItems:"center"}},
         view==="person" ? tag(lst.short,{background:lst.bg,color:lst.color},"l") : null,
         holdTag(it),
@@ -50286,7 +50446,11 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
       it.list==="confirm" && canTouch(it) ? h("div",{onMouseDown:e=>e.stopPropagation(),style:{display:"flex",gap:5,flexWrap:"wrap",borderTop:"1px dashed "+colors.border,marginTop:6,paddingTop:6}},
           h("button",{onClick:e=>{ e.stopPropagation(); startSetStatus(it); },style:{font:"inherit",fontSize:11,fontWeight:700,border:"1px solid #6f7377",background:"#eceeef",color:"#3d4144",borderRadius:6,padding:"2px 9px",cursor:"pointer"}},"Set status ▸"))
       : it.needsUs && canTouch(it) ? h("div",{onMouseDown:e=>e.stopPropagation(),style:{display:"flex",gap:5,flexWrap:"wrap",borderTop:"1px dashed "+colors.border,marginTop:6,paddingTop:6}},
-          h("button",{onClick:e=>{ e.stopPropagation(); completeCard(it); },title:"The document goes to the client: logs the revision Out and closes the task card",style:{font:"inherit",fontSize:11,fontWeight:700,border:"1px solid #0f7a5c",background:"#0f7a5c",color:"#fff",borderRadius:6,padding:"2px 9px",cursor:"pointer"}},"✓ Completed"))
+          (()=>{ const resub = Number(expectedNext(it.revs).rev)>0; const lc = docListOf(it.list).color||"#0f7a5c";   // 178: named by what it does
+            return resub ? h("button",{onClick:e=>{ e.stopPropagation(); completeCard(it); },title:"Send the revised document to the client: logs the revision Out and closes the task card",style:{font:"inherit",fontSize:11,fontWeight:700,border:"1.5px solid "+lc,background:"#fff",color:lc,borderRadius:6,padding:"2px 9px",cursor:"pointer"}},"Send resubmission ▸")
+              : h("button",{onClick:e=>{ e.stopPropagation(); completeCard(it); },title:"Send the document to the client for the first time: logs Rev 0 Out and closes the task card",style:{font:"inherit",fontSize:11,fontWeight:700,border:"1px solid #2a6db0",background:"#2a6db0",color:"#fff",borderRadius:6,padding:"2px 9px",cursor:"pointer"}},"Send to client ▸"); })())
+      : it.waitingClient && canTouch(it) ? h("div",{onMouseDown:e=>e.stopPropagation(),style:{display:"flex",gap:5,flexWrap:"wrap",borderTop:"1px dashed "+colors.border,marginTop:6,paddingTop:6}},
+          h("button",{onClick:e=>{ e.stopPropagation(); logReply(it); },title:"The client has replied: record the returned file, their code and the date",style:{font:"inherit",fontSize:11,fontWeight:700,border:"1px solid #6b4fa0",background:"#f3effa",color:"#4b3480",borderRadius:6,padding:"2px 9px",cursor:"pointer"}},"Log client reply ▸"))
       : null,
       o && h("div",{style:{borderTop:"1px dashed "+colors.border,marginTop:6,paddingTop:6,fontSize:11,color:colors.muted,lineHeight:1.6}},
         h("div",null,"Owner ",ownerSel(it,true)),
@@ -50306,7 +50470,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
   };
 
   // ---- table view ----
-  const GRP = { stage:["Stage",it=>docListOf(it.list).label], ct:["Contract",it=>it.ct+" · "+(it.customer||"")], owner:["Owner",it=>it.owner||"Unassigned"], hold:["Hold level",it=>it.hold||"Not a hold"], cat:["Category",it=>it.cat||"—"], dept:["Department",it=>it.dept||"—"], none:["No grouping",()=>""] };
+  const GRP = { stage:["Stage",it=>docListOf(it.list).label], ct:["Contract",it=>ctOptLabel(it.ct,it.customer)], owner:["Owner",it=>it.owner||"Unassigned"], hold:["Hold level",it=>it.hold||"Not a hold"], cat:["Category",it=>it.cat||"—"], dept:["Department",it=>it.dept||"—"], none:["No grouping",()=>""] };
   const TCOLS = [["ct","Contract"],["name","Document"],["no","Doc # / Rev"],["cat","Category"],["hold","Hold"],["list","Stage"],["status","Status"],["owner","Owner"],["due","Due / chase"],["days","Days in list"]];
   const tableRows = (key)=>{ const C = key ? columns.find(c=>c.key===key) : null; return vis.filter(C?C.f:()=>true); };
   const tableTitle = (key)=>{ const C = key ? columns.find(c=>c.key===key) : null; return C ? C.label.replace(/^📥 /,"") : "Document Control — whole board"; };
@@ -50432,7 +50596,8 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     const lab = (t)=> h("div",{style:{fontSize:11.5,color:colors.muted,margin:"9px 0 3px"}},t);
     const inp = (k, ph, type)=> h("input",{type:type||"text",value:mv[k]||"",placeholder:ph||"",onChange:e=>setMv(m=>({...m,[k]:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12}});
     return modal(500, [
-      h("b",{key:"t",style:{fontSize:14}},mv.viaComplete ? "✓ Completed — send to the client" : panel.to===it.list ? "Add revision" : "Move to “"+L.label+"”"),
+      h("b",{key:"t",style:{fontSize:14}},mv.viaComplete ? (Number(mv.rev)>0 ? "Send resubmission (Rev "+mv.rev+")" : "Send to client") : mv.viaReply ? "Log client reply (Rev "+mv.rev+" In)" : panel.to===it.list ? "Add revision" : "Move to “"+L.label+"”"),
+      mv.viaReply ? h("div",{key:"vr",style:{background:"#eef4fb",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:8}},"The client has replied. Pick the code they gave (the status), paste the link to the returned file, and the date it came back. The card moves to the list that status belongs to.") : null,
       mv.viaComplete ? h("div",{key:"vc",style:{background:"#e4f3ed",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:8}},"This task is done when the document goes to the client. Saving logs Rev "+mv.rev+" Out, moves the card to “"+L.label+"”, closes its task card and starts the "+DOC_CHASE_DAYS+"-day chase from the date below.") : null,
       h("div",{key:"s",style:{fontSize:11.5,color:colors.muted,marginTop:3}},it.name+" · "+it.ct+(it.no?" · "+it.no:"")),
       it.kind==="req" ? h("div",{key:"rq",style:{display:"flex",gap:8}},h("div",{style:{flex:1}},lab("Document number"),inp("num")),h("div",{style:{flex:1.4}},lab("Title"),inp("title"))) : null,
@@ -50451,7 +50616,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
       it.hold==="Full Hold" && ["code2","done"].includes(toList) && !["code2","done"].includes(it.list) ? h("div",{key:"w2",style:{background:"#fff4d6",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:10}},"If this is the last Full Hold document to reach Code 2, the app will remind you to start the delivery clock on the contract (it does not start it by itself).") : null,
       h("div",{key:"b",style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}},
         h("button",{style:btnSmall,onClick:()=>setPanel(null)},"Cancel"),
-        h("button",{style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},disabled:busy,onClick:saveMove},busy?"Saving…":mv.viaComplete?"✓ Completed — document sent":"Save revision & move"))
+        h("button",{style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},disabled:busy,onClick:saveMove},busy?"Saving…":mv.viaComplete?(Number(mv.rev)>0?"Resubmission sent ▸":"Sent to client ▸"):mv.viaReply?"Save client reply":"Save revision & move"))
     ], ()=>setPanel(null));
   };
 
@@ -50586,7 +50751,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     return modal(1180, [
       h("div",{key:"h",style:{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:8}},
         h("b",{style:{fontSize:14}},"📄 Document status report — by contract"),
-        h("select",{value:rep.ct,onChange:e=>setRep(r=>({...r,ct:e.target.value})),style:{fontSize:12,padding:"4px 6px",borderRadius:4,border:"1px solid "+colors.border}}, h("option",{value:"all"},"All contracts (one section each)"), contracts.map(c=>h("option",{key:c,value:c},c+" · "+((data.soBy[c]||{}).customer_name||"")))),
+        h(SearchPick,{value:rep.ct,onChange:v=>setRep(r=>({...r,ct:v})),width:300,options:[["all","All contracts (one section each)"], ...contracts.map(c=>[c, ctOptLabel(c,(data.soBy[c]||{}).customer_name)])]}),
         h("div",{style:{display:"inline-flex",border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden"}}, [["Internal",false],["For the client",true]].map(([l,v])=>h("button",{key:l,onClick:()=>setRep(r=>({...r,ext:v})),style:{border:0,padding:"5px 11px",fontSize:12,cursor:"pointer",background:rep.ext===v?colors.text:"#fff",color:rep.ext===v?"#fff":colors.text}},l))),
         h("span",{style:{marginLeft:"auto"}}),
         h("button",{style:btnSmall,onClick:async()=>{ try{ await docContractReportPdf(cts, data, ext, company, me); }catch(e){ alert("Could not make the PDF:\n\n"+(e&&e.message||e)); } }},"Download PDF"),
@@ -50595,7 +50760,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
       rep.ct==="all" && !ext ? h("div",{key:"s",style:{overflowX:"auto",marginBottom:18}},h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:640}},
         h("thead",null,h("tr",null,["Contract","With us","With client","Code 2","Approved","Total","% approved","Overdue","Full Hold open"].map((x,i)=>h("th",{key:x,style:{...th,...(i?{textAlign:"right"}:{})}},x)))),
         h("tbody",null,contracts.map(c=>{ const xs=data.items.filter(it=>it.ct===c); const n=k=>xs.filter(it=>it.list===k).length;
-          return h("tr",{key:c},h("td",{style:td},h("b",{style:{color:"#2a6db0"}},c)," · "+((data.soBy[c]||{}).customer_name||"")),h("td",{style:tdn},n("our")),h("td",{style:tdn},n("client")),h("td",{style:tdn},n("code2")),h("td",{style:tdn},n("done")),h("td",{style:{...tdn,fontWeight:700}},xs.length),h("td",{style:tdn},xs.length?Math.round(n("done")/xs.length*100)+"%":"—"),h("td",{style:{...tdn,color:"#a3312a"}},xs.filter(it=>it.late).length||"·"),h("td",{style:tdn},fullHoldOpen(xs)||"·")); })))) : null,
+          return h("tr",{key:c},h("td",{style:td},h("b",{style:{color:"#2a6db0"}},c)," \u2013 "+((data.soBy[c]||{}).customer_name||ctClientOf(c))),h("td",{style:tdn},n("our")),h("td",{style:tdn},n("client")),h("td",{style:tdn},n("code2")),h("td",{style:tdn},n("done")),h("td",{style:{...tdn,fontWeight:700}},xs.length),h("td",{style:tdn},xs.length?Math.round(n("done")/xs.length*100)+"%":"—"),h("td",{style:{...tdn,color:"#a3312a"}},xs.filter(it=>it.late).length||"·"),h("td",{style:tdn},fullHoldOpen(xs)||"·")); })))) : null,
       h("div",{key:"b"}, cts.map(section))
     ], ()=>setPanel(null));
   };
@@ -50613,7 +50778,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     data.tasksMissing || data.lettersMissing ? h("div",{style:{background:"#fdecea",color:"#a3312a",borderRadius:6,padding:"7px 10px",fontSize:12,marginBottom:8}},"Run the build-129 structure and data SQL — task cards and chase letters are switched off until then.") : null,
     // 174: count tiles
     (()=>{
-      const fhOpen = (ct)=> data.items.filter(it=>it.ct===ct && it.hold==="Full Hold" && !["code2","done","confirm"].includes(it.list)).length;
+      const fhOpen = (ct)=> data.items.filter(it=>it.ct===ct && it.hold==="Full Hold" && !["code2","done"].includes(it.list)).length;
       const cnt = (t)=> t.f ? tileItems.filter(t.f).length : (del ? del.filter(t.d).length : "\u2026");
       const subOf = (t)=>{
         if(t.key==="init") return "Never sent to the client";
@@ -50656,7 +50821,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     })(),
     h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:8}},
       seg([["all","All contracts"],["one","One contract"]], mode, setMode),
-      mode==="one" ? h("select",{value:curCt,onChange:e=>setCt(e.target.value),style:sel}, contracts.map(c=>h("option",{key:c,value:c},c+" · "+((data.soBy[c]||{}).customer_name||"")))) : null,
+      mode==="one" ? h(SearchPick,{value:curCt,onChange:v=>setCt(v),width:300,options:contracts.map(c=>[c, ctOptLabel(c,(data.soBy[c]||{}).customer_name)])}) : null,
       seg([["stage","By stage"],["person","By person"]], view, setView),
       h("select",{value:fHold,onChange:e=>setFHold(e.target.value),style:sel}, h("option",{value:""},"Every hold level"), HOLD_LEVELS.map(x=>h("option",{key:x,value:x},x)), h("option",{value:"none"},"Not a hold")),
       h("select",{value:fOwner,onChange:e=>setFOwner(e.target.value),style:sel}, h("option",{value:""},"Every owner"), h("option",{value:"__none"},"Unassigned"), people.map(p=>h("option",{key:p,value:p},p))),
@@ -51162,6 +51327,243 @@ const INTER_DEPT = "Inter-Department";
 const isInterDept = (d)=> /^inter[\s-]*department/i.test(String(d||"").trim());
 const taskAlso = (t)=> (t && Array.isArray(t.also_departments)) ? t.also_departments.filter(x=>x && !isInterDept(x)) : [];
 const taskShared = (t)=> taskAlso(t).length>0;
+// ---- 178: HAND OVER WORK -------------------------------------------------------------------------------
+// One person's open work to another in one go: task cards, document cards, document requests, approver roles,
+// posts — and (unticked by default) the customers they own. A reason from the Hand-over Reasons master plus an
+// optional note. Every task card gets a history line; the receiver gets a bell message. Undo within 7 days puts
+// back whatever has not been moved again since. "Left the company" also offers to switch off the login.
+// Who: Super Admin, Admin, HR & Admin Manager (role hr_admin, or an employee whose designation says HR + Admin + Manager).
+const HANDOVER_UNDO_DAYS = 7;
+const HANDOVER_REASONS_DEFAULT = ["Responsibility transfer","Department change","Leave cover","Left the company","Other"];
+async function handoverAllowed(user){
+  const r = user?.role;
+  if(r==="super_admin" || r==="admin" || r==="hr_admin") return true;
+  try{ const { data } = await sb.from("employee_tbl").select("designation").eq("app_user_id",user.id).limit(1).maybeSingle();
+    const d = String((data&&data.designation)||""); return /hr/i.test(d) && /admin/i.test(d) && /manager/i.test(d); }catch(e){ return false; }
+}
+const HO_KINDS = [
+  ["task","Task cards","Open cards they hold (not completed). Sub-tasks are listed on their own."],
+  ["doc","Document cards","Documents they own that are not yet All cleared / Code 1."],
+  ["req","Document requests","Requested documents with no document yet."],
+  ["approver","Approver roles","Boards where they approve cards (Setup → Task Approvers)."],
+  ["post","Posts","Posts they hold, e.g. Document Controller."],
+  ["customer","Customers","Customers they own in CRM. Not ticked: tick only if the receiver should take them over."],
+];
+async function handoverCollect(from){
+  const out = [];
+  const [tk, docs, reqs, apr, posts, cos, sts] = await Promise.all([
+    sb.from("task_tbl").select("id,title,task_type,department,due_date,status,assignee,ref,parent_id").eq("assignee",from).neq("status","done").limit(5000),
+    sb.from("universal_documents_tbl").select("id,doc_number,doc_name,category,entity_id,owner,is_archived").eq("owner",from).limit(5000),
+    sb.from("document_requests_tbl").select("id,category,entity_id,item_sl_no,owner,fulfilled_document_id").eq("owner",from).is("fulfilled_document_id",null).limit(5000),
+    sb.from("task_approver_tbl").select("*").eq("employee_name",from),
+    sb.from("post_holder_tbl").select("*").eq("employee_name",from),
+    sb.from("companies").select("id,company_name,owner_employee_name").eq("owner_employee_name",from).limit(5000),
+    loadDocStatuses(),
+  ]);
+  (tk.data||[]).forEach(t=> out.push({ kind:"task", id:t.id, label:t.title||"(no title)", sub:[t.task_type, t.department, t.ref, t.due_date?"due "+fmtDMY(t.due_date):""].filter(Boolean).join(" · "), before:{ assignee:t.assignee, department:t.department, status:t.status } }));
+  const liveDocs = (docs.data||[]).filter(d=>!d.is_archived);
+  let cur = {};
+  for(let k=0;k<liveDocs.length;k+=150){ const ids = liveDocs.slice(k,k+150).map(d=>d.id); try{ const { data } = await sb.from("v_document_current_status").select("document_id,status").in("document_id",ids); (data||[]).forEach(r=>{ cur[String(r.document_id)] = r.status; }); }catch(e){} }
+  const stBy = {}; (sts||[]).forEach(s=>{ stBy[docStatusName(s)] = s; });
+  liveDocs.forEach(d=>{ const s = cur[String(d.id)]||""; if(s && docStatusListKey(stBy[s], s)==="done") return;
+    out.push({ kind:"doc", id:d.id, label:(d.doc_number||"")+" "+(d.doc_name||d.category||""), sub:[d.entity_id?ctOptLabel(d.entity_id):"", s||"not sent yet"].filter(Boolean).join(" · "), before:{ owner:d.owner } }); });
+  (reqs.data||[]).forEach(r=> out.push({ kind:"req", id:r.id, label:(r.category||"Document")+(r.item_sl_no!=null?" · Sl "+r.item_sl_no:""), sub:r.entity_id?ctOptLabel(r.entity_id):"", before:{ owner:r.owner } }));
+  (apr.data||[]).forEach(a=> out.push({ kind:"approver", id:a.id!=null?a.id:a.department, label:"Approver — "+a.department, sub:"Approves cards on the "+a.department+" board", before:{ department:a.department } }));
+  (posts.data||[]).forEach(p=> out.push({ kind:"post", id:p.id!=null?p.id:p.post_key, label:"Post — "+(p.post_key==="doc_controller"?"Document Controller":p.post_key), sub:"", before:{ post_key:p.post_key } }));
+  (cos.data||[]).forEach(c=> out.push({ kind:"customer", id:c.id, label:c.company_name, sub:"Customer owner", before:{ owner_employee_name:c.owner_employee_name } }));
+  return out;
+}
+// Apply one item. Returns "" when done, or why not.
+async function handoverApplyItem(it, from, to, toEmp, why, me){
+  const now = new Date().toISOString();
+  try{
+    if(it.kind==="task"){
+      const boards = toEmp ? empBoards(toEmp) : [];
+      const dep = it.before.department && boards.includes(it.before.department) ? it.before.department : ((toEmp&&toEmp.department) || it.before.department || null);
+      const patch = { assignee:to, department:dep, moved_by:me, moved_at:now, moved_what:"Handed over from "+from+" to "+to+" — "+why };
+      if(it.before.status==="progress") patch.status = "open";   // the new holder starts it
+      const { data, error } = await sb.from("task_tbl").update(patch).eq("id",it.id).eq("assignee",from).select("id");
+      if(error) return error.message; if(!(data||[]).length) return "no longer with "+from;
+      it.after = { department:dep };
+      await taskLog(it.id, me, "Handed over from "+from+" to "+to+" — "+why, it.label);
+      try{ await taskSyncEnquiry({ id:it.id, assignee:from, department:it.before.department }, { assignee:to, department:dep }, me); }catch(e){}
+      return "";
+    }
+    if(it.kind==="doc" || it.kind==="req"){
+      const tbl = it.kind==="doc" ? "universal_documents_tbl" : "document_requests_tbl";
+      const { data, error } = await sb.from(tbl).update({ owner:to }).eq("id",it.id).eq("owner",from).select("id");
+      if(error) return error.message; if(!(data||[]).length) return "no longer owned by "+from;
+      return "";
+    }
+    if(it.kind==="approver"){
+      const d = it.before.department;
+      const { data: ex } = await sb.from("task_approver_tbl").select("*").eq("department",d).eq("employee_name",to);
+      it.added = !(ex||[]).length;
+      if(it.added){ const { error } = await sb.from("task_approver_tbl").insert({ department:d, employee_name:to }); if(error) return error.message; }
+      const { error: e2 } = await sb.from("task_approver_tbl").delete().eq("department",d).eq("employee_name",from); if(e2) return e2.message;
+      return "";
+    }
+    if(it.kind==="post"){
+      const k = it.before.post_key;
+      const { data: ex } = await sb.from("post_holder_tbl").select("*").eq("post_key",k).eq("employee_name",to);
+      it.added = !(ex||[]).length;
+      if(it.added){ const { error } = await sb.from("post_holder_tbl").insert({ post_key:k, employee_name:to, assigned_by:me }); if(error) return error.message; }
+      const { error: e2 } = await sb.from("post_holder_tbl").delete().eq("post_key",k).eq("employee_name",from); if(e2) return e2.message;
+      return "";
+    }
+    if(it.kind==="customer"){
+      const { data, error } = await sb.from("companies").update({ owner_employee_name:to }).eq("id",it.id).eq("owner_employee_name",from).select("id");
+      if(error) return error.message; if(!(data||[]).length) return "no longer owned by "+from;
+      try{ await logOwnershipChange(it.label, from, to, "Hand over: "+why, me); }catch(e){}
+      return "";
+    }
+  }catch(e){ return String(e&&e.message||e); }
+  return "unknown item";
+}
+// Put one item back — only if it is still where the hand-over left it.
+async function handoverUndoItem(it, from, to, me){
+  try{
+    if(it.kind==="task"){
+      const { data, error } = await sb.from("task_tbl").update({ assignee:from, department:it.before.department, moved_by:me, moved_at:new Date().toISOString(), moved_what:"Hand-over undone — back to "+from }).eq("id",it.id).eq("assignee",to).select("id");
+      if(error) return error.message; if(!(data||[]).length) return "moved again since";
+      await taskLog(it.id, me, "Hand-over undone — back from "+to+" to "+from, it.label); return "";
+    }
+    if(it.kind==="doc" || it.kind==="req"){
+      const tbl = it.kind==="doc" ? "universal_documents_tbl" : "document_requests_tbl";
+      const { data, error } = await sb.from(tbl).update({ owner:from }).eq("id",it.id).eq("owner",to).select("id");
+      if(error) return error.message; return (data||[]).length ? "" : "changed since";
+    }
+    if(it.kind==="approver" || it.kind==="post"){
+      const tbl = it.kind==="approver" ? "task_approver_tbl" : "post_holder_tbl";
+      const col = it.kind==="approver" ? "department" : "post_key"; const v = it.before[col];
+      const { data: ex } = await sb.from(tbl).select("*").eq(col,v).eq("employee_name",from);
+      if(!(ex||[]).length){ const row = it.kind==="approver" ? { department:v, employee_name:from } : { post_key:v, employee_name:from, assigned_by:me }; const { error } = await sb.from(tbl).insert(row); if(error) return error.message; }
+      if(it.added){ await sb.from(tbl).delete().eq(col,v).eq("employee_name",to); }
+      return "";
+    }
+    if(it.kind==="customer"){
+      const { data, error } = await sb.from("companies").update({ owner_employee_name:from }).eq("id",it.id).eq("owner_employee_name",to).select("id");
+      if(error) return error.message; if(!(data||[]).length) return "changed since";
+      try{ await logOwnershipChange(it.label, to, from, "Hand-over undone", me); }catch(e){} return "";
+    }
+  }catch(e){ return String(e&&e.message||e); }
+  return "unknown item";
+}
+function HandOverScreen({ user }){
+  const [ok,setOk] = useState(null);
+  const [emps,setEmps] = useState([]);
+  const [reasons,setReasons] = useState([]);
+  const [me,setMe] = useState("");
+  const [from,setFrom] = useState(""); const [to,setTo] = useState("");
+  const [reason,setReason] = useState(""); const [note,setNote] = useState("");
+  const [items,setItems] = useState(null); const [ticks,setTicks] = useState({});
+  const [busy,setBusy] = useState(false); const [hist,setHist] = useState([]); const [histErr,setHistErr] = useState("");
+  const [deact,setDeact] = useState(false);
+  const isAdmin = user?.role==="admin" || user?.role==="super_admin";
+  const today = toISODate(new Date());
+  const loadHist = async()=>{ const { data, error } = await sb.from("handover_tbl").select("*").order("done_at",{ascending:false}).limit(40);
+    setHistErr(error ? "The hand-over tables are not in this database yet. Run structure_tasks_handover_2026-10-12.sql." : ""); setHist(data||[]); };
+  useEffect(()=>{ (async()=>{
+    setOk(await handoverAllowed(user));
+    const [{ data: e }, rs, { data: m }] = await Promise.all([
+      sb.from("employee_tbl").select("*").order("employee_name"),
+      sb.from("handover_reason_tbl").select("*").order("sort_order"),
+      sb.from("employee_tbl").select("employee_name").eq("app_user_id",user.id).limit(1).maybeSingle()]);
+    setEmps((e||[]).filter(x=>x.employee_name && x.employee_name!=="Unassigned"));
+    const rl = rs.error ? HANDOVER_REASONS_DEFAULT.map((r,i)=>({ reason:r, offers_deactivate:r==="Left the company" })) : (rs.data||[]).filter(r=>r.is_active!==false);
+    setReasons(rl); setMe((m&&m.employee_name)||user?.username||"");
+    loadHist();
+  })(); },[user?.id]);
+  const pickFrom = async(v)=>{ setFrom(v); setItems(null); setTicks({}); if(!v) return;
+    const xs = await handoverCollect(v); const tk = {}; xs.forEach(x=>{ if(x.kind!=="customer") tk[x.kind+":"+x.id]=true; }); setItems(xs); setTicks(tk); };
+  const reasonRow = reasons.find(r=>r.reason===reason);
+  const offersDeact = !!(reasonRow && (reasonRow.offers_deactivate || /left the company/i.test(reasonRow.reason)));
+  const picked = (items||[]).filter(x=>ticks[x.kind+":"+x.id]);
+  const go = async()=>{
+    if(!from || !to){ alert("Pick who hands over and who receives."); return; }
+    if(from===to){ alert("From and To are the same person."); return; }
+    if(!reason){ alert("Pick the reason for transfer."); return; }
+    if(/^other$/i.test(reason) && !note.trim()){ alert("Reason is Other — say what it is in the note."); return; }
+    if(!picked.length){ alert("Tick at least one item."); return; }
+    if(!confirm("Hand over "+picked.length+" item"+(picked.length===1?"":"s")+" from "+from+" to "+to+"?\n\nReason: "+reason+(note.trim()?" — "+note.trim():"")+"\n\nYou can undo this for "+HANDOVER_UNDO_DAYS+" days.")) return;
+    setBusy(true);
+    const why = reason+(note.trim()?" — "+note.trim():"");
+    const toEmp = emps.find(e=>e.employee_name===to)||null;
+    const done = [], fail = [];
+    for(const it0 of picked){ const it = { ...it0 }; const err = await handoverApplyItem(it, from, to, toEmp, why, me); if(err) fail.push(it.label+" ("+err+")"); else done.push(it); }
+    let saved = true;
+    { const { error } = await sb.from("handover_tbl").insert({ from_employee:from, to_employee:to, reason, note:note.trim()||null, items:done, done_by:me, done_at:new Date().toISOString() }); if(error) saved = false; }
+    const cnt = (k)=> done.filter(x=>x.kind===k).length;
+    const parts = HO_KINDS.map(([k,l])=>cnt(k)?cnt(k)+" "+l.toLowerCase():"").filter(Boolean).join(", ");
+    try{ if(done.length) await sb.from("notifications_tbl").insert([{ employee_name:to, message:"Handed over to you by "+me+" from "+from+": "+parts+". Reason: "+why },
+                                                                      { employee_name:from, message:"Your work was handed over to "+to+" by "+me+": "+parts+". Reason: "+why }]); }catch(e){}
+    try{ await logAudit("UPDATE","handover_tbl",from+" → "+to,"Hand over: "+parts+" · "+why, user?.username||me, null, null); }catch(e){}
+    let deMsg = "";
+    if(offersDeact && deact){
+      if(!isAdmin) deMsg = "\n\nThe login was NOT switched off: only an Admin can do that (Admin → Users).";
+      else { const fe = emps.find(e=>e.employee_name===from);
+        if(fe && fe.app_user_id){ const { error } = await sb.from("app_users").update({ is_active:false }).eq("id",fe.app_user_id); deMsg = error ? "\n\nCould not switch off the login: "+error.message : "\n\n"+from+"'s login is switched off."; }
+        else deMsg = "\n\n"+from+" has no login to switch off."; }
+    }
+    setBusy(false);
+    alert("Handed over to "+to+": "+(parts||"nothing")+"."+(fail.length?"\n\nNot moved ("+fail.length+"):\n"+fail.slice(0,25).join("\n"):"")+(saved?"":"\n\nThe hand-over record could not be saved, so it cannot be undone from here. Run structure_tasks_handover_2026-10-12.sql.")+deMsg);
+    setNote(""); setDeact(false); pickFrom(from); loadHist();
+  };
+  const undo = async(r)=>{
+    if(!confirm("Undo the hand-over from "+r.from_employee+" to "+r.to_employee+" ("+fmtDMY(r.done_at)+")?\n\nItems moved again since stay where they are.")) return;
+    setBusy(true); const back = [], kept = [];
+    for(const it of (r.items||[])){ const err = await handoverUndoItem(it, r.from_employee, r.to_employee, me); if(err) kept.push(it.label+" ("+err+")"); else back.push(it); }
+    await sb.from("handover_tbl").update({ undone_by:me, undone_at:new Date().toISOString() }).eq("id",r.id);
+    try{ await sb.from("notifications_tbl").insert([{ employee_name:r.to_employee, message:"Hand-over from "+r.from_employee+" was undone by "+me+": "+back.length+" item(s) went back." }]); }catch(e){}
+    setBusy(false); alert(back.length+" item(s) went back to "+r.from_employee+"."+(kept.length?"\n\nLeft as they are ("+kept.length+"):\n"+kept.slice(0,25).join("\n"):"")); if(from) pickFrom(from); loadHist();
+  };
+  if(ok===null) return h("div",{style:{padding:20,color:colors.muted}},"Loading…");
+  if(!ok) return h("div",{style:{padding:20}},"Hand Over Work is for Super Admin, Admin and the HR & Admin Manager.");
+  const sel = (v,on,opts)=> h("select",{value:v,onChange:e=>on(e.target.value),style:{...inputStyle,padding:"7px 9px"}},opts);
+  const lab = (t,c)=> h("label",{style:{display:"flex",flexDirection:"column",gap:4,fontSize:12,color:colors.muted,flex:1,minWidth:200}},t,c);
+  const empOpts = (blank)=> [h("option",{key:"",value:""},blank), ...emps.map(e=>h("option",{key:e.employee_name,value:e.employee_name},e.employee_name+(e.department?" — "+e.department:"")+(/exit|left|inactive/i.test(e.status||"")?" (inactive)":"")))];
+  const setKind = (k,v)=> setTicks(t=>{ const m={...t}; (items||[]).filter(x=>x.kind===k).forEach(x=>{ if(v) m[x.kind+":"+x.id]=true; else delete m[x.kind+":"+x.id]; }); return m; });
+  return h("div",{style:{padding:"16px 20px",maxWidth:1000}},
+    h("div",{style:{fontSize:11.5,color:colors.muted}},"Tasks → Hand Over Work"),
+    h("h2",{style:{fontSize:19,margin:"2px 0 4px"}},"Hand Over Work"),
+    h("div",{style:{fontSize:12.5,color:colors.muted,marginBottom:12}},"Move one person's open work to another in one go. Untick anything that should stay. Undo within "+HANDOVER_UNDO_DAYS+" days."),
+    h("div",{style:{display:"flex",gap:12,flexWrap:"wrap",background:"#efece2",borderRadius:8,padding:"10px 12px"}},
+      lab("From (hands over)", sel(from, pickFrom, empOpts("— pick —"))),
+      lab("To (receives)", sel(to, setTo, empOpts("— pick —"))),
+      lab("Reason for transfer *", sel(reason, v=>{ setReason(v); setDeact(false); }, [h("option",{key:"",value:""},"— pick —"), ...reasons.map(r=>h("option",{key:r.reason,value:r.reason},r.reason))])),
+      lab("Note (optional)", h("input",{value:note,onChange:e=>setNote(e.target.value),placeholder:"e.g. Ramesh takes over Alfa Laval contracts from 15 Oct",style:{...inputStyle,padding:"7px 9px"}}))),
+    offersDeact ? h("label",{style:{display:"flex",gap:7,alignItems:"center",fontSize:12.5,marginTop:8,background:"#fdecea",borderRadius:6,padding:"7px 10px"}},
+      h("input",{type:"checkbox",checked:deact,onChange:e=>setDeact(e.target.checked)}), "Also switch off "+(from||"their")+"'s login after the hand-over"+(isAdmin?"":" (needs an Admin)")) : null,
+    !from ? h("div",{style:{marginTop:14,color:colors.muted,fontSize:12.5}},"Pick who hands over to see their open work.")
+    : items===null ? h("div",{style:{marginTop:14,color:colors.muted}},"Reading "+from+"'s work…")
+    : h("div",{style:{marginTop:12}},
+        !items.length ? h("div",{style:{color:colors.muted,fontSize:12.5}},from+" has no open work to hand over.") : null,
+        HO_KINDS.map(([k,l,tip])=>{ const xs = items.filter(x=>x.kind===k); if(!xs.length) return null; const nT = xs.filter(x=>ticks[x.kind+":"+x.id]).length;
+          return h("div",{key:k,style:{border:"1px solid "+colors.border,borderRadius:8,padding:"8px 12px",marginBottom:10,background:"#fff"}},
+            h("div",{style:{display:"flex",gap:10,alignItems:"center"}},
+              h("input",{type:"checkbox",checked:nT===xs.length,ref:el=>{ if(el) el.indeterminate = nT>0 && nT<xs.length; },onChange:e=>setKind(k,e.target.checked)}),
+              h("b",{style:{fontSize:13}},l+" ("+nT+" of "+xs.length+")"), h("span",{style:{fontSize:11,color:colors.muted}},tip)),
+            h("div",{style:{maxHeight:260,overflowY:"auto",marginTop:6}},
+              xs.map(x=>h("label",{key:x.kind+":"+x.id,style:{display:"flex",gap:8,alignItems:"baseline",fontSize:12,padding:"2px 0 2px 22px"}},
+                h("input",{type:"checkbox",checked:!!ticks[x.kind+":"+x.id],onChange:e=>setTicks(t=>{ const m={...t}; if(e.target.checked) m[x.kind+":"+x.id]=true; else delete m[x.kind+":"+x.id]; return m; })}),
+                h("span",null,x.label), x.sub ? h("span",{style:{color:colors.muted,fontSize:11}},x.sub) : null)))); }),
+        items.length ? h("div",{style:{display:"flex",gap:10,alignItems:"center",justifyContent:"flex-end",marginTop:6}},
+          h("span",{style:{fontSize:12,color:colors.muted}},picked.length+" item"+(picked.length===1?"":"s")+" ticked"),
+          h("button",{disabled:busy,onClick:go,style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700,padding:"7px 14px",fontSize:13}},busy?"Working…":"Hand over to "+(to||"…")+" ▸")) : null),
+    h("h3",{style:{fontSize:14,margin:"22px 0 6px"}},"Recent hand-overs"),
+    histErr ? h("div",{style:{fontSize:12,color:"#a3312a"}},histErr)
+    : !hist.length ? h("div",{style:{fontSize:12,color:colors.muted}},"None yet.")
+    : h("table",{style:{borderCollapse:"collapse",fontSize:12,width:"100%"}},
+        h("thead",null,h("tr",null,["Date","From","To","Reason","Items","By",""].map(c=>h("th",{key:c,style:{textAlign:"left",borderBottom:"1px solid "+colors.border,padding:"4px 6px",color:colors.muted,fontWeight:600}},c)))),
+        h("tbody",null,hist.map(r=>{ const age = (Date.now()-new Date(r.done_at).getTime())/86400000; const n = (r.items||[]).length;
+          return h("tr",{key:r.id,style:{borderBottom:"1px solid #eceae0"}},
+            h("td",{style:{padding:"4px 6px",whiteSpace:"nowrap"}},fmtDMY(r.done_at)), h("td",{style:{padding:"4px 6px"}},r.from_employee), h("td",{style:{padding:"4px 6px"}},r.to_employee),
+            h("td",{style:{padding:"4px 6px"}},r.reason+(r.note?" — "+r.note:"")), h("td",{style:{padding:"4px 6px"}},n),
+            h("td",{style:{padding:"4px 6px"}},r.done_by||""),
+            h("td",{style:{padding:"4px 6px",whiteSpace:"nowrap"}}, r.undone_at ? h("span",{style:{color:colors.muted}},"undone "+fmtDMY(r.undone_at))
+              : age<=HANDOVER_UNDO_DAYS ? h("button",{disabled:busy,onClick:()=>undo(r),style:{...btnSmall,fontSize:11,padding:"2px 8px"}},"↶ Undo ("+Math.max(0,Math.ceil(HANDOVER_UNDO_DAYS-age))+" d left)") : h("span",{style:{color:colors.mutedLight}},"—"))); })))
+  );
+}
 function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackToEnquiry, company, onGoToTab, onOpenGantt }){
   // 3 Oct (119) — three views:
   //   Task Assignment Board  a department's Unassigned pile + one list per employee
@@ -51226,6 +51628,8 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
   const [abDrag,setAbDrag] = useState("");
   const [listTbl,setListTbl] = useState(null);     // 128: {key,title,pile} — one list shown as a table
   const [doneList,setDoneList] = useState(null);   // 158: {name, span} — a person's completed cards, from the chip on their column
+  const [comments,setComments] = useState({});     // 178: task id -> number of comments
+  const [loadDept,setLoadDept] = useState("");     // 178: Workload department filter
   const [xfer,setXfer] = useState(null);           // 145: transfer cards {fd, fp, td, tp, only, ticks:{id:true}, keep, due, why, busy}
   const SORT_KEY = "tb_sort_"+(user?.id||user?.username||"");
   const [sortPref,setSortPref] = useState(()=>{ try{ return JSON.parse(localStorage.getItem(SORT_KEY)||"null") || {global:"due",lists:{}}; }catch(e){ return {global:"due",lists:{}}; } });
@@ -51254,6 +51658,8 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     if(tErr) setErr("Tasks could not be read: "+tErr.message+" — has the Task Manager structure SQL been run?");
     const live = (e||[]).filter(x=>x.employee_name && x.employee_name!=="Unassigned" && !/inactive|left|relieved|resigned/i.test(x.status||""));
     let tl = t||[];
+    try{ if(first && await taskRepeatRun(tl, toISODate(new Date()))){ const { data:t3 } = await sb.from("task_tbl").select("*").order("due_date",{ascending:true}).limit(20000); tl = t3||tl; } }catch(ex){ console.warn("Repeating cards", ex); }   // 178
+    try{ const cm = await fetchAll("task_comment_tbl","task_id"); const cc = {}; (cm||[]).forEach(r=>{ cc[r.task_id]=(cc[r.task_id]||0)+1; }); setComments(cc); }catch(ex){}   // 178
     // 123: enquiry cards — read their enquiries; any whose quote has left Draft is completed now
     // (safety net; normally done the moment the stage changes).
     try{
@@ -51273,6 +51679,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
       if(fixed){ const { data:t2 } = await sb.from("task_tbl").select("*").order("due_date",{ascending:true}).limit(20000); tl = t2||tl; enqRows = await readEnq(tl); }
       const m = {}; enqRows.forEach(x=>{ m[x.id]=x; }); setEnqMap(m);
     }catch(ex){ console.error("Enquiry cards not read", ex); }
+    try{ await ctClientLoad(); }catch(ex){}   // 178
     const aAll = mergeAutoApprovers(a);   // 131: post holders approve their boards automatically
     setEmps(live); setTasks(tl); setLabels(l||[]); setApprovers(aAll); setMe(name);
     try{   // 176: the document's status label on its task cards
@@ -51349,6 +51756,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     if(error && /updated_at/.test(error.message||"")){ delete stamp.updated_at; ({ error } = await sb.from("task_tbl").update({ ...patch, ...stamp }).eq("id",t.id)); }   // 122 structure not run yet
     if(error && /started_at/.test(error.message||"")){ patch = {...patch}; delete patch.started_at; ({ error } = await sb.from("task_tbl").update({ ...patch, ...stamp }).eq("id",t.id)); }   // 128 structure not run yet
     if(error && /wait_reason|wait_since/.test(error.message||"")){ patch = {...patch}; delete patch.wait_reason; delete patch.wait_since; ({ error } = await sb.from("task_tbl").update({ ...patch, ...stamp }).eq("id",t.id)); if(!error) alert("Saved, but the reason could not be kept — run structure_card_actions_135 (both companies) so the badge shows."); }   // 135 structure not run yet
+    if(error && /wait_on|wait_what|urgent|repeat_/.test(error.message||"")){ alert("This needs structure_tasks_handover_2026-10-12.sql (both companies) to be run first."); return false; }   // 178
     if(error){ alert("Could not move the task:\n\n"+error.message); return false; }
     await taskLog(t.id, me, what);
     await taskSyncEnquiry(t, patch, me);   // 123: hand-out / re-plan / regret decision reach the enquiry
@@ -51409,7 +51817,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     if(!a.date || a.date<=today){ alert("Pick a date after today."); return; }
     const ok = await move(t,{status:"open",due_date:a.date,sent_at:null},a.arrow+" (due "+fmtDMY(a.date)+")"); if(ok!==false) setDateAsk(null);
   };
-  const openBoard = (name)=>{ if(!name || name===TASK_PILE || name==="Unassigned") return; setWho(name); setCameFromAssign(mode==="assign"||mode==="dash"); setMode("emp"); };
+  const openBoard = (name)=>{ if(!name || name===TASK_PILE || name==="Unassigned") return; setWho(name); setCameFromAssign(mode==="assign"||mode==="dash"||mode==="load"); setMode("emp"); };
 
   // ---------- 4 Oct (122): quick filters, folded sub-tasks, date groups, load limits ----------
   const DEF_SET = { amber_open:15, red_open:25, stale_days:7, approval_wait_days:2 };
@@ -51478,7 +51886,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     enq:(a,b)=> String(enqDateOf(a)).localeCompare(String(enqDateOf(b))),
     quote:(a,b)=> String(quoteOf(a)||"~").localeCompare(String(quoteOf(b)||"~")) };
   const sortKeyFor = (listKey)=> (sortPref.lists||{})[listKey] || sortPref.global || "due";
-  const sortList = (listKey, arr)=> arr.slice().sort((a,b)=> (CMP[sortKeyFor(listKey)]||CMP.due)(a,b) || byDue(a,b));
+  const sortList = (listKey, arr)=> arr.slice().sort((a,b)=> ((b.urgent&&b.status!=="done"?1:0)-(a.urgent&&a.status!=="done"?1:0)) || (CMP[sortKeyFor(listKey)]||CMP.due)(a,b) || byDue(a,b));   // 178: urgent first
   const setListSort = (listKey, v)=>{ const lists = {...(sortPref.lists||{})}; if(v===sortPref.global) delete lists[listKey]; else lists[listKey]=v; saveSort({...sortPref, lists}); };
   // A list's small bar: its own order, Expand / Collapse all, and ⊞ to see it as a table.
   const listBar = (listKey, items, title, pile)=>{ const own = !!(sortPref.lists||{})[listKey];
@@ -51500,6 +51908,14 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
       style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#efe8fb",color:"#5b3a99",marginBottom:3,marginRight:4}},
       "\ud83d\udd17 "+(dept && mode==="assign" && dept!==taskDept(t) ? "Shared from "+taskDept(t) : "Also on "+taskAlso(t).join(", "))) : null;
   // ---- 154 (Build X): Move, Copy and Due date right on the card ----
+  // 178: document card button. Initial -> "Send to client ▸" (blue); resubmission -> "Send resubmission ▸" (outlined in the card colour).
+  const docSendBtn = (t, small, dis)=>{
+    const resub = t.task_type===DOC_TT_RESUB; const lb = docLab[String(t.doc_id)]; const lc = (lb && lb.bg) || "#b4520f";
+    const st = resub ? {border:"1.5px solid "+lc,background:"#fff",color:lc} : {border:"1px solid #2a6db0",background:"#2a6db0",color:"#fff"};
+    return h("button",{onClick:ev=>{ ev.stopPropagation(); if(dis){ alert(dis); return; } completeCard(t); },onMouseDown:ev=>ev.stopPropagation(),
+      title:dis||(resub?"Send the revised document to the client: logs the revision Out and completes this card":"Send the document to the client: logs Rev 0 Out and completes this card"),
+      style:{font:"inherit",fontSize:small?10.5:11,fontWeight:700,...st,...(dis?{opacity:.5}:{}),borderRadius:6,padding:small?"1px 6px":"2px 8px",cursor:"pointer"}}, small?"\u25b8":(resub?"Send resubmission \u25b8":"Send to client \u25b8"));
+  };
   const actStrip = (t, small)=>{
     const b = (icon, label, on, title, dis)=> h("button",{onClick:ev=>{ ev.stopPropagation(); if(dis){ alert(dis); return; } on(); },onMouseDown:ev=>ev.stopPropagation(),title:dis||title,
       style:{font:"inherit",fontSize:small?10.5:11,fontWeight:600,border:"1px solid "+colors.border,background:"#fff",color:dis?colors.mutedLight:colors.text,borderRadius:6,padding:small?"1px 6px":"2px 8px",cursor:"pointer",display:"inline-flex",gap:3,alignItems:"center"}},icon,small?null:label);
@@ -51510,6 +51926,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     const appr = t.status==="approval";   // 175: Under Approval — the approver approves or sends back from the card
     return h("div",{onClick:ev=>ev.stopPropagation(),style:{display:"flex",gap:5,flexWrap:"wrap",borderTop:small?"none":"1px dashed "+colors.border,marginTop:small?0:6,paddingTop:small?0:6,cursor:"default"}},
       appr ? (canApprove(t) ? gb(small?"\u2713":"\u2713 Approve",()=>approveCard(t),"Approve: the card is completed") : null)
+           : (t.doc_id || t.doc_request_id) && !t.chase_letter_id ? docSendBtn(t, small, noMove)   // 178: document cards say what the button does
            : gb(small?"\u2713":"\u2713 Completed",()=>completeCard(t), canApprove(t)?"Complete the card (you approve it)":"Send the card for approval", noMove),   // 175
       appr && canApprove(t) ? b("\u21a9","Send back",()=>sendBackCard(t),"Send it back to "+taskWho(t)+" with a reason",null) : null,
       b("\ud83d\udcc5","Due",()=>setDueEd(t.id),"Change the due date",noDue),
@@ -51549,7 +51966,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     };
     return h("div",{onClick:e=>{ if(e.target===e.currentTarget) close(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:12}},
       h("div",{style:{background:"#fff",borderRadius:8,padding:"18px 20px",width:420,maxWidth:"100%"}},
-        h("div",{style:{fontWeight:700,fontSize:14}},"\u2713 Completed \u2014 send to the client"),
+        h("div",{style:{fontWeight:700,fontSize:14}},t.task_type===DOC_TT_RESUB?"Send resubmission":"Send to client"),
         h("div",{style:{fontSize:12,color:colors.muted,marginTop:2}},"\u201c"+t.title+"\u201d"+(t.ref?" \u00b7 "+t.ref:"")),
         h("div",{style:{background:"#e4f3ed",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:10,lineHeight:1.45}},"A document card is done when the document goes to the client. This logs the revision Out on the Document Control board, completes this card and starts the "+DOC_CHASE_DAYS+"-day chase."),
         lab("Sent to the client on", h("input",{type:"date",value:a.date,max:today,onChange:e=>set({date:e.target.value}),style:{...inputStyle,padding:"6px 8px"}})),
@@ -51557,7 +51974,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
         lab("What changed (optional)", h("input",{value:a.what,placeholder:"e.g. Revised as per CRS",onChange:e=>set({what:e.target.value}),style:{...inputStyle,padding:"6px 8px"}})),
         h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}},
           h("button",{style:btnSmall,onClick:close,disabled:a.busy},"Cancel"),
-          h("button",{style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},disabled:a.busy,onClick:go},a.busy?"Saving\u2026":"\u2713 Completed \u2014 document sent"))));
+          h("button",{style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},disabled:a.busy,onClick:go},a.busy?"Saving\u2026":(t.task_type===DOC_TT_RESUB?"Resubmission sent \u25b8":"Sent to client \u25b8")))));
   };
   const allDeptsList = Array.from(new Set([...deptMaster, ...emps.flatMap(x=>empBoards(x)), ...emps.map(x=>x.department)].filter(x=>x && !isInterDept(x)))).sort();
   const peopleIn = (d)=> emps.filter(e=>e.employee_name!=="Unassigned" && empInDept(e,d)).map(e=>e.employee_name).sort();
@@ -51669,19 +52086,22 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     const cl = closeOf(t); const clPast = !!cl && cl<today && st!=="done";
     const prog = t.status==="progress";
     const edge = od ? "4px solid "+colors.danger : prog ? "4px solid #c99a06" : "1px solid "+colors.border;
+    const tCt = e ? "" : taskContractOf(t);   // 178: contract + client on the card
     const top = e ? [h("b",{key:"c",style:{flex:1,minWidth:0,fontSize:12.5}},(st==="done"?"✓ ":"")+(e.company_name||t.customer||"—")), quoteOf(t) ? h("b",{key:"q",style:{color:"#2a6db0",fontSize:12,whiteSpace:"nowrap"}},quoteOf(t)) : null]
-                  : [h("b",{key:"c",style:{flex:1,minWidth:0,fontSize:12.5}},(st==="done"?"✓ ":"")+t.title)];
-    const line2 = e ? (e.enquiry_number+" · "+fmtDMY(e.enquiry_date)) : [t.task_type, t.customer, t.ref].filter(Boolean).join(" · ") || (t.created_at?"created "+fmtDMY(t.created_at):"");
+                  : [h("b",{key:"c",style:{flex:1,minWidth:0,fontSize:12.5}},(st==="done"?"✓ ":"")+t.title), tCt ? h("span",{key:"ct",style:{fontSize:11,whiteSpace:"nowrap",color:colors.muted}},ctClientTag(tCt, ctClientOf(tCt)||t.customer)) : null];   // 178
+    const line2 = e ? (e.enquiry_number+" · "+fmtDMY(e.enquiry_date)) : [t.task_type, tCt?null:t.customer, t.ref].filter(Boolean).join(" · ") || (t.created_at?"created "+fmtDMY(t.created_at):"");
     const dueTxt = (st!=="done" && t.start_date ? "starts "+fmtDMY(t.start_date)+" · " : "")+(st==="done" ? "✓ completed "+(t.approved_at?fmtDMY(t.approved_at):"") : t.due_date ? "Task due "+fmtDMY(t.due_date)+(od?" · "+over+" day"+(over===1?"":"s")+" over":"") : "No task due date");   // 139: start date
     return h("div",{key:t.id, draggable:true, onDragStart:ev=>ev.dataTransfer.setData("text/plain",String(t.id)), onClick:()=>setOpenId(t.id),
         style:{background:"#fff",border:"1px solid "+colors.border,borderLeft:edge,borderRadius:7,padding:"7px 9px",marginBottom:7,cursor:"grab",opacity:st==="done"?0.8:1,overflow:"hidden"}},
       t.doc_id && st!=="done" ? docLabelStrip(docLab[String(t.doc_id)], "dl") : null,   // 176
       (()=>{ const sm = taskSourceMeta(taskSource(t)); return h("span",{title:"From: "+sm[1],style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:sm[2],color:sm[3],marginBottom:3,marginRight:4}},sm[1]); })(),   // 130
       sharedChip(t),   // 150
+      urgentChip(t), t.repeat_rule&&t.repeat_rule.every || t.repeat_of ? h("span",{title:t.repeat_rule&&t.repeat_rule.every?taskRepeatLabel(t.repeat_rule):"Part of a repeating card",style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#e8f3f0",color:"#0f6b4f",marginBottom:3,marginRight:4}},"\u21bb") : null,   // 178
+      comments[t.id] ? h("span",{title:comments[t.id]+" comment"+(comments[t.id]===1?"":"s"),style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#f1efe8",color:colors.muted,marginBottom:3,marginRight:4}},"\ud83d\udcac "+comments[t.id]) : null,
       prog ? h("span",{style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#fff6d5",color:"#7a5c00",marginBottom:3}},"In progress") : null,
       h("div",{style:{display:"flex",gap:6,alignItems:"baseline"}},...top),
       line2 ? h("div",{style:{fontSize:11,color:colors.muted,marginTop:1}},line2) : null,
-      st!=="done" ? waitBadge(t,true) : null, e ? regretBadge(e,true) : null,   // 135 Build 4
+      st!=="done" ? waitBadge(t,true) : null, waitOnBadge(t,true), e ? regretBadge(e,true) : null,   // 135 Build 4 / 178
       h("div",{style:{display:"flex",alignItems:"center",gap:6,marginTop:3,fontSize:11.5}},
         st==="done" ? h("span",{style:{color:colors.text}},"📅 "+dueTxt)
           : h("span",{style:{display:"inline-flex",gap:5,alignItems:"center",flexWrap:"wrap",color:od?colors.danger:st==="today"?"#854f0b":colors.text,fontWeight:od||st==="today"?700:400}},
@@ -51729,11 +52149,41 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
   const depts = Array.from(new Set([...visibleEmps.map(e=>e.department||"(no department)"), ...visibleEmps.flatMap(e=>empBoards(e))].filter(Boolean))).sort();
 
   // ---------- header ----------
+  // 178: WORKLOAD — open cards per person by when they are due. Click a name to open their board.
+  const loadView = ()=>{
+    const td = new Date(today+"T12:00:00"); const mon = new Date(td); mon.setDate(td.getDate()-((td.getDay()+6)%7));
+    const sun = toISODate(new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+6)), sun2 = toISODate(new Date(mon.getFullYear(),mon.getMonth(),mon.getDate()+13));
+    const depList = authDepts.filter(d=>!isInterDept(d));
+    const ppl = visibleEmps.filter(e=> loadDept ? empInDept(e,loadDept) : depList.some(d=>empInDept(e,d)));
+    const COLS = [["od","Overdue","#a3312a"],["wk","This week","#854f0b"],["nx","Next week","#2a6db0"],["lt","Later",colors.text],["nd","No date",colors.muted],["ur","\ud83d\udd25 Urgent","#a3312a"],["wt","Waiting","#3b3f9a"],["ap","Under approval","#5b3a99"],["tot","Open",colors.text]];
+    const rows = ppl.map(e=>{ const xs = tasks.filter(t=>t.assignee===e.employee_name && t.status!=="done" && (!loadDept || taskBoardsOf(t).includes(loadDept)));
+      const c = { od:0, wk:0, nx:0, lt:0, nd:0, ur:0, wt:0, ap:0, tot:xs.length };
+      xs.forEach(t=>{ const dd = String(t.due_date||"").slice(0,10);
+        if(t.urgent) c.ur++;
+        if(t.status==="approval"){ c.ap++; return; }
+        if(t.wait_on || t.wait_reason){ c.wt++; return; }
+        if(!dd) c.nd++; else if(dd<today) c.od++; else if(dd<=sun) c.wk++; else if(dd<=sun2) c.nx++; else c.lt++; });
+      return { e, c }; }).sort((a,b)=> b.c.od-a.c.od || b.c.wk-a.c.wk || b.c.tot-a.c.tot || a.e.employee_name.localeCompare(b.e.employee_name));
+    const max = Math.max(1, ...rows.map(r=>r.c.od+r.c.wk));
+    const th = { textAlign:"right", padding:"6px 8px", fontSize:11.5, color:colors.muted, fontWeight:600, borderBottom:"1px solid "+colors.border, whiteSpace:"nowrap" };
+    return h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px"}},
+      h("div",{style:{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",marginBottom:8}},
+        h("b",{style:{fontSize:14}},"Workload by due week"),
+        h("select",{value:loadDept,onChange:e=>setLoadDept(e.target.value),style:{...inputStyle,width:220,padding:"5px 8px"}},h("option",{value:""},"All my departments"),depList.map(d=>h("option",{key:d,value:d},d))),
+        h("span",{style:{fontSize:11.5,color:colors.muted}},"This week = to Sun "+fmtDMY(sun)+". Waiting (on the customer or on someone) and Under approval are not counted in the due columns. Click a name to open their board.")),
+      h("div",{style:{overflowX:"auto"}},h("table",{style:{borderCollapse:"collapse",width:"100%",fontSize:12.5}},
+        h("thead",null,h("tr",null,h("th",{style:{...th,textAlign:"left"}},"Person"),h("th",{style:{...th,textAlign:"left",width:160}},"Overdue + this week"),COLS.map(([k,l])=>h("th",{key:k,style:th},l)))),
+        h("tbody",null, rows.map(({e,c})=>h("tr",{key:e.employee_name,style:{borderBottom:"1px solid #eceae0"}},
+          h("td",{style:{padding:"5px 8px"}},h("a",{href:"#",onClick:ev=>{ ev.preventDefault(); openBoard(e.employee_name); }},e.employee_name),h("span",{style:{color:colors.mutedLight,fontSize:11}}," "+(e.department||""))),
+          h("td",{style:{padding:"5px 8px"}},h("div",{style:{display:"flex",height:9,borderRadius:4,overflow:"hidden",background:"#f1efe8",width:150}},
+            h("div",{style:{width:(c.od/max*150)+"px",background:"#a3312a"}}),h("div",{style:{width:(c.wk/max*150)+"px",background:"#d9a441"}}))),
+          COLS.map(([k,,col])=>h("td",{key:k,style:{textAlign:"right",padding:"5px 8px",color:c[k]?col:colors.mutedLight,fontWeight:(k==="od"||k==="tot")&&c[k]?700:400}},c[k]||"\u00b7"))))))));
+  };
   const header = h("div",{style:{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:10}},
     onBackToEnquiry ? h("button",{onClick:onBackToEnquiry,style:{...btnPrimary,padding:"8px 14px",background:"#0f7a5c"}},"\u2190 Back to the enquiry") : null,   // 127
     h("h2",{style:{margin:0,fontSize:16}},"Tasks"),
     h("div",{style:{display:"flex",border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden"}},
-      authorised ? tabBtn("assign","Task Assignment Board") : null, tabBtn("emp",authorised?"Employee board":"My board"), tabBtn("all","All boards"), tabBtn("dash","Dashboards")),
+      authorised ? tabBtn("assign","Task Assignment Board") : null, tabBtn("emp",authorised?"Employee board":"My board"), tabBtn("all","All boards"), authorised ? tabBtn("load","Workload") : null, tabBtn("dash","Dashboards")),   // 178
     mode==="assign" ? h("select",{value:dept,onChange:e=>setDept(e.target.value),style:{...inputStyle,width:200,padding:"7px 9px"}},authDepts.map(d=>h("option",{key:d,value:d},d))) : null,
     mode==="emp" && authorised ? h("select",{value:who,onChange:e=>setWho(e.target.value),style:{...inputStyle,width:230,padding:"7px 9px"}},
       depts.map(dp=>h("optgroup",{key:dp,label:dp},visibleEmps.filter(e=>(e.department||"(no department)")===dp || empBoards(e).includes(dp)).map(e=>h("option",{key:e.employee_name,value:e.employee_name},e.employee_name+(e.employee_name===me?" (me)":"")))))) : null,
@@ -52273,11 +52723,13 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     mode==="assign" && authorised ? assignView()
       : mode==="all" ? allView()   // 151
       : mode==="dash" ? h(TaskDashboards,{ tasks, emps, me, isAdmin:(isAdmin||isDocCtl), authorised, authDepts, deptOf, taskDept, onOpenBoard:openBoard, onGoToTab })
+      : mode==="load" && authorised ? loadView()   // 178
       : empView(),
     openId!==null && h(TaskDetailModal,{ key:String(openId), taskId:openId, tasks, emps, labels, me, who:(mode==="assign"?null:who), today,
       defaultDept:(mode==="assign"?dept:deptOf(who)), deptOf, boards:deptMaster,
       canApprove, canEdit, approversFor, labelColor, move,
       enqOf, quoteMade, onStartQuote, onOpenQuote, taskTypes, isAdmin, onGoToTab, onOpenGantt,
+      onCommented:(id)=>setComments(c=>({...c,[id]:(c[id]||0)+1})),   // 178
       onClose:()=>setOpenId(null), onOpen:(id)=>setOpenId(id),
       onChanged:(row, remove)=>{ setTasks(ts=> remove ? ts.filter(x=>x.id!==row.id) : ts.some(x=>x.id===row.id) ? ts.map(x=>x.id===row.id?row:x) : [...ts,row]); if(row && row.proc_plan_id && !remove) load(); } }),   // 139: a procurement card change can move its siblings
     deletedLog && h("div",{onClick:e=>{ if(e.target===e.currentTarget) setDeletedLog(null); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1200,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"30px 12px",overflowY:"auto"}},
@@ -52792,7 +53244,7 @@ function TaskChecklistItems({ items, onChange, depth, today, disabled, cols }){
       (i.items||[]).length ? h(TaskChecklistItems,{items:i.items,onChange:(next)=>upd(i.id,{items:next}),depth:(depth||0)+1,today,disabled}) : null)));
 }
 
-function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultDept, deptOf, canApprove, canEdit, approversFor, labelColor, move, onClose, onOpen, onChanged, enqOf, quoteMade, onStartQuote, onOpenQuote, taskTypes, isAdmin, onGoToTab, onOpenGantt, boards }){
+function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultDept, deptOf, canApprove, canEdit, approversFor, labelColor, move, onClose, onOpen, onChanged, enqOf, quoteMade, onStartQuote, onOpenQuote, taskTypes, isAdmin, onGoToTab, onOpenGantt, boards, onCommented }){
   const isNew = taskId==="new";
   const saved = isNew ? null : tasks.find(t=>t.id===taskId);
   const blank = { title:"", assignee:who||"", department:(isInterDept(defaultDept)?"":(defaultDept||"")), due_date:"", status:"open", labels:[], links:[], checklists:[], parent_id:null, ref:"", customer:"", notes:"", task_type:"", also_departments:[] };
@@ -52806,6 +53258,9 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
   const [sub,setSub] = useState({title:"",assignee:"",due:""});
   const set = (p)=>{ setD(x=>({...x,...p})); setDirty(true); };
   const [rd,setRd] = useState(null);          // 135 Build 4: "wait" | "regret" reason box
+  const [wo,setWo] = useState(null);          // 178: waiting on someone {on, what}
+  const [cms,setCms] = useState([]); const [cmErr,setCmErr] = useState(""); const [cmText,setCmText] = useState(""); const [cmBusy,setCmBusy] = useState(false);   // 178: comments
+  useEffect(()=>{ if(!isNew) sb.from("task_comment_tbl").select("*").eq("task_id",taskId).order("at",{ascending:true}).then(({data,error})=>{ setCms(data||[]); setCmErr(error?"Comments need structure_tasks_handover_2026-10-12.sql.":""); }); },[taskId]);
   const [ckHelp,setCkHelp] = useState(false); // 135 Build 3: how to change the standard checklist
   const [wide,setWide] = useState(()=> typeof window!=="undefined" && window.innerWidth>=1000);
   useEffect(()=>{ const f=()=>setWide(window.innerWidth>=1000); window.addEventListener("resize",f); return ()=>window.removeEventListener("resize",f); },[]);
@@ -52830,6 +53285,11 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
     const aEmp = emps.find(e=>e.employee_name===d.assignee);   // 123: a person in two departments keeps the card's department
     const department = !d.assignee ? (d.department||defaultDept||null) : (empInDept(aEmp, d.department) ? d.department : (deptOf(d.assignee)||d.department||null));
     const row = { title:d.title.trim(), assignee:d.assignee||null, department, due_date:d.due_date||null, labels:d.labels, links:d.links, checklists:d.checklists, ref:d.ref||null, customer:d.customer||null, notes:d.notes||null, parent_id:d.parent_id||null, ...(d.task_type?{task_type:d.task_type}:{}) };
+    // 178: urgent + repeat (sent only when set or changed, so a database without the 178 SQL still saves ordinary cards)
+    if(d.urgent || (saved && saved.urgent)) row.urgent = !!d.urgent;
+    const rr = d.repeat_rule && d.repeat_rule.every ? { every:d.repeat_rule.every, n:Math.max(1,Number(d.repeat_rule.n)||1), ...(d.repeat_rule.until?{until:d.repeat_rule.until}:{}) } : null;
+    if(rr && !d.due_date){ setBusy(false); alert("A repeating card needs a due date \u2014 the first one is due then, the next ones follow from it."); return; }
+    if(rr || (saved && saved.repeat_rule)) row.repeat_rule = rr;
     // 150: the other boards this card shows on (never its home, never the Inter-Department board)
     const alsoNew = Array.from(new Set((d.also_departments||[]).filter(x=>x && x!==department && !isInterDept(x))));
     const alsoOld = saved ? taskAlso(saved) : [];
@@ -52842,6 +53302,7 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
     }
     if(isNew){
       let { data, error } = await sb.from("task_tbl").insert({ ...row, status:"open", created_by:me }).select().single();
+      if(error && /urgent|repeat_rule/.test(error.message||"")){ setBusy(false); alert("Urgent and Repeat need structure_tasks_handover_2026-10-12.sql (both companies). Untick them, or ask for the SQL to be run."); return; }   // 178
       if(error && /also_departments/.test(error.message||"")){ const r2 = {...row}; delete r2.also_departments; ({ data, error } = await sb.from("task_tbl").insert({ ...r2, status:"open", created_by:me }).select().single()); if(!error) alert("Saved on its home board only \u2014 run structure_task_multi_board_150 (both companies) so a card can show on more than one board."); }
       setBusy(false);
       if(error){ alert("Could not save the task:\n\n"+error.message); return; }
@@ -52853,8 +53314,11 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
     if(String(saved.due_date||"").slice(0,10)!==String(row.due_date||"")) changes.push("due "+(saved.due_date?fmtDMY(saved.due_date):"none")+" → "+(row.due_date?fmtDMY(row.due_date):"none"));
     const alsoTxt = (a)=> a.length ? a.join(", ") : "none";
     if(alsoTxt(alsoOld.slice().sort())!==alsoTxt(alsoNew.slice().sort())) changes.push("also on boards "+alsoTxt(alsoOld)+" → "+alsoTxt(alsoNew));   // 150
+    if(!!saved.urgent!==!!d.urgent) changes.push(d.urgent?"marked Urgent":"no longer Urgent");   // 178
+    if(taskRepeatLabel(saved.repeat_rule)!==taskRepeatLabel(rr)) changes.push(rr?"repeats: "+taskRepeatLabel(rr):"repeat stopped");
     const stamp = changes.length ? { moved_by:me, moved_at:new Date().toISOString(), moved_what:changes.join("; ") } : {};
     let { data, error } = await sb.from("task_tbl").update({ ...row, ...stamp, updated_at:new Date().toISOString() }).eq("id",saved.id).select().single();
+    if(error && /urgent|repeat_rule/.test(error.message||"")){ setBusy(false); alert("Urgent and Repeat need structure_tasks_handover_2026-10-12.sql (both companies). Untick them, or ask for the SQL to be run."); return; }   // 178
     if(error && /also_departments/.test(error.message||"")){ setBusy(false); alert("Could not save Also on boards \u2014 run structure_task_multi_board_150 (both companies) first."); return; }   // 150
     if(error && /updated_at/.test(error.message||"")) ({ data, error } = await sb.from("task_tbl").update({ ...row, ...stamp }).eq("id",saved.id).select().single());   // 122 structure not run yet
     setBusy(false);
@@ -52889,6 +53353,23 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
     await act({ status:"approval", sent_at:new Date().toISOString(), ...(saved.wait_reason?{wait_reason:null,wait_since:null}:{}) }, "Regret Quote proposed: "+why+" → Under Approval"); };
   const waitPicks = recentReasons(tasks.filter(t=>t.wait_reason).sort((a,b)=>String(b.wait_since||"").localeCompare(String(a.wait_since||""))).map(t=>t.wait_reason), WAIT_PICKS_DEFAULT);
   const regretPicks = recentReasons(enqOf ? tasks.map(t=>{ const e=enqOf(t); return e&&e.regret_reason; }) : [], REGRET_PICKS_DEFAULT);
+  // 178: waiting on a person (inside or outside the company) — not overdue while it waits
+  const doWaitOn = async()=>{ const on = String((wo&&wo.on)||"").trim(), what = String((wo&&wo.what)||"").trim();
+    if(!on){ alert("Who is it waiting on?"); return; } if(!what){ alert("Waiting for what?"); return; }
+    setWo(null);
+    await act({ wait_on:on, wait_what:what, wait_on_since:new Date().toISOString() }, "Waiting on "+on+" \u2013 "+what);
+    if(emps.some(e=>e.employee_name===on) && on!==me){ try{ await sb.from("notifications_tbl").insert({ employee_name:on, message:"\u23f3 "+(saved.assignee||me)+" is waiting on you \u2013 "+what+" (card \u201c"+saved.title+"\u201d)" }); }catch(e){} } };
+  const doWaitOnDone = ()=> act({ wait_on:null, wait_what:null, wait_on_since:null }, "No longer waiting on "+saved.wait_on+" (was: "+(saved.wait_what||"")+")");
+  const cmMatch = /(^|\s)@([A-Za-z.]*)$/.exec(cmText);
+  const cmSugg = cmMatch ? (()=>{ const q = cmMatch[2].toLowerCase(); return emps.map(e=>e.employee_name).filter(n=>n && n!=="Unassigned" && (n.toLowerCase().startsWith(q) || n.toLowerCase().split(/[\s.]+/).some(w=>w.startsWith(q)))).slice(0,6); })() : [];
+  const postComment = async()=>{ const body = cmText.trim(); if(!body) return; setCmBusy(true);
+    const mentions = taskMentions(body, emps);
+    const { data, error } = await sb.from("task_comment_tbl").insert({ task_id:saved.id, by_name:me, body, mentions }).select().single();
+    setCmBusy(false);
+    if(error){ alert("Could not post the comment:\n\n"+error.message+(/task_comment_tbl/.test(error.message||"")?"\n\nRun structure_tasks_handover_2026-10-12.sql (both companies).":"")); return; }
+    setCms(x=>[...x,data]); setCmText(""); onCommented && onCommented(saved.id);
+    const to = Array.from(new Set([...mentions, ...(saved.assignee && !taskIsPile(saved) ? [saved.assignee] : [])])).filter(n=>n && n!==me);
+    if(to.length) await notifyRows(to.map(n=>({ employee_name:n, message:"\ud83d\udcac "+me+(mentions.includes(n)?" mentioned you":"")+" on \u201c"+saved.title+"\u201d: "+body.slice(0,180), kind:"comment" }))); };
   const del = async()=>{
     const why = prompt("Delete “"+saved.title+"”?\n\nWhy is it being deleted? (kept in the history; sub-tasks stay, without a parent)");
     if(why===null) return;
@@ -52957,7 +53438,9 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
             if(d.assignee && dsel && !emps.some(e=>e.employee_name===d.assignee && inG(e,dsel))) out.push(h("option",{key:"__cur",value:d.assignee},d.assignee+" (other department)"));
             if(dsel && !emps.some(e=>e.employee_name!=="Unassigned" && inG(e,dsel))) out.push(h("option",{key:"__none",value:"",disabled:true},"Nobody in "+dsel+" yet \u2014 the card goes to its pile"));
             return out; })())),
-        h("div",null,lbl("Task due date"),h("input",{type:"date",value:d.due_date||"",disabled:!editable,onChange:e=>set({due_date:e.target.value}),style:{...inputStyle,padding:"6px 9px"}})),
+        h("div",null,lbl("Task due date"),h("input",{type:"date",value:d.due_date||"",disabled:!editable,onChange:e=>set({due_date:e.target.value}),style:{...inputStyle,padding:"6px 9px"}}),
+          h("label",{style:{display:"inline-flex",gap:5,alignItems:"center",fontSize:12,marginTop:5,fontWeight:d.urgent?700:400,color:d.urgent?"#a3312a":colors.muted,cursor:editable?"pointer":"default"}},   // 178
+            h("input",{type:"checkbox",checked:!!d.urgent,disabled:!editable,onChange:e=>set({urgent:e.target.checked}),style:{margin:0}}),"\ud83d\udd25 Urgent (top of every list)")),
         h("div",null,lbl("Customer"),h("input",{value:d.customer||"",disabled:!editable,onChange:e=>set({customer:e.target.value}),style:{...inputStyle,padding:"7px 9px"}}))),
       h("div",{style:{marginTop:10}},lbl("Reference (enquiry / quote / contract)"),h("input",{value:d.ref||"",disabled:!editable,onChange:e=>set({ref:e.target.value}),style:{...inputStyle,padding:"7px 9px"}})),
       (()=>{ // 150: one card on several boards
@@ -52970,6 +53453,22 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
                 background:on?"#efe8fb":"#f4f6f5",color:on?"#5b3a99":colors.muted,border:"1px solid "+(on?"#b9a3e3":colors.border),fontWeight:on?700:400}},
               h("input",{type:"checkbox",checked:on,disabled:!editable,onChange:e=>set({also_departments: e.target.checked ? [...cur,b] : cur.filter(x=>x!==b)}),style:{margin:0}}),b); })),
           h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:3}},"Home board: "+(home||"\u2014")+" (approval and reports). Ticked boards show the same card \u2014 no copies; it also shows on the Inter-Department board."));
+      })(),
+      (()=>{ // 178: repeat
+        if(d.parent_id) return null;
+        if(saved && saved.repeat_of) { const root = tasks.find(t=>String(t.id)===String(saved.repeat_of));
+          return h("div",{style:{marginTop:10,fontSize:12,color:colors.muted}},"\u21bb Part of a repeating card", root ? h("span",null," \u2014 ",h("a",{href:"#",onClick:e=>{ e.preventDefault(); if(dirty && !confirm("Leave without saving?")) return; onOpen(root.id); }},"open the first card")," to change or stop the repeat.") : "."); }
+        const r = d.repeat_rule || {}; const setR = (p)=> set({ repeat_rule: p===null ? null : { ...r, ...p } });
+        return h("div",{style:{marginTop:10}},lbl("Repeat"),
+          h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}},
+            h("select",{value:r.every||"",disabled:!editable,onChange:e=>setR(e.target.value?{every:e.target.value,n:r.n||1}:null),style:{...inputStyle,width:230,padding:"6px 8px"}},
+              h("option",{value:""},"Does not repeat"), TASK_REPEAT_EVERY.map(([k,l])=>h("option",{key:k,value:k},l))),
+            r.every && r.every!=="weekday" ? h("label",{style:{fontSize:12,color:colors.muted,display:"inline-flex",gap:5,alignItems:"center"}},"every",
+              h("input",{type:"number",min:1,max:52,value:r.n||1,disabled:!editable,onChange:e=>setR({n:e.target.value}),style:{...inputStyle,width:60,padding:"5px 6px"}}),
+              ({day:"day(s)",week:"week(s)",month:"month(s)",quarter:"quarter(s)",year:"year(s)"})[r.every]) : null,
+            r.every ? h("label",{style:{fontSize:12,color:colors.muted,display:"inline-flex",gap:5,alignItems:"center"}},"until (optional)",
+              h("input",{type:"date",value:r.until||"",disabled:!editable,onChange:e=>setR({until:e.target.value}),style:{...inputStyle,width:150,padding:"5px 6px"}})) : null),
+          r.every ? h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:3}},"When this card's latest copy is due, the next copy is made on the same board"+(d.due_date?" (next after "+fmtDMY(d.due_date)+": "+fmtDMY(taskRepeatStep(d.due_date,r))+")":"")+" with the checklist unticked. Pick \u201cDoes not repeat\u201d to stop it.") : null);
       })());
   const labelsSec = sec("Labels",null,
         h("div",{style:{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}},
@@ -53042,16 +53541,40 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
             : editable ? [saved.assignee===me && (saved.status==="open" || (enq && enqQn && saved.status==="progress")) ? h("button",{key:"p",disabled:busy,onClick:startTask,title:enq?"Moves the card to In Progress and opens Quote# "+(enqQn||"")+" in the Estimator":(saved.links||[]).length?"Moves the card to In Progress and opens the latest file":"Moves the card to In Progress",style:{...btnSmall,background:"#fff6d5",borderColor:"#c99a06",color:"#7a5c00",fontWeight:700}},"\u25b6 Start Task") : null,   // 135 Build 4
                           saved.wait_reason ? h("button",{key:"w",disabled:busy,onClick:doResume,style:{...btnSmall,borderColor:"#c99a06",color:"#8a5a00",fontWeight:700}},"\u25b6 Resume (customer replied)")
                                             : h("button",{key:"w",disabled:busy,onClick:()=>{ if(dirty){ alert("Save your changes first."); return; } setRd("wait"); },style:btnSmall,title:"Give the reason: due + 3 days, label Waiting customer, not counted as stale"},"\u23f8 Waiting For Customer"),
+                          saved.wait_on ? h("button",{key:"wo",disabled:busy,onClick:doWaitOnDone,style:{...btnSmall,borderColor:"#7c80d0",color:"#3b3f9a",fontWeight:700}},"\u25b6 Got it from "+saved.wait_on)
+                                        : h("button",{key:"wo",disabled:busy,onClick:()=>{ if(dirty){ alert("Save your changes first."); return; } setWo({on:"",what:""}); },style:btnSmall,title:"Waiting on a colleague, a supplier or anyone else: the card is not counted as overdue while it waits"},"\u23f3 Waiting on someone"),   // 178
                           enq && enq.status!=="Regret proposed" ? h("button",{key:"r",disabled:busy,onClick:()=>{ if(dirty){ alert("Save your changes first."); return; } setRd("regret"); },style:{...btnSmall,color:colors.danger,borderColor:"#e3a7a2"}},"\u2716 Regret Quote") : null,
                           h("button",{key:"s",disabled:busy,onClick:()=>act({status:"approval",sent_at:new Date().toISOString()},taskStageLabel(st)+" → Under Approval (sent for approval)"),style:{...btnPrimary,padding:"7px 14px"}},"Send for approval"),
                           h("span",{key:"h",style:{fontSize:11.5,color:colors.mutedLight}},"Approver: "+(ap.length?ap.join(" / "):"an Admin"))] : null) : null,
       (!isNew && saved.wait_reason) ? waitBadge(saved,true) : null,   // 135 Build 4
+      !isNew ? waitOnBadge(saved,true) : null,   // 178
       wide ? h("div",{style:{display:"grid",gridTemplateColumns:"minmax(0,1.05fr) minmax(0,1fr)",gap:20,alignItems:"start"}},
                h("div",{style:{minWidth:0}},enqPanel,fieldsGrid,checkSec),
                h("div",{style:{minWidth:0,marginTop:12}},noteSec,labelsSec,linksSec,subsSec))
            : h("div",null,enqPanel,fieldsGrid,labelsSec,linksSec,checkSec,subsSec,noteSec),
       footer,
+      !isNew ? sec("Comments","type @ and a name to tell someone (they get it in the bell)",   // 178
+        cmErr ? h("div",{style:{fontSize:11.5,color:"#a3312a"}},cmErr) : null,
+        cms.map(c=>h("div",{key:c.id,style:{fontSize:12.5,padding:"5px 0",borderBottom:"1px solid #f0efe8"}},
+          h("div",{style:{fontSize:11,color:colors.muted}},h("b",{style:{color:colors.text}},c.by_name||"\u2014")," \u00b7 "+fmtDMYTime(c.at)),
+          h("div",{style:{whiteSpace:"pre-wrap",marginTop:1}},String(c.body||"").split(/(@[A-Za-z][A-Za-z. ]*)/).map((p2,i)=> /^@/.test(p2) && (c.mentions||[]).some(m=>p2.toLowerCase().startsWith("@"+m.toLowerCase().split(" ")[0].replace(/\.$/,""))||p2.toLowerCase().startsWith("@"+m.toLowerCase())) ? h("b",{key:i,style:{color:"#2a6db0"}},p2) : p2)))),
+        h("div",{style:{position:"relative",marginTop:6}},
+          h("textarea",{value:cmText,rows:2,placeholder:"Write a comment\u2026 @name to tell someone",onChange:e=>setCmText(e.target.value),
+            onKeyDown:e=>{ if(e.key==="Enter" && (e.ctrlKey||e.metaKey)){ e.preventDefault(); postComment(); } },style:{...inputStyle,padding:"6px 8px",fontSize:12.5,resize:"vertical"}}),
+          cmSugg.length ? h("div",{style:{display:"flex",gap:5,flexWrap:"wrap",marginTop:3}},cmSugg.map(n=>h("button",{key:n,onClick:()=>setCmText(t=>t.replace(/@([A-Za-z.]*)$/,"@"+n+" ")),style:{...btnSmall,fontSize:11,padding:"1px 8px",color:"#2a6db0"}},"@"+n))) : null,
+          h("div",{style:{display:"flex",justifyContent:"flex-end",marginTop:4}},h("button",{disabled:cmBusy||!cmText.trim(),onClick:postComment,style:{...btnSmall,fontWeight:700,color:"#0f7a5c",borderColor:"#0f7a5c"}},cmBusy?"Posting\u2026":"Post comment")))) : null,
       histSec,
+      wo ? h("div",{onClick:e=>{ if(e.target===e.currentTarget) setWo(null); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.35)",zIndex:1300,display:"flex",alignItems:"center",justifyContent:"center",padding:12}},   // 178
+        h("div",{style:{background:"#fff",borderRadius:8,padding:"16px 18px",width:420,maxWidth:"100%"}},
+          h("div",{style:{fontWeight:700,fontSize:14}},"\u23f3 Waiting on someone"),
+          h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:2}},saved.title),
+          h("div",{style:{fontSize:11.5,color:colors.muted,margin:"10px 0 3px"}},"Waiting on (a colleague, or type a supplier / any name)"),
+          h("input",{list:"wo-people",value:wo.on,onChange:e=>setWo(x=>({...x,on:e.target.value})),placeholder:"e.g. Ramesh, or Alfa Laval",style:{...inputStyle,padding:"6px 8px"}}),
+          h("datalist",{id:"wo-people"},emps.filter(e=>e.employee_name!=="Unassigned").map(e=>h("option",{key:e.employee_name,value:e.employee_name}))),
+          h("div",{style:{fontSize:11.5,color:colors.muted,margin:"10px 0 3px"}},"For what"),
+          h("input",{value:wo.what,onChange:e=>setWo(x=>({...x,what:e.target.value})),placeholder:"e.g. revised nozzle loads",style:{...inputStyle,padding:"6px 8px"}}),
+          h("div",{style:{background:"#eef0fb",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:10}},"The card shows who and what, and is not counted as overdue while it waits. A colleague gets a bell message. Press \u25b6 Got it when it comes."),
+          h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}},h("button",{style:btnSmall,onClick:()=>setWo(null)},"Cancel"),h("button",{style:{...btnPrimary,padding:"6px 12px"},onClick:doWaitOn},"Mark waiting")))) : null,
       rd==="wait" ? h(ReasonDialog,{title:"\u23f8 Waiting For Customer",subtitle:(enq?enq.enquiry_number+" \u00b7 "+(enq.company_name||""):saved.title),placeholder:"What are we waiting for?",picks:waitPicks,
         info:"Due moves to "+fmtDMY(addDaysISO(today,3))+" (+3 days), label \u201cWaiting customer\u201d is added, and the card is not counted as stale.",okLabel:"Mark waiting",onOk:doWait,onCancel:()=>setRd(null)}) : null,
       rd==="regret" ? h(ReasonDialog,{title:"\u2716 Regret Quote \u2014 "+(enq?enq.enquiry_number:""),subtitle:"Goes to the approver; the enquiry closes as Regretted once approved.",placeholder:"Why are we regretting?",picks:regretPicks,okLabel:"Send for approval",okStyle:{background:colors.danger,borderColor:colors.danger},onOk:doRegret,onCancel:()=>setRd(null)}) : null));
