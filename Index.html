@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-12T12:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-12T14:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -10149,7 +10149,50 @@ function MocGradeRow({ row, onPickSingle, onPickSplit }){
   );
 }
 
-function DatasheetModal({ openRef, openLines, model, modelItemMap, user, sessionCompany, onClose }) {
+// 12 Oct 2026 (181) — a legacy Sale Order's datasheet is the OA's Annexure III
+// exactly as printed (datasheets.source = "OA", rows in custom_free_fields as
+// {section, label, value}). It is shown read-only and printed as is, whatever
+// the item — the template form is not used for it.
+function DatasheetModal(props){
+  const { openRef, onClose } = props;
+  const [oa,setOa] = useState(undefined);   // undefined = looking, null = none
+  useEffect(()=>{ let off=false; (async()=>{
+    try{
+      const { data } = await sb.from("datasheets").select("*").eq("reference_number",openRef.reference_number).eq("item_sl_no",openRef.item_sl_no).eq("source","OA").limit(1);
+      if(!off) setOa((data&&data[0]&&Array.isArray(data[0].custom_free_fields)&&data[0].custom_free_fields.length) ? data[0] : null);
+    }catch(e){ if(!off) setOa(null); }
+  })(); return ()=>{ off=true; }; },[openRef.reference_number, openRef.item_sl_no]);
+  if(oa===undefined) return h("div",{style:{position:"fixed",inset:0,background:"rgba(20,20,20,0.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:80}},
+    h("div",{style:{background:"#fff",borderRadius:8,padding:24,fontSize:13,color:colors.mutedLight}},"Loading…"));
+  if(oa) return h(OaDatasheetView,{ ds:oa, openRef, onClose });
+  return h(DatasheetModalTemplate, props);
+}
+function OaDatasheetView({ ds, openRef, onClose }){
+  const rows = ds.custom_free_fields||[];
+  let last = null;
+  return h("div",{style:{position:"fixed",inset:0,background:"rgba(20,20,20,0.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:80,padding:16}},
+    h("div",{"data-testid":"oa-datasheet",style:{background:"#fff",borderRadius:10,width:640,maxWidth:"100%",maxHeight:"88vh",display:"flex",flexDirection:"column"}},
+      h("div",{style:{padding:"12px 16px",borderBottom:"1px solid "+colors.border,display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}},
+        h("div",null,
+          h("div",{style:{fontWeight:700,fontSize:14}},"Sl No "+openRef.item_sl_no+(ds.oa_item?" · "+ds.oa_item:"")),
+          h("div",{style:{fontSize:11,color:colors.mutedLight}},"As printed in the OA"+(ds.custom_excel_file_name?" · "+ds.custom_excel_file_name:"")+" · Annexure III · read-only")),
+        h("span",{style:{fontSize:11,padding:"2px 9px",borderRadius:10,background:"#e6f4f1",color:"#085041",border:"1px solid #9ccfbf"}},"From the OA")),
+      h("div",{style:{overflowY:"auto",padding:"8px 16px"}},
+        h("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:12}},
+          h("tbody",null, rows.flatMap((f,i)=>{
+            const out = [];
+            if((f.section||"")!==last && f.section){ out.push(h("tr",{key:"s"+i},h("td",{colSpan:2,style:{background:"#eef4f0",color:"#1f5c40",fontWeight:700,padding:"6px 8px"}},f.section))); }
+            last = f.section||"";
+            out.push(h("tr",{key:"r"+i},
+              h("td",{style:{padding:"4px 8px",borderBottom:"1px solid #eee",width:"42%",verticalAlign:"top"}},f.label),
+              h("td",{style:{padding:"4px 8px",borderBottom:"1px solid #eee",verticalAlign:"top"}},f.value)));
+            return out;
+          })))),
+      h("div",{style:{padding:"10px 16px",borderTop:"1px solid "+colors.border,display:"flex",justifyContent:"flex-end",gap:8}},
+        ds.oa_link && h("a",{href:ds.oa_link,target:"_blank",rel:"noreferrer",style:{...btnSecondary,textDecoration:"none"}},"Open the OA"),
+        h("button",{onClick:onClose,style:btnPrimary},"Close"))));
+}
+function DatasheetModalTemplate({ openRef, openLines, model, modelItemMap, user, sessionCompany, onClose }) {
   const itemName = (modelItemMap&&model&&modelItemMap.get(model)) || (openLines && openLines[0] && openLines[0].item) || "";
   const [template,setTemplate] = useState(undefined); // undefined=loading, null=none found
   const [values,setValues] = useState({});
@@ -18100,6 +18143,16 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       // already use to open/save the datasheet in the first place.
       const dpLineForTemplate = linesRows.find(l=>l.item_sl_no===est.item_sl_no && l.is_direct_price===true);
       const itemNameForTemplate = (dpLineForTemplate && dpLineForTemplate.item) || modelItemMap.get(est.model) || est.model || "Unknown item";
+      // 181: a datasheet taken from the OA prints as is — its own sections, labels and values.
+      const oaDs = datasheetsRows.find(d=>d.item_sl_no===est.item_sl_no && d.source==="OA" && Array.isArray(d.custom_free_fields) && d.custom_free_fields.length);
+      if(oaDs){
+        const secs = [];
+        oaDs.custom_free_fields.forEach((f,i)=>{ const t = f.section||"Datasheet"; let sc = secs[secs.length-1]; if(!sc || sc.title!==t){ sc = { title:t, rows:[] }; secs.push(sc); } sc.rows.push({ key:"oa-"+i, label:f.label, value:f.value }); });
+        const totalSalesValueOa = await computeSlNoFoldedSalesTotal(est.reference_number, est.item_sl_no, est.order_qty);
+        secs.push(buildPriceDataSection(est.currency, est.order_qty, totalSalesValueOa, est.conversion_rate, poUnitPriceIn(est, est.currency)!==null, poUnitPriceIn(est, est.currency)));
+        list.push({ slNo: est.item_sl_no, model: est.model||"", itemName: oaDs.oa_item || itemNameForTemplate, sectionsRows: secs, renderOwnPdfPage:true });
+        continue;
+      }
       const template = await loadDatasheetMaster(itemNameForTemplate);
       const ds = datasheetsRows.find(d=>d.item_sl_no===est.item_sl_no && d.template_key===normalizeItemName(itemNameForTemplate));
       if(!template){
@@ -27999,6 +28052,10 @@ const MANUAL_SECTIONS = [
         "blocks": [
           {
             "type": "p",
+            "text": "Changed 12 October 2026 (build 181). LEGACY SALE ORDERS: the datasheet on each Sl No is the OA's Annexure III exactly as printed \u2014 the OA's own sections, labels and values in the same order. Datasheet opens it read-only, marked From the OA, with a link to the OA file; the Sale Order PDF prints it the same way. Sl Nos the OA had no datasheet for (spares, for example) have none. Quotes and Sale Orders made in the app keep the usual datasheet form."
+          },
+          {
+            "type": "p",
             "text": "Changed 12 October 2026 (build 180). A Sale Order has no Validity: it is not asked for, not shown and not printed on the Order Acceptance. Validity belongs to the offer only."
           },
           {
@@ -30743,6 +30800,10 @@ const MANUAL_TA = {
   "blocks": [
    {
     "type": "p",
+    "text": "\u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bcd 12 \u0b85\u0b95\u0bcd\u0b9f\u0bcb\u0baa\u0bb0\u0bcd 2026 (build 181). LEGACY SALE ORDERS: \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 Sl No-\u0b87\u0ba9\u0bcd datasheet, OA-\u0b87\u0ba9\u0bcd Annexure III-\u0b87\u0bb2\u0bcd \u0b85\u0b9a\u0bcd\u0b9a\u0bbe\u0ba9\u0baa\u0b9f\u0bbf\u0baf\u0bc7 \u2014 \u0b85\u0ba4\u0bc7 \u0baa\u0b95\u0bc1\u0ba4\u0bbf\u0b95\u0bb3\u0bcd, \u0b85\u0ba4\u0bc7 label, \u0b85\u0ba4\u0bc7 \u0bae\u0ba4\u0bbf\u0baa\u0bcd\u0baa\u0bc1, \u0b85\u0ba4\u0bc7 \u0bb5\u0bb0\u0bbf\u0b9a\u0bc8. Datasheet \u0b85\u0bb4\u0bc1\u0ba4\u0bcd\u0ba4\u0bbf\u0ba9\u0bbe\u0bb2\u0bcd read-only \u0b86\u0b95, From the OA \u0b8e\u0ba9\u0bcd\u0bb1\u0bc1, OA file link-\u0b89\u0b9f\u0ba9\u0bcd \u0ba4\u0bbf\u0bb1\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd; Sale Order PDF-\u0b87\u0bb2\u0bc1\u0bae\u0bcd \u0b85\u0baa\u0bcd\u0baa\u0b9f\u0bbf\u0baf\u0bc7 \u0b85\u0b9a\u0bcd\u0b9a\u0bbe\u0b95\u0bc1\u0bae\u0bcd. OA-\u0b87\u0bb2\u0bcd datasheet \u0b87\u0bb2\u0bcd\u0bb2\u0bbe\u0ba4 Sl No-\u0b95\u0bcd\u0b95\u0bc1 (\u0b89\u0ba4\u0bbe. spares) datasheet \u0b87\u0bb0\u0bc1\u0b95\u0bcd\u0b95\u0bbe\u0ba4\u0bc1. app-\u0b87\u0bb2\u0bcd \u0b89\u0bb0\u0bc1\u0bb5\u0bbe\u0ba9 Quote, Sale Order-\u0b95\u0bcd\u0b95\u0bc1 \u0bb5\u0bb4\u0b95\u0bcd\u0b95\u0bae\u0bbe\u0ba9 datasheet form \u0ba4\u0bca\u0b9f\u0bb0\u0bc1\u0bae\u0bcd."
+   },
+   {
+    "type": "p",
     "text": "\u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bcd 12 \u0b85\u0b95\u0bcd\u0b9f\u0bcb\u0baa\u0bb0\u0bcd 2026 (build 180). Sale Order-\u0b87\u0bb2\u0bcd Validity \u0b87\u0bb2\u0bcd\u0bb2\u0bc8: \u0b95\u0bc7\u0b9f\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bbe\u0ba4\u0bc1, \u0b95\u0bbe\u0b9f\u0bcd\u0b9f\u0baa\u0bcd\u0baa\u0b9f\u0bbe\u0ba4\u0bc1, Order Acceptance-\u0b87\u0bb2\u0bcd \u0b85\u0b9a\u0bcd\u0b9a\u0bbe\u0b95\u0bbe\u0ba4\u0bc1. Validity offer-\u0b95\u0bcd\u0b95\u0bc1 \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd."
    },
    {
@@ -30762,7 +30823,7 @@ const MANUAL_TA = {
     "text": "Contract \u0b89\u0bb0\u0bc1\u0bb5\u0bbe\u0ba9 \u0b89\u0b9f\u0ba9\u0bc7 Sale Order Details prompt \u0ba4\u0bbe\u0ba9\u0bbe\u0b95\u0ba4\u0bcd \u0ba4\u0bcb\u0ba9\u0bcd\u0bb1\u0bc1\u0bae\u0bcd \u2014 Drawings, QAP Conditions, Inspection By, Late Delivery, Billing/Shipping Address, Signatory. \"Fill in later\" \u0ba4\u0bc7\u0bb0\u0bcd\u0bb5\u0bc1 \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bb2\u0bbe\u0bae\u0bcd, \u0b86\u0ba9\u0bbe\u0bb2\u0bcd \u0bae\u0bc1\u0b9f\u0bbf\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0bb5\u0bb0\u0bc8 \u0b85\u0ba4\u0bc1 \u0bae\u0bc0\u0ba3\u0bcd\u0b9f\u0bc1\u0bae\u0bcd \u0bb5\u0bb0\u0bc1\u0bae\u0bcd."
    }
   ],
-  "en_sig": "ca705d21"
+  "en_sig": "b98d8897"
  },
  "so_mandatory_fields": {
   "title": "Sale Order \u0b95\u0b9f\u0bcd\u0b9f\u0bbe\u0baf fields \u0bae\u0bb1\u0bcd\u0bb1\u0bc1\u0bae\u0bcd Billing Address",
@@ -31209,6 +31270,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"12 Oct 2026 (181)", summary:"Built on 2026-10-12T12:30:00Z (build 180). SQL: legacy_SO_datasheets_as_OA_2026-10-12.sql (FLOMETRIQ only; adds datasheets.source / oa_item / oa_link and refills every legacy Sale Order). DATASHEETS FROM THE OA, AS IS: a datasheet with source \u201cOA\u201d holds the OA's Annexure III rows exactly as printed ({section, label, value} in custom_free_fields, in the OA's order). Opening the datasheet on such a Sl No shows OaDatasheetView \u2014 read-only, sections as in the OA, the OA file name and an Open the OA link \u2014 instead of the template form (DatasheetModal now checks for it first; the template form is DatasheetModalTemplate). The Sale Order PDF's Annexure III prints the same rows under the OA's section headings, then the usual Price Data, whatever the item's template. The template-mapped datasheets and the \u201cfields the app's datasheet does not have\u201d notes made by the legacy load are replaced. Quotes and app-made Sale Orders keep their template datasheets." },
   { date:"12 Oct 2026 (180)", summary:"Built on 2026-10-12T02:15:00Z (build 179). SQL: structure_price_check_2026-10-12.sql (BOTH companies; safe to re-run). PRICE CHECK: a quote or Sale Order with a Direct Price line still Pending shows PriceCheckBanner at the top (the Sl Nos, their prices, and that every PDF prints PRICE NOT CHECKED \u2013 NOT FOR ISSUE). User: Ask an Admin to check (bell to every Admin, request in price_check_request_tbl) and ONE code box. Admin: Approve (no code), Give a code instead (authorization_codes code_type price_check with reference_number; one use; 24 hours; this quote only; sent to the requester's bell), Send back with a note. The code clears every Pending line on the quote, signed \u201c<admin> (code used by <user>)\u201d; a code for another quote is refused; an old Direct Price or validate-pending-line code still works once. PDF: while any price is Pending every page is watermarked PRICE NOT CHECKED / NOT FOR ISSUE with a red band naming the Sl Nos (DRAFT is added only when something else is also missing); merged pages carry it too. The Generate box groups it under Needs an Admin with one code box and a red warning; the clean Generate stays off. An Admin pressing Generate gets one confirm that approves the prices in his name (was: Admins bypassed and printed clean). Stage move: the same quote code, plus Ask an Admin, in the stage dialog. Reports \u2192 Pending Validation groups lines by quote (asked by, Approve all, Give a code, Send back). Authorization Codes shows the quote. The quote screen's \u201cGenerate validate-pending-line code\u201d button is gone. SALE ORDER: Validity removed completely \u2014 not required, not on the terms form or amendment form, not on Annexure I, not in Quick edits; copying a quote into a Sale Order no longer carries it; the SQL clears it on existing Sale Orders." },
   { date:"12 Oct 2026 (179)", summary:"Built on 2026-10-12T01:00:00Z. No SQL. TASK ASSIGNMENT BOARD: every list (the Unassigned pile and each person) gets its own + New task, opening the same New task dialog with Assigned to filled from the list (pile = Unassigned, due date as the dialog asks). Who sees it: Super Admin every list; an Admin every list of their HOME department's board; the board's approvers (task_approver_tbl and post auto-approvers) every list of that board including the pile; each person their own list. The header + New task is unchanged. + ADD PERSON'S LIST (Super Admin any board; Admin their home department's board): pick any employee not on the board, optionally Can approve on this board; writes board_member_tbl (and task_approver_tbl), logged in the Audit Log, and Setup \u2192 Tasks \u2192 Board Membership shows it. \u2715 on a list added this way (Extra) takes the person off the board: board_member_tbl / second_department / approver row removed, their open cards from that board go back to its Unassigned pile with a history line, and the board's approvers get a bell message \u2014 the same as Board Membership. Home and Post lists can't be removed here. Manual updated." },
   { date:"12 Oct 2026 (178)", summary:"Built on 2026-10-12T01:00:00Z, on top of 08:30 (build 176). SQL: structure_tasks_handover_2026-10-12.sql (BOTH companies; safe to re-run; adds only). CLIENT NAME: every card with a contract number shows the contract and the first two words of the client (Triveni Engineering Works \u2192 Triveni Engineering; one- and two-word names in full; full name on hover), on the Document Control board and the Task boards. Contract pick lists (Document Control report and contract view, Procurement reports, procurement upload) show \u201cnumber \u2013 full client name\u201d and can be searched by number or any part of the name. Name = Sale Order customer, else the Contract Register client. BUTTONS BY ACTION: document cards no longer say \u2713 Completed. Never sent \u2192 Send to client \u25b8 (blue); resubmission \u2192 Send resubmission \u25b8 (outlined in the card colour); with the client \u2192 Log client reply \u25b8 (records the code, the returned file and the date as Rev In). Same on document task cards. Ordinary task cards keep \u2713 Completed; approvers keep \u2713 Approve / \u21a9 Send back. FULL HOLD: grey Status to confirm cards in a Full Hold category now count in the Full Hold counts. HAND OVER WORK (Tasks and HR): Super Admin, Admin, HR & Admin Manager move one person's open task cards, document cards, document requests, approver roles and posts to another, with a reason (new master Hand-over Reasons) and a note; customers listed unticked; per-item untick; history line on each card; bell message to both; 7-day undo of whatever has not moved since; Left the company offers to switch off the login (Admin). TASKS: Urgent flag (top of every list); Waiting on <person> \u2013 <what> (not overdue while waiting; bell message to a colleague); repeating cards (day / working day / week / month / quarter / year, optional end date; next copy made when the latest is due); comments with @name (bell message); one in-app reminder a day in the bell (overdue, due today, urgent, waiting on you; approvers also get overdue per person); Workload tab (open cards per person by due week). No email." },
