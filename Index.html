@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-12T02:15:00Z";
+  var APP_BUILD_VERSION = "2026-10-12T12:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -10092,8 +10092,9 @@ async function mergeLoadedPdfPages(doc, insertions, opts){
       pg.drawRectangle({ x:width/2-tw/2-6, y:6, width:tw+12, height:11, color:rgb(232/255,242/255,236/255), borderColor:rgb(31/255,92/255,64/255), borderWidth:0.4 });
       pg.drawText(txt, { x:width/2-tw/2, y:9.6, size:7, font, color:rgb(31/255,92/255,64/255) });
       if(o.watermark){
-        const ww = bold.widthOfTextAtSize("DRAFT", 60);
-        pg.drawText("DRAFT", { x:width/2-ww/2*0.82, y:height/2-ww/2*0.57, size:60, font:bold, color:rgb(230/255,195/255,190/255), rotate:degrees(35), opacity:0.75 });
+        const wt = o.watermarkText || "DRAFT"; const wsz = wt.length>8 ? 40 : 60;
+        const ww = bold.widthOfTextAtSize(wt, wsz);
+        pg.drawText(wt, { x:width/2-ww/2*0.82, y:height/2-ww/2*0.57, size:wsz, font:bold, color:rgb(230/255,195/255,190/255), rotate:degrees(35), opacity:0.75 });
       }
     });
     return wrapAsJsPdfLike(await merged.save());
@@ -16149,7 +16150,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const ctIncotermsCode = ctData ? detectIncotermCode(ctData.incoterms) : null;
   const ctMismatch = !!(ctPriceBasisCode && ctIncotermsCode && ctPriceBasisCode!==ctIncotermsCode);
   const attemptSaveCommercialTerms=()=>{
-    const missing = CT_REQUIRED_FIELDS.filter(([key])=>!String(ctData?.[key]||"").trim()).map(([,label])=>label);
+    const missing = CT_REQUIRED_FIELDS.filter(([key])=>!(mode==="contract" && key==="validity")).filter(([key])=>!String(ctData?.[key]||"").trim()).map(([,label])=>label);
     // Packing and Forwarding — checks the real fields it's actually
     // stored in now (Basis+Value), falling back to the old free-text
     // value only for a pre-24-Aug quote that never got migrated.
@@ -16194,7 +16195,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const saveCommercialTermsGhost = async()=>{
     setCtSaving(true);
     try{
-      const allFields = [...CT_GHOST_FIELDS.map(f=>f[0]), ...CT_GHOST_TEXTAREAS.map(f=>f[0])];
+      const allFields = [...CT_GHOST_FIELDS.filter(f=>!(mode==="contract" && f[0]==="validity")).map(f=>f[0]), ...CT_GHOST_TEXTAREAS.map(f=>f[0])];
       const payload = { reference_number:quoteExportRef, updated_by:user?.username||"unknown", updated_at:new Date().toISOString() };
       allFields.forEach(f=>{
         const val=(ctGhostDraft[f]||"").trim();
@@ -16225,7 +16226,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     const {data:terms} = await sb.from("quote_commercial_terms").select("*").eq("reference_number",refNumber).maybeSingle();
     if(!terms){ missing.push({section:"Commercial Terms", items:["Not created yet"]}); termsDone=false; }
     else {
-      const missingCt = CT_REQUIRED_FIELDS.filter(([key])=>!String(terms[key]||"").trim()).map(([,label])=>label);
+      // 12 Oct (180): a Sale Order has no Validity — that belongs to the offer only.
+      const missingCt = CT_REQUIRED_FIELDS.filter(([key])=>!(mode==="contract" && key==="validity")).filter(([key])=>!String(terms[key]||"").trim()).map(([,label])=>label);
       if(missingCt.length){ missing.push({section:"Commercial Terms", items:missingCt}); termsDone=false; }
     }
     const {estimatesRows, datasheetsRows} = await fetchQuoteBundle(refNumber);
@@ -18356,8 +18358,27 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       if(!readinessCheck.ready && !isAdminOrAbove){
         const outcome = await askDraftConfirm(readinessCheck.missing, readinessCheck.incompleteBomDetails);
         if(outcome==="cancel"){ setGeneratingQuotePdf(false); return; }
-        if(outcome==="draft") watermark = true; // proceed regardless of what's still open
+        if(outcome==="draft"){
+          // 180: a price that is only waiting on the Admin prints PRICE NOT CHECKED
+          // (below), not DRAFT; DRAFT is for anything else still open.
+          let r2 = null; try{ r2 = await checkQuoteReadiness(quoteExportRef); }catch(e){}
+          if(!r2 || r2.missing.some(m=>m.type!=="validation")) watermark = true;
+        }
         // "clean" only reachable once canGenerate is true (fully resolved) — watermark stays whatever it already was
+      }
+      // 180: PRICE CHECK. Any Direct Price line still Pending prints PRICE NOT
+      // CHECKED – NOT FOR ISSUE on every page. An Admin gets one confirm that
+      // approves the prices in his name instead.
+      let priceWatermark = false, priceSlNos = [];
+      {
+        const pl = await priceCheckPendingLines(quoteExportRef);
+        if(pl.length && isAdminOrAbove && confirm(quoteExportRef+" has "+pl.length+" price"+(pl.length===1?"":"s")+" not checked yet:\n"+priceLinesText(pl)+"\n\nOK = approve "+(pl.length===1?"it":"them")+" in your name and print the clean PDF\nCancel = print with the PRICE NOT CHECKED watermark")){
+          const r = await priceCheckValidate(quoteExportRef, pl, user?.username||"unknown", "by Admin on Generate PDF", user?.username);
+          if(!r.ok){ alert(r.reason); setGeneratingQuotePdf(false); return; }
+          refreshReadiness(quoteExportRef);
+        } else if(pl.length){
+          priceWatermark = true; priceSlNos = Array.from(new Set(pl.map(l=>l.item_sl_no))).sort((a,b)=>a-b);
+        }
       }
       const {estimatesRows, linesRows, datasheetsRows} = await fetchQuoteBundle(quoteExportRef);
       if(!estimatesRows.length){ alert("No Sl Nos found under "+quoteExportRef+"."); return; }
@@ -18983,7 +19004,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       doc.autoTable({
         startY:topY(38),
         body:[
-          ["Validity", terms.validity||"—"],
+          ...(mode==="contract" ? [] : [["Validity", terms.validity||"—"]]),
           ["Payment Term", terms.payment_term||"—"],
           ["Delivery Term", terms.delivery_term||"—"],
           ["Packing and Forwarding", pfDisplay],
@@ -19474,16 +19495,26 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       } else {
         numberQuotePages(doc, W);
       }
-      if(watermark){
+      if(watermark || priceWatermark){
         const pageCount = doc.internal.getNumberOfPages();
+        const stamp = fmtDMYTime(new Date().toISOString());
         for(let p=1;p<=pageCount;p++){
           doc.setPage(p);
           const pw = doc.internal.pageSize.getWidth();
           const ph = doc.internal.pageSize.getHeight();
           doc.setFont("helvetica","bold");
-          doc.setFontSize(60);
-          doc.setTextColor(230,195,190); // light, faded — no opacity plugin dependency, just a pale color
-          doc.text("DRAFT", pw/2, ph/2, {angle:35, align:"center"});
+          if(priceWatermark){
+            // 180: PRICE NOT CHECKED – NOT FOR ISSUE, plus a red band naming the Sl Nos
+            doc.setFontSize(40); doc.setTextColor(238,196,192);
+            doc.text(watermark ? ["DRAFT","PRICE NOT CHECKED","NOT FOR ISSUE"] : ["PRICE NOT CHECKED","NOT FOR ISSUE"], pw/2, ph/2, {angle:32, align:"center"});
+            doc.setFillColor(251,236,235); doc.rect(0, ph-7, pw, 7, "F");
+            doc.setFontSize(7.5); doc.setTextColor(163,49,42);
+            doc.text("PRICE NOT CHECKED – NOT FOR ISSUE · prices on Sl No "+priceSlNos.join(", ")+" not checked by an Admin · printed "+stamp+" by "+(user?.username||""), pw/2, ph-2.6, {align:"center"});
+          } else {
+            doc.setFontSize(60);
+            doc.setTextColor(230,195,190); // light, faded — no opacity plugin dependency, just a pale color
+            doc.text("DRAFT", pw/2, ph/2, {angle:35, align:"center"});
+          }
           doc.setTextColor(...dark); // restore for anything drawn after (safety, though this is the last step per page)
         }
       }
@@ -19507,14 +19538,14 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         offerEnclosures.forEach((e,i)=>{ const L=enclLoaded[i]; if(e.filePath && L && L.error) problems.push("Enclosure "+(e.docNumber||"")+" Rev "+e.rev+": "+L.error); });
         if(problems.length) alert("The PDF is ready, but these files could not be merged in and are left out:\n\n"+problems.join("\n")+"\n\nA password-protected or damaged PDF is the usual cause. Send it separately, or upload a clean copy and generate again.");
       }
-      return await mergeLoadedPdfPages(doc, pdfMergeInsertions, { footerText: quoteExportRef, watermark });
+      return await mergeLoadedPdfPages(doc, pdfMergeInsertions, { footerText: quoteExportRef, watermark: watermark||priceWatermark, watermarkText: priceWatermark ? "PRICE NOT CHECKED" : "DRAFT" });
       }; // end buildDoc
 
       const doc = await buildDoc({});
       setPdfPreview({
         doc, filename:quoteExportRef.replace(/\s+/g,"_")+"_Quote.pdf",
         buildDoc,
-        quickEditDefaults: { customerName, delivery: terms.delivery_term||"—", validity: terms.validity||"—" }
+        quickEditDefaults: mode==="contract" ? { customerName, delivery: terms.delivery_term||"—" } : { customerName, delivery: terms.delivery_term||"—", validity: terms.validity||"—" }
       });
       await logAudit("EXPORT","estimates",quoteExportRef,"Generated compiled quote PDF for "+quoteExportRef,user?.username||"unknown",null,null);
     } catch(e){
@@ -20086,6 +20117,9 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     ),
     h("div",{style:{padding:"14px 24px 20px"}},
       // 27 Sep (91): "Back to Quotes Report" is the ribbon's Go to › Quotes Report.
+      refFilter && h(PriceCheckBanner,{referenceNumber:refFilter, user, customerName:quoteHeaderRow?.customer_name,
+        refreshKey:(readiness.loading?"l":"r")+"|"+String(readiness.categories&&readiness.categories.validation),
+        onChanged:()=>refreshReadiness(refFilter)}),   // 180: price check, one place for the code
       refFilter && quoteHeaderRow && h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,background:"#fff",padding:"14px 16px",marginBottom:14}},
         h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12,marginBottom:12}},
           h("div",{style:{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}},
@@ -20356,9 +20390,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               h("button",{onClick:generateBomExceptionCode,disabled:genBomExceptionCodeBusy,style:{...btnSecondary,padding:"4px 10px",fontSize:11,marginTop:8}},genBomExceptionCodeBusy?"Generating…":"Generate BOM-exception code"),
               justGenBomExceptionCode && h("div",{style:{fontSize:12,marginTop:6}},"Code: ",h("strong",null,justGenBomExceptionCode)," — give this to whoever needs to mark one missing BOM component as an exception (not skip the whole line)."),
               genBomExceptionCodeMsg && h("div",{style:{fontSize:11.5,color:colors.danger,marginTop:6}},genBomExceptionCodeMsg),
-              h("button",{onClick:generateValidateCode,disabled:genValidateCodeBusy,style:{...btnSecondary,padding:"4px 10px",fontSize:11,marginTop:8}},genValidateCodeBusy?"Generating…":"Generate validate-pending-line code"),
-              justGenValidateCode && h("div",{style:{fontSize:12,marginTop:6}},"Code: ",h("strong",null,justGenValidateCode)," — give this to whoever needs to mark a Pending Direct Price line as Validated."),
-              genValidateCodeMsg && h("div",{style:{fontSize:11.5,color:colors.danger,marginTop:6}},genValidateCodeMsg)
+              // 180: the price-check code is given from the banner at the top of this quote (tied to this quote, 24 h).
+              h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:8}},"Price check: approve or give a code from the banner at the top of the quote.")
             )
           )
         ),
@@ -21621,7 +21654,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         h("div",{style:{fontWeight:700,fontSize:14,marginBottom:4}},"This quote isn't fully ready"),
         h("div",{style:{fontSize:12,color:colors.muted,marginBottom:12,lineHeight:1.5}},
           (bomMissing.length||validationMissing.length)
-            ? [bomMissing.length&&"Mark a missing item as an exception, or tick a whole Sl No to skip it — skipping is final and can't be undone here.",validationMissing.length&&"Validate each Pending line below."].filter(Boolean).join(" ")+" Generate unlocks once everything below is resolved — or generate a watermarked draft now."
+            ? [bomMissing.length&&"Mark a missing item as an exception, or tick a whole Sl No to skip it — skipping is final and can't be undone here.",validationMissing.length&&"An Admin has to check the prices below: enter the code he gave for this quote, or press Ask an Admin."].filter(Boolean).join(" ")+" Generate unlocks once everything below is resolved — or generate a watermarked draft now."
             : "Go back and fill in what's missing."
         ),
         h("div",{style:{background:colors.bg,borderRadius:6,padding:"10px 12px",overflowY:"auto",flex:1,marginBottom:14,fontSize:11.5,lineHeight:1.6}},
@@ -21666,30 +21699,28 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               )
             )
           ),
-          validationMissing.length>0 && h("div",{style:{marginTop:bomMissing.length?10:0,paddingTop:bomMissing.length?8:0,borderTop:bomMissing.length?"1px solid "+colors.border:"none",marginBottom:validationMissing.length?6:0}},
-            h("div",{style:{fontWeight:700,padding:"4px 0 8px",borderBottom:"1px solid "+colors.border,marginBottom:6}},"Pending validation"),
-            validationMissing.map((m,mi)=>m.pendingLines.map((line,li)=>{
-              const done = validatedLines.has(line.id);
-              const codeOpen = pendingValidateCodeTarget===line.id;
-              return h("div",{key:"val-"+mi+"-"+li,style:{padding:"6px 0",borderBottom:"1px solid #f0efe8",opacity:done?0.55:1}},
-                h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}},
-                  h("div",null,
-                    h("span",{style:{fontWeight:700}},m.section),done&&h("i",{className:"ti ti-lock",style:{marginLeft:6,fontSize:11,color:colors.mutedLight}}),h("br"),
-                    h("span",{style:{color:colors.mutedLight}},(line.component||"line")+(line.excel_file_name?(" — "+line.excel_file_name):" — no Excel attached"))
-                  ),
-                  !done && (isAdminOrAbove
-                    ? h("button",{onClick:()=>handleValidateClick(line),disabled:pendingValidateBusy===line.id,style:{...btnSmall,fontSize:10,padding:"3px 8px",whiteSpace:"nowrap"}},pendingValidateBusy===line.id?"…":(line.excel_file_name?"✓ Mark validated":"Open Pending Validation"))
-                    : h("button",{onClick:()=>openValidateCodeEntry(line),style:{...btnSmall,fontSize:10,padding:"3px 8px",whiteSpace:"nowrap"}},"Enter code")
-                  )
-                ),
-                !done && !isAdminOrAbove && codeOpen && h("div",{style:{display:"flex",gap:6,alignItems:"center",marginTop:6,flexWrap:"wrap"}},
-                  h("input",{type:"text",value:pendingValidateCodeInput,onChange:e=>setPendingValidateCodeInput(e.target.value),placeholder:"Code",style:{width:80,padding:"5px 7px",fontSize:12,border:"1px solid "+colors.border,borderRadius:4}}),
-                  h("button",{onClick:()=>submitValidateCode(line),disabled:pendingValidateBusy===line.id||!pendingValidateCodeInput.trim(),style:{...btnSmall,fontSize:10,padding:"3px 8px"}},pendingValidateBusy===line.id?"…":"Confirm"),
-                  pendingValidateCodeError && h("span",{style:{fontSize:10.5,color:colors.danger}},pendingValidateCodeError)
+          // 180: one "Needs an Admin" box with ONE code for the whole quote (was a code per line).
+          validationMissing.length>0 && (()=>{
+            const allLines = validationMissing.flatMap(m=>m.pendingLines);
+            const doneAll = allLines.every(l=>validatedLines.has(l.id));
+            return h("div",{"data-testid":"needs-admin",style:{marginTop:bomMissing.length?10:0,marginBottom:6,border:"1px solid #f0d9a8",borderRadius:6,overflow:"hidden"}},
+              h("div",{style:{background:doneAll?"#e6f4f1":"#fff6e5",color:doneAll?"#085041":"#8a5a10",fontWeight:700,padding:"6px 10px"}},doneAll?"✓ Prices checked":"🔒 Needs an Admin — blocks the clean PDF"),
+              h("div",{style:{padding:"6px 10px"}},
+                h("div",null,"Price check: "+allLines.map(l=>"Sl No "+l.item_sl_no+" ("+(l.component||"line")+")").join(", ")),
+                !doneAll && h("div",{style:{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginTop:6}},
+                  h("input",{type:"text","data-testid":"dc-price-code",value:pendingValidateCodeInput,onChange:e=>setPendingValidateCodeInput(e.target.value),placeholder:"Code",style:{width:90,padding:"5px 7px",fontSize:12,border:"1px solid "+colors.border,borderRadius:4}}),
+                  h("button",{onClick:async()=>{ setPendingValidateBusy("all"); setPendingValidateCodeError("");
+                      const r = await priceCheckUseCode(refFilter, pendingValidateCodeInput, user?.username||"unknown");
+                      setPendingValidateBusy(null);
+                      if(!r.ok){ setPendingValidateCodeError(r.reason||"That code didn't work."); return; }
+                      setValidatedLines(s=>new Set([...s, ...allLines.map(l=>l.id)])); setPendingValidateCodeInput(""); refreshReadiness(refFilter); },
+                    disabled:pendingValidateBusy==="all"||!pendingValidateCodeInput.trim(),style:{...btnSmall,fontSize:11,padding:"4px 10px"}},pendingValidateBusy==="all"?"…":"Use code"),
+                  h("button",{onClick:async()=>{ const k = await priceCheckAsk(refFilter, allLines, user?.username, quoteHeaderRow?.customer_name); setPendingValidateCodeError(k?"Sent to "+k+" Admin"+(k===1?"":"s")+".":"No Admin has an Employee record linked. Phone an Admin."); },style:{...btnSmall,fontSize:11,padding:"4px 10px"}},"Ask an Admin"),
+                  pendingValidateCodeError && h("span",{style:{fontSize:10.5,color:/^Sent/.test(pendingValidateCodeError)?"#085041":colors.danger}},pendingValidateCodeError)
                 )
-              );
-            }))
-          ),
+              )
+            );
+          })(),
           otherMissing.length>0 && h("div",{style:{marginTop:(bomMissing.length||validationMissing.length)?10:0,paddingTop:(bomMissing.length||validationMissing.length)?8:0,borderTop:(bomMissing.length||validationMissing.length)?"1px solid "+colors.border:"none"}},
             otherMissing.map((m,i)=>h("div",{key:"other-"+i,style:{marginBottom:6}},
               h("span",{style:{fontWeight:700}},m.section),h("br"),
@@ -21709,9 +21740,11 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         canGenerate && (bomMissing.length>0||validationMissing.length>0) && h("div",{style:{display:"flex",alignItems:"center",gap:6,color:"#0f6e56",fontSize:11.5,marginBottom:10}},
           h("i",{className:"ti ti-check"}),"Everything above is resolved. Generate fires immediately — no further draft confirmation."
         ),
+        !allValidationDone && h("div",{"data-testid":"price-wm-warning",style:{background:"#fbeceb",color:"#a3312a",borderRadius:6,padding:"8px 10px",marginBottom:10,fontSize:12}},
+          h("b",null,"If you generate now"),", the PDF is watermarked ",h("b",null,"PRICE NOT CHECKED – NOT FOR ISSUE")," on every page. Do not send it to the client. Get the code from an Admin first."),
         h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",flexWrap:"wrap"}},
           h("button",{onClick:()=>resolveDraftConfirm("cancel"),style:btnSecondary},"Go back and fix"),
-          !isAdminOrAbove && !canGenerate && h("button",{onClick:()=>resolveDraftConfirm("draft"),style:{...btnSecondary,borderColor:"#d4901f",color:"#8a5a10"}},"Generate draft (watermarked)"),
+          !isAdminOrAbove && !canGenerate && h("button",{onClick:()=>resolveDraftConfirm("draft"),style:{...btnSecondary,borderColor:"#d4901f",color:"#8a5a10"}},(allValidationDone?"Generate draft (watermarked)":"Generate watermarked PDF")),
           h("button",{onClick:()=>resolveDraftConfirm("clean"),disabled:!canGenerate,style:{...btnDanger,opacity:canGenerate?1:0.5,cursor:canGenerate?"pointer":"not-allowed"}},"Generate")
         )
       )
@@ -22017,7 +22050,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           h("div",{style:{background:"#eaf2fb",border:"1px solid #85b7eb",borderRadius:6,padding:"8px 12px",marginBottom:14,fontSize:11.5,color:"#0c447c"}},
             "Amending "+quoteExportRef+" — leave a field blank to keep its current value. Only fill in what's actually changing."
           ),
-          CT_GHOST_FIELDS.map(([field,label,kind])=>
+          CT_GHOST_FIELDS.filter(f=>!(mode==="contract" && f[0]==="validity")).map(([field,label,kind])=>
             h("div",{key:field,style:{display:"flex",alignItems:"center",gap:10,marginBottom:9,fontSize:12}},
               h("div",{style:{width:150,color:colors.muted,fontSize:10.5}},label),
               h("div",{style:{width:170,color:colors.mutedLight,fontSize:11}},ctOriginalData?.[field]||"— not set"),
@@ -22048,7 +22081,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         ) :
         h(React.Fragment,null,
           h("div",{style:{display:"flex",gap:12,marginBottom:12,flexWrap:"wrap"}},
-            fld("Validity",null,h("input",{value:ctData.validity||"",onChange:e=>setCtData(d=>({...d,validity:e.target.value})),style:{...inputStyle,padding:"7px 9px",fontSize:12},placeholder:"e.g. 30 days from quote date"})),
+            mode!=="contract" && fld("Validity",null,h("input",{value:ctData.validity||"",onChange:e=>setCtData(d=>({...d,validity:e.target.value})),style:{...inputStyle,padding:"7px 9px",fontSize:12},placeholder:"e.g. 30 days from quote date"})),
             fld("Payment term",null,h(React.Fragment,null,
               h("input",{list:"ct-payment-terms",value:ctData.payment_term||"",onChange:e=>setCtData(d=>({...d,payment_term:e.target.value})),style:{...inputStyle,padding:"7px 9px",fontSize:12},placeholder:"Type or pick from list"}),
               h("datalist",{id:"ct-payment-terms"},(ctMasters.payment_term||[]).map(v=>h("option",{key:v,value:v})))
@@ -22617,14 +22650,14 @@ function askPriceValidationCode(referenceNumber, lines, newStatus, username){
     const el = (tag, css, text)=>{ const x=document.createElement(tag); if(css) x.style.cssText=css; if(text!=null) x.textContent=text; return x; };
     const back = el("div","position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:5000;display:flex;align-items:center;justify-content:center;padding:16px;font-family:inherit");
     const box = el("div","background:#fff;border-radius:10px;padding:18px 20px;width:460px;max-width:100%;max-height:85vh;overflow:auto;color:#1c1f1a;font-size:13px");
-    box.appendChild(el("div","font-weight:700;font-size:14px;margin-bottom:6px","Price not validated — "+referenceNumber));
+    box.appendChild(el("div","font-weight:700;font-size:14px;margin-bottom:6px","Price check pending — "+referenceNumber));
     box.appendChild(el("div","color:#555;line-height:1.5;margin-bottom:10px",
-      lines.length+" Direct Price line"+(lines.length===1?" is":"s are")+" still Pending validation. The stage can't move to "+newStatus+" until an Admin has checked the price. Enter a Direct Price code from an Admin (Admin → Authorization Codes) and say why; the code validates "+(lines.length===1?"this line":"all these lines")+"."));
+      "An Admin has to check "+lines.length+" price"+(lines.length===1?"":"s")+" on this quote before the stage can move to "+newStatus+". Press Ask an Admin, or enter the price-check code an Admin gave for "+referenceNumber+" (it is also entered in the banner on the quote) and say why."));
     const list = el("ul","margin:0 0 10px 18px;padding:0;color:#333");
     lines.slice(0,12).forEach(l=>list.appendChild(el("li","margin:2px 0","Sl No "+l.item_sl_no+": "+(l.component||"line")+(l.sales_price!=null?" — ₹"+Number(l.sales_price).toLocaleString("en-IN"):""))));
     if(lines.length>12) list.appendChild(el("li","margin:2px 0","… and "+(lines.length-12)+" more"));
     box.appendChild(list);
-    box.appendChild(el("div","font-weight:600;margin:6px 0 3px","One-time code"));
+    box.appendChild(el("div","font-weight:600;margin:6px 0 3px","Price-check code for "+referenceNumber));
     const code = el("input","width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid #bbb;border-radius:6px;font-size:13px"); code.inputMode="numeric"; code.autocomplete="off";
     box.appendChild(code);
     box.appendChild(el("div","font-weight:600;margin:10px 0 3px","Why is the code needed? (required)"));
@@ -22633,9 +22666,11 @@ function askPriceValidationCode(referenceNumber, lines, newStatus, username){
     const err = el("div","color:#a3312a;font-size:12px;min-height:16px;margin-top:6px","");
     box.appendChild(err);
     const row = el("div","display:flex;gap:8px;justify-content:flex-end;margin-top:8px");
-    const ok = el("button","padding:7px 14px;border-radius:6px;border:1px solid #1f5c40;background:#1f5c40;color:#fff;cursor:pointer;font-size:13px","Validate and move stage");
+    const ok = el("button","padding:7px 14px;border-radius:6px;border:1px solid #1f5c40;background:#1f5c40;color:#fff;cursor:pointer;font-size:13px","Use code and move stage");
     const cancel = el("button","padding:7px 14px;border-radius:6px;border:1px solid #bbb;background:#fff;color:#333;cursor:pointer;font-size:13px","Cancel");
-    row.appendChild(ok); row.appendChild(cancel); box.appendChild(row);   // Cancel sits last
+    const askBtn = el("button","padding:7px 14px;border-radius:6px;border:1px solid #d4901f;background:#fff;color:#8a5a10;cursor:pointer;font-size:13px;margin-right:auto","Ask an Admin to check");
+    askBtn.onclick = async()=>{ askBtn.disabled=true; const k = await priceCheckAsk(referenceNumber, lines, username, null); err.style.color="#085041"; err.textContent = k ? "Sent to "+k+" Admin"+(k===1?"":"s")+". The stage stays where it is until the price is checked." : "No Admin has an Employee record linked. Phone an Admin."; };
+    row.appendChild(askBtn); row.appendChild(ok); row.appendChild(cancel); box.appendChild(row);   // Cancel sits last
     back.appendChild(box); document.body.appendChild(back);
     setTimeout(()=>{ try{ code.focus(); }catch(e){} },0);
     const close = (v)=>{ try{ document.body.removeChild(back); }catch(e){} resolve(v); };
@@ -22645,18 +22680,179 @@ function askPriceValidationCode(referenceNumber, lines, newStatus, username){
       if(!c){ err.textContent="Enter the code."; return; }
       if(n.length<5){ err.textContent="Say why the code is needed (a few words at least)."; return; }
       ok.disabled = true; ok.textContent = "Checking…"; err.textContent = "";
-      // A Direct Price code from Admin → Authorization Codes is the normal one;
-      // the readiness check's "validate Pending line" code is accepted too.
-      let res = await verifyAndConsumeAuthCode(c, username||"unknown", "direct_price");
-      if(!res.ok){
-        const g = await verifyAndConsumeGatedPin("validate_pending_line", c, username||"unknown", "estimates", referenceNumber,
-          "Stage move to "+newStatus+" with "+lines.length+" Pending Direct Price line(s) — "+n);
-        if(g.ok) res = g;
-      }
-      if(!res.ok){ ok.disabled=false; ok.textContent="Validate and move stage"; err.textContent=(res.reason||res.message||"That code didn't work.")+" Ask an Admin for a Direct Price code (Admin → Authorization Codes)."; return; }
-      close({ note:n });
+      // 180: the price-check code an Admin gave for THIS quote (an old Direct
+      // Price code or validate-pending-line code still works). It validates
+      // every Pending line itself, so the gate does not validate again.
+      const res = await priceCheckUseCode(referenceNumber, c, username||"unknown");
+      if(!res.ok){ ok.disabled=false; ok.textContent="Use code and move stage"; err.textContent=res.reason||"That code didn't work."; return; }
+      close({ note:n, validated:true });
     };
   });
+}
+// =====================================================================
+// 12 Oct 2026 (180) — PRICE CHECK. A Direct Price (Custom) line is priced by
+// hand, so it waits as Pending until an Admin checks it. The quote now shows
+// that up front (PriceCheckBanner) with ONE place to put the code; until the
+// price is checked every PDF prints "PRICE NOT CHECKED – NOT FOR ISSUE" with a
+// red footer naming the Sl Nos. The user presses Ask an Admin; the Admin
+// approves the price (no code) or gives a code for THAT quote — one use,
+// 24 hours, clears every Pending line on the quote. Codes live in
+// authorization_codes (code_type "price_check", reference_number), so Admin →
+// Authorization Codes lists them; requests in price_check_request_tbl.
+// =====================================================================
+const PRICE_CODE_HOURS = 24;
+async function priceCheckPendingLines(ref){
+  if(!ref) return [];
+  try{
+    const { data, error } = await sb.from("estimate_lines").select("id,reference_number,item_sl_no,sl_no,component,item,sales_price,qty_required,uom,excel_file_name,added_by")
+      .eq("reference_number",ref).eq("validation_status","Pending").order("item_sl_no");
+    if(error) throw error;
+    return data||[];
+  }catch(e){ console.error("Pending price lines failed", e); return []; }
+}
+async function priceCheckAdminNames(){
+  try{
+    const { data: us } = await sb.from("app_users").select("id,username,employee_name,role").in("role",["admin","super_admin"]);
+    const ids = (us||[]).map(u=>u.id).filter(x=>x!=null);
+    const { data: emps } = ids.length ? await sb.from("employee_tbl").select("employee_name,app_user_id").in("app_user_id",ids) : { data:[] };
+    return Array.from(new Set([...(emps||[]).map(e=>e.employee_name), ...(us||[]).map(u=>u.employee_name)].filter(Boolean)));
+  }catch(e){ console.error("Admin names failed", e); return []; }
+}
+async function priceCheckEmployeeOf(username){
+  try{
+    const { data: u } = await sb.from("app_users").select("id,employee_name").eq("username",username).limit(1).maybeSingle();
+    if(!u) return null;
+    const { data: e } = await sb.from("employee_tbl").select("employee_name").eq("app_user_id",u.id).limit(1).maybeSingle();
+    return (e && e.employee_name) || u.employee_name || null;
+  }catch(e){ return null; }
+}
+async function priceCheckRequests(ref){
+  try{
+    const { data, error } = await sb.from("price_check_request_tbl").select("*").eq("reference_number",ref).order("id",{ascending:false}).limit(10);
+    if(error) throw error;
+    return data||[];
+  }catch(e){ return []; }   // table not there yet (SQL not run): the banner still works, without the "asked" line
+}
+const priceLinesText = (lines)=>lines.map(l=>"Sl No "+l.item_sl_no+" · "+(l.component||l.item||"line")+(l.sales_price!=null?" · ₹"+Number(l.sales_price).toLocaleString("en-IN"):"")).join("; ");
+async function priceCheckAsk(ref, lines, username, customer){
+  const n = lines.length;
+  try{ await sb.from("price_check_request_tbl").insert({ reference_number:ref, requested_by:username||"unknown", line_count:n, status:"Open" }); }catch(e){ console.error("Price check request not saved", e); }
+  const who = (await priceCheckEmployeeOf(username)) || username;
+  const msg = "🔎 "+who+" asks you to check "+n+" price"+(n===1?"":"s")+" on "+ref+(customer?" ("+customer+")":"")+": "+priceLinesText(lines)+". Open the quote, or Reports → Pending Validation.";
+  const names = (await priceCheckAdminNames()).filter(x=>x!==who);
+  for(const nm of names){ try{ await sb.from("notifications_tbl").insert({ employee_name:nm, message:msg, notif_type:"price_check" }); }catch(e){} }
+  await logAudit("INSERT","price_check_request_tbl",ref,"Asked an Admin to check "+n+" Direct Price line(s)",username||"unknown",null,null);
+  return names.length;
+}
+async function priceCheckCloseRequests(ref, status, by, note){
+  let reqs = [];
+  try{
+    reqs = (await priceCheckRequests(ref)).filter(r=>r.status==="Open"||r.status==="Code given");
+    if(reqs.length) await sb.from("price_check_request_tbl").update({ status, resolved_by:by, resolved_at:new Date().toISOString(), note:note||null }).in("id",reqs.map(r=>r.id));
+  }catch(e){ console.error("Price check request not closed", e); }
+  return reqs;
+}
+async function priceCheckNotifyRequesters(reqs, message){
+  const users = Array.from(new Set((reqs||[]).map(r=>r.requested_by).filter(Boolean)));
+  for(const u of users){ const nm = await priceCheckEmployeeOf(u); if(nm){ try{ await sb.from("notifications_tbl").insert({ employee_name:nm, message, notif_type:"price_check" }); }catch(e){} } }
+}
+// Marks every given line Validated. by = who signs it off; how = for the audit line.
+async function priceCheckValidate(ref, lines, by, how, actor){
+  if(!lines.length) return { ok:true, count:0 };
+  const { error } = await sb.from("estimate_lines").update({ validation_status:"Validated", validated_by:by, validated_at:new Date().toISOString() }).in("id",lines.map(l=>l.id));
+  if(error) return { ok:false, reason:saveFailedText("Validating the price", error) };
+  const reqs = await priceCheckCloseRequests(ref, how==="code"?"Code used":"Approved", by, null);
+  await priceCheckNotifyRequesters(reqs, "✓ Prices on "+ref+" checked ("+by+"). The next PDF prints clean.");
+  await logAudit("UPDATE","estimate_lines",ref,"Marked "+lines.length+" Direct Price line(s) as Validated "+(how==="code"?"via the quote's price-check code":how)+" — "+priceLinesText(lines),actor||by,null,null);
+  return { ok:true, count:lines.length };
+}
+async function priceCheckGiveCode(ref, lineCount, adminUsername){
+  const code = String(Math.floor(100000+Math.random()*900000));
+  const expires_at = new Date(Date.now()+PRICE_CODE_HOURS*3600*1000).toISOString();
+  const row = { code, code_type:"price_check", generated_by:adminUsername||"unknown", expires_at, reference_number:ref, note:lineCount+" price line(s)", used:false };
+  let { error } = await sb.from("authorization_codes").insert(row);
+  if(error && /reference_number|note/.test(error.message||"")) return { ok:false, reason:"Run structure_price_check_2026-10-12.sql first (the codes table needs its quote column)." };
+  if(error) return { ok:false, reason:error.message };
+  try{
+    const reqs = (await priceCheckRequests(ref)).filter(r=>r.status==="Open");
+    if(reqs.length) await sb.from("price_check_request_tbl").update({ status:"Code given", resolved_by:adminUsername, resolved_at:new Date().toISOString() }).in("id",reqs.map(r=>r.id));
+    await priceCheckNotifyRequesters(reqs, "🔑 "+adminUsername+" gave a price-check code for "+ref+": "+code+" (valid "+PRICE_CODE_HOURS+" hours, this quote only). Enter it in the banner on the quote.");
+  }catch(e){}
+  await logAudit("INSERT","authorization_codes",ref,"Generated a price-check code for "+ref+" ("+lineCount+" line(s), "+PRICE_CODE_HOURS+" h)",adminUsername||"unknown",null,null);
+  return { ok:true, code, expires_at };
+}
+// Checks a code typed on a quote and, if good, validates every Pending line on it.
+async function priceCheckUseCode(ref, codeTyped, username){
+  const c = String(codeTyped||"").trim();
+  if(!c) return { ok:false, reason:"Enter the code." };
+  const lines = await priceCheckPendingLines(ref);
+  const { data } = await sb.from("authorization_codes").select("*").eq("code",c).in("code_type",["price_check","direct_price"]).eq("used",false).limit(1);
+  const row = data && data[0];
+  let by;
+  if(row){
+    if(row.code_type==="price_check" && row.reference_number && row.reference_number!==ref) return { ok:false, reason:"That code is for "+row.reference_number+", not "+ref+"." };
+    if(row.expires_at && new Date(row.expires_at) < new Date()) return { ok:false, reason:"That code has expired. Ask an Admin for a new one." };
+    await sb.from("authorization_codes").update({ used:true, used_by:username, used_at:new Date().toISOString() }).eq("id",row.id);
+    by = (row.generated_by||"Admin")+" (code used by "+(username||"unknown")+")";
+  } else {
+    // a code from the old "validate pending line" generator still works until it is used
+    const g = await verifyAndConsumeGatedPin("validate_pending_line", c, username||"unknown", "estimates", ref, "Price check on "+ref+" ("+lines.length+" line(s))");
+    if(!g.ok) return { ok:false, reason:"That code didn't work. It must be the price-check code an Admin gave for "+ref+"." };
+    by = "Admin (code used by "+(username||"unknown")+")";
+  }
+  return await priceCheckValidate(ref, lines, by, "code", username);
+}
+async function priceCheckSendBack(ref, note, adminUsername){
+  const reqs = await priceCheckCloseRequests(ref, "Sent back", adminUsername, note);
+  await priceCheckNotifyRequesters(reqs, "↩ "+adminUsername+" sent back the price check on "+ref+": "+note);
+  await logAudit("UPDATE","price_check_request_tbl",ref,"Price check sent back — "+note,adminUsername||"unknown",null,null);
+}
+// The banner on the quote / Sale Order screen.
+function PriceCheckBanner({ referenceNumber, user, customerName, refreshKey, onChanged }){
+  const [lines,setLines] = useState([]);
+  const [reqs,setReqs] = useState([]);
+  const [code,setCode] = useState("");
+  const [busy,setBusy] = useState(false);
+  const [msg,setMsg] = useState("");
+  const [given,setGiven] = useState(null);
+  const isAdmin = user?.role==="admin" || user?.role==="super_admin";
+  const load = useCallback(async()=>{
+    const [l, r] = await Promise.all([priceCheckPendingLines(referenceNumber), priceCheckRequests(referenceNumber)]);
+    setLines(l); setReqs(r);
+  },[referenceNumber]);
+  useEffect(()=>{ setGiven(null); setMsg(""); setCode(""); load(); },[load, refreshKey]);
+  if(!referenceNumber || !lines.length) return null;
+  const n = lines.length;
+  const last = reqs[0];
+  const done = async(res)=>{ setBusy(false); if(!res.ok){ setMsg(res.reason||"That didn't work."); return; } setMsg(""); setCode(""); await load(); if(onChanged) onChanged(); };
+  const ask = async()=>{ setBusy(true); setMsg(""); const k = await priceCheckAsk(referenceNumber, lines, user?.username, customerName); setBusy(false); setMsg(k?"Sent to "+k+" Admin"+(k===1?"":"s")+".":"No Admin has an Employee record linked, so nobody got a bell message. Phone an Admin."); load(); };
+  const useIt = async()=>{ setBusy(true); setMsg(""); done(await priceCheckUseCode(referenceNumber, code, user?.username)); };
+  const approve = async()=>{ setBusy(true); done(await priceCheckValidate(referenceNumber, lines, user?.username||"unknown", "by Admin from the quote banner", user?.username)); };
+  const giveCode = async()=>{ setBusy(true); setMsg(""); const r = await priceCheckGiveCode(referenceNumber, n, user?.username); setBusy(false); if(!r.ok){ setMsg(r.reason); return; } setGiven(r); load(); };
+  const sendBack = async()=>{ const note = prompt("Send the price check on "+referenceNumber+" back — say what to change:"); if(!note||!note.trim()) return; setBusy(true); await priceCheckSendBack(referenceNumber, note.trim(), user?.username); setBusy(false); load(); };
+  const status = last && (last.status==="Open" ? "Asked an Admin ("+last.requested_by+", "+fmtDMYTime(last.requested_at)+"). Waiting."
+    : last.status==="Code given" ? "Code given by "+last.resolved_by+" ("+fmtDMYTime(last.resolved_at)+"). Enter it here."
+    : last.status==="Sent back" ? "Sent back by "+last.resolved_by+": "+(last.note||"") : null);
+  return h("div",{"data-testid":"price-check-banner",style:{background:"#fff6e5",border:"1px solid #f0d9a8",borderRadius:8,padding:"10px 12px",marginBottom:12,color:"#5c3d06",fontSize:12.5}},
+    h("div",{style:{fontWeight:700,color:"#8a5a10"}},"⚠ "+(isAdmin?"Price check pending: ":"An Admin has to check ")+n+" price"+(n===1?"":"s")+(isAdmin?"":" before this "+(String(referenceNumber).match(/^\d{6}$/)?"order":"quote")+" can go out.")),
+    h("div",{style:{marginTop:3}},lines.map(l=>h("div",{key:l.id},"Sl No "+l.item_sl_no+" · "+(l.component||l.item||"line")+(l.sales_price!=null?" · ₹"+Number(l.sales_price).toLocaleString("en-IN"):"")+(l.excel_file_name?" · Excel attached":" · no Excel")))),
+    h("div",{style:{fontSize:11.5,color:"#7a5a20",marginTop:4}},"Until then every PDF prints with the watermark ",h("b",null,"PRICE NOT CHECKED – NOT FOR ISSUE"),", and the stage can't move."),
+    status && h("div",{style:{fontSize:11.5,marginTop:4,color:last.status==="Sent back"?"#a3312a":"#5c3d06"}},status),
+    isAdmin
+      ? h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginTop:8}},
+          h("button",{onClick:approve,disabled:busy,style:{...btnPrimary,padding:"5px 12px",fontSize:12}},"✓ Approve "+(n===1?"the price":"all "+n+" prices")),
+          h("button",{onClick:giveCode,disabled:busy,style:{...btnSecondary,padding:"5px 12px",fontSize:12}},"Give a code instead"),
+          last && last.status==="Open" && h("button",{onClick:sendBack,disabled:busy,style:{...btnSecondary,padding:"5px 12px",fontSize:12}},"Send back with a note"))
+      : h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginTop:8}},
+          h("button",{onClick:ask,disabled:busy||(last&&last.status==="Open"),style:{...btnPrimary,padding:"5px 12px",fontSize:12,opacity:(last&&last.status==="Open")?0.6:1}},(last&&last.status==="Open")?"Admin asked":"Ask an Admin to check"),
+          h("span",{style:{fontSize:11.5,color:"#7a5a20"}},"or, if an Admin gave you a code:"),
+          h("input",{"data-testid":"price-code-input",value:code,onChange:e=>setCode(e.target.value),placeholder:"Code",inputMode:"numeric",style:{...inputStyle,width:110,padding:"5px 8px",fontSize:12,letterSpacing:"0.15em"}}),
+          h("button",{onClick:useIt,disabled:busy||!code.trim(),style:{...btnSecondary,padding:"5px 12px",fontSize:12}},busy?"Checking…":"Use code")),
+    given && h("div",{style:{marginTop:8,background:"#e6f4f1",borderRadius:6,padding:"8px 10px",color:"#085041"}},
+      h("div",{style:{fontSize:11}},"Code for "+referenceNumber+" ("+n+" line"+(n===1?"":"s")+"), valid "+PRICE_CODE_HOURS+" hours, one use, this quote only"+(last&&last.status!=="Open"?" — sent to "+(last.requested_by||"the person who asked")+"'s bell":"")+":"),
+      h("div",{style:{fontSize:24,fontWeight:800,letterSpacing:"0.3em"}},given.code)),
+    msg && h("div",{style:{fontSize:11.5,marginTop:6,color:/^Sent/.test(msg)?"#085041":"#a3312a"}},msg)
+  );
 }
 async function gateDirectPriceOnStageMove(referenceNumber, newStatus, changedBy){
   let lines = [];
@@ -22676,6 +22872,7 @@ async function gateDirectPriceOnStageMove(referenceNumber, newStatus, changedBy)
     const r = await askPriceValidationCode(referenceNumber, lines, newStatus, changedBy);
     if(!r) return { blocked:true };
     how = "via one-time code on stage move"; note = r.note;
+    if(r.validated){ await logAudit("UPDATE","estimates",referenceNumber,"Stage move to "+newStatus+" after the price-check code — reason: "+note,changedBy||"unknown",null,null); return { ok:true, validated:lines.length }; }
   }
   const ids = lines.map(l=>l.id);
   const { error: vErr } = await sb.from("estimate_lines").update({validation_status:"Validated",validated_by:changedBy||"unknown",validated_at:new Date().toISOString()}).in("id",ids);
@@ -23339,8 +23536,8 @@ function PdfPreviewModal({ doc:initialDoc, filename, onClose, buildDoc, quickEdi
           h("input",{value:edits.customerName||"",onChange:e=>onEditField("customerName",e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12,marginBottom:10}}),
           h("label",{style:{display:"block",fontSize:11,color:colors.muted,marginBottom:3}},"Delivery"),
           h("input",{value:edits.delivery||"",onChange:e=>onEditField("delivery",e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12,marginBottom:10}}),
-          h("label",{style:{display:"block",fontSize:11,color:colors.muted,marginBottom:3}},"Validity"),
-          h("input",{value:edits.validity||"",onChange:e=>onEditField("validity",e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12,marginBottom:10}}),
+          quickEditDefaults && ("validity" in quickEditDefaults) && h("label",{style:{display:"block",fontSize:11,color:colors.muted,marginBottom:3}},"Validity"),
+          quickEditDefaults && ("validity" in quickEditDefaults) && h("input",{value:edits.validity||"",onChange:e=>onEditField("validity",e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12,marginBottom:10}}),
           h("div",{style:{fontSize:10,color:colors.mutedLight,marginTop:10,lineHeight:1.5}},"Only these fields are quick-editable here. For anything else — line items, pricing, specs — edit the actual quote, then re-open this preview. Customer Name updates the Cover Letter and Annexure II; Delivery/Validity update Annexure I (Commercial Terms).")
         ),
         blobUrl
@@ -23416,7 +23613,7 @@ async function cloneQuoteIntoContract(quoteRef, contractNumber, customerName, us
   let newEstRows = [];
   if(estRows?.length){ const { data: ne, error: neErr } = await sb.from("estimates").insert(estRows.map(r=>({...stripId(r), reference_number:contractNumber}))).select(); if(neErr) throw neErr; newEstRows = ne||[]; }
   if(lineRows?.length){ const { error: lnErr } = await sb.from("estimate_lines").insert(remapEstimateIds(onlyLiveSl(lineRows, estRows), estRows, newEstRows).map(r=>({...stripId(r), reference_number:contractNumber}))); if(lnErr) throw lnErr; }
-  if(termsRows?.length) await sb.from("quote_commercial_terms").insert(termsRows.map(r=>({...stripId(r), reference_number:contractNumber})));
+  if(termsRows?.length) await sb.from("quote_commercial_terms").insert(termsRows.map(r=>({...stripId(r), reference_number:contractNumber, validity:null})));   // 180: no Validity on a Sale Order
   if(noteRows?.length) await sb.from("quote_notes").insert(noteRows.map(r=>({...stripId(r), reference_number:contractNumber})));
   if(onlyLiveSl(dsRows, estRows).length) await sb.from("datasheets").insert(onlyLiveSl(dsRows, estRows).map(r=>({...stripId(r), reference_number:contractNumber})));   // 156
   if(epRows?.length) await sb.from("quote_extra_price_tbl").insert(epRows.map(r=>({...stripId(r), reference_number:contractNumber})));
@@ -25785,6 +25982,10 @@ const MANUAL_SECTIONS = [
         "blocks": [
           {
             "type": "p",
+            "text": "Changed 12 October 2026 (build 180). While any Direct Price line on the quote is still Pending, the PDF prints PRICE NOT CHECKED \u2013 NOT FOR ISSUE across every page, with a red line at the foot naming the Sl Nos. Do not send it to the client. The Generate box shows the price check under Needs an Admin, with one place for the Admin's code. The clean Generate stays off until the price is checked."
+          },
+          {
+            "type": "p",
             "text": "\"Generate Quote PDF\" compiles one document per Quote#: Cover Letter, Index (with real page numbers), Commercial Terms, Notes (its own page, only when the quote has at least one note \u2014 right after Commercial Terms), Price Summary (one row per Sl No), and every Sl No's Datasheet, in that order."
           },
           {
@@ -27645,6 +27846,10 @@ const MANUAL_SECTIONS = [
         "blocks": [
           {
             "type": "p",
+            "text": "Changed 12 October 2026 (build 180). PRICE CHECK: a quote with a Direct Price line still Pending shows an amber banner at the top: which Sl Nos, their prices, and that every PDF prints PRICE NOT CHECKED \u2013 NOT FOR ISSUE until an Admin checks them. Press Ask an Admin to check \u2014 every Admin gets a bell message. The Admin either approves the prices (no code at all) or gives a code for THAT quote: one use, valid 24 hours, clears every Pending line on the quote. Enter the code in the banner on the quote (or in the Generate PDF box). A code for another quote is refused. If the Admin sends it back, his note shows in the banner. ADMINS: the banner has Approve, Give a code instead and Send back; Reports \u2192 Pending Validation groups the lines by quote with the same buttons; pressing Generate on a quote with unchecked prices asks once whether to approve them in your name. Admin \u2192 Authorization Codes lists price-check codes with their quote."
+          },
+          {
+            "type": "p",
             "text": "For a quote line where the BOM/costing was done outside the app (an Excel sheet, or nothing formal at all) \u2014 pick the flagged \u201cCustom \u2014 no BOM\u201d entry from the Model list in the Estimator, or use the \u201cDirect price line\u201d toggle in the Quotes screen's \u201cAdd line item\u201d modal (works on existing quotes and revisions too)."
           },
           {
@@ -27792,6 +27997,10 @@ const MANUAL_SECTIONS = [
         "title": "Creating a Sale Order from a Won Quote",
         "tag": "Sale Order",
         "blocks": [
+          {
+            "type": "p",
+            "text": "Changed 12 October 2026 (build 180). A Sale Order has no Validity: it is not asked for, not shown and not printed on the Order Acceptance. Validity belongs to the offer only."
+          },
           {
             "type": "p",
             "text": "A Sale Order (called a Contract internally) is created from a Quote once it's marked Won \u2014 one Won Quote makes exactly one Contract, and creating it blocks any further amendment on that Quote so the two can never drift apart."
@@ -28488,6 +28697,10 @@ const MANUAL_TA = {
   "blocks": [
    {
     "type": "p",
+    "text": "\u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bcd 12 \u0b85\u0b95\u0bcd\u0b9f\u0bcb\u0baa\u0bb0\u0bcd 2026 (build 180). quote-\u0b87\u0bb2\u0bcd \u0b8f\u0ba4\u0bbe\u0bb5\u0ba4\u0bc1 Direct Price \u0bb5\u0bb0\u0bbf Pending \u0b86\u0b95 \u0b87\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd, PDF-\u0b87\u0ba9\u0bcd \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 \u0baa\u0b95\u0bcd\u0b95\u0ba4\u0bcd\u0ba4\u0bbf\u0bb2\u0bc1\u0bae\u0bcd PRICE NOT CHECKED \u2013 NOT FOR ISSUE \u0bb5\u0bb0\u0bc1\u0bae\u0bcd, \u0b95\u0bc0\u0bb4\u0bc7 \u0b9a\u0bbf\u0bb5\u0baa\u0bcd\u0baa\u0bc1 \u0bb5\u0bb0\u0bbf\u0baf\u0bbf\u0bb2\u0bcd Sl No-\u0b95\u0bcd\u0b95\u0bb3\u0bcd \u0bb5\u0bb0\u0bc1\u0bae\u0bcd. \u0b87\u0ba4\u0bc8 client-\u0b95\u0bcd\u0b95\u0bc1 \u0b85\u0ba9\u0bc1\u0baa\u0bcd\u0baa\u0bbe\u0ba4\u0bc0\u0bb0\u0bcd\u0b95\u0bb3\u0bcd. Generate box-\u0b87\u0bb2\u0bcd price check, Needs an Admin \u0b8e\u0ba9\u0bcd\u0bb1 \u0baa\u0b95\u0bc1\u0ba4\u0bbf\u0baf\u0bbf\u0bb2\u0bcd, Admin code-\u0b95\u0bcd\u0b95\u0bc1 \u0b92\u0bb0\u0bc7 \u0b87\u0b9f\u0ba4\u0bcd\u0ba4\u0bc1\u0b9f\u0ba9\u0bcd \u0bb5\u0bb0\u0bc1\u0bae\u0bcd. \u0bb5\u0bbf\u0bb2\u0bc8 \u0b9a\u0bb0\u0bbf\u0baa\u0bbe\u0bb0\u0bcd\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0bb5\u0bb0\u0bc8 \u0b9a\u0bc1\u0ba4\u0bcd\u0ba4\u0bae\u0bbe\u0ba9 Generate \u0b87\u0baf\u0b99\u0bcd\u0b95\u0bbe\u0ba4\u0bc1."
+   },
+   {
+    "type": "p",
     "text": "\"Generate Quote PDF\" \u0b92\u0bb0\u0bc1 Quote#-\u0b95\u0bcd\u0b95\u0bc1 \u0b92\u0bb0\u0bc1 \u0b86\u0bb5\u0ba3\u0bae\u0bcd \u0b89\u0bb0\u0bc1\u0bb5\u0bbe\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd: Cover Letter, Index (\u0baa\u0b95\u0bcd\u0b95 \u0b8e\u0ba3\u0bcd\u0b95\u0bb3\u0bc1\u0b9f\u0ba9\u0bcd), Commercial Terms, Notes (\u0b95\u0bc1\u0bb1\u0bbf\u0baa\u0bcd\u0baa\u0bc1 \u0b87\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd), Price Summary (\u0b92\u0bb0\u0bc1 Sl No-\u0b95\u0bcd\u0b95\u0bc1 \u0b92\u0bb0\u0bc1 \u0bb5\u0bb0\u0bbf), \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 Sl No-\u0bb5\u0bbf\u0ba9\u0bcd Datasheet."
    },
    {
@@ -28511,12 +28724,16 @@ const MANUAL_TA = {
     "text": "Quotes screen-\u0b87\u0bb2\u0bcd \u0b87\u0bb0\u0ba3\u0bcd\u0b9f\u0bc1 \"Go to Cart\" button-\u0b95\u0bb3\u0bcd \u0b89\u0bb3\u0bcd\u0bb3\u0ba9 \u2014 \u0b87\u0bb0\u0ba3\u0bcd\u0b9f\u0bc1\u0bae\u0bcd \u0b92\u0bb0\u0bc7 \u0bb5\u0bc7\u0bb2\u0bc8 \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bc1\u0bae\u0bcd. \u0b85\u0bb0\u0bc1\u0b95\u0bbf\u0bb2\u0bcd \u0b89\u0bb3\u0bcd\u0bb3\u0ba4\u0bc8\u0baa\u0bcd \u0baa\u0baf\u0ba9\u0bcd\u0baa\u0b9f\u0bc1\u0ba4\u0bcd\u0ba4\u0bc1\u0b99\u0bcd\u0b95\u0bb3\u0bcd."
    }
   ],
-  "en_sig": "3c85c1a2"
+  "en_sig": "e7ce233f"
  },
  "direct_price_line": {
   "title": "Direct Price \u0bb5\u0bb0\u0bbf\u0b95\u0bb3\u0bcd \u0bae\u0bb1\u0bcd\u0bb1\u0bc1\u0bae\u0bcd Pending Validation",
   "tag": "Estimator / Quotes",
   "blocks": [
+   {
+    "type": "p",
+    "text": "\u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bcd 12 \u0b85\u0b95\u0bcd\u0b9f\u0bcb\u0baa\u0bb0\u0bcd 2026 (build 180). PRICE CHECK: Pending \u0ba8\u0bbf\u0bb2\u0bc8\u0baf\u0bbf\u0bb2\u0bcd Direct Price \u0bb5\u0bb0\u0bbf \u0b89\u0bb3\u0bcd\u0bb3 quote-\u0b87\u0ba9\u0bcd \u0bae\u0bc7\u0bb2\u0bc7 amber banner \u0bb5\u0bb0\u0bc1\u0bae\u0bcd: \u0b8e\u0ba8\u0bcd\u0ba4 Sl No, \u0b85\u0ba4\u0ba9\u0bcd \u0bb5\u0bbf\u0bb2\u0bc8, Admin \u0b9a\u0bb0\u0bbf\u0baa\u0bbe\u0bb0\u0bcd\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0bb5\u0bb0\u0bc8 \u0b92\u0bb5\u0bcd\u0bb5\u0bca\u0bb0\u0bc1 PDF-\u0b87\u0bb2\u0bc1\u0bae\u0bcd PRICE NOT CHECKED \u2013 NOT FOR ISSUE \u0bb5\u0bb0\u0bc1\u0bae\u0bcd. Ask an Admin to check \u0b85\u0bb4\u0bc1\u0ba4\u0bcd\u0ba4\u0bc1\u0b99\u0bcd\u0b95\u0bb3\u0bcd \u2014 \u0b8e\u0bb2\u0bcd\u0bb2\u0bbe Admin-\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd bell \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbf \u0baa\u0bcb\u0b95\u0bc1\u0bae\u0bcd. Admin \u0bb5\u0bbf\u0bb2\u0bc8\u0baf\u0bc8 Approve \u0b9a\u0bc6\u0baf\u0bcd\u0bb5\u0bbe\u0bb0\u0bcd (code \u0ba4\u0bc7\u0bb5\u0bc8\u0baf\u0bbf\u0bb2\u0bcd\u0bb2\u0bc8), \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 \u0b85\u0ba8\u0bcd\u0ba4 quote-\u0b95\u0bcd\u0b95\u0bc1 \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd \u0b92\u0bb0\u0bc1 code \u0ba4\u0bb0\u0bc1\u0bb5\u0bbe\u0bb0\u0bcd: \u0b92\u0bb0\u0bc1\u0bae\u0bc1\u0bb1\u0bc8 \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd, 24 \u0bae\u0ba3\u0bbf \u0ba8\u0bc7\u0bb0\u0bae\u0bcd, quote-\u0b87\u0ba9\u0bcd \u0b8e\u0bb2\u0bcd\u0bb2\u0bbe Pending \u0bb5\u0bb0\u0bbf\u0b95\u0bb3\u0bc8\u0baf\u0bc1\u0bae\u0bcd \u0b9a\u0bb0\u0bbf\u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bc1\u0bae\u0bcd. Code-\u0b90 quote-\u0b87\u0ba9\u0bcd banner-\u0b87\u0bb2\u0bcd (\u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 Generate PDF box-\u0b87\u0bb2\u0bcd) \u0baa\u0bcb\u0b9f\u0bc1\u0b99\u0bcd\u0b95\u0bb3\u0bcd. \u0bb5\u0bc7\u0bb1\u0bc1 quote-\u0b87\u0ba9\u0bcd code \u0b8f\u0bb1\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bbe\u0ba4\u0bc1. Admin \u0ba4\u0bbf\u0bb0\u0bc1\u0baa\u0bcd\u0baa\u0bbf \u0b85\u0ba9\u0bc1\u0baa\u0bcd\u0baa\u0bbf\u0ba9\u0bbe\u0bb2\u0bcd \u0b85\u0bb5\u0bb0\u0ba4\u0bc1 \u0b95\u0bc1\u0bb1\u0bbf\u0baa\u0bcd\u0baa\u0bc1 banner-\u0b87\u0bb2\u0bcd \u0ba4\u0bc6\u0bb0\u0bbf\u0baf\u0bc1\u0bae\u0bcd. ADMIN: banner-\u0b87\u0bb2\u0bcd Approve, Give a code instead, Send back \u0b89\u0bb3\u0bcd\u0bb3\u0ba9; Reports \u2192 Pending Validation quote \u0bb5\u0bbe\u0bb0\u0bbf\u0baf\u0bbe\u0b95 \u0b85\u0ba4\u0bc7 \u0baa\u0bca\u0ba4\u0bcd\u0ba4\u0bbe\u0ba9\u0bcd\u0b95\u0bb3\u0bc1\u0b9f\u0ba9\u0bcd \u0b95\u0bbe\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd; \u0b9a\u0bb0\u0bbf\u0baa\u0bbe\u0bb0\u0bcd\u0b95\u0bcd\u0b95\u0bbe\u0ba4 \u0bb5\u0bbf\u0bb2\u0bc8\u0baf\u0bc1\u0b9f\u0ba9\u0bcd Generate \u0b85\u0bb4\u0bc1\u0ba4\u0bcd\u0ba4\u0bbf\u0ba9\u0bbe\u0bb2\u0bcd \u0b89\u0b99\u0bcd\u0b95\u0bb3\u0bcd \u0baa\u0bc6\u0baf\u0bb0\u0bbf\u0bb2\u0bcd approve \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bb5\u0bbe \u0b8e\u0ba9\u0bcd\u0bb1\u0bc1 \u0b92\u0bb0\u0bc1\u0bae\u0bc1\u0bb1\u0bc8 \u0b95\u0bc7\u0b9f\u0bcd\u0b95\u0bc1\u0bae\u0bcd. Admin \u2192 Authorization Codes-\u0b87\u0bb2\u0bcd price-check code-\u0b95\u0bb3\u0bcd quote \u0b8e\u0ba3\u0bcd\u0ba3\u0bc1\u0b9f\u0ba9\u0bcd \u0bb5\u0bb0\u0bc1\u0bae\u0bcd."
+   },
    {
     "type": "p",
     "text": "BOM/costing app-\u0b95\u0bcd\u0b95\u0bc1 \u0bb5\u0bc6\u0bb3\u0bbf\u0baf\u0bc7 (Excel-\u0b87\u0bb2\u0bcd, \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 \u0bae\u0bc1\u0bb1\u0bc8\u0baf\u0bbe\u0b95 \u0b87\u0bb2\u0bcd\u0bb2\u0bbe\u0bae\u0bb2\u0bcd) \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0baa\u0bcd\u0baa\u0b9f\u0bcd\u0b9f \u0b95\u0bca\u0b9f\u0bcd\u0b9f\u0bc7\u0bb7\u0ba9\u0bcd \u0bb5\u0bb0\u0bbf\u0b95\u0bcd\u0b95\u0bc1 \u2014 Estimator-\u0b87\u0bb2\u0bcd Model list-\u0b87\u0bb2\u0bcd \"Custom \u2014 no BOM\" \u0ba4\u0bc7\u0bb0\u0bcd\u0ba8\u0bcd\u0ba4\u0bc6\u0b9f\u0bc1\u0b95\u0bcd\u0b95\u0bb5\u0bc1\u0bae\u0bcd, \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 Quotes screen-\u0b87\u0ba9\u0bcd \"Add line item\"-\u0b87\u0bb2\u0bcd \"Direct price line\" toggle \u0baa\u0baf\u0ba9\u0bcd\u0baa\u0b9f\u0bc1\u0ba4\u0bcd\u0ba4\u0bb5\u0bc1\u0bae\u0bcd."
@@ -28532,7 +28749,7 @@ const MANUAL_TA = {
     ]
    }
   ],
-  "en_sig": "83a1e4a7"
+  "en_sig": "1fc99135"
  },
  "log_followups": {
   "title": "Log Follow-ups \u2014 \u0ba4\u0bbf\u0ba9\u0b9a\u0bb0\u0bbf \u0baa\u0ba4\u0bbf\u0bb5\u0bc1",
@@ -30526,6 +30743,10 @@ const MANUAL_TA = {
   "blocks": [
    {
     "type": "p",
+    "text": "\u0bae\u0bbe\u0bb1\u0bcd\u0bb1\u0bae\u0bcd 12 \u0b85\u0b95\u0bcd\u0b9f\u0bcb\u0baa\u0bb0\u0bcd 2026 (build 180). Sale Order-\u0b87\u0bb2\u0bcd Validity \u0b87\u0bb2\u0bcd\u0bb2\u0bc8: \u0b95\u0bc7\u0b9f\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bbe\u0ba4\u0bc1, \u0b95\u0bbe\u0b9f\u0bcd\u0b9f\u0baa\u0bcd\u0baa\u0b9f\u0bbe\u0ba4\u0bc1, Order Acceptance-\u0b87\u0bb2\u0bcd \u0b85\u0b9a\u0bcd\u0b9a\u0bbe\u0b95\u0bbe\u0ba4\u0bc1. Validity offer-\u0b95\u0bcd\u0b95\u0bc1 \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bcd."
+   },
+   {
+    "type": "p",
     "text": "\u0b92\u0bb0\u0bc1 Quote Won \u0b8e\u0ba9\u0bcd\u0bb1\u0bc1 \u0b95\u0bc1\u0bb1\u0bbf\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bcd\u0b9f\u0ba4\u0bc1\u0bae\u0bcd \u0b85\u0ba4\u0bbf\u0bb2\u0bbf\u0bb0\u0bc1\u0ba8\u0bcd\u0ba4\u0bc1 Sale Order (\u0b89\u0bb3\u0bcd\u0bb3\u0bc7 Contract \u0b8e\u0ba9\u0bcd\u0bb1\u0bc1 \u0b85\u0bb4\u0bc8\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bc1\u0bae\u0bcd) \u0b89\u0bb0\u0bc1\u0bb5\u0bbe\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bc1\u0bae\u0bcd \u2014 \u0b92\u0bb0\u0bc1 Won Quote \u0b9a\u0bb0\u0bbf\u0baf\u0bbe\u0b95 \u0b92\u0bb0\u0bc1 Contract-\u0b90 \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bc7 \u0b89\u0bb0\u0bc1\u0bb5\u0bbe\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd; \u0b85\u0ba4\u0bc8 \u0b89\u0bb0\u0bc1\u0bb5\u0bbe\u0b95\u0bcd\u0b95\u0bbf\u0baf\u0ba4\u0bc1\u0bae\u0bcd \u0b85\u0ba8\u0bcd\u0ba4 Quote-\u0b87\u0bb2\u0bcd \u0bae\u0bc7\u0bb1\u0bcd\u0b95\u0bca\u0ba3\u0bcd\u0b9f\u0bc1 amendment \u0b8e\u0ba4\u0bc1\u0bb5\u0bc1\u0bae\u0bcd \u0b9a\u0bc6\u0baf\u0bcd\u0baf \u0bae\u0bc1\u0b9f\u0bbf\u0baf\u0bbe\u0ba4\u0bc1, \u0b85\u0ba4\u0ba9\u0bbe\u0bb2\u0bcd \u0b87\u0bb0\u0ba3\u0bcd\u0b9f\u0bc1\u0bae\u0bcd \u0b92\u0bb0\u0bc1\u0baa\u0bcb\u0ba4\u0bc1\u0bae\u0bcd \u0bb5\u0bc7\u0bb1\u0bc1\u0baa\u0b9f\u0bbe\u0ba4\u0bc1."
    },
    {
@@ -30541,7 +30762,7 @@ const MANUAL_TA = {
     "text": "Contract \u0b89\u0bb0\u0bc1\u0bb5\u0bbe\u0ba9 \u0b89\u0b9f\u0ba9\u0bc7 Sale Order Details prompt \u0ba4\u0bbe\u0ba9\u0bbe\u0b95\u0ba4\u0bcd \u0ba4\u0bcb\u0ba9\u0bcd\u0bb1\u0bc1\u0bae\u0bcd \u2014 Drawings, QAP Conditions, Inspection By, Late Delivery, Billing/Shipping Address, Signatory. \"Fill in later\" \u0ba4\u0bc7\u0bb0\u0bcd\u0bb5\u0bc1 \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bb2\u0bbe\u0bae\u0bcd, \u0b86\u0ba9\u0bbe\u0bb2\u0bcd \u0bae\u0bc1\u0b9f\u0bbf\u0b95\u0bcd\u0b95\u0bc1\u0bae\u0bcd \u0bb5\u0bb0\u0bc8 \u0b85\u0ba4\u0bc1 \u0bae\u0bc0\u0ba3\u0bcd\u0b9f\u0bc1\u0bae\u0bcd \u0bb5\u0bb0\u0bc1\u0bae\u0bcd."
    }
   ],
-  "en_sig": "b0ff9e8a"
+  "en_sig": "ca705d21"
  },
  "so_mandatory_fields": {
   "title": "Sale Order \u0b95\u0b9f\u0bcd\u0b9f\u0bbe\u0baf fields \u0bae\u0bb1\u0bcd\u0bb1\u0bc1\u0bae\u0bcd Billing Address",
@@ -30988,6 +31209,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"12 Oct 2026 (180)", summary:"Built on 2026-10-12T02:15:00Z (build 179). SQL: structure_price_check_2026-10-12.sql (BOTH companies; safe to re-run). PRICE CHECK: a quote or Sale Order with a Direct Price line still Pending shows PriceCheckBanner at the top (the Sl Nos, their prices, and that every PDF prints PRICE NOT CHECKED \u2013 NOT FOR ISSUE). User: Ask an Admin to check (bell to every Admin, request in price_check_request_tbl) and ONE code box. Admin: Approve (no code), Give a code instead (authorization_codes code_type price_check with reference_number; one use; 24 hours; this quote only; sent to the requester's bell), Send back with a note. The code clears every Pending line on the quote, signed \u201c<admin> (code used by <user>)\u201d; a code for another quote is refused; an old Direct Price or validate-pending-line code still works once. PDF: while any price is Pending every page is watermarked PRICE NOT CHECKED / NOT FOR ISSUE with a red band naming the Sl Nos (DRAFT is added only when something else is also missing); merged pages carry it too. The Generate box groups it under Needs an Admin with one code box and a red warning; the clean Generate stays off. An Admin pressing Generate gets one confirm that approves the prices in his name (was: Admins bypassed and printed clean). Stage move: the same quote code, plus Ask an Admin, in the stage dialog. Reports \u2192 Pending Validation groups lines by quote (asked by, Approve all, Give a code, Send back). Authorization Codes shows the quote. The quote screen's \u201cGenerate validate-pending-line code\u201d button is gone. SALE ORDER: Validity removed completely \u2014 not required, not on the terms form or amendment form, not on Annexure I, not in Quick edits; copying a quote into a Sale Order no longer carries it; the SQL clears it on existing Sale Orders." },
   { date:"12 Oct 2026 (179)", summary:"Built on 2026-10-12T01:00:00Z. No SQL. TASK ASSIGNMENT BOARD: every list (the Unassigned pile and each person) gets its own + New task, opening the same New task dialog with Assigned to filled from the list (pile = Unassigned, due date as the dialog asks). Who sees it: Super Admin every list; an Admin every list of their HOME department's board; the board's approvers (task_approver_tbl and post auto-approvers) every list of that board including the pile; each person their own list. The header + New task is unchanged. + ADD PERSON'S LIST (Super Admin any board; Admin their home department's board): pick any employee not on the board, optionally Can approve on this board; writes board_member_tbl (and task_approver_tbl), logged in the Audit Log, and Setup \u2192 Tasks \u2192 Board Membership shows it. \u2715 on a list added this way (Extra) takes the person off the board: board_member_tbl / second_department / approver row removed, their open cards from that board go back to its Unassigned pile with a history line, and the board's approvers get a bell message \u2014 the same as Board Membership. Home and Post lists can't be removed here. Manual updated." },
   { date:"12 Oct 2026 (178)", summary:"Built on 2026-10-12T01:00:00Z, on top of 08:30 (build 176). SQL: structure_tasks_handover_2026-10-12.sql (BOTH companies; safe to re-run; adds only). CLIENT NAME: every card with a contract number shows the contract and the first two words of the client (Triveni Engineering Works \u2192 Triveni Engineering; one- and two-word names in full; full name on hover), on the Document Control board and the Task boards. Contract pick lists (Document Control report and contract view, Procurement reports, procurement upload) show \u201cnumber \u2013 full client name\u201d and can be searched by number or any part of the name. Name = Sale Order customer, else the Contract Register client. BUTTONS BY ACTION: document cards no longer say \u2713 Completed. Never sent \u2192 Send to client \u25b8 (blue); resubmission \u2192 Send resubmission \u25b8 (outlined in the card colour); with the client \u2192 Log client reply \u25b8 (records the code, the returned file and the date as Rev In). Same on document task cards. Ordinary task cards keep \u2713 Completed; approvers keep \u2713 Approve / \u21a9 Send back. FULL HOLD: grey Status to confirm cards in a Full Hold category now count in the Full Hold counts. HAND OVER WORK (Tasks and HR): Super Admin, Admin, HR & Admin Manager move one person's open task cards, document cards, document requests, approver roles and posts to another, with a reason (new master Hand-over Reasons) and a note; customers listed unticked; per-item untick; history line on each card; bell message to both; 7-day undo of whatever has not moved since; Left the company offers to switch off the login (Admin). TASKS: Urgent flag (top of every list); Waiting on <person> \u2013 <what> (not overdue while waiting; bell message to a colleague); repeating cards (day / working day / week / month / quarter / year, optional end date; next copy made when the latest is due); comments with @name (bell message); one in-app reminder a day in the bell (overdue, due today, urgent, waiting on you; approvers also get overdue per person); Workload tab (open cards per person by due week). No email." },
   { date:"11 Oct 2026 (176)", summary:"Built on 2026-10-11T08:30:00Z, on top of 08:00 (which carries build 175 and its SQL). No new SQL. STATUS LABELS ON DOCUMENT CARDS: a coloured strip across the top of every card on the Document Control board, and on each open document task card on the Task boards, with a short word. Red \u2014 Our action (never sent); Pink \u2014 Comments \u2013 resubmit (Code 3 / returned); Yellow \u2014 With client; Code 2 \u2013 ours (Code 2 proceed, resubmission pending): yellow for the first half, fading through pink to red; Code 2 \u2013 with client (resubmission done): yellow fading to green; Hold \u2013 ours (Production Hold, resubmission pending): pink fading to red; Hold \u2013 with client (resubmission done): yellow fading to red; Green \u2014 Approved. Status to confirm cards have no label and a grey card. The label follows the list and whose move it is, so a status added to the master later gets the right label by itself." },
@@ -32665,11 +32887,12 @@ function AuthorizationCodesScreen({ user }){
       loading ? h("div",{style:{padding:16,fontSize:12,color:colors.mutedLight}},"Loading…") :
       h("table",{style:{width:"100%",fontSize:12,borderCollapse:"collapse"}},
         h("thead",null,h("tr",{style:{background:"#f4f2ea"}},
-          ["Code","Type","Generated by","Generated at","Status","Used by"].map(hd=>h("th",{key:hd,style:{textAlign:"left",padding:"7px 10px",fontWeight:700}},hd))
+          ["Code","Type","For quote","Generated by","Generated at","Status","Used by"].map(hd=>h("th",{key:hd,style:{textAlign:"left",padding:"7px 10px",fontWeight:700}},hd))
         )),
         h("tbody",null,codes.map(c=>{ const st=statusOf(c); return h("tr",{key:c.id,style:{borderTop:"1px solid #f0efe8"}},
           h("td",{style:{padding:"6px 10px",fontFamily:"monospace"}},c.code),
-          h("td",{style:{padding:"6px 10px",fontWeight:600,color:c.code_type==="delete"?colors.danger:colors.text}},c.code_type),
+          h("td",{style:{padding:"6px 10px",fontWeight:600,color:c.code_type==="delete"?colors.danger:colors.text}},c.code_type==="price_check"?"price check":c.code_type),
+          h("td",{style:{padding:"6px 10px"}},c.reference_number ? c.reference_number+(c.note?" · "+c.note:"") : "—"),
           h("td",{style:{padding:"6px 10px"}},c.generated_by),
           h("td",{style:{padding:"6px 10px",color:colors.muted}},fmtDMYTime(c.generated_at)),
           h("td",{style:{padding:"6px 10px",color:st.color,fontWeight:600}},st.label),
@@ -42572,8 +42795,36 @@ function PendingValidationScreen({ user, onOpenQuote }){
       : { data: [] };
     const custByRefSl = new Map((ests||[]).map(e=>[e.reference_number+"||"+e.item_sl_no, e.customer_name]));
     setRows((lines||[]).map(l=>({...l, customer_name: custByRefSl.get(l.reference_number+"||"+l.item_sl_no)||""})));
+    // 180: who asked, per quote
+    try{
+      const { data: rq } = refNums.length ? await sb.from("price_check_request_tbl").select("*").in("reference_number",refNums).order("id",{ascending:false}) : { data:[] };
+      const m = {}; (rq||[]).forEach(r=>{ if(!m[r.reference_number]) m[r.reference_number]=r; }); setReqByRef(m);
+    }catch(e){ setReqByRef({}); }
     setLoading(false);
   },[]);
+  const [reqByRef,setReqByRef] = useState({});
+  const [codeByRef,setCodeByRef] = useState({});
+  const [refBusy,setRefBusy] = useState(null);
+  const approveRef = async(ref)=>{
+    const ls = rows.filter(r=>r.reference_number===ref);
+    setRefBusy(ref);
+    const r = await priceCheckValidate(ref, ls, user.username, "by Admin from Pending Validation", user.username);
+    setRefBusy(null);
+    if(!r.ok){ alert(r.reason); return; }
+    setRows(rs=>rs.filter(x=>x.reference_number!==ref));
+  };
+  const giveCodeRef = async(ref)=>{
+    setRefBusy(ref);
+    const r = await priceCheckGiveCode(ref, rows.filter(x=>x.reference_number===ref).length, user.username);
+    setRefBusy(null);
+    if(!r.ok){ alert(r.reason); return; }
+    setCodeByRef(m=>({...m,[ref]:r.code}));
+  };
+  const sendBackRef = async(ref)=>{
+    const note = prompt("Send the price check on "+ref+" back — say what to change:");
+    if(!note||!note.trim()) return;
+    setRefBusy(ref); await priceCheckSendBack(ref, note.trim(), user.username); setRefBusy(null); load();
+  };
   useEffect(()=>{ load(); },[load]);
 
   const markValidated = async(row)=>{
@@ -42604,11 +42855,24 @@ function PendingValidationScreen({ user, onOpenQuote }){
 
   return h("div",{style:{padding:"20px 24px"}},
     h("div",{style:{fontWeight:700,fontSize:16,marginBottom:4}},"Pending Validation ("+rows.length+")"),
-    h("div",{style:{fontSize:11.5,color:colors.mutedLight,marginBottom:14}},"Direct Price lines with no traceable BOM costing. Each blocks its Quote#'s PDF until an Admin or Super Admin marks it Validated."),
+    h("div",{style:{fontSize:11.5,color:colors.mutedLight,marginBottom:14}},"Direct Price lines with no traceable BOM costing. Until an Admin checks the price, every PDF of that quote prints PRICE NOT CHECKED – NOT FOR ISSUE and its stage can't move. Approve here, or give a code for that quote (one use, "+PRICE_CODE_HOURS+" hours)."),
     loading?h("div",{style:{fontSize:12,color:colors.mutedLight}},"Loading…"):
     rows.length===0?h("div",{style:{fontSize:12,color:colors.mutedLight}},"Nothing pending."):
     h("div",{style:{display:"flex",flexDirection:"column",gap:10}},
-      rows.map(row=>h("div",{key:lineKey(row),style:{border:"1px solid "+colors.border,borderRadius:6,padding:"10px 12px"}},
+      Array.from(new Set(rows.map(r=>r.reference_number))).map(ref=>{ const ls = rows.filter(r=>r.reference_number===ref); const rq = reqByRef[ref];
+        return h("div",{key:"grp-"+ref,style:{border:"1px solid #f0d9a8",background:"#fffaf0",borderRadius:8,padding:"10px 12px"}},
+          h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap"}},
+            h("div",null,
+              h("div",{style:{fontSize:13.5,fontWeight:700}},ref+(ls[0].customer_name?" — "+ls[0].customer_name:"")+" · "+ls.length+" price"+(ls.length===1?"":"s")),
+              rq && h("div",{style:{fontSize:11.5,color:rq.status==="Sent back"?colors.danger:colors.muted}},
+                rq.status==="Open" ? "Asked by "+rq.requested_by+", "+fmtDMYTime(rq.requested_at) : rq.status+" — "+(rq.resolved_by||"")+(rq.note?": "+rq.note:""))),
+            isAdminOrAbove && h("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}},
+              h("button",{onClick:()=>approveRef(ref),disabled:refBusy===ref,style:{...btnSmall,fontSize:11,background:"#1c8c56",color:"#fff"}},"✓ Approve "+(ls.length===1?"":"all "+ls.length)),
+              h("button",{onClick:()=>giveCodeRef(ref),disabled:refBusy===ref,style:{...btnSmall,fontSize:11}},"Give a code"),
+              rq && rq.status==="Open" && h("button",{onClick:()=>sendBackRef(ref),disabled:refBusy===ref,style:{...btnSmall,fontSize:11}},"Send back"))),
+          codeByRef[ref] && h("div",{style:{marginTop:6,background:"#e6f4f1",borderRadius:6,padding:"6px 10px",color:"#085041",fontSize:11.5}},"Code for "+ref+" (one use, "+PRICE_CODE_HOURS+" h, this quote only"+(rq?", sent to "+rq.requested_by+"'s bell":"")+"): ",h("b",{style:{fontSize:18,letterSpacing:"0.25em"}},codeByRef[ref])),
+          h("div",{style:{display:"flex",flexDirection:"column",gap:8,marginTop:8}},
+      ls.map(row=>h("div",{key:lineKey(row),style:{border:"1px solid "+colors.border,borderRadius:6,padding:"10px 12px"}},
         h("div",{style:{fontSize:13,fontWeight:600,marginBottom:2}},row.reference_number+" / Sl No "+row.item_sl_no+(row.customer_name?" — "+row.customer_name:"")),
         h("div",{style:{fontSize:12.5,marginBottom:4}},row.component),
         // 25 Sep 2026 — the price is per item, so it reads "INR x each", and
@@ -42629,7 +42893,7 @@ function PendingValidationScreen({ user, onOpenQuote }){
         isAdminOrAbove && h("button",{onClick:()=>markValidated(row),disabled:busyId===lineKey(row),style:{...btnSmall,fontSize:11,background:"#1c8c56",color:"#fff"}},busyId===lineKey(row)?"Working…":"✓ Mark validated"),
         onOpenQuote && h("button",{onClick:()=>onOpenQuote(row.reference_number,row.item_sl_no),style:{...btnSmall,fontSize:11,marginLeft:8}},"Open Quote#"),
         !isAdminOrAbove && h("div",{style:{fontSize:11,color:colors.mutedLight}},"Only an Admin or Super Admin can mark this validated.")
-      ))
+      ))));})
     )
   );
 }
