@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-13T03:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-14T08:45:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -4911,7 +4911,7 @@ function MasterEditor({ tableKey, user }) {
     return h("input",{type:isNumeric?"number":"text",autoComplete:"off",value:addDraft[col]??"",onChange:e=>setAddDraft(d=>({...d,[col]:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12},placeholder:col.replace(/_/g," ")+"…"});
   };
 
-  const filteredRows = useMemo(()=>{ if(!search) return rows; const s=search.toLowerCase(); return rows.filter(r=>tableDef.columns.some(c=>String(r[c]??"").toLowerCase().includes(s))); },[rows,search,tableDef]);
+  const filteredRows = useMemo(()=>{ if(!search) return rows; const s=search.toLowerCase(); return rows.filter(r=>tableDef.columns.some(c=>hHas(r[c]??"", s))); },[rows,search,tableDef]);
 
   const mrFilteredRows = useMemo(()=>{
     if(tableKey!=="material_rates") return [];
@@ -13174,8 +13174,28 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
 
   const unissuedSlNos = contractSlNos.filter(e=>!woSlNos.some(w=>String(w.item_sl_no)===String(e.item_sl_no)));
   const readyForGoAhead = isReadyForGoAhead(holdOpen);
+  // 184c: Production BOM — asked at production release; the link sits on the Sale Order.
+  const [pbom,setPbom] = useState(null);        // {link, by, at, answer} | null (column not there)
+  const [bomAsk,setBomAsk] = useState(null);    // {toState, yes, link, err, resolve}
+  const loadPbom = useCallback(async()=>{
+    if(!contractInfo?.contract_number) return;
+    const { data, error } = await sb.from("sale_order_tbl").select("prod_bom_link,prod_bom_link_by,prod_bom_link_at,prod_bom_answer").eq("contract_number",contractInfo.contract_number).maybeSingle();
+    setPbom(error ? null : { link:(data&&data.prod_bom_link)||"", by:(data&&data.prod_bom_link_by)||"", at:(data&&data.prod_bom_link_at)||"", answer:(data&&data.prod_bom_answer)||"" });
+  },[contractInfo?.contract_number]);
+  useEffect(()=>{ loadPbom(); },[loadPbom]);
+  const askProdBom = (toState)=> new Promise(res=> setBomAsk({ toState, yes:null, link:"", err:"", resolve:res }));
+  const pbomLinkOk = (v)=> /^https?:\/\/\S+\.\S+/i.test(String(v||"").trim());
+  const savePbomLink = async(link, why)=>{
+    const now = new Date().toISOString();
+    const { error } = await sb.from("sale_order_tbl").update({ prod_bom_link:link, prod_bom_link_by:user?.username||"unknown", prod_bom_link_at:now, prod_bom_answer:"Yes", prod_bom_answered_by:user?.username||"unknown", prod_bom_answered_at:now }).eq("contract_number",contractInfo.contract_number);
+    if(error){ alert("Could not save the Production BOM link: "+error.message); return false; }
+    await logAudit("UPDATE","sale_order_tbl",contractInfo.contract_number,"Production BOM link "+(why||"added")+": "+link,user?.username||"unknown",null,null);
+    await pbomTick(contractInfo.contract_number, "pbom|draft", user?.username||"", false);
+    await loadPbom(); return true;
+  };
   const releaseGoAhead = async(toState)=>{
     if(!canReleaseGoAhead(user,isSalesHead)){ alert("Only the Sales Head or a Super Admin can release production."); return; }
+    let bomAns = null;   // 184c
     const backward = GO_AHEAD_STATES.indexOf(toState) < GO_AHEAD_STATES.indexOf(goState||"Hold");
     let reason = null;
     if(backward){
@@ -13186,9 +13206,25 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
       const held = await docHoldNotesFor(contractInfo.contract_number);   // 175: name the Production Hold documents and why
       if(!confirm("Full Hold documents are still short of Code 2"+(holdOpen&&holdOpen.documents?(" ("+holdOpen.documents+")"):"")+"."+(held.length?"\n\nOn Production Hold:\n• "+held.join("\n• "):"")+"\n\nRelease production anyway?")) return;
     }
+    // 184c: on a release into production, ask for the Production BOM (once it is on the Sale Order it is not asked again)
+    if(!backward && toState.indexOf("Start Production")===0 && pbom && !pbom.link){
+      bomAns = await askProdBom(toState);
+      if(!bomAns) return;
+    }
     setGoBusy(true);
     const res = await setGoAheadState(contractInfo.contract_number, goState, toState, user?.username, reason);
     if(res.error){ setGoBusy(false); alert("Could not move the go-ahead: "+res.error); return; }
+    if(bomAns){   // 184c
+      const client = contractInfo.customer_name || (quoteHeaderRow && quoteHeaderRow.customer_name) || "";
+      if(bomAns.yes){ await savePbomLink(bomAns.link, "given at production release ("+toState+")"); await pbomTaskFor(contractInfo.contract_number, client, "approve", user?.username||"", { link:bomAns.link }); }
+      else {
+        const now = new Date().toISOString();
+        await sb.from("sale_order_tbl").update({ prod_bom_answer:"No", prod_bom_answered_by:user?.username||"unknown", prod_bom_answered_at:now }).eq("contract_number",contractInfo.contract_number);
+        await logAudit("UPDATE","sale_order_tbl",contractInfo.contract_number,"Production release ("+toState+"): Production BOM not available \u2014 card to the "+postLabel(PBOM_POST)+" post",user?.username||"unknown",null,null);
+        await pbomTaskFor(contractInfo.contract_number, client, "pending", user?.username||"", { note:"Asked at production release ("+toState+") on "+fmtDMY(now)+" by "+(user?.username||"")+": the Production BOM was not available." });
+        await loadPbom();
+      }
+    }
     // The work order is raised automatically on the first release into
     // production, covering every Sl No not already on one.
     if(!backward && toState.indexOf("Start Production")===0 && unissuedSlNos.length){
@@ -13708,6 +13744,33 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
         h("option",{value:""},goBusy?"Working…":"Move go-ahead…"),
         GO_AHEAD_STATES.filter(st=>st!==goState).map(st=>h("option",{key:st,value:st},st))
       ),
+      // 184c: the Production BOM link
+      pbom && (pbom.link
+        ? h("a",{href:pbom.link,target:"_blank",rel:"noopener",title:"Production BOM"+(pbom.by?" \u00b7 added by "+pbom.by:"")+(pbom.at?" on "+fmtDMY(pbom.at):""),style:{fontSize:10.5,padding:"2px 8px",borderRadius:9,background:"#e6f4f1",color:"#0f6e56",textDecoration:"none",fontWeight:600}},"\u2713 Production BOM")
+        : (goState.indexOf("Start Production")===0 || pbom.answer==="No")
+          ? h("button",{onClick:async()=>{ const v = prompt("Paste the OneDrive link to the Production BOM (Work Orders \u203a "+contractInfo.contract_number+" \u203a Prod BOM):"); if(v===null) return; if(!pbomLinkOk(v)){ alert("That is not a link. Copy it from OneDrive (Share \u2192 Copy link)."); return; } await savePbomLink(String(v).trim(),"added"); },
+              title:"No Production BOM link yet \u2014 a card is with "+postPersonText(PBOM_POST),style:{fontSize:10.5,padding:"2px 8px",borderRadius:9,background:"#fdecea",color:"#a3312a",border:"1px solid #f3c1bd",cursor:"pointer",fontWeight:600}},"Production BOM pending \u2014 add link")
+          : null),
+      bomAsk && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1300,display:"flex",alignItems:"center",justifyContent:"center"}},
+        h("div",{style:{background:"#fff",borderRadius:10,padding:"18px 22px",width:520,maxWidth:"94vw"}},
+          h("div",{style:{fontWeight:700,fontSize:14}},"Release "+contractInfo.contract_number+" for production"),
+          h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:10}},goState+" \u2192 "+bomAsk.toState),
+          h("div",{style:{fontSize:12.5,fontWeight:600,marginBottom:6}},"Is the Production BOM available?"),
+          h("label",{style:{display:"block",border:"1px solid "+(bomAsk.yes===true?"#1f4e78":colors.border),borderRadius:7,padding:"8px 10px",marginBottom:8,cursor:"pointer",background:bomAsk.yes===true?"#f5f9fd":"#fff"}},
+            h("input",{type:"radio",checked:bomAsk.yes===true,onChange:()=>setBomAsk(b=>({...b,yes:true,err:""}))})," ",h("b",null,"Yes \u2014 here is the link"),
+            bomAsk.yes===true ? h("div",{style:{marginTop:6}},
+              h("input",{value:bomAsk.link,placeholder:"OneDrive link to Work Orders \u203a "+contractInfo.contract_number+" \u203a Prod BOM (required)",onChange:e=>setBomAsk(b=>({...b,link:e.target.value,err:""})),style:{...inputStyle,width:"100%",borderColor:"#e0a800"}}),
+              h("div",{style:{fontSize:11,color:colors.muted,marginTop:4}},"Saved on the Sale Order. A card to approve it goes to "+postPersonText(PBOM_POST)+", due in 3 days.")) : null),
+          h("label",{style:{display:"block",border:"1px solid "+(bomAsk.yes===false?"#1f4e78":colors.border),borderRadius:7,padding:"8px 10px",cursor:"pointer",background:bomAsk.yes===false?"#f5f9fd":"#fff"}},
+            h("input",{type:"radio",checked:bomAsk.yes===false,onChange:()=>setBomAsk(b=>({...b,yes:false,err:""}))})," ",h("b",null,"No \u2014 not ready yet"),
+            bomAsk.yes===false ? h("div",{style:{fontSize:11,color:colors.muted,marginTop:4}},"A card \u201cProduction BOM Pending\u201d goes to "+postPersonText(PBOM_POST)+": Draft BOM due "+pgDmy(pgAdd(pgToday(),3))+", BOM approved due "+pgDmy(pgAdd(pgToday(),6))+".") : null),
+          bomAsk.err ? h("div",{style:{fontSize:11.5,color:colors.danger,marginTop:8}},bomAsk.err) : null,
+          h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:14}},
+            h("button",{onClick:()=>{ const r = bomAsk.resolve; setBomAsk(null); r(null); },style:btnSmall},"Cancel"),
+            h("button",{onClick:()=>{ const b = bomAsk;
+                if(b.yes===null){ setBomAsk({...b,err:"Answer the question first."}); return; }
+                if(b.yes && !pbomLinkOk(b.link)){ setBomAsk({...b,err:"Paste the OneDrive link \u2014 it is required when the BOM is available."}); return; }
+                setBomAsk(null); b.resolve({ yes:b.yes, link:String(b.link||"").trim() }); },style:btnPrimary},"Release")))),
       // Work orders. Raised automatically on release; anything added to
       // the order afterwards needs one of its own, so what is still
       // unissued is stated rather than left to be noticed.
@@ -13977,7 +14040,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const comboRefocusRS = (e)=>{ e.target.dataset.prevVal = refSearchDisplay; setRefSearchDisplay(""); };
   const handleRefSearchChange = (val)=>{
     setRefSearchDisplay(val);
-    const hit = refOptionsList.find(o=>o.label===val);
+    const hit = refOptionsList.find(o=>o.label===val) || (val.length>=6 ? refOptionsList.find(o=>hFold(o.rn).toUpperCase()===hFold(val).toUpperCase()) : null);   // 184b: with or without the H
     if(hit){
       const target = latestRefForBase(hit.rn);
       setRefFilter(target); setSlNoFilter("");
@@ -13988,7 +14051,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const handleRefSearchBlur = (e)=>{
     const val = refSearchDisplay.trim();
     if(!val){ setRefSearchDisplay(e.target.dataset.prevVal||""); return; }
-    const hit = refOptionsList.find(o=>o.label===val || o.rn===val);
+    const hit = refOptionsList.find(o=>o.label===val || o.rn===val) || refOptionsList.find(o=>hFold(o.rn).toUpperCase()===hFold(val).toUpperCase());   // 184b
     if(hit){ const target=latestRefForBase(hit.rn); setRefFilter(target); setSlNoFilter(""); setRefSearchDisplay(hit.label); return; }
     // Also allow typing just the client name portion to narrow, without
     // triggering the "doesn't exist" prompt on every partial keystroke —
@@ -23941,7 +24004,7 @@ function AccessCombo({ options, value, onPick, placeholder, style, testid, colWi
   const ql = q.trim().toLowerCase();
   const items = useMemo(()=>{
     const all = options||[];
-    const m = ql ? all.filter(o=>o.text.toLowerCase().includes(ql)) : all.slice();
+    const m = ql ? all.filter(o=>hHas(o.text, ql)) : all.slice();
     if(ql) m.sort((a,b)=>(a.text.toLowerCase().startsWith(ql)?0:1)-(b.text.toLowerCase().startsWith(ql)?0:1));
     return m.slice(0,400);
   },[options, ql]);
@@ -31329,6 +31392,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"14 Oct 2026 (184c)", summary:"Built on 2026-10-14T02:30:00Z. SQL: structure_production_bom_workflow_2026-10-14.sql (BOTH companies: task_tbl.post_key; sale_order_tbl prod_bom_link / _by / _at / prod_bom_answer / _answered_by / _answered_at; proc_item_tbl). PRODUCTION BOM AT RELEASE: moving a Sale Order to Start Production Code 2 or Code 1 (not Start Engineering) asks \u201cIs the Production BOM available?\u201d \u2014 Yes needs the OneDrive link (saved on the Sale Order, shown as \u2713 Production BOM) and makes a card \u201cApprove Production BOM\u201d due in 3 days; No makes a card \u201cProduction BOM Pending\u201d (Draft BOM due +3 days, BOM approved due +6 days from the answer). Both cards go to the holder of the Technical Head POST. Not asked again once the link is on the Sale Order; \u201cProduction BOM pending \u2014 add link\u201d on the Sale Order adds it later and ticks Draft BOM. Approve Production BOM closes the card. CARDS FOLLOW THE POST: a card carrying a post (post_key) moves to the new holder when the post changes hands (Setup \u2192 Posts, Hand Over Work), logged on the card; ordinary cards do not move. DEFAULT DATES: a Procurement Gantt made by Approve Production BOM gets every PO Release planned 7 days from the approval; overdue PO releases show on the Super Admins' Pending Actions. ITEMS TO BUY: each material-form sub-task lists its specs (one row per spec, merged across Sl Nos, from the BOM); tick = received with the date (editable); when every item is in, \u201cat Our Factory\u201d is set on the Gantt. Later the Stores GRN will tick them. PENDING MATERIAL STATUS: new Procurement report, Summary (one row per contract) and Detailed (contract \u2192 form \u2192 spec), filters by contract, client (narrows the contract list), form and purchase engineer, Pending only, PDF and Excel." },
+  { date:"14 Oct 2026 (184)", summary:"Built on 2026-10-13T03:00:00Z (build 183); replaces 2026-10-14T02:15:00Z. No SQL. QUOTE REGISTER \u2014 HYDRONETT H: a register tab takes its prefix with or without the H after the F (the FXDS tab takes FXDS\u2026 and FHXDS\u2026; an FHXDS tab takes both too). The two forms share one running number: a new line takes the next number after the highest of either form, and a number used once (e.g. FHXDS260075) cannot be saved again in the other form (FXDS260075). The wrong-prefix message now names both forms. Opening a number from Log Follow-ups goes to the tab of its own prefix, else the tab of its other form. Renumber accepts either form. SEARCH WITH OR WITHOUT THE H, EVERYWHERE: typing FXDS260075 finds FHXDS260075 and the other way round \u2014 Quote Register search, the quote picker (Log Follow-ups and others), the Quotes / Sale Order number box, every master table search, the Sale Order and other pick lists, the Document Control Board search, the Contract Register search and the allocation quote picker. Only quote numbers are folded (F + H + letters + digits); ordinary words are matched as before." },
   { date:"13 Oct 2026 (183)", summary:"Built on 2026-10-12T14:40:00Z (build 182). SQL: structure_doc_board_gateway_2026-10-13.sql (BOTH companies: universal_documents_tbl review_added_by / _at / review_reason / review_link / review_via; doc_add_request_tbl; doc_board_list_tbl). DOCUMENT CONTROL BOARD \u2014 ADD A MISSING DOCUMENT: \u201c+ Missing document\u201d in the bar and \u201c+\u201d on every list header (the card starts in that list). Form: contract, category, title, doc number (category prefix-contract-NNN), starts in (any list but Status to confirm; past Not submitted it asks the status, Rev, Out/In and date), hand to, why added (Found missing in review / Client asked for it later / Was on Trello only / Was in OneDrive, not in the app / Other), OneDrive link REQUIRED (OneDrive, SharePoint or Drive only; anything else refused). Duplicate category on the contract asks first. BACKWARD: the document is made and a fulfilled requirement (document_requests_tbl, source review) is put on the contract, so the Sale Order's documents and Report by Contract show it. FORWARD: the owner's bell and, for our-action cards, a Task Manager card by the task type's days; chase and codes follow as for any card. \u201cAdded in review\u201d tag for 30 days; \ud83d\udd17 OneDrive on the card until a revision has its own link. WHO: a user needs an Admin's code (Ask an Admin sends the filled form to the Admins' bells; Requests to add: Approve & add / Give a code (this contract only, 24 hours, one use, sent to the asker's bell) / Send back with a note); an Admin adds without a code and Super Admins are told; a Super Admin adds freely. Review additions lists every one (when, who, how, why, where it is now, link). \u2699 LISTS (Super Admin): the six built-in lists stay; + New list asks 13 questions \u2014 name / short name, colour and meaning, comes after, whose move (ours / outside party / no one), counts as (open / approved / approved with production hold), holds production, chase (days), task card when a card enters (as the status says / always / never), which statuses land here (with each one's current list), who may move cards in or out (as today / Document Controller and Admins only), bell when a card enters (owner / owner and Document Controller / no one), wording on the client's report, count tile \u2014 with a preview (the built-in list it behaves like, statuses that open it, cards that move now). The answers set its base list, which drives chasing, task cards, % approved and production release; the list appears on the board (after its list), the tiles, Report by Contract (client wording on the client version) and the move panel. Statuses chosen move into it and remember their old list; Remove only when empty, statuses go back. Edit any time." },
   { date:"12 Oct 2026 (182)", summary:"Built on 2026-10-12T14:00:00Z (build 181). No SQL. SALE ORDER SCREEN: both boxes are AccessCombo, an MS Access style combo box \u2014 type and the first match fills in with the rest highlighted; the list narrows to matches anywhere (those starting with what you typed first); \u2191 \u2193 move, Enter or Tab picks, Esc closes, \u25be shows the whole list; limit to list (text that matches nothing goes back). Contract Number lists number and customer in two columns and opens the Sale Order on pick; the \u201cNo contract found\u201d box is gone and + Add new contract is always a button. Browse by Customer lists only customers that have a Sale Order, taken from the Sale Orders (case-insensitive), with a count each; picking one lists its contracts (double-click opens)." },
   { date:"12 Oct 2026 (181)", summary:"Built on 2026-10-12T12:30:00Z (build 180). SQL: legacy_SO_datasheets_as_OA_2026-10-12.sql (FLOMETRIQ only; adds datasheets.source / oa_item / oa_link and refills every legacy Sale Order). DATASHEETS FROM THE OA, AS IS: a datasheet with source \u201cOA\u201d holds the OA's Annexure III rows exactly as printed ({section, label, value} in custom_free_fields, in the OA's order). Opening the datasheet on such a Sl No shows OaDatasheetView \u2014 read-only, sections as in the OA, the OA file name and an Open the OA link \u2014 instead of the template form (DatasheetModal now checks for it first; the template form is DatasheetModalTemplate). The Sale Order PDF's Annexure III prints the same rows under the OA's section headings, then the usual Price Data, whatever the item's template. The template-mapped datasheets and the \u201cfields the app's datasheet does not have\u201d notes made by the legacy load are replaced. Quotes and app-made Sale Orders keep their template datasheets." },
@@ -31732,13 +31797,16 @@ function PostsEditor({ user }){
     const { error } = await sb.from("post_holder_tbl").insert({post_key:key, employee_name:pickEmp, assigned_by:user?.username||"unknown"});
     if(error){ alert("Failed: "+error.message); return; }
     await logAudit("CREATE","post_holder_tbl",key,pickEmp+" assigned to "+key,user?.username||"unknown",null,null);
+    const mv = await postCardsSync(key, user?.username||"");   // 184c: open cards owed by this post follow it
+    if(mv) alert(mv+" open card"+(mv===1?"":"s")+" owed by this post moved to "+pickEmp+".");
     setPickFor(null); setPickEmp(""); load();
   };
 
   const unassign = async(row)=>{
-    if(!confirm("Remove "+row.employee_name+" from this post?\n\nCards already assigned to them are NOT moved — this only changes where new work routes.")) return;
+    if(!confirm("Remove "+row.employee_name+" from this post?\n\nOrdinary cards already assigned to them are NOT moved. Open cards owed by the POST (e.g. Production BOM) move to the next holder, or to the Unassigned pile if the post is left empty.")) return;
     await sb.from("post_holder_tbl").delete().eq("id",row.id);
     await logAudit("DELETE","post_holder_tbl",row.post_key,row.employee_name+" removed from "+row.post_key,user?.username||"unknown",null,null);
+    await postCardsSync(row.post_key, user?.username||"");   // 184c
     load();
   };
 
@@ -33693,7 +33761,7 @@ function QuoteRefSearch({ value, companyName, onPick, onForceNew, onFocus, style
   const q = text===null ? "" : text.trim(), qn = regNorm(q).replace(/(REV|R)\d+$/,""), lo = q.toLowerCase();
   const co = String(companyName||"").trim().toLowerCase();
   let hits = (list||[]).filter(e=>!e.closed);
-  hits = q ? hits.filter(e=>e.base.includes(qn) || (lo.length>=3 && String(e.customer||"").toLowerCase().includes(lo)) || (e.enq && regNorm(e.enq).includes(regNorm(q))))
+  hits = q ? hits.filter(e=>hFold(e.base).includes(hFold(qn)) || (lo.length>=3 && String(e.customer||"").toLowerCase().includes(lo)) || (e.enq && regNorm(e.enq).includes(regNorm(q))))
            : (co ? hits.filter(e=>String(e.customer||"").trim().toLowerCase()===co) : []);
   hits.sort((a,b)=> ((String(b.customer||"").trim().toLowerCase()===co)-(String(a.customer||"").trim().toLowerCase()===co)) || b.base.localeCompare(a.base));
   hits = hits.slice(0,40);
@@ -36184,7 +36252,7 @@ function LinkExistingQuoteModal({ allocation, onCancel, onSaved }){
     if(t.length<2){ setMatches([]); return; }
     let cancelled=false;
     const timer = setTimeout(async()=>{
-      const { data } = await sb.from("estimates").select("reference_number,customer_name").ilike("reference_number","%"+t+"%").is("linked_allocation_id",null).order("reference_number").limit(15);
+      const { data } = await (hAltTerm(t) ? sb.from("estimates").select("reference_number,customer_name").or("reference_number.ilike.%"+t.replace(/[%,()]/g," ")+"%,reference_number.ilike.%"+hAltTerm(t).replace(/[%,()]/g," ")+"%") : sb.from("estimates").select("reference_number,customer_name").ilike("reference_number","%"+t+"%")).is("linked_allocation_id",null).order("reference_number").limit(15);
       if(!cancelled){
         const seen = new Set(); const uniq=[];
         (data||[]).forEach(r=>{ if(!seen.has(r.reference_number)){ seen.add(r.reference_number); uniq.push(r); } });
@@ -37367,6 +37435,15 @@ function EnquiryDetailScreen({ user, me, enquiryId, pos, total, onBack, onPrev, 
 const REG = { loaded:0, tabs:[], people:[], zoneByState:{}, ok:false };
 const regKey = (s)=> String(s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
 const regNorm = (s)=> String(s||"").toUpperCase().replace(/[\s\-_.\/]/g,"");
+// 184: Hydronett numbers carry an H after the F (FXDS -> FHXDS). A tab takes its prefix with or without the H,
+// and the two share one running number. Returns [prefix, other form] (other form is null for a prefix that does not start with F).
+// 184b: searching with or without the Hydronett H finds the same quote: FXDS260075 finds FHXDS260075 and the other way round.
+// hFold drops the H from any F-prefixed quote number (FH + letters + digits); hHas is a case-blind "contains" on folded text.
+const hFold = (s)=> String(s==null?"":s).replace(/\b([Ff])\s*[Hh](?=[A-Za-z]{1,5}[\s\-_.\/]*\d)/g, "$1");
+const hHas = (hay, needle)=> hFold(hay).toLowerCase().includes(hFold(needle).toLowerCase());
+// for a database "contains" search: the term as typed plus its other form (null when it has none)
+const hAltTerm = (t)=>{ t = String(t||""); const f = hFold(t); if(f!==t) return f; const m = t.match(/\b([Ff])([A-GI-Za-gi-z][A-Za-z]{0,4}[\s\-_.\/]*\d)/); return m ? t.replace(m[0], m[1]+(m[1]==="F"?"H":"h")+m[2]) : null; };
+const regHPair = (px)=>{ px = regNorm(px); if(!/^F[A-Z]/.test(px)) return [px, null]; return px[1]==="H" && px.length>2 ? [px, "F"+px.slice(2)] : [px, "FH"+px.slice(1)]; };
 const regList = (s)=> String(s||"").split(",").map(regKey).filter(Boolean);
 const regIsIndia = (c)=> regKey(c)==="india";
 async function regLoad(force){
@@ -37556,7 +37633,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
     const qs = q.trim();
     let base = ()=>{ let b = sb.from("register_line_tbl").select("*",{count:"exact"});
       if(!(qs && qAll)) b = b.eq("tab_name",cur);
-      if(qs){ const v = "%"+qs.replace(/[%,()]/g," ")+"%"; b = b.or("quote_no.ilike."+v+",customer_name.ilike."+v+",enquiry_no.ilike."+v+",city.ilike."+v); }
+      if(qs){ const v = "%"+qs.replace(/[%,()]/g," ")+"%"; const alt = hAltTerm(qs); b = b.or("quote_no.ilike."+v+",customer_name.ilike."+v+",enquiry_no.ilike."+v+",city.ilike."+v+(alt?",quote_no.ilike.%"+alt.replace(/[%,()]/g," ")+"%":"")); }
       if(sortBy==="ed_asc"||sortBy==="ed_desc") return b.order("edate",{ascending:sortBy==="ed_asc",nullsFirst:false}).order("row_order",{ascending:sortBy==="ed_asc"}).order("id",{ascending:sortBy==="ed_asc"});
       if(sortBy==="od_asc"||sortBy==="od_desc") return b.order("offer_date",{ascending:sortBy==="od_asc",nullsFirst:false}).order("edate",{ascending:sortBy==="od_asc",nullsFirst:false}).order("id",{ascending:sortBy==="od_asc"});
       return b.order("row_order",{ascending:true,nullsFirst:true}).order("id",{ascending:true}); };
@@ -37567,7 +37644,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
     if(page<0 || page>last) setPage(pg);
     const { data } = await base().range(pg*REG_PAGE, pg*REG_PAGE+REG_PAGE-1);
     let rs = data||[];
-    if(qs){ const lo = qs.toLowerCase(); rs = rs.filter(r=>[r.quote_no,r.customer_name,r.enquiry_no,r.city].join(" ").toLowerCase().includes(lo)); }   // keeps the test stand-in honest too
+    if(qs){ rs = rs.filter(r=>hHas([r.quote_no,r.customer_name,r.enquiry_no,r.city].join(" "), qs)); }   // keeps the test stand-in honest too
     setRows(rs);
   },[cur,page,q,qAll,sortBy]);
   useEffect(()=>{ if(!fs) return; const f=(e)=>{ if(e.key==="Escape" && !ask && !logFor && !custForm) setFs(false); }; document.addEventListener("keydown",f); return ()=>document.removeEventListener("keydown",f); },[fs,ask,logFor,custForm]);
@@ -37576,7 +37653,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
   const gwDone = useRef(false);
   useEffect(()=>{ if(!ready || !gateway || gwDone.current) return; gwDone.current = true; (async()=>{
     const n = regNorm(gateway.quote_no); const px = (n.match(/^[A-Z]+/)||[""])[0];
-    const t = tabs.find(x=>x.is_open && x.prefix && regNorm(x.prefix)===px);
+    const t = tabs.find(x=>x.is_open && x.prefix && regNorm(x.prefix)===px) || tabs.find(x=>x.is_open && x.prefix && regHPair(x.prefix).includes(px));   // 184: FHXDS… goes to the FXDS tab when it has no tab of its own
     if(t){ setCur(t.tab_name); try{ localStorage.setItem("qr_tab",t.tab_name); }catch(e){} }
     else setErr("No open register tab uses the prefix "+(px||"of this number")+". Check the number, or pick the right tab and type it again.");
     setEdit({ id:null, d:{ ...blank, quote_no:n, edate:"" }, orig:{ ...blank, quote_no:"", edate:"" }, co:null, gw:true }); setChk({bad:[],warn:[],ok:false});
@@ -37594,8 +37671,10 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
   const nextNo = async(t)=>{
     if(!t || !t.prefix) return "";
     const yy = today.slice(2,4); const px = regNorm(t.prefix);
-    const { data } = await sb.from("register_line_tbl").select("quote_norm").eq("tab_name",t.tab_name).like("quote_norm",px+yy+"%").limit(5000);
-    let mx = 0; (data||[]).forEach(r=>{ const m = String(r.quote_norm).match(new RegExp("^"+px+yy+"(\\d+)$")); if(m) mx = Math.max(mx, parseInt(m[1],10)); });
+    // 184: the running number is shared by the prefix with and without the Hydronett H
+    const pxs = regHPair(px).filter(Boolean);
+    const res = await Promise.all(pxs.map(p=>sb.from("register_line_tbl").select("quote_norm").eq("tab_name",t.tab_name).like("quote_norm",p+yy+"%").limit(5000)));
+    let mx = 0; res.forEach(({data},k)=> (data||[]).forEach(r=>{ const m = String(r.quote_norm).match(new RegExp("^"+pxs[k]+yy+"(\\d+)$")); if(m) mx = Math.max(mx, parseInt(m[1],10)); }));
     return px+yy+String(mx+1).padStart(4,"0");
   };
   const blank = { quote_no:"", offer_date:"", enquiry_no:"", edate:today, customer_name:"", company_id:null, city:"", state:"", country:"", line_fse:"", line_tc:"" };
@@ -37649,11 +37728,18 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
       const pm = n.match(/^([A-Z]+)(\d+)$/);
       if(!pm) warn.push("“"+d.quote_no+"” is not the usual PREFIX + YY + number.");
       else if(t && t.prefix){
-        const px = regNorm(t.prefix);
-        if(pm[1]!==px){ const owner = tabs.find(x=>x.is_open && regNorm(x.prefix)===pm[1]); bad.push(pm[1]+"… numbers are not used on this tab (it uses "+px+"…)."+(owner?" "+pm[1]+"… numbers belong on the "+regTabLabel(owner.tab_name)+" tab.":"")); }
+        const [px, pxH] = regHPair(t.prefix);
+        if(pm[1]!==px && pm[1]!==pxH){ const owner = tabs.find(x=>x.is_open && regNorm(x.prefix)===pm[1]); bad.push(pm[1]+"… numbers are not used on this tab (it uses "+px+"…"+(pxH?" or "+pxH+"…":"")+")."+(owner?" "+pm[1]+"… numbers belong on the "+regTabLabel(owner.tab_name)+" tab.":"")); }
         else {
           if(pm[2].length!==6){ const fix = px+pm[2].slice(0,2)+pm[2].slice(2).replace(/^0+/,"").padStart(4,"0"); warn.push("It has "+pm[2].length+" digits, not 6 — did you mean "+fix+"?"); }
           else if(pm[2].slice(0,2)!==today.slice(2,4) && !e.id) warn.push("Year "+pm[2].slice(0,2)+" is not this year ("+today.slice(2,4)+").");
+          // 184: one running number for both forms — FXDS260075 and FHXDS260075 cannot both exist
+          const twin = pm[1]===px ? pxH : px;
+          if(twin && !other.length){
+            const { data: tw } = await sb.from("register_line_tbl").select("id,quote_no,customer_name,tab_name").eq("quote_norm",twin+pm[2]).limit(1);
+            const th = (tw||[]).find(r=>r.id!==e.id);
+            if(th) bad.push("Number "+pm[2]+" is already used as "+th.quote_no+" ("+(th.customer_name||"no customer")+"). With or without the H, a number is used once.");
+          }
         }
       }
       if(!other.length && !e.id){
@@ -37842,7 +37928,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
     setRn({ line, tab:t1?t1.tab_name:"", no: t1 ? await nextNo(t1) : "", why:"", preview:null, err:"", busy:false }); };
   const rnTabCheck = (x)=>{ const t1 = tabs.find(tt=>tt.tab_name===x.tab); if(!t1) return "Pick a tab.";
     const n = regNorm(x.no); const px = (n.match(/^[A-Z]+/)||[""])[0];
-    if(!n) return "Give the new number."; if(t1.prefix && px!==regNorm(t1.prefix)) return px+"\u2026 numbers are not used on "+regTabLabel(t1.tab_name)+" (it uses "+regNorm(t1.prefix)+"\u2026).";
+    if(!n) return "Give the new number."; if(t1.prefix && !regHPair(t1.prefix).includes(px)) return px+"\u2026 numbers are not used on "+regTabLabel(t1.tab_name)+" (it uses "+regHPair(t1.prefix).filter(Boolean).join("\u2026 or ")+"\u2026).";
     if(n===regNorm(x.line.quote_no)) return "That is the same number.";
     if(!t1.owner_per_line && x.line.country){ const ok = regTabsFor(x.line.country, x.line.state, !!t1.is_emf).some(tt=>tt.tab_name===t1.tab_name);
       if(!ok) return x.line.customer_name+" is in "+[x.line.state,x.line.country].filter(Boolean).join(", ")+" \u2014 "+regTabLabel(t1.tab_name)+" does not take it. Fix the customer's state / emirate first (Edit Customer), or pick the tab that takes it."; }
@@ -38246,7 +38332,7 @@ async function pgFormsFromBom(contractNumber){
   const m = new Map();
   (lines||[]).forEach(l=>{ const f = String(l.material_shape||"").trim(); if(!f) return;
     if(!m.has(f)) m.set(f,{ form:f, cert:"3.1", rfi:false, lines:[] });
-    m.get(f).lines.push({ sheet:"Sl No "+l.item_sl_no, part:l.component||l.sub_assembly||"", desc:[l.material_spec,l.grade].filter(Boolean).join(" "), qty:Math.round((Number(l.qty_required)||0)*(oq.get(l.item_sl_no)||1)*1000)/1000, uom:l.uom||"", cert:"3.1" }); });
+    m.get(f).lines.push({ sheet:"Sl No "+l.item_sl_no, part:l.component||l.sub_assembly||"", desc:[l.material_spec,l.grade].filter(Boolean).join(" "), spec:l.material_spec||"", grade:l.grade||"", qty:Math.round((Number(l.qty_required)||0)*(oq.get(l.item_sl_no)||1)*1000)/1000, uom:l.uom||"", cert:"3.1" }); });
   return [...m.values()];
 }
 // ---- task card + sub-tasks ----------------------------------------------------------------------------------------
@@ -38365,6 +38451,97 @@ async function pgNotifyPurchase(message, except){
     if(to.length) await sb.from("notifications_tbl").insert(to.map(n=>({ employee_name:n, message })));
   }catch(e){ console.warn("Purchase notification", e); }
 }
+// ===== 184c (14 Oct 2026): Production BOM workflow =====
+// The Production BOM is owed by the Technical Head POST, not a person: the card carries post_key, and when the
+// post changes hands every open card of that post moves to the new holder (postCardsSync).
+const PBOM_POST = "technical_head";
+const PBOM_LABEL = "Production BOM";
+async function postCardsSync(postKey, by){
+  try{
+    await loadPostPeople(true); const hs = postHolders(postKey);
+    const { data, error } = await sb.from("task_tbl").select("id,assignee,status,title").eq("post_key",postKey).neq("status","done");
+    if(error) return 0;
+    let n = 0; const now = new Date().toISOString();
+    for(const t of (data||[])){
+      if(t.assignee && hs.includes(t.assignee)) continue;
+      const to = hs[0] || null; if((t.assignee||null)===to) continue;
+      const { error: e2 } = await sb.from("task_tbl").update({ assignee:to, moved_by:by||"App", moved_at:now, moved_what:"Moved with the "+postLabel(postKey)+" post" }).eq("id",t.id);
+      if(!e2){ n++; await taskLog(t.id, by||"App", "Moved with the "+postLabel(postKey)+" post: "+(t.assignee||"Unassigned pile")+" \u2192 "+(to||"Unassigned pile")); }
+    }
+    return n;
+  }catch(e){ console.error("Post cards not moved", e); return 0; }
+}
+// kind "pending": no Production BOM at release -> Draft BOM due +3 days, BOM approved due +6 (from the user's answer).
+// kind "approve": the BOM link was given at release -> BOM approved due +3.
+async function pbomTaskFor(ct, client, kind, by, opts){
+  try{
+    const { data: ex } = await sb.from("task_tbl").select("id,status,labels").eq("ref",ct).neq("status","done");
+    if((ex||[]).some(t=>(t.labels||[]).includes(PBOM_LABEL))) return null;   // one open Production BOM card per contract
+    await loadPostPeople(true); const who = postHolders(PBOM_POST)[0] || null;
+    let dept = null; if(who){ try{ const { data } = await sb.from("employee_tbl").select("department").eq("employee_name",who).limit(1).maybeSingle(); dept = (data && data.department) || null; }catch(e){} }
+    const today = pgToday(), d3 = pgAdd(today,3), d6 = pgAdd(today,6);
+    const pending = kind==="pending";
+    const items = pending
+      ? [{ id:"pbom|draft", text:"Draft BOM (put it in Work Orders \u203a "+ct+" \u203a Prod BOM and add the link on the Sale Order)", due:d3, done:false, items:[] },
+         { id:"pbom|appr", text:"BOM approved (Approve Production BOM on the Sale Order)", due:d6, done:false, items:[] }]
+      : [{ id:"pbom|appr", text:"BOM approved (Approve Production BOM on the Sale Order)", due:d3, done:false, items:[] }];
+    const row = { title:(pending?"Production BOM Pending \u2014 ":"Approve Production BOM \u2014 ")+ct+(client?" "+client:""), assignee:who, department:dept, labels:[PBOM_LABEL],
+      links:(opts && opts.link) ? [opts.link] : [], ref:ct, customer:client||null, created_by:by||"App", status:"open", due_date: pending ? d6 : d3, post_key:PBOM_POST,
+      checklists:[{ id:"pbom", name:"Production BOM", items }], notes:(opts && opts.note) || "" };
+    let { data, error } = await sb.from("task_tbl").insert(row).select().single();
+    if(error && /post_key/.test(error.message||"")){ delete row.post_key; ({ data, error } = await sb.from("task_tbl").insert(row).select().single()); }
+    if(error){ console.error("Production BOM card", error); alert("The Production BOM card could not be made:\n\n"+error.message); return null; }
+    await taskLog(data.id, by||"App", "Created on production release of "+ct+" \u2014 owed by "+postPersonText(PBOM_POST));
+    return data;
+  }catch(e){ console.error("Production BOM card", e); return null; }
+}
+// Tick an item on the open Production BOM card(s) of a contract; close the card when every item is ticked.
+async function pbomTick(ct, itemId, by, closeAll){
+  try{
+    const { data } = await sb.from("task_tbl").select("*").eq("ref",ct).neq("status","done");
+    for(const t of (data||[]).filter(x=>(x.labels||[]).includes(PBOM_LABEL))){
+      const cls = (t.checklists||[]).map(c=> c.id!=="pbom" ? c : { ...c, items:(c.items||[]).map(i=> (closeAll || i.id===itemId) ? { ...i, done:true } : i) });
+      const all = cls.every(c=>c.id!=="pbom" || (c.items||[]).every(i=>i.done));
+      const now = new Date().toISOString();
+      const patch = all ? { checklists:cls, status:"done", approved_by:"App (Production BOM)", approved_at:now, moved_by:by||"App", moved_at:now, moved_what:"Production BOM approved \u2014 completed" } : { checklists:cls };
+      const { error } = await sb.from("task_tbl").update(patch).eq("id",t.id);
+      if(!error) await taskLog(t.id, by||"App", all ? "Production BOM approved \u2014 card completed" : "Production BOM link added \u2014 Draft BOM ticked");
+    }
+  }catch(e){ console.error("Production BOM card tick", e); }
+}
+// One item row per spec (merged across Sl Nos) for the Pending Material Status report and the sub-task checklist.
+async function pgItemsFromForms(p, me){
+  try{
+    const rows = [], seen = new Map();
+    pgForms(p).forEach(f=>(f.lines||[]).forEach(l=>{
+      const spec = String(l.spec || l.desc || l.part || "").trim(); if(!spec) return;
+      const k = f.form+"|"+spec.toLowerCase()+"|"+String(l.grade||"").toLowerCase()+"|"+(l.uom||""); const q = Number(l.qty)||0;
+      if(seen.has(k)){ const r = seen.get(k); r.qty = Math.round((r.qty+q)*1000)/1000; if(l.sheet && !String(r.sl_nos||"").split(", ").includes(l.sheet)) r.sl_nos = (r.sl_nos?r.sl_nos+", ":"")+l.sheet; return; }
+      const r = { plan_id:p.id, contract_number:p.contract_number, form:f.form, spec, grade:l.grade||null, qty:q, uom:l.uom||null, sl_nos:l.sheet||null, source:p.source||null, created_by:me||"" };
+      seen.set(k, r); rows.push(r); }));
+    if(rows.length){ const { error } = await sb.from("proc_item_tbl").insert(rows); if(error) console.warn("Procurement items not saved (run structure_production_bom_workflow_2026-10-14.sql)", error.message); }
+    return rows.length;
+  }catch(e){ console.warn("Procurement items", e); return 0; }
+}
+// Super Admins watch PO release: 7 days from the Production BOM approval by default.
+async function pbomPendingItems(P){
+  const out = [];
+  try{
+    const today = pgToday();
+    const { data: plans, error } = await sb.from("proc_plan_tbl").select("id,contract_number,client,source");
+    if(error) return out;
+    const live = (plans||[]).filter(p=>!/legacy/i.test(p.source||""));
+    if(!live.length) return out;
+    const lines = await fetchPaged(()=>sb.from("proc_line_tbl").select("plan_id,line_key,plan_date,act_date").like("line_key","rel|%").in("plan_id",live.map(p=>p.id)));
+    lines.filter(l=>l.plan_date && !l.act_date && String(l.plan_date).slice(0,10)<today).forEach(l=>{
+      const p = live.find(x=>x.id===l.plan_id); if(!p) return;
+      const dl = pgDd(String(l.plan_date).slice(0,10), today); const form = String(l.line_key).split("|").slice(1).join("|");
+      (P.supers.length ? P.supers : [""]).forEach(who=>out.push({ what:"Contract "+p.contract_number+(p.client?" ("+p.client+")":"")+": PO release for "+form+" was due "+pgDmy(String(l.plan_date).slice(0,10))+" \u2014 not released",
+        entity_key:p.contract_number, detail_key:"porel|"+p.id+"|"+form, owed_by_role:"super_admin", owed_by_person:who, days_waiting:dl, urgency:"overdue", client_side:true, source:"po_release" })); });
+  }catch(e){ console.error("PO release pending items", e); }
+  return out;
+}
+
 // Make a plan (both routes): the plan row, BOM Received, the card and its sub-tasks.
 async function pgMakePlan(row, user, how){
   const emp = await pgEmp(user); const me = (emp && emp.employee_name) || user.username || "";
@@ -38373,6 +38550,14 @@ async function pgMakePlan(row, user, how){
   if(error){ alert("Could not make the Procurement Gantt:\n\n"+error.message+"\n\nHas the build-139 SQL been run?"); return null; }
   await sb.from("proc_line_tbl").insert({ plan_id:p.id, line_key:"bom", label:"BOM Received", stage:"BOM Received", plan_start_type:"d", plan_start:today, plan_type:"d", plan_date:today, act_start_type:"d", act_start:today, act_type:"d", act_date:today, updated_by:me, updated_at:now });
   await logAudit("INSERT","proc_plan_tbl",p.contract_number,how+" — Procurement Gantt made with "+pgForms(p).length+" material forms",user?.username||"");
+  await pgItemsFromForms(p, me);   // 184c
+  if(p.prod_bom_approved_at){   // 184c: PO release planned 7 days from the Production BOM approval
+    const rel = pgAdd(today,7);
+    const ups = pgForms(p).map(f=>({ plan_id:p.id, line_key:"rel|"+f.form, label:"PO Release", stage:"PO Release", form:f.form, pred_key:"appr|"+f.form, is_custom:false,
+      plan_start_type:"d", plan_start:null, plan_type:"d", plan_date:rel, act_start_type:"d", act_start:null, act_type:"d", act_date:null, updated_by:me, updated_at:now }));
+    if(ups.length){ const { error } = await sb.from("proc_line_tbl").upsert(ups,{onConflict:"plan_id,line_key"}); if(error) console.warn("Default PO release dates", error.message); }
+    await pbomTick(p.contract_number, "pbom|appr", me, true);
+  }
   const card = await pgCreateTasks(p, me, emp && emp.department);
   if(card) await pgSyncTasks(p.id, me);
   await pgNotifyPurchase("Contract "+p.contract_number+(p.client?" ("+p.client+")":"")+": Procurement Gantt made ("+how+") — its card is in the "+PG_PURCHASE_DEPT+" Unassigned pile for the daily review.", null);
@@ -38880,6 +39065,8 @@ function ProcReportsScreen({ user, onOpenGantt }){
   const [odAll,setOdAll] = useState(false);   // 160: Overdue (all steps) — every line of each contract, not only the late ones
   const [odInc,setOdInc] = useState(false);   // 160: list contracts with nothing overdue too
   const [odView,setOdView] = useState(()=>{ try{ return localStorage.getItem("pr_odview")||"table"; }catch(e){ return "table"; } });   // 163: Table / Bars
+  const [matView,setMatView] = useState("sum");   // 184c: Pending Material Status — sum | det
+  const [matForm,setMatForm] = useState(""); const [matClient,setMatClient] = useState(""); const [matPend,setMatPend] = useState(true);
   const [busy,setBusy] = useState(false);
   useEffect(()=>{ (async()=>{
     const { data: plans, error } = await sb.from("proc_plan_tbl").select("*").order("contract_number",{ascending:false});
@@ -38887,7 +39074,8 @@ function ProcReportsScreen({ user, onOpenGantt }){
     const lines = await fetchPaged(()=>sb.from("proc_line_tbl").select("*").order("id"));
     const tasks = await fetchPaged(()=>sb.from("task_tbl").select("id,proc_plan_id,parent_id,proc_form,assignee,status,title").not("proc_plan_id","is",null).order("id"));
     let chg = [], chgOk = true; try{ const { data: c, error: ce } = await sb.from("proc_date_change_tbl").select("*").order("changed_at").limit(20000); if(ce) chgOk = false; else chg = c||[]; }catch(e){ chgOk = false; }
-    setData({ plans:plans||[], lines, tasks, chg, chgOk });
+    let items = [], itemsOk = true; try{ items = await fetchPaged(()=>sb.from("proc_item_tbl").select("*").order("id")); }catch(e){ itemsOk = false; }   // 184c
+    setData({ plans:plans||[], lines, tasks, chg, chgOk, items, itemsOk });
     if((plans||[]).length) setCt(String(plans[0].contract_number));
   })(); },[]);
   useEffect(()=>{ try{ localStorage.setItem("pr_rep",rep); }catch(e){} },[rep]);
@@ -39083,7 +39271,41 @@ function ProcReportsScreen({ user, onOpenGantt }){
         h("div",{style:{fontSize:11,color:colors.muted,marginTop:8}},"Bar length = days past the planned date as on "+pgDmy(today)+" · \u201c(start)\u201d = not started after its planned start · contracts with nothing overdue are not shown · click a bar to open the Gantt there and update the dates."));
     R.count = nC+" contract(s) with overdue steps · "+nSteps+" overdue step"+(nSteps===1?"":"s")+(worstAll?" · worst "+worstAll+" d":"")+" · as on "+pgDmy(today)+" · overdue = not finished after its planned finish, or not started after its planned start · P = planned finish, A = actual finish";
   }
-  const titles = { past:"Materials past planned date", od:"Overdue (all steps)", pend:"Pending supply", sum:"Contract summary", hist:"Plan history", kpi:"Purchase engineer KPI" };
+  // 184c: Pending Material Status — one row per spec item (proc_item_tbl); Summary = one row per contract, Detailed = contract > form > spec.
+  const matPlans = (data.plans||[]).filter(p=>(scope==="all" || String(p.contract_number)===ct) && (!matClient || (p.client||"")===matClient));
+  const matItems = (data.items||[]).filter(it=>matPlans.some(p=>p.id===it.plan_id) && (!matForm || it.form===matForm));
+  const matHolder = (planId, form)=>{ const sub = (data.tasks||[]).find(t=>t.proc_plan_id===planId && t.parent_id && (t.proc_form||"")===(form||"")); const card = (data.tasks||[]).find(t=>t.proc_plan_id===planId && !t.parent_id); return (sub && sub.assignee) || (card && card.assignee) || ""; };
+  if(rep==="mat"){
+    const byPlan = matPlans.map(p=>({ p, xs: matItems.filter(it=>it.plan_id===p.id) })).filter(g=>g.xs.length && (!matPend || g.xs.some(x=>!x.received)) && (!eng || g.xs.some(x=>matHolder(p.id,x.form)===eng)));
+    const nItems = byPlan.reduce((n,g)=>n+g.xs.length,0), nPend = byPlan.reduce((n,g)=>n+g.xs.filter(x=>!x.received).length,0);
+    R.count = (data.itemsOk===false ? "The item table is not there yet (run structure_production_bom_workflow_2026-10-14) \u00b7 " : "")+byPlan.length+" contract(s) \u00b7 "+nPend+" item(s) pending of "+nItems+" \u00b7 as on "+pgDmy(today);
+    if(matView==="sum"){
+      R.head = ["Contract","Client","Forms","Forms pending","Items","Received","Pending","% received","Oldest PO due","Holder"];
+      R.rows = byPlan.map(({p,xs})=>{ const forms = Array.from(new Set(xs.map(x=>x.form))); const fp = forms.filter(f=>xs.some(x=>x.form===f && !x.received)).length; const rc = xs.filter(x=>x.received).length;
+        const dues = (data.lines||[]).filter(l=>l.plan_id===p.id && /^rel\|/.test(l.line_key) && l.plan_date && !l.act_date).map(l=>String(l.plan_date).slice(0,10)).sort();
+        const card = (data.tasks||[]).find(t=>t.proc_plan_id===p.id && !t.parent_id); const pct = Math.round(100*rc/Math.max(1,xs.length));
+        const cells = [String(p.contract_number), p.client||"", forms.length, fp, xs.length, rc, xs.length-rc, pct+"%", dues[0]?pgDmy(dues[0]):"\u2014", (card&&card.assignee)||"Unassigned"];
+        return { onClick:()=>onOpenGantt && onOpenGantt(String(p.contract_number), ""), cells, pdf:cells.map(String) }; });
+    } else {
+      R.head = ["Contract","Form","Spec","Grade","Qty","UOM","Sl No","Status","Received on","Holder"];
+      R.rows = [];
+      byPlan.forEach(({p,xs})=>{ const pend = xs.filter(x=>!x.received).length;
+        R.rows.push({ group:true, cells:[h("b",null,p.contract_number+(p.client?" \u00b7 "+p.client:"")+" \u2014 "+pend+" of "+xs.length+" item(s) pending")], pdf:[p.contract_number+(p.client?" \u00b7 "+p.client:"")+" \u2014 "+pend+" of "+xs.length+" item(s) pending"] });
+        Array.from(new Set(xs.map(x=>x.form))).forEach(f=>{ const fx = xs.filter(x=>x.form===f && (!matPend || !x.received)); if(!fx.length) return; const hold = matHolder(p.id,f)||"Unassigned";
+          fx.forEach(x=>{ const cells = [String(p.contract_number), f, x.spec, x.grade||"", (Number(x.qty)||0).toLocaleString("en-IN",{maximumFractionDigits:3}), x.uom||"", x.sl_nos||"", x.received?"Received":"Pending", x.received_on?pgDmy(String(x.received_on).slice(0,10)):"", hold];
+            R.rows.push({ onClick:()=>onOpenGantt && onOpenGantt(String(p.contract_number), f), cells:cells.map((c,i)=> i===7 ? pill(c, x.received?"g":"r") : c), pdf:cells }); }); }); });
+    }
+  }
+  const matXlsx = ()=>{
+    try{
+      const aoa = [["Pending Material Status \u2014 "+(matView==="sum"?"Summary":"Detailed")+" \u00b7 "+scopeText+" \u00b7 "+pgDmy(today)], [], R.head];
+      R.rows.forEach(r=> aoa.push(r.group ? [r.pdf[0]] : r.pdf));
+      const ws = XLSX.utils.aoa_to_sheet(aoa); ws["!cols"] = R.head.map((x,i)=>({ wch: i===2 && matView==="det" ? 48 : 16 }));
+      const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, matView==="sum"?"Summary":"Detailed");
+      XLSX.writeFile(wb, ("Pending_Material_Status_"+(matView==="sum"?"Summary":"Detailed")+"_"+(scope==="one"?ct:"all")+"_"+today).replace(/[^A-Za-z0-9_-]+/g,"_")+".xlsx");
+    }catch(e){ alert("Could not make the Excel file: "+(e&&e.message||e)); }
+  };
+  const titles = { past:"Materials past planned date", od:"Overdue (all steps)", pend:"Pending supply", mat:"Pending Material Status", sum:"Contract summary", hist:"Plan history", kpi:"Purchase engineer KPI" };
   const pdf = async()=>{
     setBusy(true);
     try{
@@ -39123,12 +39345,18 @@ function ProcReportsScreen({ user, onOpenGantt }){
       Object.entries(titles).map(([k,l])=>h("button",{key:k,onClick:()=>setRep(k),style:{...btnSmall,fontSize:12.5,padding:"6px 11px",background:rep===k?colors.dark:"#fff",color:rep===k?"#fff":colors.text,borderColor:rep===k?colors.dark:colors.border}},l))),
     h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",background:"#efece2",borderRadius:8,padding:"8px 10px",marginBottom:8}},
       seg([["one","One contract"],["all","All contracts"]], scope, setScope),
-      lab("Contract", h(SearchPick,{value:ct, onChange:setCt, disabled:scope!=="one", width:300, options:data.plans.map(p=>[String(p.contract_number), ctOptLabel(p.contract_number, p.client)])})),
+      lab("Contract", h(SearchPick,{value:ct, onChange:setCt, disabled:scope!=="one", width:300, options:data.plans.filter(p=>rep!=="mat" || !matClient || (p.client||"")===matClient).map(p=>[String(p.contract_number), ctOptLabel(p.contract_number, p.client)])})),
       lab("Purchase engineer", sel(eng, setEng, [h("option",{key:"",value:""},"Everyone"), ...people.map(p=>h("option",{key:p,value:p},p))])),
       rep==="past" ? lab("Late by at least", sel(String(minLate), v=>setMinLate(Number(v)), [1,3,7,14].map(n=>h("option",{key:n,value:String(n)},n+" day"+(n===1?"":"s"))))) : null,
       rep==="pend" ? lab("Show", sel(show, setShow, [h("option",{key:"p",value:"pending"},"Pending only"),h("option",{key:"r",value:"recent"},"Pending + received in the last 30 days"),h("option",{key:"a",value:"all"},"Everything")])) : null,
       rep==="pend" ? lab("Expected", sel(within, setWithin, [h("option",{key:"",value:""},"Any date"),h("option",{key:"7",value:"7"},"Next 7 days"),h("option",{key:"14",value:"14"},"Next 14 days")])) : null,
       rep==="sum" ? h("label",{style:{fontSize:12,display:"inline-flex",gap:5,alignItems:"center"}},h("input",{type:"checkbox",checked:incDone,onChange:e=>setIncDone(e.target.checked)}),"Include contracts fully received") : null,
+      rep==="mat" ? seg([["sum","Summary"],["det","Detailed"]], matView, setMatView) : null,   // 184c
+      rep==="mat" ? lab("Client", sel(matClient, v=>{ setMatClient(v); if(v && scope==="one" && !(data.plans||[]).some(p=>String(p.contract_number)===ct && (p.client||"")===v)){ const f = (data.plans||[]).find(p=>(p.client||"")===v); if(f) setCt(String(f.contract_number)); } },
+          [h("option",{key:"",value:""},"All"), ...Array.from(new Set((data.plans||[]).filter(p=>(data.items||[]).some(i=>i.plan_id===p.id)).map(p=>p.client||"").filter(Boolean))).sort().map(c=>h("option",{key:c,value:c},c))])) : null,
+      rep==="mat" ? lab("Form", sel(matForm, setMatForm, [h("option",{key:"",value:""},"All"), ...Array.from(new Set((data.items||[]).filter(i=>(data.plans||[]).some(p=>p.id===i.plan_id && (scope==="all"||String(p.contract_number)===ct) && (!matClient||(p.client||"")===matClient))).map(i=>i.form))).sort().map(f=>h("option",{key:f,value:f},f))])) : null,
+      rep==="mat" ? h("label",{style:{fontSize:12,display:"inline-flex",gap:5,alignItems:"center"}},h("input",{type:"checkbox",checked:matPend,onChange:e=>setMatPend(e.target.checked)}),"Pending only") : null,
+      rep==="mat" ? h("button",{onClick:matXlsx,style:{...btnSmall,fontSize:12}},"Excel") : null,
       rep==="od" ? seg([["table","Table"],["bars","Bars"]], odView, setOdView) : null,
       rep==="od" && scope==="all" && odView==="table" ? h("label",{style:{fontSize:12,display:"inline-flex",gap:5,alignItems:"center"}},h("input",{type:"checkbox",checked:odAll,onChange:e=>setOdAll(e.target.checked)}),"Every line (not only the late ones)") : null,
       rep==="od" && scope==="all" && odView==="table" ? h("label",{style:{fontSize:12,display:"inline-flex",gap:5,alignItems:"center"}},h("input",{type:"checkbox",checked:odInc,onChange:e=>setOdInc(e.target.checked)}),"Include contracts with nothing overdue") : null,
@@ -41821,7 +42049,7 @@ function CrmFunnelKanban({ user }){
     if(filters.nature && c.quote_nature!==filters.nature) return false;
     if(filters.search){
       const s = filters.search.toLowerCase();
-      if(!((c.customer_name||"").toLowerCase().includes(s) || (c.reference_number||"").toLowerCase().includes(s))) return false;
+      if(!((c.customer_name||"").toLowerCase().includes(s) || hHas(c.reference_number||"", s))) return false;
     }
     return true;
   });
@@ -50239,7 +50467,7 @@ function SearchPick({ value, onChange, options, style, disabled, placeholder, wi
   const [open,setOpen] = useState(false); const [q,setQ] = useState("");
   const cur = (options||[]).find(o=>String(o[0])===String(value));
   const ql = q.trim().toLowerCase();
-  const list = (options||[]).filter(o=> !ql || String(o[1]).toLowerCase().includes(ql) || String(o[0]).toLowerCase().includes(ql)).slice(0,300);
+  const list = (options||[]).filter(o=> !ql || hHas(o[1], ql) || hHas(o[0], ql)).slice(0,300);
   const pick = v=>{ setOpen(false); setQ(""); onChange && onChange(v); };
   return h("span",{style:{position:"relative",display:"inline-block",width:width||"auto",minWidth:180,opacity:disabled?0.5:1}},
     h("input",{value: open ? q : (cur?cur[1]:(value||"")), disabled:!!disabled, placeholder: open ? ((cur&&cur[1])||placeholder||"Type number or client") : (placeholder||""),
@@ -50659,7 +50887,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
   const tileItems = data.items.filter(it=> !mine || it.owner===me);
   const vis = data.items.filter(it=>(!tileDef || !tileDef.f || tileDef.f(it)) && (!mine || it.owner===me) && (mode==="all" || it.ct===curCt) && (!fHold || (fHold==="none" ? !it.hold : it.hold===fHold))
     && (!fOwner || (fOwner==="__none" ? !it.owner : it.owner===fOwner)) && (!fDept || it.dept===fDept)
-    && (!ql || [it.name,it.no,it.ct,it.customer,it.cat,it.owner].some(x=>String(x||"").toLowerCase().includes(ql))));
+    && (!ql || [it.name,it.no,it.ct,it.customer,it.cat,it.owner].some(x=>hHas(x||"", ql))));
   const cmp = { due:(a,b)=>String(a.due||"9").localeCompare(String(b.due||"9")), ct:(a,b)=>a.ct.localeCompare(b.ct)||a.name.localeCompare(b.name), days:(a,b)=>b.days-a.days, name:(a,b)=>a.name.localeCompare(b.name) }[srt];
   const columns = view==="stage"
     ? docStageLists().map(L=>({ key:"s:"+L.key, label:L.label, color:L.color, sub:L.sub, f: docCustomOf(L.key) ? (it=>it.sub===L.key) : (it=>it.list===L.key && !it.sub), list:L.key, custom:!!docCustomOf(L.key) }))   // 183
@@ -52173,6 +52401,7 @@ async function handoverApplyItem(it, from, to, toEmp, why, me){
       it.added = !(ex||[]).length;
       if(it.added){ const { error } = await sb.from("post_holder_tbl").insert({ post_key:k, employee_name:to, assigned_by:me }); if(error) return error.message; }
       const { error: e2 } = await sb.from("post_holder_tbl").delete().eq("post_key",k).eq("employee_name",from); if(e2) return e2.message;
+      await postCardsSync(k, me);   // 184c
       return "";
     }
     if(it.kind==="customer"){
@@ -54081,6 +54310,60 @@ function TaskChecklistItems({ items, onChange, depth, today, disabled, cols }){
       (i.items||[]).length ? h(TaskChecklistItems,{items:i.items,onChange:(next)=>upd(i.id,{items:next}),depth:(depth||0)+1,today,disabled}) : null)));
 }
 
+// 184c: the specs to buy under a material form, one row per spec. Tick = received (date editable).
+// When every row is received, "at Our Factory" on the Gantt is set; ticking the step does not receive the items.
+function ProcItemsPanel({ task, me, onChanged }){
+  const [rows,setRows] = useState(null); const [err,setErr] = useState(""); const [busy,setBusy] = useState(false);
+  const load = useCallback(async()=>{
+    const { data, error } = await sb.from("proc_item_tbl").select("*").eq("plan_id",task.proc_plan_id).eq("form",task.proc_form).order("id");
+    if(error){ setErr("The item list is not there yet \u2014 run structure_production_bom_workflow_2026-10-14.sql."); setRows([]); return; }
+    setRows(data||[]);
+  },[task.proc_plan_id, task.proc_form]);
+  useEffect(()=>{ load(); },[load]);
+  const factoryStep = async(all, last)=>{
+    try{
+      const { data: rowsDb } = await sb.from("proc_line_tbl").select("*").eq("plan_id",task.proc_plan_id);
+      const { data: plan } = await sb.from("proc_plan_tbl").select("*").eq("id",task.proc_plan_id).maybeSingle(); if(!plan) return;
+      const { d, extra } = pgFromRows(rowsDb); const row = pgRows(plan, d, extra).find(r=>(r.form||"")===(task.proc_form||"")); if(!row) return;
+      const st = row.steps.find(x=>x.key==="fac|"+task.proc_form); if(!st) return;
+      const has = !!pgDue(st.act.e); if(all===has && !(all && pgDue(st.act.e)!==last)) return;
+      const cur = d[st.key]||{}; const nowIso = new Date().toISOString();
+      await sb.from("proc_line_tbl").upsert([{ plan_id:plan.id, line_key:st.key, label:st.label, stage:st.label, form:st.group||null, pred_key:st.pred||null, is_custom:false,
+        plan_start_type:(cur.ps||PG_NONE).t, plan_start:(cur.ps||PG_NONE).v||null, plan_type:(cur.pe||PG_NONE).t, plan_date:(cur.pe||PG_NONE).v||null,
+        act_start_type:"d", act_start: all ? (pgDue(cur.as||PG_NONE)||last) : ((cur.as||PG_NONE).v||null), act_type:"d", act_date: all ? last : null, updated_by:me||"", updated_at:nowIso }],{onConflict:"plan_id,line_key"});
+      await pgSyncTasks(plan.id, me||"");
+    }catch(e){ console.error("Items -> Gantt", e); }
+  };
+  const save = async(r, patch, logTxt)=>{
+    setBusy(true);
+    try{
+      const { error } = await sb.from("proc_item_tbl").update({ ...patch, updated_by:me||"", updated_at:new Date().toISOString() }).eq("id",r.id);
+      if(error){ alert("Could not save: "+error.message); return; }
+      await taskLog(task.id, me||"", logTxt);
+      const next = rows.map(x=>x.id===r.id ? { ...x, ...patch } : x); setRows(next);
+      const all = next.length>0 && next.every(x=>x.received);
+      const last = next.map(x=>x.received_on).filter(Boolean).sort().pop() || pgToday();
+      await factoryStep(all, last);
+      onChanged && onChanged();
+    } finally { setBusy(false); }
+  };
+  if(rows===null) return h("div",{style:{fontSize:12,color:colors.muted,marginTop:12}},"Reading the items\u2026");
+  const got = rows.filter(r=>r.received).length;
+  return h("div",{style:{marginTop:14,borderTop:"1px solid #e8efec",paddingTop:10}},
+    h("div",{style:{fontWeight:700,fontSize:12.5,marginBottom:2}},"Items to buy \u2014 "+task.proc_form+(rows.length?" ("+got+" of "+rows.length+" received)":"")),
+    h("div",{style:{fontSize:11,color:colors.muted,marginBottom:6}},"Tick when the item is received at the factory; the date fills with today and can be changed. When every item is in, \u201cat Our Factory\u201d is set on the Gantt. (Later the Stores GRN will tick these by itself.)"),
+    err ? h("div",{style:{fontSize:12,color:colors.danger}},err) : null,
+    !rows.length && !err ? h("div",{style:{fontSize:12,color:colors.mutedLight}},"No items listed for this form.") : null,
+    rows.map(r=>h("div",{key:r.id,style:{display:"grid",gridTemplateColumns:"22px minmax(0,1fr) 100px 150px",gap:8,alignItems:"center",padding:"4px 0",borderBottom:"1px dashed #eceae2",fontSize:12.5}},
+      h("input",{type:"checkbox",checked:!!r.received,disabled:busy,onChange:e=>{ const on = e.target.checked; save(r, on ? { received:true, received_on:pgToday(), received_by:me||"" } : { received:false, received_on:null, received_by:null },
+        (on?"Received: ":"Not received: ")+r.spec+(r.grade?" \u00b7 "+r.grade:"")+" ("+r.qty+" "+(r.uom||"")+")"); }}),
+      h("span",{style:{color:r.received?colors.muted:colors.text,textDecoration:r.received?"line-through":"none"}},r.spec+(r.grade?" \u00b7 "+r.grade:""),
+        r.sl_nos ? h("span",{style:{fontSize:10.5,color:colors.mutedLight}}," \u00b7 "+r.sl_nos) : null),
+      h("span",{style:{textAlign:"right"}},(Number(r.qty)||0).toLocaleString("en-IN",{maximumFractionDigits:3})+" "+(r.uom||"")),
+      r.received ? h("input",{type:"date",value:r.received_on?String(r.received_on).slice(0,10):"",disabled:busy,onChange:e=>{ const v = e.target.value; if(!v) return; save(r, { received_on:v }, "Received date for "+r.spec+" set to "+pgDmy(v)); },
+          style:{...inputStyle,padding:"2px 6px",fontSize:11.5,width:140}})
+        : h("span",{style:{fontSize:10.5,fontWeight:700,color:"#a3312a",background:"#fdecea",borderRadius:9,padding:"1px 8px",justifySelf:"start"}},"pending"))));
+}
 function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultDept, deptOf, canApprove, canEdit, approversFor, labelColor, move, onClose, onOpen, onChanged, enqOf, quoteMade, onStartQuote, onOpenQuote, taskTypes, isAdmin, onGoToTab, onOpenGantt, boards, onCommented }){
   const isNew = taskId==="new";
   const saved = isNew ? null : tasks.find(t=>t.id===taskId);
@@ -54389,6 +54672,7 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
                h("div",{style:{minWidth:0}},enqPanel,fieldsGrid,checkSec),
                h("div",{style:{minWidth:0,marginTop:12}},noteSec,labelsSec,linksSec,subsSec))
            : h("div",null,enqPanel,fieldsGrid,labelsSec,linksSec,checkSec,subsSec,noteSec),
+      (!isNew && saved && saved.proc_plan_id && saved.parent_id && saved.proc_form) ? h(ProcItemsPanel,{ task:saved, me, onChanged }) : null,   // 184c
       footer,
       !isNew ? sec("Comments","type @ and a name to tell someone (they get it in the bell)",   // 178
         cmErr ? h("div",{style:{fontSize:11.5,color:"#a3312a"}},cmErr) : null,
@@ -55307,6 +55591,7 @@ async function despPendingItems(){
   // 10 Oct 2026 (166): invoices + LUT register
   try{ (await invPendingItems(P)).forEach(x=>out.push(x)); }catch(e){ console.error("Invoice pending items", e); }
   try{ (await invLutPending(P)).forEach(x=>out.push(x)); }catch(e){ console.error("LUT pending items", e); }
+  try{ (await pbomPendingItems(P)).forEach(x=>out.push(x)); }catch(e){ console.error("PO release pending items", e); }   // 184c
   return out;
 }
 
@@ -56198,7 +56483,7 @@ function ContractRegisterScreen({ user, onOpenQuote, onOpenContract, onGoToTab, 
   const qq = q.trim().toLowerCase();
   const kindOk = (c)=> kind==="all" || (kind==="export" ? c.isExport : !c.isExport);
   const cnKey = (c)=> Number(String(c.cn).replace(/\D/g,""))||0;
-  const base = list.filter(c=> fyOk(c) && kindOk(c) && (!chk || c.checkCcy) && (!qq || [c.cn,c.quote,c.legacyRef,c.client,c.po,c.endUser,...c.lines.map(l=>l.d)].join(" ").toLowerCase().includes(qq)));
+  const base = list.filter(c=> fyOk(c) && kindOk(c) && (!chk || c.checkCcy) && (!qq || hHas([c.cn,c.quote,c.legacyRef,c.client,c.po,c.endUser,...c.lines.map(l=>l.d)].join(" "), qq)));
   const shown = base.filter(c=> st==="All" || c.status===st).sort((a,b)=>{ const d = String(a.cn).length-String(b.cn).length || cnKey(a)-cnKey(b); return sortDesc ? -d : d; });
   const cnt = (s)=> base.filter(c=>s==="All"||c.status===s).length;
   const T = { inr:0, usd:0, other:{}, all:0, noRate:0 };
