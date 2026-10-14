@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-14T08:45:00Z";
+  var APP_BUILD_VERSION = "2026-10-14T11:20:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -848,7 +848,7 @@ const MASTER_TABLES = [
   // it from the list; an Admin can add a new family on the go with
   // "+ Add new…". Blank is allowed so existing items keep working until
   // someone assigns them.
-  { key: "item_tbl", label: "Items", columns: ["item","family","hsn_code"], addLabel:"New item", cascade:[{col:"family",from:"family_tbl",field:"family"}], freeText:["item","hsn_code"], nullableCols:["family"], exportEnabled:true, editAllEnabled:true },
+  { key: "item_tbl", label: "Items", columns: ["item","family","hsn_code","gst_rate","supply_kind"], addLabel:"New item", cascade:[{col:"family",from:"family_tbl",field:"family"}], freeText:["item","hsn_code","gst_rate","supply_kind"], colLabels:{hsn_code:"HSN / SAC", gst_rate:"GST %", supply_kind:"Goods / Service"}, nullableCols:["family"], exportEnabled:true, editAllEnabled:true },
   { key: "size_tbl", label: "Sizes", columns: ["size"], addLabel:"New size", freeText:["size"], editAllEnabled:true },
   { key: "component_item_tbl", label: "Components by item", columns: ["component","item"], addLabel:"New component", cascade:[{col:"item",from:"item_tbl",field:"item"}], freeText:["component"], editAllEnabled:true, exportEnabled:true },
   { key: "subassembly_tbl", label: "Sub-assemblies", columns: ["item","component","sub_assembly"], addLabel:"New sub-assembly", cascade:[{col:"item",from:"item_tbl",field:"item"},{col:"component",from:"component_item_tbl",field:"component",filterBy:"item"}], freeText:["sub_assembly"], groupBy:["item","component"], editAllEnabled:true, exportEnabled:true },
@@ -12698,6 +12698,130 @@ function AddToMasterPanel({ table, fieldLabel, valueCol, onClose, onAdded }){
 
 // A strict dropdown paired with a "Can't find it? Add" link that opens
 // AddToMasterPanel and re-selects the newly added value on save.
+// ---- 185 (14 Oct): GST type on the Sale Order + GST rate per Sl No ----
+const GST_KIND_HELP = { intra:"CGST + SGST, half the rate each", inter:"IGST, the full rate", export:"0% — LUT wording on the invoice",
+  sez:"0% zero-rated supply to an SEZ unit, under LUT", merchant:"0.1% to an Indian merchant exporter (CGST 0.05 + SGST 0.05 in Tamil Nadu, IGST 0.1 outside)" };
+function gstKindOfName(n){ n = String(n||""); if(!n) return null; return /merchant/i.test(n)?"merchant":/\bsez\b/i.test(n)?"sez":/export|lut/i.test(n)?"export":/tamil|intra/i.test(n)?"intra":"inter"; }
+function gstSuggestKind(state, currency){
+  if(currency && String(currency).toUpperCase()!=="INR") return "export";
+  if(!state) return null;
+  return /tamil/i.test(state) ? "intra" : (GST_STATES && Object.values(GST_STATES).some(v=>String(v).toLowerCase()===String(state).toLowerCase()) ? "inter" : "export");
+}
+function SoGstPanel({ ctData, options, onPick, clientState, currency, slRows, setSlRows, locked }){
+  const kindOf = (o)=> o && (o.kind || (/tamil|intra/i.test(o.structure_name)?"intra":/sez/i.test(o.structure_name)?"sez":/merchant/i.test(o.structure_name)?"merchant":/export|lut/i.test(o.structure_name)?"export":"inter"));
+  const cur = options.find(o=>String(o.id)===String(ctData.gst_structure_id));
+  const kind = ctData.gst_kind || kindOf(cur) || null;
+  const sug = gstSuggestKind(clientState, currency);
+  const warns = [];
+  if(kind==="intra" && clientState && !/tamil/i.test(clientState)) warns.push("Client state is "+clientState+" but the GST type is Tamil Nadu — Intrastate. Check the billing address / GSTIN.");
+  if(kind==="inter" && clientState && /tamil/i.test(clientState)) warns.push("Client is in Tamil Nadu but the GST type is Interstate — IGST.");
+  if(currency && String(currency).toUpperCase()!=="INR" && (kind==="intra" || kind==="inter")) warns.push("Currency is "+currency+" but the GST type is "+(cur?cur.structure_name:kind)+". Exports are normally Export — LUT.");
+  if((kind==="export") && (slRows||[]).some(r=>r.kind==="Service")) warns.push("Export — LUT with a Service line: a service done in India is usually taxable even for a foreign client. Check before the invoice.");
+  const radio = (o)=>{ const k = kindOf(o); const on = String(o.id)===String(ctData.gst_structure_id);
+    return h("label",{key:o.id,style:{display:"block",border:"1px solid "+(on?colors.dark:colors.border),background:on?"#f5f9fd":"#fff",borderRadius:6,padding:"6px 9px",margin:"4px 0",fontSize:12,cursor:locked?"default":"pointer"}},
+      h("input",{type:"radio",name:"so-gst-kind",checked:on,disabled:locked,onChange:()=>onPick(String(o.id)),style:{marginRight:6}}),
+      h("b",null,o.structure_name), h("span",{style:{color:colors.muted,fontSize:11}}," — "+(GST_KIND_HELP[k]||"")),
+      sug===k && !on ? h("span",{style:{marginLeft:6,fontSize:10.5,background:"#e8f0fa",color:"#1f4e78",borderRadius:9,padding:"1px 7px"}},"suggested"+(clientState?": client in "+clientState:"")) : null); };
+  const setRow = (i, k, v)=> setSlRows(rs=>rs.map((r,j)=>j===i?{...r,[k]:v}:r));
+  const effRate = (r)=> kind==="merchant" ? 0.1 : (kind==="export"||kind==="sez") ? 0 : (r.rate!==""&&r.rate!=null ? Number(r.rate) : (r.itemRate!=null?Number(r.itemRate):18));
+  const th = { textAlign:"left", fontSize:10.5, color:colors.muted, padding:"4px 6px", borderBottom:"1px solid "+colors.border, fontWeight:600 };
+  const td = { padding:"3px 6px", borderBottom:"1px solid "+colors.border, fontSize:11.5, verticalAlign:"top" };
+  return h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px",marginBottom:14,background:"#fcfcfa"}},
+    h("div",{style:{fontWeight:700,fontSize:12.5,marginBottom:2}},"Tax — GST type"),
+    h("div",{style:{fontSize:11,color:colors.muted,marginBottom:4}},"Pick one. The tax wording on the O.A is set from it and can't be typed."),
+    options.map(radio),
+    !ctData.gst_structure_id && h("div",{style:{fontSize:10.5,color:colors.danger,marginTop:3}},"⚠ Not set — flagged until picked"),
+    h("div",{style:{fontSize:11,color:colors.muted,marginTop:6}},"Tax wording: ", h("b",{style:{color:colors.dark}}, ctData.tax||"—")),
+    warns.map((w,i)=>h("div",{key:i,style:{marginTop:6,background:"#fdecea",border:"1px solid #f3b4ae",color:"#8a1c14",borderRadius:5,padding:"5px 8px",fontSize:11}},"⚠ "+w)),
+    (slRows||[]).length>0 && h("div",{style:{marginTop:10}},
+      h("div",{style:{fontWeight:700,fontSize:12,marginBottom:2}},"GST per Sl No"),
+      h("div",{style:{fontSize:10.5,color:colors.muted,marginBottom:4}},"Blank = from the Items master (18% when it has none). Change only when needed, with a reason."),
+      h("table",{style:{borderCollapse:"collapse",width:"100%"}},
+        h("thead",null,h("tr",null,["Sl","Item","Goods / Service","HSN / SAC","GST %","Why not the usual rate"].map(t=>h("th",{key:t,style:th},t)))),
+        h("tbody",null,(slRows||[]).map((r,i)=>{ const er = effRate(r); const off = r.rate!=="" && r.rate!=null && Number(r.rate)!==(r.itemRate!=null?Number(r.itemRate):18);
+          return h("tr",{key:r.sl,style:off?{background:"#fffbea"}:null},
+            h("td",{style:td},r.sl), h("td",{style:td},r.item||"—"),
+            h("td",{style:td},h("select",{value:r.kind||"Goods",disabled:locked,onChange:e=>setRow(i,"kind",e.target.value),style:{...inputStyle,padding:"3px 5px",fontSize:11.5}},h("option",null,"Goods"),h("option",null,"Service"))),
+            h("td",{style:td},h("input",{value:r.hsn||"",disabled:locked,placeholder:r.itemHsn||(r.kind==="Service"?"SAC":"HSN"),onChange:e=>setRow(i,"hsn",e.target.value),style:{...inputStyle,padding:"3px 5px",fontSize:11.5,width:90}})),
+            h("td",{style:td},h("input",{value:r.rate==null?"":r.rate,disabled:locked||kind==="merchant",placeholder:String(er),onChange:e=>setRow(i,"rate",e.target.value.replace(/[^0-9.]/g,"")),style:{...inputStyle,padding:"3px 5px",fontSize:11.5,width:56,textAlign:"right"}}),
+              (kind==="export"||kind==="sez") ? h("div",{style:{fontSize:10,color:colors.muted}},"0% under LUT") : kind==="merchant" ? h("div",{style:{fontSize:10,color:colors.muted}},"0.1% (merchant)") : null),
+            h("td",{style:td},h("input",{value:r.reason||"",disabled:locked,placeholder:off?"required":"",onChange:e=>setRow(i,"reason",e.target.value),style:{...inputStyle,padding:"3px 5px",fontSize:11.5,width:"100%",borderColor:off&&!String(r.reason||"").trim()?"#e0a800":undefined}}))); })))
+    )
+  );
+}
+// ---- 185 (14 Oct): Sale Order terms — free text with spell check, "did you mean the list entry?", and "add to the list?" ----
+// The agreed wording from the customer's PO can stay as it is; the list entry is suggested when the wording is close to one.
+// Any user can add to the list (no code). Quotes keep the strict lists. Tax is never free text.
+const TERM_WORDS = ("weeks week days day months month from the date of firm order with advance approval approvals approved gad itp qap drawing drawings document documents "+
+  "manufacturing manufacture clearance clearances receipt received upon against prior to dispatch despatch delivery delivered material materials readiness ready inspection "+
+  "proforma invoice invoices payment payments balance credit net within after before and or by our your scope us you included inclusive extra basis door to-pay pay "+
+  "freight transporter transport road ship sea air courier approved any insurance packing forwarding seaworthy port works ex-works chennai india site project fca fob cif dap ddp "+
+  "exw incoterms guarantee guaranteed warranty commissioning commission dispatch whichever earlier later manufacturing defects period items are is be shall will for of in on at "+
+  "critical code code-2 purchase po lpo loi tax gst igst cgst sgst export applicable as per all taxes duties percent value basic total order acceptance letter bank transfer "+
+  "milestone milestones submission submit certificate certificates test testing hydro mrb irn tpi third party "+
+  "post agst manufacturer manufacturers along released release releases complete completion acknowledgement acknowledgment design designs contract price prices mandatory "+
+  "spares spare initial final full part partial pro-rata rata including include includes excluding exclude subject receipt receipts issue issued issuance schedule "+
+  "documents documentation relevant supported supporting proper properly certified approval approved successful successfully clearance cleared collection collected "+
+  "material vendor seller buyer supplier client customer company works factory facility warehouse location address below above days working calendar months year years "+
+  "open immediate immediately due paid payable through platform discounted letter irrevocable credit established establish established transfer cheque scan copy "+
+  "against prior post-dated pdc remaining rest balance retention guarantee performance bank bg abg pbg valid validity until till fabrication assembly procedure "+
+  "basis door delivery delivered collect collection exworks ex-work work charges charge adding added while invoicing extra extras specialist services service "+
+  "seaworthy packing upto nhava sheva mumbai port despatch dispatched shipment shipped shipping ship road roadways rail air sea vessel lc cash purchase "+
+  "however does cover covers wear tear filters seals gaskets fasteners fastners etc commissioning date dates weeks data deliver team exceed exceeding exceeds "+
+  "maximum minimum max min capped cap first second third each per both other such also only not no new same this that these those which when where who all than then them they there their what with without into onto over under more less most least").split(/\s+/);
+function termEditDist(a, b){
+  if(Math.abs(a.length-b.length)>2) return 9;
+  const d = Array.from({length:a.length+1},(_,i)=>[i]); for(let j=1;j<=b.length;j++) d[0][j]=j;
+  for(let i=1;i<=a.length;i++) for(let j=1;j<=b.length;j++) d[i][j] = Math.min(d[i-1][j]+1, d[i][j-1]+1, d[i-1][j-1]+(a[i-1]===b[j-1]?0:1), (i>1&&j>1&&a[i-1]===b[j-2]&&a[i-2]===b[j-1]) ? d[i-2][j-2]+1 : 99);
+  return d[a.length][b.length];
+}
+// words that look misspelt: not in the vocabulary (term words + every word already in the term lists) but 1-2 letters from one that is
+function termSpellCheck(text, options){
+  const vocab = new Set(TERM_WORDS); (options||[]).forEach(o=>String(o||"").toLowerCase().split(/[^a-z\-]+/).forEach(w=>{ if(w.length>2) vocab.add(w); }));
+  const fixes = [];
+  String(text||"").split(/[^A-Za-z\-]+/).map(w=>w.replace(/^-+|-+$/g,"")).forEach(w=>{ const lw = w.toLowerCase(); if(lw.length<4 || vocab.has(lw) || vocab.has(lw.replace(/(es|s|ed|ing|ly)$/,"")) || vocab.has(lw.replace(/(s|d)$/,"")) || /^[A-Z0-9\-]+$/.test(w) && w.length<=5) return;
+    let best = null, bd = 9; vocab.forEach(v=>{ if(v.length<4) return; const dd = termEditDist(lw, v); if(dd<bd){ bd = dd; best = v; } });
+    if(best && bd <= (lw.length>=8 ? 2 : 1) && !fixes.some(f=>f.from===w)) fixes.push({ from:w, to: w[0]===w[0].toUpperCase() ? best[0].toUpperCase()+best.slice(1) : best }); });
+  return fixes;
+}
+function termNorm(s){ return String(s||"").toLowerCase().replace(/[‐-―]/g,"-").replace(/[^a-z0-9%]+/g," ").trim(); }
+// the closest list entry, when the typed wording is nearly the same (spacing, case, punctuation, a letter or two)
+function termClosest(text, options){
+  const t = termNorm(text); if(!t) return null; let best = null, bs = 0;
+  (options||[]).forEach(o=>{ const n = termNorm(o); if(!n) return; if(n===t){ best = o; bs = 1; return; }
+    const ta = new Set(t.split(" ")), oa = new Set(n.split(" ")); let inter = 0; ta.forEach(w=>{ if(oa.has(w)) inter++; });
+    const sim = (2*inter)/(ta.size+oa.size); const ed = (t.length<60 && n.length<60) ? termEditDist(t.slice(0,58), n.slice(0,58)) : 99;
+    const score = Math.max(sim, ed<=3 ? 0.95 : 0); if(score>bs){ bs = score; best = o; } });
+  return bs>=0.85 ? best : null;
+}
+function SoTermField({ value, onChange, options, table, fieldLabel, refreshOptions, user, contractNumber, disabled, placeholder }){
+  const [typed,setTyped] = useState(value||"");
+  const [ask,setAsk] = useState(null);   // {kind:"spell"|"close"|"new", ...}
+  const [busy,setBusy] = useState(false);
+  useEffect(()=>{ setTyped(value||""); },[value]);
+  const listId = useMemo(()=>"sot-"+Math.random().toString(36).slice(2,9),[]);
+  const inList = (v)=> (options||[]).some(o=>o===v);
+  const check = (v)=>{
+    v = String(v||"").trim(); onChange(v);
+    if(!v || inList(v)){ setAsk(null); return; }
+    const sp = termSpellCheck(v, options); if(sp.length){ setAsk({ kind:"spell", fixes:sp }); return; }
+    const cl = termClosest(v, options); if(cl){ setAsk({ kind:"close", entry:cl }); return; }
+    setAsk(null);   // 185b: free text stays on this Sale Order only — nothing is added to the list
+  };
+  const fixSpelling = ()=>{ let v = typed; ask.fixes.forEach(f=>{ v = v.replace(new RegExp("\\b"+f.from.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\b","g"), f.to); }); setTyped(v); check(v); };
+  const keepSpelling = ()=>{ const v = String(typed||"").trim(); const cl = termClosest(v, options); setAsk(cl ? { kind:"close", entry:cl } : null); };
+  const box = { marginTop:4, background:"#fff8e1", border:"1px solid #f0d58a", borderRadius:5, padding:"6px 8px", fontSize:11, color:"#6b4e00" };
+  const b = (label, fn, primary)=> h("button",{type:"button",onClick:fn,disabled:busy,style:{...btnSmall,fontSize:10.5,padding:"3px 8px",marginRight:5,marginTop:4,...(primary?{background:colors.dark,color:"#fff",border:"none"}:{})}},label);
+  return h("div",null,
+    h("input",{ list:listId, value:typed, disabled, spellCheck:true, title:typed||"",
+      onChange:e=>{ setTyped(e.target.value); setAsk(null); }, onBlur:e=>check(e.target.value),
+      placeholder: placeholder || "Pick from the list or type the agreed wording", style:{...inputStyle, padding:"7px 9px", fontSize:12} }),
+    h("datalist",{id:listId},(options||[]).map(o=>h("option",{key:o,value:o}))),
+    ask && ask.kind==="spell" && h("div",{style:box}, "Spelling: ", ask.fixes.map(f=>h("b",{key:f.from}, f.from+" → "+f.to+"  ")), h("br"), b("Fix", fixSpelling, true), b("Keep as typed", keepSpelling)),
+    ask && ask.kind==="close" && h("div",{style:box}, "Close to the list entry: ", h("b",null,"\""+ask.entry+"\""), h("br"),
+      b("Use the list entry", ()=>{ setTyped(ask.entry); onChange(ask.entry); setAsk(null); }, true), b("Keep my wording", ()=>setAsk(null))),
+  );
+}
 function MasterSelect({ value, onChange, options, table, valueCol, fieldLabel, placeholder, style, refreshOptions }){
   const [showAdd,setShowAdd] = useState(false);
   return h("div",{style:{display:"flex",gap:6,alignItems:"center"}},
@@ -15442,9 +15566,27 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     if(!structureId){ setCtData(d=>({...d,gst_structure_id:null,gst_structure_name:null,gst_components_snapshot:null})); return; }
     const structure = gstStructureOptions.find(s=>String(s.id)===String(structureId));
     const { data: components } = await sb.from("gst_structure_component_tbl").select("label,rate_percent").eq("structure_id",structureId).order("sort_order");
-    setCtData(d=>({...d, gst_structure_id:structureId, gst_structure_name:structure?.structure_name||null, gst_components_snapshot:components||[]}));
+    const k = structure?.kind || (/tamil|intra/i.test(structure?.structure_name||"")?"intra":/sez/i.test(structure?.structure_name||"")?"sez":/merchant/i.test(structure?.structure_name||"")?"merchant":/export|lut/i.test(structure?.structure_name||"")?"export":"inter");
+    setCtData(d=>({...d, gst_structure_id:structureId, gst_structure_name:structure?.structure_name||null, gst_components_snapshot:components||[], gst_kind:k, tax: structure?.tax_wording || d.tax }));
+  };
+  // 185: client state (for the suggestion / warnings) and the GST rate per Sl No
+  const [ctClientState,setCtClientState] = useState(null);
+  const [ctSlGst,setCtSlGst] = useState([]);
+  const [ctSlGstOrig,setCtSlGstOrig] = useState("[]");
+  const loadCtSlGst = async(ref)=>{
+    try{
+      const cn = quoteHeaderRow?.customer_name || contractInfo?.customer_name;
+      if(cn){ const { data: co } = await sb.from("companies").select("billing_state,billing_country").eq("company_name",cn).maybeSingle(); setCtClientState(co ? (co.billing_state||co.billing_country||null) : null); }
+      const [{ data: es }, { data: its }, { data: ms }] = await Promise.all([ sb.from("estimates").select("*").eq("reference_number",ref).order("item_sl_no"), sb.from("item_tbl").select("*"), sb.from("model_tbl").select("model,item") ]);
+      const mi = new Map((ms||[]).map(r=>[r.model,r.item])); const byItem = new Map((its||[]).map(r=>[String(r.item||"").trim().toLowerCase(), r]));
+      const rows = (es||[]).map(e=>{ const itemName = mi.get(e.model)||e.model||""; const it = byItem.get(String(itemName).trim().toLowerCase());
+        return { sl:e.item_sl_no, item:itemName, kind:e.gst_supply_kind||(it&&it.supply_kind)||"Goods", hsn:e.gst_hsn_sac||"", rate:e.gst_rate==null?"":String(e.gst_rate), reason:e.gst_rate_reason||"",
+                 itemRate: it && it.gst_rate!=null ? Number(it.gst_rate) : null, itemHsn: it ? (it.hsn_code||"") : "" }; });
+      setCtSlGst(rows); setCtSlGstOrig(JSON.stringify(rows));
+    }catch(e){ console.error("GST per Sl No load", e); setCtSlGst([]); setCtSlGstOrig("[]"); }
   };
   const [ctOriginalData,setCtOriginalData]=useState(null); // snapshot at load time, for revision diff-logging
+  const [ctAmend,setCtAmend]=useState(null);   // 185: {reason} while amending terms after the O.A has gone
   const [ctLoading,setCtLoading]=useState(false);
   const [ctSaving,setCtSaving]=useState(false);
   const [showCtMissingModal,setShowCtMissingModal]=useState(false);
@@ -16221,7 +16363,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const [ctBasicPrice,setCtBasicPrice] = useState(0);
   const openCommercialTerms=async()=>{
     if(!quoteExportRef) return;
-    setCtLoading(true); setShowCommercialTerms(true); setCtAllowMismatch(false); setCtMismatchBlocked(false); setCtGhostDraft({});
+    setCtLoading(true); setShowCommercialTerms(true); setCtAllowMismatch(false); setCtMismatchBlocked(false); setCtGhostDraft({}); setCtAmend(null);
+    if(mode==="contract") loadCtSlGst(quoteExportRef); else { setCtSlGst([]); setCtSlGstOrig("[]"); }
     try {
       const{data}=await sb.from("quote_commercial_terms").select("*").eq("reference_number",quoteExportRef).maybeSingle();
       const loaded = data||{reference_number:quoteExportRef,validity:"",payment_term:"",delivery_term:"",packing_forwarding:"",packing_forwarding_basis:"Percentage",packing_forwarding_value:"",insurance:"",price_basis:"",guarantee:"",dispatch_through:"",incoterms:"",freight:"",tax:"",warranty_coverage:"",jurisdiction:CT_DEFAULTS.jurisdiction,force_majeure:CT_DEFAULTS.force_majeure,order_cancellation_charges:CT_DEFAULTS.order_cancellation_charges};
@@ -16255,6 +16398,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const ctPriceBasisCode = ctData ? detectIncotermCode(ctData.price_basis) : null;
   const ctIncotermsCode = ctData ? detectIncotermCode(ctData.incoterms) : null;
   const ctMismatch = !!(ctPriceBasisCode && ctIncotermsCode && ctPriceBasisCode!==ctIncotermsCode);
+  // 185: a Sale Order's terms lock once the O.A has gone (any Stage past Draft); amend with a reason
+  const ctLocked = mode==="contract" && !!contractInfo && !!contractInfo.status && contractInfo.status!=="Draft" && !ctAmend && !String(quoteExportRef||"").includes("-Rev-");
   const attemptSaveCommercialTerms=()=>{
     const missing = CT_REQUIRED_FIELDS.filter(([key])=>!(mode==="contract" && key==="validity")).filter(([key])=>!String(ctData?.[key]||"").trim()).map(([,label])=>label);
     // Packing and Forwarding — checks the real fields it's actually
@@ -16268,17 +16413,44 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     saveCommercialTerms();
   };
   const saveCommercialTerms=async()=>{
+    // 185: a Sl No whose GST rate differs from its item's needs a reason
+    if(mode==="contract"){ const bad = (ctSlGst||[]).filter(r=>r.rate!=="" && r.rate!=null && Number(r.rate)!==(r.itemRate!=null?Number(r.itemRate):18) && !String(r.reason||"").trim());
+      if(bad.length){ alert("GST rate changed on Sl No "+bad.map(r=>r.sl).join(", ")+" — give the reason (e.g. merchant exporter, 5% item)."); return; } }
     setCtSaving(true);
     try {
       const payload={...ctData,reference_number:quoteExportRef,updated_by:user?.username||"unknown",updated_at:new Date().toISOString()};
       delete payload.id;
-      const{error}=await sb.from("quote_commercial_terms").upsert(payload,{onConflict:"reference_number"});
+      let { error } = await sb.from("quote_commercial_terms").upsert(payload,{onConflict:"reference_number"});
+      if(error && /gst_kind|packing_forwarding_notes/.test(error.message||"")){ delete payload.gst_kind; delete payload.packing_forwarding_notes; ({ error } = await sb.from("quote_commercial_terms").upsert(payload,{onConflict:"reference_number"})); }
       if(error) throw error;
+      if(mode==="contract"){
+        // the invoice reads the GST type from the Sale Order, so keep the two the same
+        if(contractInfo && contractInfo.id && ctData.gst_structure_id){
+          const so = { gst_structure_id:ctData.gst_structure_id, gst_structure_name:ctData.gst_structure_name||null, gst_components_snapshot:ctData.gst_components_snapshot||[], gst_kind:ctData.gst_kind||gstKindOfName(ctData.gst_structure_name) };
+          let r = await sb.from("sale_order_tbl").update(so).eq("id",contractInfo.id);
+          if(r.error && /gst_kind/.test(r.error.message||"")){ delete so.gst_kind; r = await sb.from("sale_order_tbl").update(so).eq("id",contractInfo.id); }
+          if(r.error) console.error("Sale Order GST sync", r.error);
+        }
+        const orig = new Map(JSON.parse(ctSlGstOrig||"[]").map(r=>[r.sl,r]));
+        for(const r of (ctSlGst||[])){ const o = orig.get(r.sl)||{}; if(o.kind===r.kind && String(o.hsn||"")===String(r.hsn||"") && String(o.rate??"")===String(r.rate??"") && String(o.reason||"")===String(r.reason||"")) continue;
+          const upd = { gst_supply_kind:r.kind||"Goods", gst_hsn_sac:String(r.hsn||"").trim()||null, gst_rate: r.rate===""||r.rate==null ? null : Number(r.rate), gst_rate_reason:String(r.reason||"").trim()||null };
+          const { error: ue } = await sb.from("estimates").update(upd).eq("reference_number",quoteExportRef).eq("item_sl_no",r.sl);
+          if(ue){ alert("GST on Sl No "+r.sl+" not saved: "+ue.message+(/gst_/.test(ue.message)?" — run structure_gst_per_slno_2026-10-14.sql first.":"")); break; }
+          await logRevisionChange(quoteExportRef,"commercial_terms","GST Sl No "+r.sl, [o.kind,o.hsn,o.rate,o.reason].filter(Boolean).join(" · "), [r.kind,r.hsn,r.rate,r.reason].filter(Boolean).join(" · "));
+        }
+        if(ctAmend){ const changed = Object.keys(CT_LABELS).filter(k=>String(ctData[k]||"")!==String(ctOriginalData?.[k]||""));
+          for(const k of changed) await logRevisionChange(quoteExportRef,"commercial_terms",CT_LABELS[k]+" (amended after O.A: "+ctAmend.reason+")",ctOriginalData?.[k],ctData[k]);
+          await logAudit("UPDATE","quote_commercial_terms",quoteExportRef,"Terms amended after the O.A was sent — "+ctAmend.reason+(changed.length?" · "+changed.map(k=>CT_LABELS[k]).join(", "):""),user?.username||"unknown",null,null); }
+      }
       setShowCommercialTerms(false);
       if(openRef && openRef.reference_number===quoteExportRef) refreshReadiness(quoteExportRef);
     } catch(e){ console.error("Save commercial terms failed",e); alert("Save failed: "+e.message); }
     finally { setCtSaving(false); }
   };
+  // 185: on a Sale Order the agreed wording may differ from the list (spell check + "add to the list?"); quotes keep the strict list
+  const ctTermField = (field, table, label)=> mode==="contract"
+    ? h(SoTermField,{value:ctData[field],onChange:v=>setCtData(d=>({...d,[field]:v})),options:ctMasters[field],table,fieldLabel:label,refreshOptions:loadCtMasters,user,contractNumber:quoteExportRef})
+    : h(MasterSelect,{value:ctData[field],onChange:v=>setCtData(d=>({...d,[field]:v})),options:ctMasters[field],table,fieldLabel:label,refreshOptions:loadCtMasters,placeholder:"Select…",style:{fontSize:12,padding:"7px 9px"}});
   const CT_GHOST_FIELDS = [
     ["validity","Validity","text"],
     ["payment_term","Payment term","combo"],
@@ -18578,9 +18750,12 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       const pfComputedAmount = terms.packing_forwarding_basis==="Flat"
         ? (Number(terms.packing_forwarding_value)||0)
         : pfBasicPriceTotal*(Number(terms.packing_forwarding_value)||0)/100;
+      const pfNotes = String(terms.packing_forwarding_notes||"").trim();
+      const pfNoteAdd = pfNotes && !/^\s*[\d.]+\s*%?\s*$/.test(pfNotes) ? " — "+pfNotes : "";   // 185b: notes print with the value (not when they only repeat the number)
       const pfDisplay = !terms.packing_forwarding_basis ? (terms.packing_forwarding||"—") // pre-24-Aug quotes with only the old free-text value
-        : terms.packing_forwarding_basis==="Flat" ? money(pfComputedAmount)+" (Lumpsum)"
-        : (Number(terms.packing_forwarding_value)||0)+"% ("+money(pfComputedAmount)+")";
+        : terms.packing_forwarding_basis==="Flat" ? money(pfComputedAmount)+" (Lumpsum)"+pfNoteAdd
+        : !(Number(terms.packing_forwarding_value)||0) ? (pfNotes || "Included")
+        : (Number(terms.packing_forwarding_value)||0)+"% ("+money(pfComputedAmount)+")"+pfNoteAdd;
       // Global testing redistribution: each test's combined total (across
       // all items it was applied to — always "all items" per the confirmed
       // design) is reallocated proportional to each item's own (price×qty)
@@ -22195,17 +22370,21 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
             h("button",{onClick:saveCommercialTermsGhost,disabled:ctSaving,style:{...btnPrimary,opacity:ctSaving?0.6:1}},ctSaving?"Saving…":"Save amendment")
           )
         ) :
-        h(React.Fragment,null,
+        h("fieldset",{disabled:ctLocked,style:{border:"none",margin:0,padding:0,minWidth:0}},
+          ctLocked && h("div",{style:{background:"#eef2f6",border:"1px solid #c9d3de",borderRadius:6,padding:"8px 12px",marginBottom:12,fontSize:11.5,color:"#1f4e78"}},
+            "🔒 Terms locked — the O.A has gone to the client (Stage: "+(contractInfo?.status||"")+"). Use “Amend terms…” below; the reason and every change are kept in Revision History."),
+          ctAmend && h("div",{style:{background:"#fff8e1",border:"1px solid #f0d58a",borderRadius:6,padding:"8px 12px",marginBottom:12,fontSize:11.5,color:"#6b4e00"}},
+            "Amending after the O.A — reason: "+ctAmend.reason),
           h("div",{style:{display:"flex",gap:12,marginBottom:12,flexWrap:"wrap"}},
             mode!=="contract" && fld("Validity",null,h("input",{value:ctData.validity||"",onChange:e=>setCtData(d=>({...d,validity:e.target.value})),style:{...inputStyle,padding:"7px 9px",fontSize:12},placeholder:"e.g. 30 days from quote date"})),
-            fld("Payment term",null,h(React.Fragment,null,
+            fld("Payment term",null, mode==="contract" ? h(SoTermField,{value:ctData.payment_term,onChange:v=>setCtData(d=>({...d,payment_term:v})),options:ctMasters.payment_term,table:"payment_terms_tbl",fieldLabel:"Payment Terms",refreshOptions:loadCtMasters,user,contractNumber:quoteExportRef}) : h(React.Fragment,null,
               h("input",{list:"ct-payment-terms",value:ctData.payment_term||"",onChange:e=>setCtData(d=>({...d,payment_term:e.target.value})),style:{...inputStyle,padding:"7px 9px",fontSize:12},placeholder:"Type or pick from list"}),
               h("datalist",{id:"ct-payment-terms"},(ctMasters.payment_term||[]).map(v=>h("option",{key:v,value:v})))
             ))
           ),
           h("div",{style:{display:"flex",gap:12,marginBottom:12,flexWrap:"wrap"}},
-            fld("Delivery term",null,h(MasterSelect,{value:ctData.delivery_term,onChange:v=>setCtData(d=>({...d,delivery_term:v})),options:ctMasters.delivery_term,table:"delivery_terms_tbl",fieldLabel:"Delivery Terms",refreshOptions:loadCtMasters,placeholder:"Select…",style:{fontSize:12,padding:"7px 9px"}})),
-            fld("Price basis",null,h(MasterSelect,{value:ctData.price_basis,onChange:v=>setCtData(d=>({...d,price_basis:v})),options:ctMasters.price_basis,table:"price_basis_tbl",fieldLabel:"Price Basis",refreshOptions:loadCtMasters,placeholder:"Select…",style:{fontSize:12,padding:"7px 9px"}}))
+            fld("Delivery term",null,ctTermField("delivery_term","delivery_terms_tbl","Delivery Terms")),
+            fld("Price basis",null,ctTermField("price_basis","price_basis_tbl","Price Basis"))
           ),
           h("div",{style:{display:"flex",gap:12,marginBottom:12,flexWrap:"wrap"}},
             fld("Packing and forwarding",null,h("div",null,
@@ -22263,14 +22442,18 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
                 })()
               )
             )),
-            fld("Insurance",null,h(MasterSelect,{value:ctData.insurance,onChange:v=>setCtData(d=>({...d,insurance:v})),options:ctMasters.insurance,table:"insurance_terms_tbl",fieldLabel:"Insurance",refreshOptions:loadCtMasters,placeholder:"Select…",style:{fontSize:12,padding:"7px 9px"}}))
+            fld("Insurance",null,ctTermField("insurance","insurance_terms_tbl","Insurance"))
+          ),
+          // 185b: P&F notes — what the packing is ("Included", "Seaworthy packing upto Nhava Sheva…"). 0% = included in the price.
+          mode==="contract" && h("div",{style:{marginBottom:12}},
+            h("div",{style:{fontSize:10,color:colors.muted,marginBottom:3}},"P&F notes (printed with Packing and forwarding; 0% = included in the price)"),
+            h(SoTermField,{value:ctData.packing_forwarding_notes||"",onChange:v=>setCtData(d=>({...d,packing_forwarding_notes:v})),options:[],fieldLabel:"P&F notes",user,contractNumber:quoteExportRef,placeholder:"e.g. Included (Seaworthy packing upto Nhava Sheva Mumbai port)"})),
+          h("div",{style:{display:"flex",gap:12,marginBottom:12,flexWrap:"wrap"}},
+            fld("Guarantee",null,ctTermField("guarantee","guarantee_terms_tbl","Guarantee")),
+            fld("Warranty coverage",null,ctTermField("warranty_coverage","warranty_coverage_tbl","Warranty Coverage"))
           ),
           h("div",{style:{display:"flex",gap:12,marginBottom:12,flexWrap:"wrap"}},
-            fld("Guarantee",null,h(MasterSelect,{value:ctData.guarantee,onChange:v=>setCtData(d=>({...d,guarantee:v})),options:ctMasters.guarantee,table:"guarantee_terms_tbl",fieldLabel:"Guarantee",refreshOptions:loadCtMasters,placeholder:"Select…",style:{fontSize:12,padding:"7px 9px"}})),
-            fld("Warranty coverage",null,h(MasterSelect,{value:ctData.warranty_coverage,onChange:v=>setCtData(d=>({...d,warranty_coverage:v})),options:ctMasters.warranty_coverage,table:"warranty_coverage_tbl",fieldLabel:"Warranty Coverage",refreshOptions:loadCtMasters,placeholder:"Select…",style:{fontSize:12,padding:"7px 9px"}}))
-          ),
-          h("div",{style:{display:"flex",gap:12,marginBottom:12,flexWrap:"wrap"}},
-            fld("Transport through",null,h(MasterSelect,{value:ctData.dispatch_through,onChange:v=>setCtData(d=>({...d,dispatch_through:v})),options:ctMasters.dispatch_through,table:"dispatch_through_tbl",fieldLabel:"Transport Through",refreshOptions:loadCtMasters,placeholder:"Select…",style:{fontSize:12,padding:"7px 9px"}})),
+            fld("Transport through",null,ctTermField("dispatch_through","dispatch_through_tbl","Transport Through")),
             fld("Inco terms",null,h(MasterSelect,{value:ctData.incoterms,onChange:v=>setCtData(d=>({...d,incoterms:v})),options:ctMasters.incoterms,table:"incoterms_tbl",fieldLabel:"Inco Terms",refreshOptions:loadCtMasters,placeholder:"Select…",style:{fontSize:12,padding:"7px 9px"}}))
           ),
           ctMismatch && h("div",{style:{background:"#faece7",border:"1px solid #f0997b",borderRadius:6,padding:"9px 11px",marginBottom:12,fontSize:11.5,color:"#993c1d"}},
@@ -22283,16 +22466,10 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               : h("div",{style:{marginTop:4,fontSize:11}},"Pick consistent values — only an Admin can save with a mismatch.")
           ),
           h("div",{style:{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap"}},
-            fld("Freight",null,h(MasterSelect,{value:ctData.freight,onChange:v=>setCtData(d=>({...d,freight:v})),options:ctMasters.freight,table:"freight_terms_tbl",fieldLabel:"Freight",refreshOptions:loadCtMasters,placeholder:"Select…",style:{fontSize:12,padding:"7px 9px"}})),
-            fld("Tax",null,h(MasterSelect,{value:ctData.tax,onChange:v=>setCtData(d=>({...d,tax:v})),options:ctMasters.tax,table:"tax_terms_tbl",fieldLabel:"Tax",refreshOptions:loadCtMasters,placeholder:"Select…",style:{fontSize:12,padding:"7px 9px"}})),
-            mode==="contract" && fld("GST Structure",null,h("div",null,
-              h("select",{value:ctData.gst_structure_id||"",onChange:e=>pickGstStructure(e.target.value||null),style:{...inputStyle,padding:"7px 9px",fontSize:12,width:180}},
-                h("option",{value:""},"Not set"),
-                gstStructureOptions.map(s=>h("option",{key:s.id,value:s.id},s.structure_name))
-              ),
-              !ctData.gst_structure_id && h("div",{style:{fontSize:10,color:colors.danger,marginTop:3}},"⚠ Not set — flagged until picked")
-            ))
+            fld("Freight",null,ctTermField("freight","freight_terms_tbl","Freight")),
+            mode!=="contract" && fld("Tax",null,h(MasterSelect,{value:ctData.tax,onChange:v=>setCtData(d=>({...d,tax:v})),options:ctMasters.tax,table:"tax_terms_tbl",fieldLabel:"Tax",refreshOptions:loadCtMasters,placeholder:"Select…",style:{fontSize:12,padding:"7px 9px"}}))
           ),
+          mode==="contract" && h(SoGstPanel,{ctData, options:gstStructureOptions, onPick:pickGstStructure, clientState:ctClientState, currency:(quoteHeaderRow?.currency||"INR"), slRows:ctSlGst, setSlRows:setCtSlGst, locked:false}),
           h("div",{style:{marginBottom:14}},
             h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}},
               h("div",{style:{fontSize:10,color:colors.muted}},"Jurisdiction"),
@@ -22320,7 +22497,9 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         ),
         h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:16,borderTop:"1px solid "+colors.border,paddingTop:14}},
           h("button",{onClick:()=>setShowCommercialTerms(false),style:btnSecondary},"Cancel"),
-          h("button",{onClick:attemptSaveCommercialTerms,disabled:ctSaving||ctLoading,style:{...btnPrimary,opacity:ctSaving?0.6:1}},ctSaving?"Saving…":"Save terms")
+          ctLocked
+            ? h("button",{onClick:()=>{ const r = prompt("Amend the terms after the O.A was sent.\n\nReason (kept in Revision History):"); if(r && r.trim()) setCtAmend({ reason:r.trim() }); },style:btnPrimary},"Amend terms…")
+            : h("button",{onClick:attemptSaveCommercialTerms,disabled:ctSaving||ctLoading,style:{...btnPrimary,opacity:ctSaving?0.6:1}},ctSaving?"Saving…":(ctAmend?"Save amendment":"Save terms"))
         )
       )
     ),
@@ -31392,6 +31571,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"14 Oct 2026 (185b)", summary:"Built on 2026-10-14T11:00:00Z (replaces it — 11:00 was not to be deployed). Bala's review: (1) no \"Add to the list\" on Sale Order terms — free text stays on that Sale Order only, the lists change only in Setup › Masters; spell check and \"close to the list entry\" stay. (2) NEW P&F notes (quote_commercial_terms.packing_forwarding_notes, in structure_gst_per_slno_2026-10-14.sql) under Packing and forwarding on a Sale Order; 0% means included in the price. Prints on the O.A / Sale Order PDF and the invoice's packing term: 0% → the notes, or \"Included\" when none; a percentage or lumpsum → the value then \" — notes\" (not when the notes only repeat the number). (3) legacy_SO_terms_GST_fix_2026-10-14.sql now keeps every OA wording exactly (no change to list entries, nothing added to any list, Inco Terms list untouched); P&F from the OA: Nil / Included / Inclusive = 0% with the notes, \"3% of basic order value\" = 3% with the notes. Tests: e2e_185.js (41), e2e_185b.js (16), e2e_185pdf.js (5)." },
+  { date:"14 Oct 2026 (185)", summary:"Built on 2026-10-14T08:45:00Z. SQL: structure_gst_per_slno_2026-10-14.sql (BOTH companies), then legacy_SO_terms_GST_fix_2026-10-14.sql (Flometriq). SALE ORDER TERMS: on a Sale Order the term boxes (Payment, Delivery, Price basis, Insurance, Guarantee, Warranty, Transport, Freight) take the agreed wording from the PO. On leaving a box the app spell-checks it (\"dare → date?\" Fix / Keep), offers the list entry when the wording is nearly the same (case, spaces, a letter or two), and otherwise asks \"Add to the list?\" — any user, no code, logged with the Sale Order — or \"Use on this Sale Order only\". Quotes keep the strict lists. Inco Terms stay strict. TAX is never typed on a Sale Order: pick the GST TYPE (Tamil Nadu — Intrastate, Interstate — IGST, Export — LUT, SEZ — LUT, Merchant export — 0.1%) and the tax wording is set from it; suggested from the client's state and currency, with warnings when they disagree and when an export Sale Order has a service line. GST PER SL NO: Goods / Service, HSN / SAC, GST % and a reason (required when the rate differs from the item's). The Items master gets GST % and Goods / Service next to the HSN code (18% / Goods to start). The GST type is now also saved on the Sale Order, which is what the invoice reads (before this it stayed on the terms only). LOCK: once the Stage is past Draft (O.A Sent onward) the terms are locked; \"Amend terms…\" asks for a reason and logs every change with it in Revision History. INVOICE: each line carries its rate; one tax row per rate (\"OUTPUT IGST 18% on …\", \"OUTPUT IGST 0.1% on …\"); a single-rate invoice prints exactly as before; a GST % column appears only when the invoice has more than one rate; P&F, freight and insurance follow the goods, shared by value; HSN summary one row per HSN and rate; SEZ prints the LUT banner with no tax; merchant export prints the Notification 40/41-2017 note and splits 0.05 + 0.05 in Tamil Nadu, IGST 0.1 outside. Tests: e2e_185.js (41), e2e_185b.js (14), e2e_185pdf.js (5)." },
   { date:"14 Oct 2026 (184c)", summary:"Built on 2026-10-14T02:30:00Z. SQL: structure_production_bom_workflow_2026-10-14.sql (BOTH companies: task_tbl.post_key; sale_order_tbl prod_bom_link / _by / _at / prod_bom_answer / _answered_by / _answered_at; proc_item_tbl). PRODUCTION BOM AT RELEASE: moving a Sale Order to Start Production Code 2 or Code 1 (not Start Engineering) asks \u201cIs the Production BOM available?\u201d \u2014 Yes needs the OneDrive link (saved on the Sale Order, shown as \u2713 Production BOM) and makes a card \u201cApprove Production BOM\u201d due in 3 days; No makes a card \u201cProduction BOM Pending\u201d (Draft BOM due +3 days, BOM approved due +6 days from the answer). Both cards go to the holder of the Technical Head POST. Not asked again once the link is on the Sale Order; \u201cProduction BOM pending \u2014 add link\u201d on the Sale Order adds it later and ticks Draft BOM. Approve Production BOM closes the card. CARDS FOLLOW THE POST: a card carrying a post (post_key) moves to the new holder when the post changes hands (Setup \u2192 Posts, Hand Over Work), logged on the card; ordinary cards do not move. DEFAULT DATES: a Procurement Gantt made by Approve Production BOM gets every PO Release planned 7 days from the approval; overdue PO releases show on the Super Admins' Pending Actions. ITEMS TO BUY: each material-form sub-task lists its specs (one row per spec, merged across Sl Nos, from the BOM); tick = received with the date (editable); when every item is in, \u201cat Our Factory\u201d is set on the Gantt. Later the Stores GRN will tick them. PENDING MATERIAL STATUS: new Procurement report, Summary (one row per contract) and Detailed (contract \u2192 form \u2192 spec), filters by contract, client (narrows the contract list), form and purchase engineer, Pending only, PDF and Excel." },
   { date:"14 Oct 2026 (184)", summary:"Built on 2026-10-13T03:00:00Z (build 183); replaces 2026-10-14T02:15:00Z. No SQL. QUOTE REGISTER \u2014 HYDRONETT H: a register tab takes its prefix with or without the H after the F (the FXDS tab takes FXDS\u2026 and FHXDS\u2026; an FHXDS tab takes both too). The two forms share one running number: a new line takes the next number after the highest of either form, and a number used once (e.g. FHXDS260075) cannot be saved again in the other form (FXDS260075). The wrong-prefix message now names both forms. Opening a number from Log Follow-ups goes to the tab of its own prefix, else the tab of its other form. Renumber accepts either form. SEARCH WITH OR WITHOUT THE H, EVERYWHERE: typing FXDS260075 finds FHXDS260075 and the other way round \u2014 Quote Register search, the quote picker (Log Follow-ups and others), the Quotes / Sale Order number box, every master table search, the Sale Order and other pick lists, the Document Control Board search, the Contract Register search and the allocation quote picker. Only quote numbers are folded (F + H + letters + digits); ordinary words are matched as before." },
   { date:"13 Oct 2026 (183)", summary:"Built on 2026-10-12T14:40:00Z (build 182). SQL: structure_doc_board_gateway_2026-10-13.sql (BOTH companies: universal_documents_tbl review_added_by / _at / review_reason / review_link / review_via; doc_add_request_tbl; doc_board_list_tbl). DOCUMENT CONTROL BOARD \u2014 ADD A MISSING DOCUMENT: \u201c+ Missing document\u201d in the bar and \u201c+\u201d on every list header (the card starts in that list). Form: contract, category, title, doc number (category prefix-contract-NNN), starts in (any list but Status to confirm; past Not submitted it asks the status, Rev, Out/In and date), hand to, why added (Found missing in review / Client asked for it later / Was on Trello only / Was in OneDrive, not in the app / Other), OneDrive link REQUIRED (OneDrive, SharePoint or Drive only; anything else refused). Duplicate category on the contract asks first. BACKWARD: the document is made and a fulfilled requirement (document_requests_tbl, source review) is put on the contract, so the Sale Order's documents and Report by Contract show it. FORWARD: the owner's bell and, for our-action cards, a Task Manager card by the task type's days; chase and codes follow as for any card. \u201cAdded in review\u201d tag for 30 days; \ud83d\udd17 OneDrive on the card until a revision has its own link. WHO: a user needs an Admin's code (Ask an Admin sends the filled form to the Admins' bells; Requests to add: Approve & add / Give a code (this contract only, 24 hours, one use, sent to the asker's bell) / Send back with a note); an Admin adds without a code and Super Admins are told; a Super Admin adds freely. Review additions lists every one (when, who, how, why, where it is now, link). \u2699 LISTS (Super Admin): the six built-in lists stay; + New list asks 13 questions \u2014 name / short name, colour and meaning, comes after, whose move (ours / outside party / no one), counts as (open / approved / approved with production hold), holds production, chase (days), task card when a card enters (as the status says / always / never), which statuses land here (with each one's current list), who may move cards in or out (as today / Document Controller and Admins only), bell when a card enters (owner / owner and Document Controller / no one), wording on the client's report, count tile \u2014 with a preview (the built-in list it behaves like, statuses that open it, cards that move now). The answers set its base list, which drives chasing, task cards, % approved and production release; the list appears on the board (after its list), the tiles, Report by Contract (client wording on the client version) and the move panel. Statuses chosen move into it and remember their old list; Remove only when empty, statuses go back. Edit any time." },
@@ -55659,23 +55840,74 @@ async function invUnitPrice(cn, est, currency, fx){
   const inCur = currency==="INR" ? inrUnit : (fx>0 ? inrUnit/fx : 0);
   return { unit: p.exact ? r2(inCur) : offerRound(inCur, currency), source:p.exact?"PO":"Contract" };
 }
-// Totals, tax and HSN summary. lines: [{hsn, amount}]
-function invCompute(inv, lines, gstSnap){
+// Totals, tax and HSN summary. lines: [{hsn, amount, gst_rate}]
+// 185 (14 Oct): GST per Sl No. The GST TYPE (kind) decides how a rate is split — Tamil Nadu: CGST + SGST halves,
+// Interstate: IGST in full, Export / SEZ: nothing, Merchant export: 0.1% split by place of supply. Each line carries
+// its own RATE (Sl No, else Items master, else 18%). One tax row per rate; with a single rate the rows are exactly
+// as before (OUTPUT CGST 9% / OUTPUT SGST 9%). P&F, freight and insurance follow the goods, shared in proportion to value.
+function invGstSplit(kind, gstSnap, intraState){
+  if(kind==="export" || kind==="sez") return [];
+  if(kind==="merchant") return intraState ? [{label:"CGST",share:0.5},{label:"SGST",share:0.5}] : [{label:"IGST",share:1}];
+  const comps = (gstSnap||[]).map(c=>({ label:c.label, rate:Number(c.rate_percent)||0 })).filter(c=>c.rate>0);
+  const tot = comps.reduce((n,c)=>n+c.rate,0);
+  if(tot>0) return comps.map(c=>({ label:c.label, share:c.rate/tot }));
+  if(kind==="intra") return [{label:"CGST",share:0.5},{label:"SGST",share:0.5}];
+  if(kind==="inter") return [{label:"IGST",share:1}];
+  return [];
+}
+function invSnapRate(gstSnap){ const t = (gstSnap||[]).reduce((n,c)=>n+(Number(c.rate_percent)||0),0); return t>0 ? t : 18; }
+function invLineRate(l, kind, gstSnap){
+  if(kind==="merchant") return 0.1;
+  const r = l.gst_rate; return (r===null || r===undefined || r==="" || isNaN(Number(r))) ? invSnapRate(gstSnap) : Number(r);
+}
+function invCompute(inv, lines, gstSnap, kindIn){
   const cur = String(inv.currency||"INR").toUpperCase();
+  const kind = inv.is_export ? "export" : (kindIn || inv.gst_kind || null);
   const basic = r2(lines.reduce((n,l)=>n+(Number(l.amount)||0),0));
   const charges = r2((Number(inv.pf_amount)||0)+(Number(inv.freight_amount)||0)+(Number(inv.insurance_amount)||0));
   const taxable = r2(basic + charges);
-  const comps = inv.is_export ? [] : (gstSnap||[]).map(c=>({ label:c.label, rate:Number(c.rate_percent)||0 })).filter(c=>c.rate>0);
-  const taxLines = comps.map(c=>({ label:c.label, rate:c.rate, amount:r2(taxable*c.rate/100) }));
+  const intra = !!(inv.pos_code && inv.snap_state_code && String(inv.pos_code)===String(inv.snap_state_code));
+  const split = (inv.is_export || kind==="export" || kind==="sez") ? [] : invGstSplit(kind, gstSnap, intra);
+  // taxable value per rate and per HSN + rate (charges shared by value)
+  const share = (amt)=> basic>0 ? amt/basic : 0;
+  const byRate = new Map(); const byHR = new Map();
+  lines.forEach(l=>{ const amt = Number(l.amount)||0; const rt = invLineRate(l, kind, gstSnap);
+    byRate.set(rt,(byRate.get(rt)||0)+amt); const k = (l.hsn||"—")+"\u0001"+rt; byHR.set(k,(byHR.get(k)||0)+amt); });
+  if(!lines.length) byRate.set(invSnapRate(gstSnap), 0);
+  const rates = Array.from(byRate.keys()).sort((a,b)=>b-a);
+  const mixed = rates.length>1;
+  const taxLines = [];
+  rates.forEach(rt=>{ const base = r2(byRate.get(rt) + charges*share(byRate.get(rt)) + (lines.length?0:charges));
+    split.forEach(c=>{ const cr = Math.round(rt*c.share*10000)/10000; if(cr>0) taxLines.push({ label:c.label, rate:cr, base, amount:r2(base*cr/100) }); }); });
   const tax = r2(taxLines.reduce((n,t)=>n+t.amount,0));
   const raw = r2(taxable + tax);
   const grand = cur==="INR" ? Math.round(raw) : raw;
   const round_off = r2(grand - raw);
-  const rateTot = comps.reduce((n,c)=>n+c.rate,0);
-  const byH = new Map(); lines.forEach(l=>{ const k = l.hsn||"—"; byH.set(k,(byH.get(k)||0)+(Number(l.amount)||0)); });
-  const hsn = Array.from(byH.entries()).map(([k,amt])=>{ const share = basic>0 ? amt/basic : 0; const tx = r2(amt + charges*share); return { hsn:k, taxable:tx, rate:rateTot, tax:r2(tx*rateTot/100), comps:comps.map(c=>({ label:c.label, rate:c.rate, amount:r2(tx*c.rate/100) })) }; });
+  const hsn = Array.from(byHR.entries()).map(([k,amt])=>{ const [hk,rs] = k.split("\u0001"); const rt = Number(rs); const tx = r2(amt + charges*share(amt));
+    const comps = split.map(c=>{ const cr = Math.round(rt*c.share*10000)/10000; return { label:c.label, rate:cr, amount:r2(tx*cr/100) }; });
+    return { hsn:hk, gst_rate:rt, taxable:tx, rate:split.length?rt:0, tax:r2(comps.reduce((n,c)=>n+c.amount,0)), comps }; });
   const fx = Number(inv.fx_rate)||0;
-  return { basic_total:basic, taxable_total:taxable, tax_lines:taxLines, tax_total:tax, round_off, grand_total:grand, grand_total_inr: cur==="INR" ? grand : r2(grand*fx), hsn_summary:hsn, amount_words:invAmountWords(grand, cur) };
+  return { basic_total:basic, taxable_total:taxable, tax_lines:taxLines, tax_total:tax, round_off, grand_total:grand, grand_total_inr: cur==="INR" ? grand : r2(grand*fx), hsn_summary:hsn, amount_words:invAmountWords(grand, cur), mixed_rates:mixed, gst_kind:kind };
+}
+// The GST type of a contract: the Sale Order's, else the one picked on its Commercial Terms.
+async function invGstContext(cn){
+  let snap = null, kind = null, name = null;
+  try{ const { data: so } = await sb.from("sale_order_tbl").select("*").eq("contract_number",cn).maybeSingle();
+    if(so){ snap = so.gst_components_snapshot||null; kind = so.gst_kind||null; name = so.gst_structure_name||null; } }catch(e){}
+  if(!snap || !kind){ try{ const { data: t } = await sb.from("quote_commercial_terms").select("*").eq("reference_number",cn).maybeSingle();
+    if(t){ if(!snap) snap = t.gst_components_snapshot||null; if(!kind) kind = t.gst_kind||null; if(!name) name = t.gst_structure_name||null; } }catch(e){} }
+  return { snap: snap||[], kind: kind || gstKindOfName(name), name };
+}
+// GST rate and kind for each contract Sl No: the Sl No's own, else the Items master's, else 18%.
+async function invSlGst(cn, ests){
+  const out = new Map(); let items = [];
+  try{ const { data } = await sb.from("item_tbl").select("*"); items = data||[]; }catch(e){}
+  const byItem = new Map(items.map(r=>[String(r.item||"").trim().toLowerCase(), r]));
+  let mi = new Map(); try{ const { data } = await sb.from("model_tbl").select("model,item"); (data||[]).forEach(r=>mi.set(r.model, r.item)); }catch(e){}
+  (ests||[]).forEach(e=>{ const it = byItem.get(String(mi.get(e.model)||e.model||"").trim().toLowerCase());
+    const rate = e.gst_rate!=null && e.gst_rate!=="" ? Number(e.gst_rate) : (it && it.gst_rate!=null ? Number(it.gst_rate) : null);
+    out.set(e.item_sl_no, { gst_rate: rate, supply_kind: e.gst_supply_kind || (it && it.supply_kind) || "Goods", hsn: e.gst_hsn_sac || null, reason: e.gst_rate_reason || null }); });
+  return out;
 }
 // Make the draft invoice for a DC.
 async function invMakeFromDc(dcId, user){
@@ -55695,7 +55927,11 @@ async function invMakeFromDc(dcId, user){
   // prices
   const price = new Map(); let contractBasic = 0;
   for(const e of (ests||[])){ const p = await invUnitPrice(dc.contract_number, e, currency, fx); price.set(e.item_sl_no, p); contractBasic += p.unit*(Number(e.order_qty)||1); }
-  const lines = x.lines.map((l,i)=>{ const p = price.get(l.item_sl_no)||{unit:0,source:"Contract"}; return { dc_line_id:l.id, item_sl_no:l.item_sl_no, item:l.item, description:l.description, hsn:l.hsn, uom:l.uom||"NOS", qty:Number(l.qty)||0, unit_price:p.unit, amount:r2(p.unit*(Number(l.qty)||0)), price_source:p.source, sort_order:i }; });
+  const G = await invGstContext(dc.contract_number); const slG = await invSlGst(dc.contract_number, ests);
+  const gKind = dc.is_export ? "export" : (G.kind || null);
+  const lines = x.lines.map((l,i)=>{ const p = price.get(l.item_sl_no)||{unit:0,source:"Contract"}; const g = slG.get(l.item_sl_no)||{};
+    return { dc_line_id:l.id, item_sl_no:l.item_sl_no, item:l.item, description:l.description, hsn:g.hsn||l.hsn, uom:l.uom||"NOS", qty:Number(l.qty)||0, unit_price:p.unit, amount:r2(p.unit*(Number(l.qty)||0)), price_source:p.source, sort_order:i,
+      gst_rate: gKind==="merchant" ? 0.1 : (g.gst_rate!=null ? g.gst_rate : null), supply_kind: g.supply_kind||"Goods" }; });
   const basic = r2(lines.reduce((n,l)=>n+l.amount,0));
   // P&F: a percentage of this invoice's basic, or this invoice's share of a lumpsum (never more than what is left)
   let pf = 0;
@@ -55709,7 +55945,9 @@ async function invMakeFromDc(dcId, user){
     pf = lastShipment ? r2(left) : r2(Math.min(left, contractBasic>0 ? lump*basic/contractBasic : 0));
   }
   const buyerCode = invStateCodeFromGstin(C.buyerGstin) || invStateCodeFromName(C.company && (C.company.billing_state||C.company.state));
-  const pfText = !terms ? "" : terms.packing_forwarding_basis==="Flat" ? "Lumpsum "+invMoney(terms.packing_forwarding_value,currency) : terms.packing_forwarding_basis==="Percentage" ? (Number(terms.packing_forwarding_value)||0)+"%" : (terms.packing_forwarding||"");
+  const pfNotes = terms ? String(terms.packing_forwarding_notes||"").trim() : ""; const pfNoteAdd = pfNotes && !/^\s*[\d.]+\s*%?\s*$/.test(pfNotes) ? " — "+pfNotes : "";
+  const pfText = !terms ? "" : terms.packing_forwarding_basis==="Flat" ? "Lumpsum "+invMoney(terms.packing_forwarding_value,currency)+pfNoteAdd
+    : terms.packing_forwarding_basis==="Percentage" ? (!(Number(terms.packing_forwarding_value)||0) ? (pfNotes||"Included") : (Number(terms.packing_forwarding_value)||0)+"%"+pfNoteAdd) : (terms.packing_forwarding||"");
   let vehicle = ""; if(x.gp) vehicle = x.gp.vehicle_no||"";
   const row = { dc_id:dc.id, invoice_no:dc.bill_no, fy:dc.fy||despFy(), invoice_date:invDate, status:"Draft", is_export:!!dc.is_export, contract_number:dc.contract_number, customer_name:C.customer,
     bill_to:[C.customer, C.buyerAddr].filter(Boolean).join("\n"), buyer_gstin:C.buyerGstin||null, buyer_state: dc.is_export ? (C.country||null) : (GST_STATES[buyerCode]||(C.company&&(C.company.billing_state||C.company.state))||null),
@@ -55721,13 +55959,17 @@ async function invMakeFromDc(dcId, user){
     packing_term:pfText||null, insurance_term:(terms&&terms.insurance)||null, tax_term: dc.is_export ? "Nil — export under LUT" : ((terms&&terms.tax)||((C.so&&C.so.gst_structure_name)||null)),
     pf_amount:pf, freight_amount:0, insurance_amount:0,
     snap_gstin:S.our_gstin||null, snap_pan:S.our_pan||null, snap_state:S.our_state||null, snap_state_code:S.our_state_code||null, snap_factory_addr:S.factory_address||null,
-    snap_lut_no: dc.is_export ? (L.lut_no||null) : null, snap_lut_fy: dc.is_export ? L.fy : null, snap_iec:S.iec_no||null,
+    snap_lut_no: (dc.is_export||gKind==="sez") ? (L.lut_no||null) : null, snap_lut_fy: (dc.is_export||gKind==="sez") ? L.fy : null, snap_iec:S.iec_no||null, gst_kind:gKind,
     snap_bank_name:S.bank_name||null, snap_bank_account:S.bank_account||null, snap_bank_acc_name:S.bank_acc_name||null, snap_bank_ifsc:S.bank_ifsc||null, snap_bank_branch:S.bank_branch||null, snap_bank_swift:S.bank_swift||null,
     created_by:user?.username||"unknown" };
-  Object.assign(row, invCompute(row, lines, C.so && C.so.gst_components_snapshot));
-  const { data: inv, error } = await sb.from("invoice_tbl").insert(row).select().single();
+  { const c = invCompute(row, lines, (G.snap&&G.snap.length) ? G.snap : (C.so && C.so.gst_components_snapshot), gKind); delete c.mixed_rates; delete c.gst_kind; Object.assign(row, c); }
+  if(!G.kind && !dc.is_export) row.tax_term = row.tax_term || null;
+  let ins = await sb.from("invoice_tbl").insert(row).select().single();
+  if(ins.error && /gst_kind/.test(ins.error.message||"")){ delete row.gst_kind; ins = await sb.from("invoice_tbl").insert(row).select().single(); }   // structure SQL not run yet
+  const { data: inv, error } = ins;
   if(error) throw error;
-  const { error: le } = await sb.from("invoice_line_tbl").insert(lines.map(l=>({ ...l, invoice_id:inv.id })));
+  let { error: le } = await sb.from("invoice_line_tbl").insert(lines.map(l=>({ ...l, invoice_id:inv.id })));
+  if(le && /gst_rate|supply_kind/.test(le.message||"")){ ({ error: le } = await sb.from("invoice_line_tbl").insert(lines.map(l=>{ const { gst_rate, supply_kind, ...rest } = l; return { ...rest, invoice_id:inv.id }; }))); }
   if(le){ await sb.from("invoice_tbl").delete().eq("id",inv.id); throw le; }
   await invHist(inv.id, dc.id, "Invoice drafted", user?.username, inv.invoice_no);
   await logAudit("CREATE","invoice_tbl",inv.invoice_no,"Draft invoice from DC "+inv.invoice_no+" · "+currency+" "+invMoney(row.grand_total,currency),user?.username||"unknown",null,null);
@@ -55772,8 +56014,8 @@ async function invPdf(inv, lines){
     doc.autoTable({ ...T, startY:y, body:irnTxt, margin:{ left:10, right: qrImg ? 40 : 10 }, columnStyles:{0:{fontStyle:"bold",cellWidth:26}} });
     if(qrImg){ try{ doc.addImage(qrImg,"PNG",W-38,y-1,28,28); }catch(e){} }
     y = Math.max(doc.lastAutoTable.finalY, qrImg ? y+28 : 0) + 1.5;
-    if(inv.is_export){ doc.setFillColor(253,231,176); doc.rect(10,y,W-20,6,"F"); doc.setFontSize(7.6); doc.setFont(undefined,"bold"); doc.setTextColor(60,40,0);
-      doc.text("SUPPLY MEANT FOR EXPORT UNDER LETTER OF UNDERTAKING WITHOUT PAYMENT OF INTEGRATED TAX · LUT No: "+(inv.snap_lut_no||"—")+" ("+(inv.snap_lut_fy||"")+")", W/2, y+4, {align:"center"}); doc.setFont(undefined,"normal"); doc.setTextColor(28,31,26); y += 7.5; }
+    if(inv.is_export || inv.gst_kind==="sez"){ doc.setFillColor(253,231,176); doc.rect(10,y,W-20,6,"F"); doc.setFontSize(7.6); doc.setFont(undefined,"bold"); doc.setTextColor(60,40,0);
+      doc.text((inv.gst_kind==="sez" && !inv.is_export ? "SUPPLY MEANT FOR SEZ UNIT / DEVELOPER UNDER LETTER OF UNDERTAKING WITHOUT PAYMENT OF INTEGRATED TAX · LUT No: " : "SUPPLY MEANT FOR EXPORT UNDER LETTER OF UNDERTAKING WITHOUT PAYMENT OF INTEGRATED TAX · LUT No: ")+(inv.snap_lut_no||"—")+" ("+(inv.snap_lut_fy||"")+")", W/2, y+4, {align:"center"}); doc.setFont(undefined,"normal"); doc.setTextColor(28,31,26); y += 7.5; }
     const billHead = inv.is_export ? "Buyer (Bill To)" : "Customer (Bill To)";
     const bill = [inv.bill_to, inv.buyer_gstin?"GSTIN/UIN: "+inv.buyer_gstin:"", inv.buyer_state?(inv.is_export?"Country: ":"State: ")+inv.buyer_state+(inv.is_export?"":(invStateCodeFromName(inv.buyer_state)?"  Code: "+invStateCodeFromName(inv.buyer_state):"")):""].filter(Boolean).join("\n");
     const pRows = [[{content:billHead,styles:{fontStyle:"bold"}},{content:inv.is_export?"Consignee / Deliver To":"Deliver To (if other than consignee)",styles:{fontStyle:"bold"}}],[bill, inv.ship_to||"Same as Bill To"]];
@@ -55794,10 +56036,15 @@ async function invPdf(inv, lines){
     doc.autoTable({ ...T, startY:y, body:L, columnStyles:{0:{fontStyle:"bold",cellWidth:28},1:{cellWidth:(W-20)/2-28},2:{fontStyle:"bold",cellWidth:30}} });
     y = doc.lastAutoTable.finalY + 1.5;
     const sym = isInr ? "Rs" : cur;
-    const body = lines.map((l,i)=>[String(i+1), l.item||"", [l.description, l.item_sl_no!=null?"Contract Sl No "+l.item_sl_no:""].filter(Boolean).join(" — "), l.hsn||"", (Number(l.qty)||0)+" "+(l.uom||"NOS"), invMoney(l.unit_price,cur), invMoney(l.amount,cur)]);
-    body.push([{content:"Total",colSpan:4,styles:{fontStyle:"bold",halign:"right"}},{content:String(lines.reduce((n,l)=>n+(Number(l.qty)||0),0)),styles:{fontStyle:"bold"}},"",{content:invMoney(inv.basic_total,cur),styles:{fontStyle:"bold"}}]);
-    doc.autoTable({ ...T, startY:y, head:[["S.No","Item","Description","HSN/SAC","Qty","Unit Price ("+sym.replace("₹","Rs")+")","Total ("+sym.replace("₹","Rs")+")"]], body,
-      columnStyles:{0:{cellWidth:10},1:{cellWidth:28},3:{cellWidth:18},4:{cellWidth:16},5:{cellWidth:24,halign:"right"},6:{cellWidth:26,halign:"right"}} });
+    // 185: a GST % column only when this invoice has more than one rate
+    const rateSet = new Set([...(inv.hsn_summary||[]).map(hh=>hh.gst_rate), ...lines.map(l=>l.gst_rate)].filter(v=>v!==null && v!==undefined && v!=="").map(Number));
+    const mixedPdf = rateSet.size>1;
+    const lineRate = (l)=> l.gst_rate!=null && l.gst_rate!=="" ? Number(l.gst_rate) : null;
+    const body = lines.map((l,i)=>[String(i+1), l.item||"", [l.description, l.item_sl_no!=null?"Contract Sl No "+l.item_sl_no:""].filter(Boolean).join(" — "), l.hsn||"", ...(mixedPdf?[{content:lineRate(l)!=null?String(lineRate(l)):"",styles:{halign:"right"}}]:[]), (Number(l.qty)||0)+" "+(l.uom||"NOS"), invMoney(l.unit_price,cur), invMoney(l.amount,cur)]);
+    body.push([{content:"Total",colSpan:mixedPdf?5:4,styles:{fontStyle:"bold",halign:"right"}},{content:String(lines.reduce((n,l)=>n+(Number(l.qty)||0),0)),styles:{fontStyle:"bold"}},"",{content:invMoney(inv.basic_total,cur),styles:{fontStyle:"bold"}}]);
+    doc.autoTable({ ...T, startY:y, head:[["S.No","Item","Description","HSN/SAC", ...(mixedPdf?[{content:"GST %",styles:{halign:"right"}}]:[]),"Qty","Unit Price ("+sym.replace("₹","Rs")+")","Total ("+sym.replace("₹","Rs")+")"]], body,
+      columnStyles: mixedPdf ? {0:{cellWidth:10},1:{cellWidth:26},3:{cellWidth:18},4:{cellWidth:12,halign:"right"},5:{cellWidth:15},6:{cellWidth:23,halign:"right"},7:{cellWidth:25,halign:"right"}}
+                             : {0:{cellWidth:10},1:{cellWidth:28},3:{cellWidth:18},4:{cellWidth:16},5:{cellWidth:24,halign:"right"},6:{cellWidth:26,halign:"right"}} });
     y = doc.lastAutoTable.finalY + 1.5;
     if(y > H-75){ doc.addPage(); y = 15; }
     const terms = [["Payment Term", inv.payment_term],["Delivery Term", inv.delivery_term],["Transportation", inv.transport_term],["Packing", inv.packing_term],["Insurance", inv.insurance_term],["Taxes", inv.tax_term]].filter(t=>t[1]);
@@ -55806,7 +56053,7 @@ async function invPdf(inv, lines){
     if(Number(inv.freight_amount)) tot.push(["Freight (recovered)", invMoney(inv.freight_amount,cur)]);
     if(Number(inv.insurance_amount)) tot.push(["Insurance (recovered)", invMoney(inv.insurance_amount,cur)]);
     if(!inv.is_export) tot.push(["Taxable Value", invMoney(inv.taxable_total,cur)]);
-    (inv.tax_lines||[]).forEach(t=>tot.push(["OUTPUT "+t.label+" "+t.rate+"%", invMoney(t.amount,cur)]));
+    (inv.tax_lines||[]).forEach(t=>tot.push([ (mixedPdf && t.base!=null) ? {content:"OUTPUT "+t.label+" "+t.rate+"% on "+invMoney(t.base,cur)} : "OUTPUT "+t.label+" "+t.rate+"%", invMoney(t.amount,cur)]));
     if(Number(inv.round_off)) tot.push(["Round Off", invMoney(inv.round_off,cur)]);
     tot.push([{content:"Total ("+sym.replace("₹","Rs")+")",styles:{fontStyle:"bold"}},{content:invMoney(inv.grand_total,cur),styles:{fontStyle:"bold"}}]);
     if(!isInr) tot.push(["INR equivalent", "Rs "+invMoney(inv.grand_total_inr,"INR")]);
@@ -55817,12 +56064,13 @@ async function invPdf(inv, lines){
     y = Math.max(yA, doc.lastAutoTable.finalY) + 1.5;
     doc.autoTable({ ...T, startY:y, body:[[{content:"Amount in Words : "+(inv.amount_words||""),styles:{fontStyle:"bold"}}]] });
     y = doc.lastAutoTable.finalY + 1.5;
-    if(!inv.is_export && (inv.hsn_summary||[]).length){
-      const comps = (inv.tax_lines||[]).map(t=>t.label);
+    if(!inv.is_export && inv.gst_kind!=="sez" && (inv.hsn_summary||[]).length){
+      const comps = Array.from(new Set((inv.tax_lines||[]).map(t=>t.label)));   // 185: one column per tax, one row per HSN + rate
       doc.autoTable({ ...T, startY:y, head:[["HSN No","Taxable Value", ...comps.map(c=>c+" %"), ...comps.map(c=>c+" Amount"), "Tax Amount"]],
-        body:inv.hsn_summary.map(hh=>[hh.hsn, invMoney(hh.taxable,cur), ...(hh.comps||[]).map(c=>String(c.rate)), ...(hh.comps||[]).map(c=>invMoney(c.amount,cur)), invMoney(hh.tax,cur)]) });
+        body:inv.hsn_summary.map(hh=>{ const by = new Map((hh.comps||[]).map(c=>[c.label,c])); return [hh.hsn, invMoney(hh.taxable,cur), ...comps.map(c=>by.get(c)?String(by.get(c).rate):"—"), ...comps.map(c=>by.get(c)?invMoney(by.get(c).amount,cur):"—"), invMoney(hh.tax,cur)]; }) });
       y = doc.lastAutoTable.finalY + 1.5;
     }
+    if(inv.gst_kind==="merchant"){ doc.autoTable({ ...T, startY:y, body:[["Supply to a merchant exporter at the concessional rate of 0.1% under Notification No. 40/2017-Central Tax (Rate) / 41/2017-Integrated Tax (Rate). The goods are to be exported within 90 days of this invoice."]] }); y = doc.lastAutoTable.finalY + 1.5; }
     if(inv.is_export){ doc.autoTable({ ...T, startY:y, body:[["Bank details for remittance: "+[inv.snap_bank_name, inv.snap_bank_account?"A/c "+inv.snap_bank_account:"", inv.snap_bank_acc_name, inv.snap_bank_ifsc?"IFSC "+inv.snap_bank_ifsc:"", inv.snap_bank_swift?"SWIFT "+inv.snap_bank_swift:"", inv.snap_bank_branch].filter(Boolean).join(" · ")]] }); y = doc.lastAutoTable.finalY + 1.5; }
     if(y > H-32){ doc.addPage(); y = 15; }
     doc.setDrawColor(216,212,197); doc.rect(10,y,W-20,26); doc.line(W/2,y,W/2,y+26);
@@ -55837,13 +56085,13 @@ async function invPdf(inv, lines){
 // ---- the invoice editor ----------------------------------------------------------------------------
 function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
   const [inv,setInv] = useState(null); const [lines,setLines] = useState([]); const [orig,setOrig] = useState(null);
-  const [gst,setGst] = useState(null); const [busy,setBusy] = useState(false); const [msg,setMsg] = useState(""); const [hist,setHist] = useState([]);
+  const [gst,setGst] = useState(null); const [gstKind,setGstKind] = useState(null); const [busy,setBusy] = useState(false); const [msg,setMsg] = useState(""); const [hist,setHist] = useState([]);
   const [irnDlg,setIrnDlg] = useState(null); const [cancelDlg,setCancelDlg] = useState(false);
   const load = useCallback(async()=>{
     const [{ data: i }, { data: ls }] = await Promise.all([ sb.from("invoice_tbl").select("*").eq("id",invoiceId).maybeSingle(), sb.from("invoice_line_tbl").select("*").eq("invoice_id",invoiceId).order("sort_order") ]);
     if(!i){ setMsg("Invoice not found."); return; }
-    const { data: so } = await sb.from("sale_order_tbl").select("gst_components_snapshot,gst_structure_name").eq("contract_number",i.contract_number).maybeSingle();
-    setGst(so ? (so.gst_components_snapshot||[]) : []);
+    const G = await invGstContext(i.contract_number);
+    setGst(G.snap||[]); setGstKind(i.gst_kind || G.kind || null);
     setInv(i); setLines((ls||[]).map(l=>({ ...l, unit_price:String(l.unit_price), _orig:Number(l.unit_price) }))); setOrig(JSON.stringify(i));
     const { data: hs } = await sb.from("dc_history_tbl").select("*").eq("invoice_id",invoiceId).order("at"); setHist(hs||[]);
   },[invoiceId]);
@@ -55853,7 +56101,7 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
   const editable = inv.status==="Draft" && canAcc;
   const cur = String(inv.currency||"INR").toUpperCase();
   const calcLines = lines.map(l=>({ ...l, amount:r2((Number(l.unit_price)||0)*(Number(l.qty)||0)) }));
-  const calc = invCompute(inv, calcLines, gst);
+  const calc = invCompute(inv, calcLines, gst, gstKind);
   const set = (k,v)=> setInv(x=>({...x,[k]:v}));
   const ourCode = inv.snap_state_code || "33";
   const labels = (gst||[]).map(c=>String(c.label||"").toUpperCase());
@@ -55871,9 +56119,9 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
       final_destination:inv.final_destination||null, country_origin:inv.country_origin||null, vehicle_no:inv.vehicle_no||null, eway_no:inv.eway_no||null, eway_date:inv.eway_date||null,
       shipping_bill_no:inv.shipping_bill_no||null, shipping_bill_date:inv.shipping_bill_date||null,
       payment_term:inv.payment_term||null, delivery_term:inv.delivery_term||null, transport_term:inv.transport_term||null, packing_term:inv.packing_term||null, insurance_term:inv.insurance_term||null, tax_term:inv.tax_term||null,
-      pf_amount:r2(inv.pf_amount), freight_amount:r2(inv.freight_amount), insurance_amount:r2(inv.insurance_amount), remarks:inv.remarks||null, ...calc };
+      pf_amount:r2(inv.pf_amount), freight_amount:r2(inv.freight_amount), insurance_amount:r2(inv.insurance_amount), remarks:inv.remarks||null, ...(({ mixed_rates, gst_kind, ...c })=>c)(calc) };
     // the LUT follows the invoice date's financial year
-    if(inv.is_export){ const L = await invLutFor(inv.invoice_date); head.snap_lut_no = L.lut_no||null; head.snap_lut_fy = L.fy; }
+    if(inv.is_export || calc.gst_kind==="sez"){ const L = await invLutFor(inv.invoice_date); head.snap_lut_no = L.lut_no||null; head.snap_lut_fy = L.fy; }
     const { error } = await sb.from("invoice_tbl").update(head).eq("id",inv.id).eq("status","Draft");
     if(error){ setBusy(false); setMsg("Could not save: "+error.message); return false; }
     for(const l of calcLines){ const ed = r2(l.unit_price)!==r2(l._orig) || l.price_source==="Edited";
