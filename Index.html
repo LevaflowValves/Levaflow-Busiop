@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-14T11:40:00Z";
+  var APP_BUILD_VERSION = "2026-10-14T12:10:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -1605,11 +1605,18 @@ function setCuttingPlanIncludeCostPref(val){
   try { localStorage.setItem(CUTTING_PLAN_COST_KEY, val?"1":"0"); } catch(e){}
 }
 
+// 185d: every paged read has a fixed order. Without one the database may hand back the pages in a
+// different order each call, so a row can be skipped or come twice once a table passes 1,000 rows.
+// The order is the table's key (id; estimate_lines has no id). If the key can't be used, the first
+// page says so and the read carries on without it, as before.
+const PAGE_KEYS = { estimate_lines:["reference_number","item_sl_no","sl_no"] };
 async function fetchAll(table, cols) {
-  let all=[], from=0;
+  let all=[], from=0, tie=true; const keys = PAGE_KEYS[table] || ["id"];
   while(true) {
-    const { data, error } = await sb.from(table).select(cols).range(from, from+999);
-    if(error) break;
+    let q = sb.from(table).select(cols); if(tie) keys.forEach(k=>{ q = q.order(k,{ascending:true}); });
+    const { data, error } = await q.range(from, from+999);
+    if(error && tie && from===0){ tie = false; continue; }
+    if(error){ console.error("Paged read of "+table+" stopped", error); break; }
     all = all.concat(data||[]);
     if(!data || data.length < 1000) break;
     from += 1000;
@@ -3425,10 +3432,10 @@ function MaterialRatesBulkUpload({ user, onClose, onImported }){
       });
 
       const [{data:existingRates},{data:shapes},{data:specs},{data:grades}] = await Promise.all([
-        sb.from("material_rates").select("id,material_shape,material_spec,material_grade,rate"),
-        sb.from("materials_shape").select("shape"),
-        sb.from("material_spec").select("material_spec,material_shape"),
-        sb.from("grade_tbl").select("material_grade,material_shape"),
+        pagedRead(()=>sb.from("material_rates").select("id,material_shape,material_spec,material_grade,rate")),   // 185d: was capped at 1,000 — existing rates were missed
+        pagedRead(()=>sb.from("materials_shape").select("shape")),
+        pagedRead(()=>sb.from("material_spec").select("material_spec,material_shape")),
+        pagedRead(()=>sb.from("grade_tbl").select("material_grade,material_shape")),
       ]);
       const rateMap = new Map((existingRates||[]).map(r=>[r.material_shape+"|||"+r.material_spec+"|||"+r.material_grade, r]));
       const shapeSet = new Set((shapes||[]).map(s=>s.shape));
@@ -4414,13 +4421,13 @@ function MasterEditor({ tableKey, user }) {
     let q = sb.from("material_rates").select("*",{count:"exact"}).eq("rate",0);
     if(zrShapeFocus) q = q.eq("material_shape",zrShapeFocus);
     if(zrSpecFilter) q = q.eq("material_spec",zrSpecFilter);
-    const { data, count } = await q.order("material_shape",{ascending:true}).order("material_spec",{ascending:true}).range(zrPage*ZR_PAGE_SIZE, zrPage*ZR_PAGE_SIZE+ZR_PAGE_SIZE-1);
+    const { data, count } = await q.order("material_shape",{ascending:true}).order("material_spec",{ascending:true}).order("id",{ascending:true}).range(zrPage*ZR_PAGE_SIZE, zrPage*ZR_PAGE_SIZE+ZR_PAGE_SIZE-1);
     setZeroRateRows(data||[]); setZeroRateTotal(count||0);
   },[zrShapeFocus,zrSpecFilter,zrPage]);
   useEffect(()=>{ if(zeroRateOpen) loadZeroRateRows(); },[zeroRateOpen,loadZeroRateRows]);
   useEffect(()=>{
     if(!zeroRateOpen || !zrShapeFocus){ setZrSpecOptions([]); return; }
-    sb.from("material_rates").select("material_spec").eq("rate",0).eq("material_shape",zrShapeFocus).limit(2000)
+    pagedRead(()=>sb.from("material_rates").select("material_spec").eq("rate",0).eq("material_shape",zrShapeFocus))
       .then(({data})=>setZrSpecOptions(Array.from(new Set((data||[]).map(r=>r.material_spec).filter(Boolean))).sort()));
   },[zeroRateOpen,zrShapeFocus]);
   const zrGuardStep = (label, ready, e)=>{
@@ -4725,7 +4732,7 @@ function MasterEditor({ tableKey, user }) {
           if(mrGradeFilter) q = q.eq("material_grade",mrGradeFilter);
         }
         const { data, count, error:err } = await q
-          .order("material_shape",{ascending:true}).order("material_spec",{ascending:true})
+          .order("material_shape",{ascending:true}).order("material_spec",{ascending:true}).order("material_grade",{ascending:true}).order("id",{ascending:true})
           .range(page*MR_PAGE_SIZE, page*MR_PAGE_SIZE+MR_PAGE_SIZE-1);
         if(err) throw err; setRows(data||[]); setMrAllRatesTotal(count||0);
       } else {
@@ -4925,12 +4932,12 @@ function MasterEditor({ tableKey, user }) {
   const [mrGradeOptionsScoped,setMrGradeOptionsScoped]=useState([]);
   useEffect(()=>{
     if(tableKey!=="material_rates"||!mrShapeFocus){ setMrSpecOptionsScoped([]); return; }
-    sb.from("material_rates").select("material_spec").eq("material_shape",mrShapeFocus).limit(2000)
+    pagedRead(()=>sb.from("material_rates").select("material_spec").eq("material_shape",mrShapeFocus))
       .then(({data})=>setMrSpecOptionsScoped(Array.from(new Set((data||[]).map(r=>r.material_spec).filter(Boolean))).sort()));
   },[tableKey,mrShapeFocus]);
   useEffect(()=>{
     if(tableKey!=="material_rates"||!mrSpecFilter){ setMrGradeOptionsScoped([]); return; }
-    sb.from("material_rates").select("material_grade").eq("material_shape",mrShapeFocus).eq("material_spec",mrSpecFilter).limit(2000)
+    pagedRead(()=>sb.from("material_rates").select("material_grade").eq("material_shape",mrShapeFocus).eq("material_spec",mrSpecFilter))
       .then(({data})=>setMrGradeOptionsScoped(Array.from(new Set((data||[]).map(r=>r.material_grade).filter(Boolean))).sort()));
   },[tableKey,mrShapeFocus,mrSpecFilter]);
   const [mrStepMsg,setMrStepMsg]=useState("");
@@ -5946,9 +5953,10 @@ function plKey(r){ return (r.model_code||"")+"|"+(r.vendor||""); } // one price 
 // through instead. make() must return a fresh, fully filtered and ordered
 // query each time.
 async function fetchPagedRows(make, cap){
-  const out=[]; const step=1000; const max=cap||100000;
+  const out=[]; const step=1000; const max=cap||100000; let tie=true;   // 185d: id as the last sort key
   for(let from=0; from<max; from+=step){
-    const { data, error } = await make().range(from, Math.min(from+step, max)-1);
+    let { data, error } = await (tie ? make().order("id",{ascending:true}) : make()).range(from, Math.min(from+step, max)-1);
+    if(error && tie && from===0){ tie = false; ({ data, error } = await make().range(from, Math.min(from+step, max)-1)); }
     if(error) throw error;
     out.push(...(data||[]));
     if(!data || data.length<step) break;
@@ -5956,11 +5964,11 @@ async function fetchPagedRows(make, cap){
   return out;
 }
 async function fetchAllPricelistModels(includeInactive){
-  const out=[]; const step=1000;
+  const out=[]; const step=1000; let plTie=true;
   for(let from=0; from<200000; from+=step){
-    let q = sb.from("pricelist_models").select("*").order("model_code").order("vendor").range(from, from+step-1);
-    if(!includeInactive) q = q.eq("active",true);
-    const { data, error } = await q;
+    const mk = (tie)=>{ let q = sb.from("pricelist_models").select("*").order("model_code").order("vendor"); if(tie) q = q.order("id"); q = q.range(from, from+step-1); if(!includeInactive) q = q.eq("active",true); return q; };
+    let { data, error } = await mk(plTie);
+    if(error && plTie && from===0){ plTie = false; ({ data, error } = await mk(false)); }
     if(error) throw error;
     out.push(...(data||[]));
     if(!data || data.length<step) break;
@@ -14744,7 +14752,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       // wildcard, which would risk a false match against an unrelated
       // quote number sharing the same numeric prefix.
       const base0 = baseRefOf(refFilter);
-      const { data: allContractRefs } = await sb.from("sale_order_tbl").select("contract_number,quote_reference_number");
+      const { data: allContractRefs } = await pagedRead(()=>sb.from("sale_order_tbl").select("contract_number,quote_reference_number"));
       const existingContract = (allContractRefs||[]).find(r=>baseRefOf(r.quote_reference_number)===base0);
       if(existingContract){
         alert("This Quote can't be amended — Sale Order "+existingContract.contract_number+" has already been created from it. A Quote and its Sale Order can't be allowed to drift apart.");
@@ -23739,11 +23747,14 @@ function remapEstimateIds(lineRows, oldEst, newEst){
   const oldSl = new Map((oldEst||[]).map(r=>[r.id, String(r.item_sl_no)]));
   return (lineRows||[]).map(l=>{ const sl = String(l.item_sl_no ?? oldSl.get(l.estimate_id) ?? ""); const nid = bySl.get(sl); return nid ? { ...l, estimate_id:nid } : l; });
 }
+// 185d: the same, shaped like a single read ({ data, error }) so it drops into Promise.all / destructuring
+async function pagedRead(build){ try{ return { data: await fetchPaged(build), error: null }; }catch(e){ return { data: [], error: e }; } }
 async function fetchPaged(build, pageSize){
   const size = pageSize||1000;
-  let all = [], from = 0;
+  let all = [], from = 0, tie = true;   // 185d: id as the last sort key
   while(true){
-    const { data, error } = await build().range(from, from+size-1);
+    let { data, error } = await (tie ? build().order("id",{ascending:true}) : build()).range(from, from+size-1);
+    if(error && tie && from===0){ tie = false; continue; }
     if(error){ console.error("Paged read failed", error); break; }
     all = all.concat(data||[]);
     if(!data || data.length < size) break;
@@ -23957,7 +23968,7 @@ async function suggestNextContractNumber(){
   // a new series every calendar year: 260169 … then 270001 from 1 January 2027.
   const [{ data: cfg }, { data: contracts }, reg] = await Promise.all([
     sb.from("contract_number_config_tbl").select("*").order("id",{ascending:false}).limit(1).maybeSingle(),
-    sb.from("sale_order_tbl").select("contract_number"),
+    pagedRead(()=>sb.from("sale_order_tbl").select("contract_number")),
     (async()=>{ try{ const { data, error } = await sb.from("contract_register_tbl").select("contract_number"); return error ? [] : (data||[]); }catch(e){ return []; } })()
   ]);
   const yy = String(new Date().getFullYear()%100).padStart(2,"0");
@@ -24276,7 +24287,7 @@ function SaleOrderContractPicker({ user, onOpenContract, startCreate, onConsumed
     setQuoteOptionsLoading(true);
     const [{data:estRows},{data:contractsAll}] = await Promise.all([
       sb.from("estimates").select("reference_number,customer_name,quote_status,item_sl_no,currency").order("reference_number"),
-      sb.from("sale_order_tbl").select("contract_number"),
+      pagedRead(()=>sb.from("sale_order_tbl").select("contract_number")),
     ]);
     const contractNumbers = new Set((contractsAll||[]).map(c=>c.contract_number));
     const quoteRows = (estRows||[]).filter(r=>!contractNumbers.has(r.reference_number));
@@ -31571,6 +31582,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"14 Oct 2026 (185d)", summary:"Built on 2026-10-14T11:40:00Z. No SQL. PAGING FIX. The database hands back at most 1,000 rows per call whatever the app asks for, and a paged read with no fixed order can skip or repeat rows between pages. (1) Every paged read now has a fixed order ending in the row id (estimate_lines: contract, Sl No, line); if a table has no id the read carries on as before. (2) Reads that asked for 'up to 5,000 / 20,000' rows in one call — and so silently got 1,000 — now page: the task boards and Tasks Completed report (task_tbl passed 1,000 cards with the Production BOM load, so cards that sorted late were missing from boards), the morning ☀ line, the workload view, the Document Control tasks, Hand Over Work (tasks, documents, requests, customers of the person), the Quote Register next number (all numbers of the year), Procurement date changes and the procurement task reads, the Quotes Report activity and outcomes, the document customer lookup, the Sale Order lists, and the Material Rates option lists and BULK UPLOAD comparison (it saw only 1,000 existing rates, so rates already there could be treated as new). (3) Page lists with a sort that can tie (PO Register, GRN, Vendors, Tag Register, Material Rates, Allowable Stress, rates report) add the id so a row can't sit on two pages. Tests: e2e_185d.js (4; the test stand-in now returns at most 1,000 rows a call, like the server)." },
   { date:"14 Oct 2026 (185c)", summary:"Built on 2026-10-14T11:20:00Z. No SQL. EMPLOYEE BOARD: Tasks Assigned is now the first list (Tasks Assigned, Overdue, Today's, In Progress, Under Approval, Stale, Completed). The list order starts fresh for everyone (saved under a new name); move lists again if you want. COMPLETED is one list with tabs, Today / Week / Month (each includes the shorter) and a quarter tab when it has cards; the tab is remembered. So all the lists fit on one screen; before this the Completed lists sat off the screen to the right. NEW STALE list: open cards with no change for the department's Stale days (Task Department Limits; 7 when not set; 'Waiting customer' cards left out) and cards in Under Approval past the approval-wait days, each with its days; the card also stays in its own list. Whoever RAISED a card gets a bell line when it is completed (\"✓ Gothai completed: … (approved by Deepak)\"), unless they completed or hold it themselves. The approver's daily ☀ line adds \"N stale cards in <department>\". Tests: e2e_185c.js (14)." },
   { date:"14 Oct 2026 (185b)", summary:"Built on 2026-10-14T11:00:00Z (replaces it — 11:00 was not to be deployed). Bala's review: (1) no \"Add to the list\" on Sale Order terms — free text stays on that Sale Order only, the lists change only in Setup › Masters; spell check and \"close to the list entry\" stay. (2) NEW P&F notes (quote_commercial_terms.packing_forwarding_notes, in structure_gst_per_slno_2026-10-14.sql) under Packing and forwarding on a Sale Order; 0% means included in the price. Prints on the O.A / Sale Order PDF and the invoice's packing term: 0% → the notes, or \"Included\" when none; a percentage or lumpsum → the value then \" — notes\" (not when the notes only repeat the number). (3) legacy_SO_terms_GST_fix_2026-10-14.sql now keeps every OA wording exactly (no change to list entries, nothing added to any list, Inco Terms list untouched); P&F from the OA: Nil / Included / Inclusive = 0% with the notes, \"3% of basic order value\" = 3% with the notes. Tests: e2e_185.js (41), e2e_185b.js (16), e2e_185pdf.js (5)." },
   { date:"14 Oct 2026 (185)", summary:"Built on 2026-10-14T08:45:00Z. SQL: structure_gst_per_slno_2026-10-14.sql (BOTH companies), then legacy_SO_terms_GST_fix_2026-10-14.sql (Flometriq). SALE ORDER TERMS: on a Sale Order the term boxes (Payment, Delivery, Price basis, Insurance, Guarantee, Warranty, Transport, Freight) take the agreed wording from the PO. On leaving a box the app spell-checks it (\"dare → date?\" Fix / Keep), offers the list entry when the wording is nearly the same (case, spaces, a letter or two), and otherwise asks \"Add to the list?\" — any user, no code, logged with the Sale Order — or \"Use on this Sale Order only\". Quotes keep the strict lists. Inco Terms stay strict. TAX is never typed on a Sale Order: pick the GST TYPE (Tamil Nadu — Intrastate, Interstate — IGST, Export — LUT, SEZ — LUT, Merchant export — 0.1%) and the tax wording is set from it; suggested from the client's state and currency, with warnings when they disagree and when an export Sale Order has a service line. GST PER SL NO: Goods / Service, HSN / SAC, GST % and a reason (required when the rate differs from the item's). The Items master gets GST % and Goods / Service next to the HSN code (18% / Goods to start). The GST type is now also saved on the Sale Order, which is what the invoice reads (before this it stayed on the terms only). LOCK: once the Stage is past Draft (O.A Sent onward) the terms are locked; \"Amend terms…\" asks for a reason and logs every change with it in Revision History. INVOICE: each line carries its rate; one tax row per rate (\"OUTPUT IGST 18% on …\", \"OUTPUT IGST 0.1% on …\"); a single-rate invoice prints exactly as before; a GST % column appears only when the invoice has more than one rate; P&F, freight and insurance follow the goods, shared by value; HSN summary one row per HSN and rate; SEZ prints the LUT banner with no tax; merchant export prints the Notification 40/41-2017 note and splits 0.05 + 0.05 in Tamil Nadu, IGST 0.1 outside. Tests: e2e_185.js (41), e2e_185b.js (14), e2e_185pdf.js (5)." },
@@ -33403,7 +33415,7 @@ function GoAheadPendingPrompt({ user, onDone, onOpenContract }){
     (async()=>{
       try{
         const [{data:sos},{data:holds}] = await Promise.all([
-          sb.from("sale_order_tbl").select("id,contract_number,customer_name,go_ahead_state,oa_issued_on"),
+          pagedRead(()=>sb.from("sale_order_tbl").select("id,contract_number,customer_name,go_ahead_state,oa_issued_on")),
           sb.from("v_full_hold_outstanding").select("contract_number,full_hold_docs_open")
         ]);
         const openBy = new Map((holds||[]).map(hh=>[hh.contract_number, Number(hh.full_hold_docs_open)||0]));
@@ -37855,7 +37867,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
     const yy = today.slice(2,4); const px = regNorm(t.prefix);
     // 184: the running number is shared by the prefix with and without the Hydronett H
     const pxs = regHPair(px).filter(Boolean);
-    const res = await Promise.all(pxs.map(p=>sb.from("register_line_tbl").select("quote_norm").eq("tab_name",t.tab_name).like("quote_norm",p+yy+"%").limit(5000)));
+    const res = await Promise.all(pxs.map(p=>pagedRead(()=>sb.from("register_line_tbl").select("quote_norm").eq("tab_name",t.tab_name).like("quote_norm",p+yy+"%"))));   // 185d: paged
     let mx = 0; res.forEach(({data},k)=> (data||[]).forEach(r=>{ const m = String(r.quote_norm).match(new RegExp("^"+pxs[k]+yy+"(\\d+)$")); if(m) mx = Math.max(mx, parseInt(m[1],10)); }));
     return px+yy+String(mx+1).padStart(4,"0");
   };
@@ -39255,7 +39267,7 @@ function ProcReportsScreen({ user, onOpenGantt }){
     if(error){ setData({ err:error.message }); return; }
     const lines = await fetchPaged(()=>sb.from("proc_line_tbl").select("*").order("id"));
     const tasks = await fetchPaged(()=>sb.from("task_tbl").select("id,proc_plan_id,parent_id,proc_form,assignee,status,title").not("proc_plan_id","is",null).order("id"));
-    let chg = [], chgOk = true; try{ const { data: c, error: ce } = await sb.from("proc_date_change_tbl").select("*").order("changed_at").limit(20000); if(ce) chgOk = false; else chg = c||[]; }catch(e){ chgOk = false; }
+    let chg = [], chgOk = true; try{ const { data: c, error: ce } = await pagedRead(()=>sb.from("proc_date_change_tbl").select("*").order("changed_at")); if(ce) chgOk = false; else chg = c||[]; }catch(e){ chgOk = false; }
     let items = [], itemsOk = true; try{ items = await fetchPaged(()=>sb.from("proc_item_tbl").select("*").order("id")); }catch(e){ itemsOk = false; }   // 184c
     setData({ plans:plans||[], lines, tasks, chg, chgOk, items, itemsOk });
     if((plans||[]).length) setCt(String(plans[0].contract_number));
@@ -39596,9 +39608,9 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
     const { data: ps, error } = await sb.from("proc_plan_tbl").select("*").order("contract_number",{ascending:false});
     if(error){ setSqlErr(error.message); setLoading(false); return; }
     let rows = [], from = 0;
-    while(true){ const { data, error: e2 } = await sb.from("proc_line_tbl").select("*").range(from, from+999); if(e2) break; rows = rows.concat(data||[]); if(!data || data.length<1000) break; from += 1000; }
-    const { data: tk } = await sb.from("task_tbl").select("id,proc_plan_id,parent_id,assignee,status,proc_form").not("proc_plan_id","is",null);
-    try{ const { data: cl, error: ce } = await sb.from("proc_date_change_tbl").select("*").order("changed_at").limit(20000); setChgOk(!ce); setChg(ce ? [] : (cl||[])); }catch(e){ setChgOk(false); }
+    while(true){ const { data, error: e2 } = await sb.from("proc_line_tbl").select("*").order("id",{ascending:true}).range(from, from+999); if(e2) break; rows = rows.concat(data||[]); if(!data || data.length<1000) break; from += 1000; }
+    const { data: tk } = await pagedRead(()=>sb.from("task_tbl").select("id,proc_plan_id,parent_id,assignee,status,proc_form").not("proc_plan_id","is",null));
+    try{ const { data: cl, error: ce } = await pagedRead(()=>sb.from("proc_date_change_tbl").select("*").order("changed_at")); setChgOk(!ce); setChg(ce ? [] : (cl||[])); }catch(e){ setChgOk(false); }
     // 142: a plan made before its Sale Order takes the P O No, delivery date and contract date from the Sale Order once it exists (blanks only).
     try{ const need = (ps||[]).filter(p=>!p.po_no || !p.delivery_date || !p.contract_date);
       if(need.length){ const cns = need.map(p=>p.contract_number);
@@ -40034,7 +40046,7 @@ function EnquiriesListScreen({ user, onGoToTab, onOpenQuote, onCreateQuoteFromEn
         sb.from("employee_tbl").select("*").order("employee_name"),
         sb.from("post_holder_tbl").select("employee_name").eq("post_key","doc_controller"),
         sb.from("task_approver_tbl").select("*"),
-        sb.from("task_tbl").select("assignee,status").in("status",["open","progress"]).limit(20000),
+        pagedRead(()=>sb.from("task_tbl").select("id,assignee,status").in("status",["open","progress"])),
         sb.from("task_type_tbl").select("*").eq("type_name",ENQ_TASK_TYPE).limit(1).maybeSingle(),
       ]);
       const live = (emps||[]).filter(x=>x.employee_name && x.employee_name!=="Unassigned" && !/inactive|left|relieved|resigned/i.test(x.status||""));
@@ -41827,11 +41839,11 @@ function CrmDashboardsScreen({ user, onDrillToQuotesReport, onOpenQuote, onGoToT
       const legacyRows = await fetchPaged(()=>sb.from("legacy_quotes_tbl").select("id,reference_number,reference_date,quote_status").order("id"));   // 141: paged, read here
       qKeepLatestInPlace(quotes, legacyRows);   // 141: latest revision of each quote only
 
-      const { data: acts } = await sb.from("activity_log_tbl").select("*")
-        .gte("created_at",from+"T00:00:00").lte("created_at",to+"T23:59:59").order("created_at",{ascending:false}).limit(5000);
+      const { data: acts } = await pagedRead(()=>sb.from("activity_log_tbl").select("*")
+        .gte("created_at",from+"T00:00:00").lte("created_at",to+"T23:59:59").order("created_at",{ascending:false}));
       const activities = acts||[];
 
-      const { data: outcomes } = await sb.from("quote_outcomes").select("*").limit(2000);
+      const { data: outcomes } = await pagedRead(()=>sb.from("quote_outcomes").select("*"));
 
       const customerNames = Array.from(new Set(quotes.map(q=>q.customer_name).filter(Boolean)));
       const { data: cos } = customerNames.length
@@ -44768,7 +44780,7 @@ function AllowableStressEditor({ user }) {
 
   const load=useCallback(async()=>{
     setLoading(true);
-    const{data}=await sb.from("allowable_stress").select("*").order("material_spec").range(page*pageSize,page*pageSize+pageSize-1);
+    const{data}=await sb.from("allowable_stress").select("*").order("material_spec").order("id").range(page*pageSize,page*pageSize+pageSize-1);
     setRows(data||[]); setLoading(false);
   },[page]);
   useEffect(()=>{load();},[load]);
@@ -47605,7 +47617,7 @@ function MaterialRatesReport({ user }){
     let q = filteredQuery("id,material_spec,material_grade,material_shape,rate,uom,created_at,created_by",{count:"exact"});
     if(view==="stale") q = q.lt("created_at",cutoffISO);
     else if(view==="zero") q = q.eq("rate",0);
-    const { data, count, error:err } = await q.order("created_at",{ascending:true}).range(page*RPT_PAGE_SIZE, page*RPT_PAGE_SIZE+RPT_PAGE_SIZE-1);
+    const { data, count, error:err } = await q.order("created_at",{ascending:true}).order("id",{ascending:true}).range(page*RPT_PAGE_SIZE, page*RPT_PAGE_SIZE+RPT_PAGE_SIZE-1);
     if(err){ setLoadError(err.message); setRows([]); setLoading(false); return; }
     setRows(data||[]); setTotal(count||0);
     setLoading(false);
@@ -47629,19 +47641,14 @@ function MaterialRatesReport({ user }){
   // Cascading option lists via small dedicated queries — never derived from
   // `rows`, since rows is now just the current 25-row page.
   useEffect(()=>{
-    sb.from("material_rates").select("material_shape").limit(2000)
+    pagedRead(()=>sb.from("material_rates").select("material_shape"))
       .then(({data})=>setAllShapes(Array.from(new Set((data||[]).map(r=>r.material_shape).filter(Boolean))).sort()));
   },[]);
   useEffect(()=>{
-    let q = sb.from("material_rates").select("material_spec").limit(2000);
-    if(shapeSel) q = q.eq("material_shape",shapeSel);
-    q.then(({data})=>setSpecOptions(Array.from(new Set((data||[]).map(r=>r.material_spec).filter(Boolean))).sort()));
+    pagedRead(()=>{ let q = sb.from("material_rates").select("material_spec"); if(shapeSel) q = q.eq("material_shape",shapeSel); return q; }).then(({data})=>setSpecOptions(Array.from(new Set((data||[]).map(r=>r.material_spec).filter(Boolean))).sort()));
   },[shapeSel]);
   useEffect(()=>{
-    let q = sb.from("material_rates").select("material_grade").limit(2000);
-    if(shapeSel) q = q.eq("material_shape",shapeSel);
-    if(specSel) q = q.eq("material_spec",specSel);
-    q.then(({data})=>setGradeOptions(Array.from(new Set((data||[]).map(r=>r.material_grade).filter(Boolean))).sort()));
+    pagedRead(()=>{ let q = sb.from("material_rates").select("material_grade"); if(shapeSel) q = q.eq("material_shape",shapeSel); if(specSel) q = q.eq("material_spec",specSel); return q; }).then(({data})=>setGradeOptions(Array.from(new Set((data||[]).map(r=>r.material_grade).filter(Boolean))).sort()));
   },[shapeSel,specSel]);
 
   const onShapeChange = (v)=>{ setShapeSel(v); setSpecSel(""); setGradeSel(""); };
@@ -48046,7 +48053,7 @@ async function loadMyDayData(user, empName, isSales){
       const depts = Array.from(new Set([...(ta||[]).map(r=>r.department), ...BOARD_CACHE.autoApprovers.filter(a=>a.employee_name===empName).map(a=>a.department)].filter(Boolean)));
       if(depts.length){
         let pile = await fetchPaged(()=>sb.from("task_tbl").select("*").in("department",depts).in("status",["open","progress"]).is("parent_id",null).order("created_at"));
-        try{ const { data: sh, error: shErr } = await sb.from("task_tbl").select("*").overlaps("also_departments",depts).is("assignee",null).in("status",["open","progress"]).is("parent_id",null);   // 150: shared pile cards
+        try{ const { data: sh, error: shErr } = await pagedRead(()=>sb.from("task_tbl").select("*").overlaps("also_departments",depts).is("assignee",null).in("status",["open","progress"]).is("parent_id",null));   // 150: shared pile cards
           if(!shErr) (sh||[]).forEach(r=>{ if(!pile.some(x=>x.id===r.id)) pile.push(r); }); }catch(e){}
         const { data: es } = await sb.from("employee_tbl").select("*");
         const live = (es||[]).filter(e=>e.employee_name && e.employee_name!=="Unassigned" && !/inactive|left|relieved|resigned/i.test(e.status||""));
@@ -49152,7 +49159,7 @@ function PoRegisterScreen({ user }){
   const [posItemsMap,setPosItemsMap] = useState({}); // po_no -> [{description,value}]
 
   const loadPos = useCallback(async()=>{
-    let q = sb.from("po_register").select("*",{count:"exact"}).order("po_date",{ascending:false});
+    let q = sb.from("po_register").select("*",{count:"exact"}).order("po_date",{ascending:false}).order("id",{ascending:false});
     if(filterPoNo.trim()) q = q.ilike("po_no","%"+filterPoNo.trim()+"%");
     if(filterDateFrom) q = q.gte("po_date",filterDateFrom);
     if(filterDateTo) q = q.lte("po_date",filterDateTo);
@@ -49455,7 +49462,7 @@ function MaterialInwardScreen({ user, sessionCompany }){
   const isAdminOrAbove = user.role==="admin" || user.role==="super_admin";
 
   const loadGrns = useCallback(async()=>{
-    let q = sb.from("grn_header").select("*").order("grn_date",{ascending:false});
+    let q = sb.from("grn_header").select("*").order("grn_date",{ascending:false}).order("id",{ascending:false});
     if(filters.vendor_name) q = q.eq("vendor_name",filters.vendor_name);
     if(filters.grn_no) q = q.eq("grn_no",filters.grn_no);
     if(filters.po_no) q = q.eq("po_no",filters.po_no);
@@ -49905,7 +49912,7 @@ function VendorsScreen({ user }){
   const [expired,setExpired] = useState([]);
 
   const loadVendors = useCallback(async()=>{
-    let q = sb.from("vendor_tbl").select("*").eq("is_archived",false).order("vendor_name");
+    let q = sb.from("vendor_tbl").select("*").eq("is_archived",false).order("vendor_name").order("id",{ascending:true});
     if(statusFilter==="__none") q = q.is("approval_status",null); else if(statusFilter) q = q.eq("approval_status",statusFilter);
     if(vsearch.trim()) q = q.ilike("vendor_name","%"+vsearch.trim()+"%");
     const { data } = await q.range(page*PAGE_SIZE,page*PAGE_SIZE+PAGE_SIZE-1);
@@ -50154,7 +50161,7 @@ function TagRegisterScreen({ user }){
   const [detail,setDetail] = useState(null); // {tag row, grn header}
 
   const loadRows = useCallback(async()=>{
-    let q = sb.from("tag_register").select("*").order("created_at",{ascending:false});
+    let q = sb.from("tag_register").select("*").order("created_at",{ascending:false}).order("id",{ascending:false});
     if(search.trim()) q = q.ilike("tag_number","%"+search.trim()+"%");
     const { data } = await q.range(page*PAGE_SIZE,page*PAGE_SIZE+PAGE_SIZE-1);
     setRows(data||[]);
@@ -50391,7 +50398,7 @@ async function taskDailyDigest(name){
     const { data: ap } = await sb.from("task_approver_tbl").select("department").eq("employee_name",name);
     const deps = Array.from(new Set((ap||[]).map(a=>a.department).filter(Boolean)));
     if(deps.length){
-      const { data: dt2 } = await sb.from("task_tbl").select("*").in("department",deps).neq("status","done").limit(5000);
+      const { data: dt2 } = await pagedRead(()=>sb.from("task_tbl").select("*").in("department",deps).neq("status","done"));
       const by = {}; (dt2||[]).filter(t=>taskOverdue(t,today) && t.assignee && t.assignee!==name).forEach(t=>{ by[t.assignee]=(by[t.assignee]||0)+1; });
       const top = Object.entries(by).sort((a,b)=>b[1]-a[1]);
       if(top.length) msg = (msg||"☀ Today:")+" Your board"+(deps.length>1?"s":"")+" ("+deps.join(", ")+"): "+top.reduce((n,x)=>n+x[1],0)+" overdue — "+top.slice(0,6).map(x=>x[0]+" "+x[1]).join(", ")+(top.length>6?"…":"")+".";
@@ -50713,7 +50720,7 @@ async function docBoardLoad(){
     loadDocStatuses(),
     sb.from("doc_category_tbl").select("*"),
     fetchAll("sale_order_tbl","*"),
-    sb.from("task_tbl").select("*").or("doc_id.not.is.null,doc_request_id.not.is.null,chase_letter_id.not.is.null"),
+    pagedRead(()=>sb.from("task_tbl").select("*").or("doc_id.not.is.null,doc_request_id.not.is.null,chase_letter_id.not.is.null")),
     sb.from("doc_chase_letter_tbl").select("*").order("id"),
     sb.from("employee_tbl").select("*").order("employee_name"),
     sb.from("post_holder_tbl").select("employee_name").eq("post_key","doc_controller"),
@@ -52217,7 +52224,7 @@ function BoardGridScreen({ user }){
     const removals = changes.filter(c=>c.kind==="remove");
     let moved = [];
     if(removals.length){
-      const { data:open } = await sb.from("task_tbl").select("id,title,assignee,department,status").neq("status","done");
+      const { data:open } = await pagedRead(()=>sb.from("task_tbl").select("id,title,assignee,department,status").neq("status","done"));
       moved = removals.map(c=>({ c, cards:(open||[]).filter(t=>t.assignee===c.n && t.department===c.b) }));
       const n = moved.reduce((s,x)=>s+x.cards.length,0);
       if(n && !confirm(moved.filter(x=>x.cards.length).map(x=>x.c.n+" has "+x.cards.length+" open card"+(x.cards.length>1?"s":"")+" from "+x.c.b).join("\n")+"\n\nThey go back to that board's Unassigned pile and its approver is told. Save?")) return;
@@ -52543,12 +52550,12 @@ const HO_KINDS = [
 async function handoverCollect(from){
   const out = [];
   const [tk, docs, reqs, apr, posts, cos, sts] = await Promise.all([
-    sb.from("task_tbl").select("id,title,task_type,department,due_date,status,assignee,ref,parent_id").eq("assignee",from).neq("status","done").limit(5000),
-    sb.from("universal_documents_tbl").select("id,doc_number,doc_name,category,entity_id,owner,is_archived").eq("owner",from).limit(5000),
-    sb.from("document_requests_tbl").select("id,category,entity_id,item_sl_no,owner,fulfilled_document_id").eq("owner",from).is("fulfilled_document_id",null).limit(5000),
+    pagedRead(()=>sb.from("task_tbl").select("id,title,task_type,department,due_date,status,assignee,ref,parent_id").eq("assignee",from).neq("status","done")),
+    pagedRead(()=>sb.from("universal_documents_tbl").select("id,doc_number,doc_name,category,entity_id,owner,is_archived").eq("owner",from)),
+    pagedRead(()=>sb.from("document_requests_tbl").select("id,category,entity_id,item_sl_no,owner,fulfilled_document_id").eq("owner",from).is("fulfilled_document_id",null)),
     sb.from("task_approver_tbl").select("*").eq("employee_name",from),
     sb.from("post_holder_tbl").select("*").eq("employee_name",from),
-    sb.from("companies").select("id,company_name,owner_employee_name").eq("owner_employee_name",from).limit(5000),
+    pagedRead(()=>sb.from("companies").select("id,company_name,owner_employee_name").eq("owner_employee_name",from)),
     loadDocStatuses(),
   ]);
   (tk.data||[]).forEach(t=> out.push({ kind:"task", id:t.id, label:t.title||"(no title)", sub:[t.task_type, t.department, t.ref, t.due_date?"due "+fmtDMY(t.due_date):""].filter(Boolean).join(" · "), before:{ assignee:t.assignee, department:t.department, status:t.status } }));
@@ -52846,7 +52853,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     if(first) await docTaskBoardSync();   // 130: document cards brought up to date every time the board opens (chase letters once a day)
     const [{data:e},{data:t,error:tErr},{data:l},{data:a},name] = await Promise.all([
       sb.from("employee_tbl").select("*").order("employee_name"),   // 123: * so second_department comes too
-      sb.from("task_tbl").select("*").order("due_date",{ascending:true}).limit(20000),
+      pagedRead(()=>sb.from("task_tbl").select("*").order("due_date",{ascending:true})),   // 185d: was capped at 1,000 rows by the server
       sb.from("task_label_tbl").select("*").order("label"),
       sb.from("task_approver_tbl").select("*"),
       taskMyEmployeeName(user),
@@ -52854,7 +52861,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     if(tErr) setErr("Tasks could not be read: "+tErr.message+" — has the Task Manager structure SQL been run?");
     const live = (e||[]).filter(x=>x.employee_name && x.employee_name!=="Unassigned" && !/inactive|left|relieved|resigned/i.test(x.status||""));
     let tl = t||[];
-    try{ if(first && await taskRepeatRun(tl, toISODate(new Date()))){ const { data:t3 } = await sb.from("task_tbl").select("*").order("due_date",{ascending:true}).limit(20000); tl = t3||tl; } }catch(ex){ console.warn("Repeating cards", ex); }   // 178
+    try{ if(first && await taskRepeatRun(tl, toISODate(new Date()))){ const { data:t3 } = await pagedRead(()=>sb.from("task_tbl").select("*").order("due_date",{ascending:true})); tl = t3||tl; } }catch(ex){ console.warn("Repeating cards", ex); }   // 178
     try{ const cm = await fetchAll("task_comment_tbl","task_id"); const cc = {}; (cm||[]).forEach(r=>{ cc[r.task_id]=(cc[r.task_id]||0)+1; }); setComments(cc); }catch(ex){}   // 178
     // 123: enquiry cards — read their enquiries; any whose quote has left Draft is completed now
     // (safety net; normally done the moment the stage changes).
@@ -52872,7 +52879,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
         const sent = est.find(r=>r.reference_number===e.linked_reference_number && r.quote_status && r.quote_status!=="Draft");
         if(sent && (enqIsOpen(e) || (tk && tk.status!=="done"))) fixed += await enquiryOfferSent(e.linked_reference_number, sent.status_changed_by||"App", sent.status_changed_at);
       }
-      if(fixed){ const { data:t2 } = await sb.from("task_tbl").select("*").order("due_date",{ascending:true}).limit(20000); tl = t2||tl; enqRows = await readEnq(tl); }
+      if(fixed){ const { data:t2 } = await pagedRead(()=>sb.from("task_tbl").select("*").order("due_date",{ascending:true})); tl = t2||tl; enqRows = await readEnq(tl); }
       const m = {}; enqRows.forEach(x=>{ m[x.id]=x; }); setEnqMap(m);
     }catch(ex){ console.error("Enquiry cards not read", ex); }
     try{ await ctClientLoad(); }catch(ex){}   // 178
@@ -54078,7 +54085,7 @@ function TaskCompletedReport({ user, company }){
     const all = isAdmin || (dc||[]).some(r=>r.employee_name===name);
     const depts = Array.from(new Set(mergeAutoApprovers(aps).filter(a=>a.employee_name===name).map(a=>a.department)));
     setMe(name); setScope({ all, depts });
-    const { data: done } = await sb.from("task_tbl").select("*").eq("status","done").order("approved_at",{ascending:true}).limit(20000);
+    const { data: done } = await pagedRead(()=>sb.from("task_tbl").select("*").eq("status","done").order("approved_at",{ascending:true}));
     const ids = Array.from(new Set((done||[]).map(t=>t.enquiry_id).filter(Boolean))); let enqs = [];
     for(let k=0;k<ids.length;k+=150){ const { data:er } = await sb.from("enquiry_tbl").select("id,enquiry_number,company_name,linked_reference_number,closing_date,enquiry_date").in("id",ids.slice(k,k+150)); enqs = enqs.concat(er||[]); }
     setData({ emps:(emps||[]).filter(e=>e.employee_name && e.employee_name!=="Unassigned"), tasks:done||[], enq:new Map(enqs.map(e=>[e.id,e])), types:(types||[]).map(t=>t.type_name) });
@@ -56965,7 +56972,7 @@ function PendingActionsScreen({ user }){
     try{
       const today = toISODate(new Date());
       const [{ data: tks, error: tkErr }, { data: aps }, { data: emps }] = await Promise.all([
-        sb.from("task_tbl").select("*").neq("status","done"),
+        pagedRead(()=>sb.from("task_tbl").select("*").neq("status","done")),
         sb.from("task_approver_tbl").select("department,employee_name"),
         sb.from("employee_tbl").select("employee_name,department"),
       ]);
@@ -56996,7 +57003,7 @@ function PendingActionsScreen({ user }){
       const { data: plans, error: pErr } = await sb.from("proc_plan_tbl").select("*");
       if(!pErr && plans && plans.length){
         const lines = await fetchPaged(()=>sb.from("proc_line_tbl").select("*").order("id"));
-        const { data: ptk } = await sb.from("task_tbl").select("id,parent_id,proc_plan_id,proc_form,assignee,status,moved_at,created_at").not("proc_plan_id","is",null);
+        const { data: ptk } = await pagedRead(()=>sb.from("task_tbl").select("id,parent_id,proc_plan_id,proc_form,assignee,status,moved_at,created_at").not("proc_plan_id","is",null));
         let storesWho = []; try{ const { data: sh } = await sb.from("post_holder_tbl").select("employee_name").eq("post_key","stores"); storesWho = (sh||[]).map(x=>x.employee_name).filter(Boolean); }catch(e){}   // 157
         plans.forEach(p=>{ const { d, extra:ex } = pgFromRows((lines||[]).filter(l=>l.plan_id===p.id)); const R = pgRows(p, d, ex);
           const card = (ptk||[]).find(t=>t.proc_plan_id===p.id && !t.parent_id);
@@ -57158,9 +57165,9 @@ function DocumentRegisterReport(){
     (async()=>{
       const [{data:st},{data:reqs},{data:ests},{data:sos}] = await Promise.all([
         sb.from("doc_status_tbl").select("*"),
-        sb.from("document_requests_tbl").select("*"),
-        sb.from("estimates").select("reference_number,customer_name"),
-        sb.from("sale_order_tbl").select("contract_number,customer_name")
+        pagedRead(()=>sb.from("document_requests_tbl").select("*")),
+        pagedRead(()=>sb.from("estimates").select("reference_number,customer_name")),
+        pagedRead(()=>sb.from("sale_order_tbl").select("contract_number,customer_name"))
       ]);
       // Customer by entity id, from both sides, so a document on a
       // contract shows its customer as readily as one on a quote.
