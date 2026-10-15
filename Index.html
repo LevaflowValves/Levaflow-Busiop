@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-14T12:10:00Z";
+  var APP_BUILD_VERSION = "2026-10-15T15:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -908,7 +908,11 @@ const MASTER_TABLES = [
   // State -> Country -> Zone (see resolveOwnerForAddress) — this only
   // ever fires once the more specific two have both missed.
   // 137: the Quote Register tabs (Super Admin) - which customers each tab takes. Who covers a tab: Register Tabs & People.
-  { key: "register_tab_tbl", label: "Register Tabs (rules)", columns: ["tab_name","prefix","group_label","sort_order","is_open","is_emf","is_catchall","owner_per_line","accepts_countries","accepts_states","accepts_zone"], colLabels:{owner_per_line:"Owner on each line (FSE / Telecaller asked per line, e.g. Tenders)",tab_name:"Tab (as in Excel)",group_label:"Group",sort_order:"Order",is_open:"Open",is_emf:"EMF",is_catchall:"Catch-all (any other country outside India)",accepts_countries:"Countries (comma list)",accepts_states:"States / emirates (comma list; blank = whole country)",accepts_zone:"India zone (south / north / west / east)"}, addLabel:"New register tab", freeText:["tab_name","prefix","group_label","sort_order","accepts_countries","accepts_states","accepts_zone"], boolCols:["is_open","is_emf","is_catchall","owner_per_line"], nullableCols:["prefix","group_label","accepts_countries","accepts_states","accepts_zone"] },
+  { key: "register_tab_tbl", label: "Register Tabs (rules)", columns: ["tab_name","prefix","also_prefixes","group_label","sort_order","is_open","is_emf","is_catchall","owner_per_line","accepts_countries","accepts_states","accepts_zone"], colLabels:{also_prefixes:"Also accepts prefixes (comma list, e.g. FEX)",owner_per_line:"Owner on each line (FSE / Telecaller asked per line, e.g. Tenders)",tab_name:"Tab (as in Excel)",group_label:"Group",sort_order:"Order",is_open:"Open",is_emf:"EMF",is_catchall:"Catch-all (any other country outside India)",accepts_countries:"Countries (comma list)",accepts_states:"States / emirates (comma list; blank = whole country)",accepts_zone:"India zone (south / north / west / east)"}, addLabel:"New register tab", freeText:["tab_name","prefix","also_prefixes","group_label","sort_order","accepts_countries","accepts_states","accepts_zone"], boolCols:["is_open","is_emf","is_catchall","owner_per_line"], nullableCols:["prefix","also_prefixes","group_label","accepts_countries","accepts_states","accepts_zone"] },
+  // 185h: Sales Regions (Super Admin) — who owns a customer goes by its region, not by the register tab its number is on
+  { key: "sales_region_tbl", label: "Sales Regions (rules)", columns: ["region_name","zone_label","countries","states","india_zone","is_catchall","sort_order","is_active"],
+    colLabels:{region_name:"Region",zone_label:"Zone (label)",countries:"Countries (comma list; blank = any)",states:"States / emirates (comma list; blank = whole country)",india_zone:"India zone (south / north / west / east)",is_catchall:"Catch-all (any country outside India no other region takes)",sort_order:"Order",is_active:"In use"},
+    addLabel:"New sales region", freeText:["region_name","zone_label","countries","states","india_zone","sort_order"], boolCols:["is_catchall","is_active"], nullableCols:["zone_label","countries","states","india_zone","sort_order"] },
   { key: "territory_rule_zone_tbl", label: "Territory Rules — Zones", columns: ["employee_name","zone"], addLabel:"New rule", cascade:[{col:"employee_name",from:"employee_tbl",field:"employee_name"},{col:"zone",from:"zone_tbl",field:"value"}], groupBy:["employee_name"], editAllEnabled:true },
   { key: "sale_order_status_tbl", label: "Sale Order Status", columns: ["status","sort_order"], addLabel:"New status", freeText:["status","sort_order"] },
 ];
@@ -2207,8 +2211,8 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
     { label:"Raw material", tabs:[...byKeys(rawMaterialKeys), {key:"test_types",label:"Test Types Master"}, {key:"allowable_stress",label:"Allowable Stress"}] },
     { label:"Rules", tabs:[{key:"item_moc_rules",label:"Datasheet MOC"},{key:"description_master",label:"Description"},{key:"selection_questions",label:"Selection Questions"},{key:"valve_extras",label:"Valve Extras"}] },
     { label:"CRM", tabs:[
-      ...(isSuperAdmin?[{key:"register_people",label:"Register Tabs & People"},...byKeys(["register_tab_tbl"])]:[]),
-      ...byKeys(["state_zone_tbl","country_zone_tbl","city_tbl", ...(REG.people.length ? [] : ["territory_rule_state_tbl","territory_rule_country_tbl","territory_rule_zone_tbl"]),"crm_status_tbl"]),
+      ...(isSuperAdmin?[...byKeys(["register_tab_tbl"]),{key:"region_people",label:"Sales Regions & People"},...byKeys(["sales_region_tbl"])]:[]),   // 185h
+      ...byKeys(["state_zone_tbl","country_zone_tbl","city_tbl", ...((REG.people.length || regRegionsOn()) ? [] : ["territory_rule_state_tbl","territory_rule_country_tbl","territory_rule_zone_tbl"]),"crm_status_tbl"]),
       {key:"crm_helper_masters",label:"Package & Type Masters"} ] },
     { label:"Documents", tabs:[{key:"doc_status_master",label:"Document Status Master"},...byKeys(["doc_category_tbl"])] },
     { label:"Tasks", tabs:[{key:"board_grid",label:"Board Membership"}, ...byKeys(["task_type_tbl","task_label_tbl","task_approver_tbl","task_dept_setting_tbl","handover_reason_tbl"])] },
@@ -23340,8 +23344,7 @@ async function updateQuoteStatusForQuote(referenceNumber, newStatus, changedBy, 
         // 137: with Register Tabs & People in use, every FSE on the quote's tab is told, not just the owner
         let owners = co?.owner_employee_name ? [co.owner_employee_name] : [];
         try{ await regLoad(); if(regGridOn()){ const n = regNorm(referenceNumber).replace(/(REV|R)\d+$/,""); const { data: rl } = await sb.from("register_line_tbl").select("*").eq("quote_norm",n).limit(1).maybeSingle();
-          const tabsQ = rl ? [rl.tab_name] : (co ? regTabsFor(co.billing_country, co.billing_state, false).map(t=>t.tab_name) : []);
-          const f = rl ? regPeopleOfLine(rl,"FSE") : Array.from(new Set(tabsQ.flatMap(t=>regPeople(t,"FSE")))); if(f.length) owners = f; } }catch(e){}   // 149: line owner first
+          const f = rl ? regPeopleOfLine(rl,"FSE") : (co ? regAddrPeople(co.billing_country, co.billing_state, "FSE") : []); if(f.length) owners = f; } }catch(e){}   // 149: line owner first; 185h: by region when on
         const { data: actingEmp } = owners.length ? await sb.from("employee_tbl").select("employee_name").eq("app_user_id",
           (await sb.from("app_users").select("id").eq("username",changedBy).limit(1).maybeSingle()).data?.id || -1
         ).limit(1).maybeSingle() : { data:null };
@@ -23705,7 +23708,7 @@ async function resolveWinCreditContext(referenceNumber){
     // 137: no register line -> the customer's tab
     if(regGridOn() && !(out.tabFses && out.tabFses.length) && out.company){
       const tabsQ = regTabsFor(out.company.billing_country, out.company.billing_state, false).map(t=>t.tab_name);
-      out.tabFses = Array.from(new Set(tabsQ.flatMap(t=>regPeople(t,"FSE")))); out.tabName = tabsQ[0] || "";
+      out.tabFses = regAddrPeople(out.company.billing_country, out.company.billing_state, "FSE"); out.tabName = tabsQ[0] || "";   // 185h
     }
     if(out.tabFses && out.tabFses.length){ out.resolved = out.tabFses[0]; out.resolvedIsFse = out.tabFses.length===1; out.ruleScope = null; }
   }catch(e){ console.error("resolveWinCreditContext failed", e); }
@@ -24619,7 +24622,7 @@ async function mayAmendFreely(user, customerName){
     if((sc||[]).some(r=>r.employee_name===me)) return true;
     const { data: co } = await sb.from("companies").select("owner_employee_name,billing_country,billing_state").eq("company_name",customerName||"").limit(1).maybeSingle();
     if(co && co.owner_employee_name===me) return true;
-    if(co){ await regLoad(); if(regAnyTabsFor(co.billing_country, co.billing_state).some(t=>REG.people.some(p=>p.tab_name===t.tab_name && p.employee_name===me))) return true; }
+    if(co){ await regLoad(); if(regRegionsOn() ? regAddrPeople(co.billing_country, co.billing_state).includes(me) : regAnyTabsFor(co.billing_country, co.billing_state).some(t=>REG.people.some(p=>p.tab_name===t.tab_name && p.employee_name===me))) return true; }   // 185h
   }catch(e){ console.warn("Amend rights not read", e); }
   return false;
 }
@@ -25054,6 +25057,8 @@ function CustomerCompanyForm({ initial, onCancel, onSaved, user, onUseExisting }
             h("option",{value:""},"—"),
             employeeOptionsForOwner.map(name=>h("option",{key:name,value:name},name))
           ),
+          (regRegionsOn() && f.billing_country) ? (()=>{ const r = regRegionFor(f.billing_country, f.billing_state);   // 185h
+            return h("div",{style:{fontSize:10.5,color:colors.muted,marginTop:3}},"Sales region: "+(r?r.region_name:"none")+" \u00b7 covered by "+((r?regRegionPeople(r.id):[]).join(", ")||"nobody yet")); })() :
           (()=>{ const ts = (REG.tabs.length && f.billing_country) ? regAnyTabsFor(f.billing_country, f.billing_state) : [];   // 137
             return ts.length ? h("div",{style:{fontSize:10.5,color:colors.muted,marginTop:3}},"Quote Register tab: "+ts.map(t=>regTabLabel(t.tab_name)).join(" / ")+(regGridOn()?" \u00b7 covered by "+(Array.from(new Set(ts.flatMap(t=>regPeople(t.tab_name))))).join(", ")||"nobody yet":"")) : null; })()
         )
@@ -31582,6 +31587,11 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"15 Oct 2026 (185i)", summary:"Built on 2026-10-15T14:30:00Z. No new structure SQL. The Register Tabs & People grid is gone from Setup \u2192 CRM; who covers customers is set only in Sales Regions & People (owners by region). Register Tabs (rules) stays for numbering. The Quote Register's hint points to Sales Regions & People. Data: apply_sales_regions_from_tabs_2026-10-15.sql (Flometriq) makes the regions and moves owners: India South and North \u2192 Hari Ram; India East and West \u2192 Subrat Kumar; Dubai / Northern Emirates and Abu Dhabi \u2192 Muthu Kumar (K.M.Kayathri Devi second); Oman, Kuwait, Qatar, South East Asia, Europe, Africa, USA, Exports \u2013 OTHERS \u2192 K.M.Kayathri Devi; Saudi Arabia: nobody yet." },
+  { date:"15 Oct 2026 (185h)", summary:"Built on 2026-10-15T14:00:00Z. SQL: structure_sales_regions_2026-10-15.sql (BOTH companies). PREFIXES: Register Tabs has 'Also accepts prefixes'. A number typed with an accepted prefix saves on that tab (FIW takes FW and FW takes FIW; FDEX takes FEX and FEX takes FDEX \u2014 set by the SQL). + New line still gives the tab's own prefix and running number; each prefix keeps its series; a number is used once in the register. SALES REGIONS: new Setup \u2192 CRM \u2192 Sales Regions (rules) and Sales Regions & People (Super Admin). A customer falls in the region of its billing country / state (states, then India zone, then country, then catch-all). 'Make regions from today's tabs' makes a first set (tabs covering the same places become one region; EMF tabs and Tenders left out) with their people. '\u2b07 Check (Excel)': Regions, FSE changes (customers whose FSE differs tab vs region), No region. 'Switch to Sales Regions\u2026' (new customers only, or move existing; owners set by hand never moved). After the switch every owner rule reads the region: account owner, My Worklist, follow-ups, Quote Funnel and overdue filters, who is told about a quote, win credit, quote amend rights; a register line's owners are its customer's region's people whatever its prefix (Tenders keep the owner picked on the line). Switch back any time. Until the switch nothing changes." },
+  { date:"15 Oct 2026 (185g)", summary:"Built on 2026-10-15T13:30:00Z. No SQL. ✓ COMPLETED ASKS: a card's holder who is not its approver gets a choice — ✓ Completed (done, no approval, straight to Completed) or ➜ Send for approval (Under Approval, as before). Approvers and Super Admins complete at once as before. Cards closed by the holder show 'closed by holder' in Completed, the card says 'Completed by … (no approval)', the history says so, and whoever raised it hears '(no approval)'. The open card has ✓ Completed beside Send for approval. UNASSIGNED PILE: cards in the pile have ✓ Close (board approvers, Admins, Super Admins): one click, no reason, no approval, nobody assigned. An enquiry card asks one click — Regret / Ignored / Others — and the enquiry closes (Regretted, with that word) and its Quote Register line is struck out with it. Whoever raised the card gets 'Closed at the review by …'. New list on the Task Assignment Board: Closed without assignment (Today / Week / Month), chip 'closed unassigned', ↺ Reopen puts the card back in the pile (and reopens the enquiry and its register line if they were closed here). Cards the app completes by itself (offer sent, document sent, letter sent) are unchanged." },
+  { date:"15 Oct 2026 (185f)", summary:"Built on 2026-10-15T13:00:00Z. No SQL. ONE ENQUIRY FORM EVERYWHERE. Quote Register: a line with an enquiry has one ✎ Edit (was two). It opens the Log enquiry form filled in as logged, over the register: subject, last date, type, source, folder link, details and items, with the line's customer, date received and RFQ ref at the top (checked as the line's own Edit checks them) and a 'Change the number…' link (Admin code, as before). The green '✓ ENQ-…' on the line opens the enquiry. The Enquiries screen's Edit opens the same form. THE CARD FOLLOWS: its title, folder link and customer change with the enquiry; changed details replace the card's notes, or, when the holder has already written in the notes, go in as a dated note (comment). Holder, stage, due date and checklist never change. If the new last date for submission is before the card's due date the form warns; the due date stays. The card holder gets a bell line naming what changed, and the card history has it. ON THE CARD: clicking 'Enquiry ENQ-…' asks View (the form, locked) or Edit (card holder, the person who logged it, or Admins)." },
+  { date:"15 Oct 2026 (185e)", summary:"Built on 2026-10-14T12:10:00Z. SQL: structure_register_strike_2026-10-15.sql (BOTH companies). SAVE ON EVERY BOARD: a new card has one button, Add task. It shows a green message (\"✓ Task added — on Karupuswamy's board, due 18/10\"), closes the form and leaves you on the board you were on; the card flashes and carries a \"✓ Saved hh:mm\" badge for ten minutes. Before, Create task reopened the card with a second Save. Saving an existing card shows \"✓ Saved — title\" and closes. Closing with unsaved changes (Close, ✕, Esc, clicking outside) asks Save and close / Discard / Keep editing instead of an OK/Cancel box. The quick buttons on cards (✓ Completed, Move, Due, Approve, drag to a list) show the same message and badge. ENQUIRIES: Log enquiry shows the green message (no pop-up to press OK) and the register line or enquiry row gets the badge; Edit enquiry → Save shows \"✓ Saved\"; Cancel with changes asks. QUOTE REGISTER: Save / Add a line shows the message and badge. STRIKE OUT beside Log Enquiry on an open line (Sales Coordinator and Admins): Regret / Ignored / Others, reason required, no approval, never on a line that has an enquiry or a quote. Struck lines are greyed with their badge and never reused; Admins can Reopen with a reason (logged). When an enquiry's regret is approved its line is struck out as Regret by itself (the SQL does the same for enquiries regretted before). Chips: All / Open, no enquiry / Struck out. Tests: e2e_185e.js (23)." },
   { date:"14 Oct 2026 (185d)", summary:"Built on 2026-10-14T11:40:00Z. No SQL. PAGING FIX. The database hands back at most 1,000 rows per call whatever the app asks for, and a paged read with no fixed order can skip or repeat rows between pages. (1) Every paged read now has a fixed order ending in the row id (estimate_lines: contract, Sl No, line); if a table has no id the read carries on as before. (2) Reads that asked for 'up to 5,000 / 20,000' rows in one call — and so silently got 1,000 — now page: the task boards and Tasks Completed report (task_tbl passed 1,000 cards with the Production BOM load, so cards that sorted late were missing from boards), the morning ☀ line, the workload view, the Document Control tasks, Hand Over Work (tasks, documents, requests, customers of the person), the Quote Register next number (all numbers of the year), Procurement date changes and the procurement task reads, the Quotes Report activity and outcomes, the document customer lookup, the Sale Order lists, and the Material Rates option lists and BULK UPLOAD comparison (it saw only 1,000 existing rates, so rates already there could be treated as new). (3) Page lists with a sort that can tie (PO Register, GRN, Vendors, Tag Register, Material Rates, Allowable Stress, rates report) add the id so a row can't sit on two pages. Tests: e2e_185d.js (4; the test stand-in now returns at most 1,000 rows a call, like the server)." },
   { date:"14 Oct 2026 (185c)", summary:"Built on 2026-10-14T11:20:00Z. No SQL. EMPLOYEE BOARD: Tasks Assigned is now the first list (Tasks Assigned, Overdue, Today's, In Progress, Under Approval, Stale, Completed). The list order starts fresh for everyone (saved under a new name); move lists again if you want. COMPLETED is one list with tabs, Today / Week / Month (each includes the shorter) and a quarter tab when it has cards; the tab is remembered. So all the lists fit on one screen; before this the Completed lists sat off the screen to the right. NEW STALE list: open cards with no change for the department's Stale days (Task Department Limits; 7 when not set; 'Waiting customer' cards left out) and cards in Under Approval past the approval-wait days, each with its days; the card also stays in its own list. Whoever RAISED a card gets a bell line when it is completed (\"✓ Gothai completed: … (approved by Deepak)\"), unless they completed or hold it themselves. The approver's daily ☀ line adds \"N stale cards in <department>\". Tests: e2e_185c.js (14)." },
   { date:"14 Oct 2026 (185b)", summary:"Built on 2026-10-14T11:00:00Z (replaces it — 11:00 was not to be deployed). Bala's review: (1) no \"Add to the list\" on Sale Order terms — free text stays on that Sale Order only, the lists change only in Setup › Masters; spell check and \"close to the list entry\" stay. (2) NEW P&F notes (quote_commercial_terms.packing_forwarding_notes, in structure_gst_per_slno_2026-10-14.sql) under Packing and forwarding on a Sale Order; 0% means included in the price. Prints on the O.A / Sale Order PDF and the invoice's packing term: 0% → the notes, or \"Included\" when none; a percentage or lumpsum → the value then \" — notes\" (not when the notes only repeat the number). (3) legacy_SO_terms_GST_fix_2026-10-14.sql now keeps every OA wording exactly (no change to list entries, nothing added to any list, Inco Terms list untouched); P&F from the OA: Nil / Included / Inclusive = 0% with the notes, \"3% of basic order value\" = 3% with the notes. Tests: e2e_185.js (41), e2e_185b.js (16), e2e_185pdf.js (5)." },
@@ -34852,7 +34862,7 @@ function ContinuousFollowupEntry({ user, sessionCompany, prefill, onBackToOverdu
   enqLog && h(LogEnquiryModal,{ user, allocation:null, pkg:null, project:null, regLine:enqLog.line, onCancel:()=>setEnqLog(null),
     onSaved:async(r)=>{ const k = enqLog.key; setEnqLog(null); await qrefLoad(true); const row = rowsRef.current.find(x=>x._key===k);
       const e = row && qrefFind(row.chaseReference); if(e) updateRow(k,{ chaseReference: qrefOption(e) });
-      if(r) alert("Enquiry "+r.enquiryNumber+" logged for Quote# "+r.quoteNo+"."); } }),
+      if(r){ appToast("✓ Enquiry "+r.enquiryNumber+" logged — Quote# "+r.quoteNo); savedMark("enq:"+r.enquiryId); } } }),   // 185e
   // 151: gateway 1 — Log Follow-ups → Quote Register (new number) → Add New Customer, and back
   qrGate && h("div",{style:{position:"fixed",inset:0,zIndex:1300,background:"#f4f2ea",overflow:"auto"}},
     h(QuoteRegisterScreen,{ user, gateway:{ quote_no:qrGate.quote_no, company:qrGate.company, from:"Log Follow-ups" },
@@ -36141,26 +36151,48 @@ async function enqFindCustomer(name, id){
   }catch(e){ console.error("Customer lookup", e); }
   return null;
 }
-function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved, regLine }){
+function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved, regLine, editEnq, readOnly, regSave, onChangeNumber, onWantEdit }){
+  // 185f: the same form edits an enquiry (editEnq), or shows it (readOnly). From the Quote Register the
+  // line's own fields (customer, received, RFQ ref) are edited here too, through regSave (the register's checks).
+  const E = editEnq || null, isEdit = !!E, RO = !!(E && readOnly);
+  const d10e = (x)=> x ? String(x).slice(0,10) : "";
   // 5 Oct (123) — logging an enquiry: customer from the customer list, Quote# given at
   // once, customer's closing date, folder link, RFQ ref. Saving creates the enquiry
   // AND its card in the Estimation Unassigned pile (standard checklist, label Enquiry).
   const fromChase = !!allocation;
   const today = toISODate(new Date());
   // 137 (Build 7): opened from a Quote Register line - Quote#, customer, date received and RFQ ref come from the line, locked.
-  const RL = regLine || null;
-  const [companyName,setCompanyName] = useState(RL ? (RL.customer_name||"") : (allocation?.company_name || ""));
-  const [subject,setSubject] = useState("");
-  const [quoteNo,setQuoteNo] = useState(RL ? (RL.quote_no||"") : "");
-  const [enquiryDate,setEnquiryDate] = useState(RL && RL.edate ? String(RL.edate).slice(0,10) : today);
-  const [closingDate,setClosingDate] = useState("");
-  const [customerRef,setCustomerRef] = useState(RL ? (/^n\/?a$/i.test(String(RL.enquiry_no||"").trim()) ? "" : (RL.enquiry_no||"")) : "");
-  const [folderLink,setFolderLink] = useState("");
+  const [rlAuto,setRlAuto] = useState(null);   // 185f: editing an enquiry opened elsewhere - its register line, looked up
+  const RL = regLine || rlAuto || null;
+  const [companyName,setCompanyName] = useState(E ? (E.company_name||"") : RL ? (RL.customer_name||"") : (allocation?.company_name || ""));
+  const [subject,setSubject] = useState(E ? (E.subject||"") : "");
+  const [quoteNo,setQuoteNo] = useState(E ? (E.linked_reference_number||"") : RL ? (RL.quote_no||"") : "");
+  const [enquiryDate,setEnquiryDate] = useState(E ? (d10e(E.enquiry_date)||today) : RL && RL.edate ? String(RL.edate).slice(0,10) : today);
+  const [closingDate,setClosingDate] = useState(E ? d10e(E.closing_date) : "");
+  const [customerRef,setCustomerRef] = useState(E ? (E.customer_ref||"") : RL ? (/^n\/?a$/i.test(String(RL.enquiry_no||"").trim()) ? "" : (RL.enquiry_no||"")) : "");
+  const [folderLink,setFolderLink] = useState(E ? (E.folder_link||"") : "");
   const [askLeave,setAskLeave] = useState(false);   // 137: unsaved changes on Cancel
-  const [enquiryType,setEnquiryType] = useState("");
-  const [source,setSource] = useState(fromChase ? "From project chase" : "");
-  const [details,setDetails] = useState("");
+  const [enquiryType,setEnquiryType] = useState(E ? (E.enquiry_type||"") : "");
+  const [source,setSource] = useState(E ? (E.source||"") : fromChase ? "From project chase" : "");
+  const [details,setDetails] = useState(E ? (E.details||"") : "");
   const [items,setItems] = useState([{item:"",qty:""}]);
+  // 185f: edit mode - the items as saved, the card (for the due-date warning), and the register line's fields
+  const [itemsOrig,setItemsOrig] = useState([]);
+  const [eCard,setECard] = useState(null);
+  const lineOf = (r)=> ({ customer_name:r.customer_name||"", company_id:r.company_id||null, city:r.city||"", state:r.state||"", country:r.country||"", enquiry_no:r.enquiry_no||"", edate:d10e(r.edate) });
+  const [lineD,setLineD] = useState(regLine ? lineOf(regLine) : null);
+  const [lineO,setLineO] = useState(regLine ? lineOf(regLine) : null);
+  const lineEditable = !!(isEdit && !RO && regSave && lineD);
+  useEffect(()=>{ if(!E) return; let live = true; (async()=>{
+    const { data: it } = await sb.from("enquiry_item_tbl").select("item,qty").eq("enquiry_id",E.id);
+    const rows = (it||[]).map(r=>({ item:r.item||"", qty:r.qty==null?"":String(r.qty) }));
+    if(live){ setItemsOrig(rows); setItems(rows.length ? rows : [{item:"",qty:""}]); }
+    let c = null;
+    if(E.task_id){ const { data } = await sb.from("task_tbl").select("id,title,due_date,status,assignee,notes").eq("id",E.task_id).maybeSingle(); c = data||null; }
+    if(!c){ const { data } = await sb.from("task_tbl").select("id,title,due_date,status,assignee,notes").eq("enquiry_id",E.id).limit(1); c = (data&&data[0])||null; }
+    if(live) setECard(c);
+    if(!regLine){ const { data: rl } = await sb.from("register_line_tbl").select("*").eq("enquiry_id",E.id).limit(1); if(live && rl && rl[0]) setRlAuto(rl[0]); }
+  })(); return ()=>{ live = false; }; },[E && E.id]);
   const [types,setTypes] = useState([]);
   const [sources,setSources] = useState([]);
   const [itemOptions,setItemOptions] = useState([]);
@@ -36180,14 +36212,14 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved, re
   // (spaces, case and dots ignored). If neither, the line's customer is not in the list: Pick Customer / Add New Customer.
   const [rlCust,setRlCust] = useState(RL ? "checking" : "");   // "checking" | "ok" | "missing"
   const [rlPick,setRlPick] = useState(false);
-  useEffect(()=>{ if(!RL) return; let live = true; (async()=>{
+  useEffect(()=>{ if(!RL || isEdit) return; let live = true; (async()=>{   // 185f: not when editing
     const found = await enqFindCustomer(RL.customer_name, RL.company_id);
     if(!live) return;
     if(found){ setCompanyName(found.company_name); setRlCust("ok"); } else setRlCust("missing");
   })(); return ()=>{ live = false; }; },[RL && RL.id]);
   // Duplicate warning: the customer's enquiries still open, by enquiry number and Quote#.
   useEffect(()=>{
-    const c = companyName.trim(); if(!c){ setOpenOnes([]); return; }
+    const c = companyName.trim(); if(!c || isEdit){ setOpenOnes([]); return; }
     let live = true;
     sb.from("enquiry_tbl").select("enquiry_number,linked_reference_number,subject,details,status,assigned_to,enquiry_date").eq("company_name",c).order("created_at",{ascending:false})
       .then(({data})=>{ if(live) setOpenOnes((data||[]).filter(enqIsOpen)); });
@@ -36276,17 +36308,113 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved, re
     finally{ setSaving(false); }
   };
 
+  // ---- 185f: saving an edit -------------------------------------------------------------
+  const nz = (x)=> String(x==null?"":x).replace(/\r/g,"").trim();
+  const itemsKey = (rows)=> JSON.stringify((rows||[]).filter(r=>nz(r.item)).map(r=>[nz(r.item), nz(r.qty)]));
+  const editChanges = ()=>{
+    if(!E) return [];
+    const ch = [];
+    if(nz(subject)!==nz(E.subject)) ch.push("subject");
+    if(nz(closingDate)!==d10e(E.closing_date)) ch.push("last date "+(E.closing_date?fmtDMY(E.closing_date):"\u2014")+" \u2192 "+(closingDate?fmtDMY(closingDate):"\u2014"));
+    if(nz(enquiryType)!==nz(E.enquiry_type)) ch.push("type");
+    if(nz(source)!==nz(E.source)) ch.push("source");
+    if(nz(folderLink)!==nz(E.folder_link)) ch.push("folder link");
+    if(nz(details)!==nz(E.details)) ch.push("details");
+    if(itemsKey(items)!==itemsKey(itemsOrig)) ch.push("items");
+    if(!RL){ if(nz(customerRef)!==nz(E.customer_ref)) ch.push("RFQ ref"); if(nz(enquiryDate)!==d10e(E.enquiry_date)) ch.push("received date"); }
+    if(lineEditable && lineO){
+      if(lineD.customer_name!==lineO.customer_name) ch.push("customer "+lineO.customer_name+" \u2192 "+lineD.customer_name);
+      if(nz(lineD.enquiry_no)!==nz(lineO.enquiry_no)) ch.push("RFQ ref");
+      if(nz(lineD.edate)!==nz(lineO.edate)) ch.push("received date");
+    }
+    return ch;
+  };
+  const pickLineCustomer = async(sel)=>{
+    const nm = (sel&&sel.company_name)||"";
+    if(!nm){ setLineD(d=>({ ...d, customer_name:"", company_id:null, city:"", state:"", country:"" })); return; }
+    const { data: co } = await sb.from("companies").select("*").eq("company_name",nm).limit(1).maybeSingle();
+    setLineD(d=>({ ...d, customer_name:nm, company_id:co?.id||null, city:co?.billing_city||"", state:co?.billing_state||"", country:co?.billing_country||"" }));
+  };
+  const saveEdit = async()=>{
+    if(!E || RO || saving) return;
+    const ch = editChanges();
+    if(!ch.length){ onCancel(); return; }
+    const subj = nz(subject);
+    if(!subj){ setErr("Subject is required — it is the card title."); return; }
+    const recv = lineEditable ? lineD.edate : (RL ? d10e(RL.edate) : enquiryDate);
+    if(closingDate && recv && closingDate < recv){ setErr("The last date for submission is before the date received."); return; }
+    { const fc = enqFolderLinkCheck(folderLink); if(fc.error){ setErr(fc.error); return; }
+      if(fc.warning && nz(folderLink)!==nz(E.folder_link) && !confirm(fc.warning+"\n\nOK = save it anyway\nCancel = go back and change the link")) return; }
+    // the client's last date moved before our own due date on the card: warn only, the card's date stays
+    if(eCard && eCard.status!=="done" && closingDate && closingDate!==d10e(E.closing_date) && eCard.due_date && closingDate < d10e(eCard.due_date)
+      && !confirm("The new last date for submission ("+fmtDMY(closingDate)+") is before the card's due date ("+fmtDMY(eCard.due_date)+(eCard.assignee&&!taskIsPile(eCard)?", "+eCard.assignee:"")+").\n\nThe card's due date is not changed \u2014 the holder is told in the bell.\n\nOK = save\nCancel = go back")) return;
+    setSaving(true); setErr("");
+    try{
+      const by = (await taskMyEmployeeName(user)) || user?.username || "unknown";
+      // 1. the register line (and, through it, the enquiry's customer / RFQ ref / received date)
+      if(lineEditable && JSON.stringify(lineD)!==JSON.stringify(lineO)){
+        if(!lineD.customer_name || !lineD.company_id){ setErr("Pick the customer from the list."); return; }
+        let r = await regSave(lineD, false);
+        if(r && r.bad && r.bad.length){ setErr(r.bad.join(" ")); return; }
+        if(r && r.warn && r.warn.length){
+          if(!confirm(r.warn.join("\n")+"\n\nOK = save anyway\nCancel = go back")) return;
+          r = await regSave(lineD, true);
+          if(r && r.bad && r.bad.length){ setErr(r.bad.join(" ")); return; }
+        }
+        if(r && r.error){ setErr(r.error); return; }
+      }
+      // 2. the enquiry
+      const patch = { subject:subj, closing_date:closingDate||null, folder_link:nz(folderLink)||null, enquiry_type:enquiryType||null, source:source||null, details:nz(details)||null };
+      if(!RL){ patch.customer_ref = nz(customerRef)||null; patch.enquiry_date = enquiryDate||E.enquiry_date; }
+      const { error } = await sb.from("enquiry_tbl").update(patch).eq("id",E.id);
+      if(error){ setErr("Could not save: "+error.message); return; }
+      // 3. the items
+      if(itemsKey(items)!==itemsKey(itemsOrig)){
+        const valid = items.filter(r=>nz(r.item));
+        const { error: dErr } = await sb.from("enquiry_item_tbl").delete().eq("enquiry_id",E.id);
+        if(dErr){ setErr("The enquiry is saved, but its items could not be changed: "+dErr.message); return; }
+        if(valid.length){ const { error: iErr } = await sb.from("enquiry_item_tbl").insert(valid.map(r=>({ enquiry_id:E.id, item:nz(r.item), qty: nz(r.qty)!=="" && !isNaN(Number(r.qty)) ? Number(r.qty) : null })));
+          if(iErr){ setErr("The enquiry is saved, but its items could not be saved: "+iErr.message); return; } }
+      }
+      await logAudit("UPDATE","enquiry_tbl",E.enquiry_number,"Enquiry edited: "+ch.join(", "),by,E,patch);
+      // 4. the card follows
+      await enqCardSync(E, { subject:subj, folder_link:patch.folder_link, details:patch.details, company_name: lineEditable && lineD.customer_name!==lineO.customer_name ? lineD.customer_name : undefined }, ch, by);
+      savedMark("enq:"+E.id); if(RL && RL.id) savedMark("reg:"+RL.id);
+      setUnsavedGuard(false);
+      appToast("\u2713 Saved \u2014 "+(E.enquiry_number||"enquiry")+(quoteNo?" \u00b7 "+quoteNo:""));
+      onSaved({ enquiryNumber:E.enquiry_number, quoteNo, enquiryId:E.id, edited:true, changes:ch });
+    } catch(x){ setErr((x&&x.message)||"Could not save the enquiry."); }
+    finally{ setSaving(false); }
+  };
+  const editDirty = ()=> isEdit && !RO && editChanges().length>0;
   const fld = (label, el, flex)=> h("div",{style:{flex:flex||1,minWidth:0}},h("div",{style:{fontSize:10,color:colors.muted,marginBottom:2}},label),el);
   const inp = (v,set,ph,type)=> h("input",{type:type||"text",value:v,placeholder:ph||"",onChange:e=>set(e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12}});
   return h("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.45)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}},
     h("div",{style:{background:"#fff",borderRadius:8,padding:"20px 24px",width:620,maxWidth:"96vw",maxHeight:"90vh",overflowY:"auto"}},
-      h("div",{style:{fontWeight:700,fontSize:14,marginBottom:2}},"Log enquiry"),
+      h("div",{style:{fontWeight:700,fontSize:14,marginBottom:2}},isEdit ? (RO?"Enquiry ":"Edit enquiry ")+(E.enquiry_number||"")+(quoteNo?" \u00b7 "+quoteNo:"") : "Log enquiry"),
       h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:14}},
-        fromChase ? "Traced from "+(project?.project_name||"—")+" → "+(pkg?.package_name||"—")+" → "+companyName : "Saving makes the enquiry, gives it its Quote#, and puts a card in the "+ENQUIRY_DEPT+" Unassigned pile for the daily review."),
+        RO ? "As logged. "+(onWantEdit?"Press \u270e Edit to change it.":"")
+        : isEdit ? "Same form as Log enquiry. Change what's needed and Save. The card follows: title, folder link, customer, and the details (as a dated note when the card's notes were already written in). Its holder, stage and due date stay."
+        : fromChase ? "Traced from "+(project?.project_name||"—")+" → "+(pkg?.package_name||"—")+" → "+companyName : "Saving makes the enquiry, gives it its Quote#, and puts a card in the "+ENQUIRY_DEPT+" Unassigned pile for the daily review."),
       fromChase ? h("div",{style:{padding:"10px 12px",background:"#f4f2ea",borderRadius:6,marginBottom:12,fontSize:12.5}},
         h("div",null,h("strong",null,"Project: "),project?.project_name||"—"),
         h("div",null,h("strong",null,"Package: "),pkg?.package_name||"—"),
         h("div",null,h("strong",null,"Customer: "),companyName))
+      : (isEdit && RL) ? h("div",{style:{padding:"10px 12px",background:"#f4f2ea",border:"1px dashed "+colors.border,borderRadius:6,marginBottom:12,fontSize:12.5,display:"grid",gridTemplateColumns:"repeat(2,minmax(0,1fr))",gap:"6px 16px"}},   // 185f
+          h("div",null,h("span",{style:{color:colors.muted}},"Quote#: "),h("b",null,RL.quote_no||quoteNo),
+            (!RO && onChangeNumber) ? h("button",{type:"button","data-t":"enq-chgno",onClick:()=>{ if(editDirty() && !confirm("Your changes on this form are not saved.\n\nOK = leave them and change the number\nCancel = stay")) return; onChangeNumber(RL); },style:{marginLeft:8,border:"none",background:"none",padding:0,color:"#1f5fa8",textDecoration:"underline",cursor:"pointer",fontSize:11.5}},"Change the number\u2026") : null),
+          lineEditable
+            ? fld("Customer", h(CustomerSelect,{value:lineD.customer_name,user,compact:true,onSelect:pickLineCustomer}))
+            : h("div",null,h("span",{style:{color:colors.muted}},"Customer: "),h("b",null,companyName||RL.customer_name||"\u2014")),
+          lineEditable
+            ? fld("Received", h("input",{type:"date","data-t":"enq-edate",value:lineD.edate||"",onChange:ev=>setLineD(d=>({...d,edate:ev.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12}}))
+            : h("div",null,h("span",{style:{color:colors.muted}},"Received: "),RL.edate?fmtDMY(RL.edate):"\u2014"),
+          lineEditable
+            ? fld("Customer RFQ / ref", h("input",{type:"text","data-t":"enq-rfq",value:lineD.enquiry_no||"",onChange:ev=>setLineD(d=>({...d,enquiry_no:ev.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12}}))
+            : h("div",null,h("span",{style:{color:colors.muted}},"Customer RFQ / ref: "),RL.enquiry_no||"\u2014"),
+          (!RO && !lineEditable) ? h("div",{style:{gridColumn:"1 / -1",fontSize:11,color:colors.muted}},"From the Quote Register line \u2014 change these from the register's \u270e Edit.") : null)
+      : (isEdit && !RL) ? h("div",{style:{padding:"8px 12px",background:"#f4f2ea",borderRadius:6,marginBottom:12,fontSize:12.5}},
+          h("span",{style:{color:colors.muted}},"Customer: "),h("b",null,companyName||"\u2014"), quoteNo ? h("span",null,h("span",{style:{color:colors.muted,marginLeft:14}},"Quote#: "),h("b",null,quoteNo)) : null)
       : RL ? h("div",{style:{padding:"10px 12px",background:"#f4f2ea",border:"1px dashed "+colors.border,borderRadius:6,marginBottom:12,fontSize:12.5,display:"grid",gridTemplateColumns:"repeat(2,minmax(0,1fr))",gap:"4px 16px"}},   // 137
           h("div",null,h("span",{style:{color:colors.muted}},"Quote#: "),h("b",null,RL.quote_no)),
           h("div",null,h("span",{style:{color:colors.muted}},"Customer: "),h("b",null,companyName||RL.customer_name||"\u2014"),
@@ -36312,10 +36440,11 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved, re
       openOnes.length ? h("div",{style:{background:"#fff4d6",color:"#854f0b",borderRadius:6,padding:"8px 10px",fontSize:11.5,marginBottom:10}},
         h("b",null,"⚠ "+companyName+" already has "+openOnes.length+" open enquir"+(openOnes.length===1?"y":"ies")+" — same one?"),
         openOnes.slice(0,6).map(o=>h("div",{key:o.enquiry_number,style:{marginTop:2}},o.enquiry_number+" · "+(o.linked_reference_number||"no Quote#")+" — "+(o.subject||o.details||"")+" ("+(o.status||"")+(o.assigned_to&&o.assigned_to!=="Unassigned"?" · "+o.assigned_to:"")+")"))) : null,
-      h("div",{style:{marginBottom:10}}, fld("Subject (becomes the card title)", inp(subject,setSubject,"e.g. 200NB T-strainers, Luberef"))),
+      h("fieldset",{disabled:RO,"data-t":RO?"enq-ro":"enq-fields",style:{border:"none",margin:0,padding:0,minWidth:0}},   // 185f: read-only view = the same form, locked
+      h("div",{style:{marginBottom:10}}, fld(isEdit?"Subject (the card title)":"Subject (becomes the card title)", inp(subject,setSubject,"e.g. 200NB T-strainers, Luberef"))),
       h("div",{style:{display:"flex",gap:10,marginBottom:10,flexWrap:"wrap"}},
-        RL ? null : fld("Quote# (from the Quote Register)", inp(quoteNo,setQuoteNo,"e.g. FEX260601")),
-        RL && RL.edate ? null : fld("Received on", inp(enquiryDate,setEnquiryDate,"","date")),   // 151: a line forced in from Log Follow-ups has no date yet
+        (RL || isEdit) ? null : fld("Quote# (from the Quote Register)", inp(quoteNo,setQuoteNo,"e.g. FEX260601")),
+        RL && (RL.edate || isEdit) ? null : fld("Received on", inp(enquiryDate,setEnquiryDate,"","date")),   // 151: a line forced in from Log Follow-ups has no date yet
         fld("Last date for submission", inp(closingDate,setClosingDate,"","date"))),
       h("div",{style:{display:"flex",gap:10,marginBottom:10,flexWrap:"wrap"}},
         fld("Type", h("select",{value:enquiryType,onChange:e=>setEnquiryType(e.target.value),style:{...inputStyle,padding:"7px 9px",fontSize:12}},h("option",{value:""},"—"),types.map(t=>h("option",{key:t,value:t},t)))),
@@ -36324,19 +36453,25 @@ function LogEnquiryModal({ user, allocation, pkg, project, onCancel, onSaved, re
       h("div",{style:{marginBottom:10}}, fld("Enquiry folder link * (OneDrive / SharePoint / Google Drive)",
         h("div",{style:{display:"flex",gap:6}}, h("div",{style:{flex:1,minWidth:0}},inp(folderLink,setFolderLink,"Paste the folder link")),
           h("button",{type:"button",onClick:()=>{ const v=folderLink.trim(); if(!/^https?:\/\//i.test(v)){ alert("Paste the https:// link first."); return; } window.open(v,"_blank","noopener"); },style:{...btnSmall,whiteSpace:"nowrap"}},"Test link")))),
-      h("div",{style:{marginBottom:12}}, fld("Details", h(NoteBox,{value:details,onChange:setDetails,height:150,placeholder:"Anything the estimator should know \u2014 paste the customer's email here",title:"Details \u2014 new enquiry"}))),   // 135 Build 3
+      h("div",{style:{marginBottom:12}}, fld("Details", h(NoteBox,{value:details,onChange:setDetails,disabled:RO,height:150,placeholder:"Anything the estimator should know \u2014 paste the customer's email here",title:"Details \u2014 "+(isEdit?(E.enquiry_number||"enquiry"):"new enquiry")}))),   // 135 Build 3
       h("div",{style:{borderTop:"1px solid "+colors.border,paddingTop:10,marginBottom:12}},
         h("div",{style:{fontSize:11.5,fontWeight:600,marginBottom:6}},"Items (optional)"),
         items.map((row,i)=>h("div",{key:i,style:{display:"flex",gap:6,marginBottom:6}},
           h(LimitToListCombo,{value:row.item,onChange:v=>setItemRow(i,"item",v),options:itemOptions,limitToList:false,placeholder:"Item",style:{flex:2,fontSize:12}}),
           h("input",{value:row.qty,onChange:e=>setItemRow(i,"qty",e.target.value),placeholder:"Qty",style:{...inputStyle,flex:1,padding:"7px 9px",fontSize:12}}),
           items.length>1 && h("button",{onClick:()=>removeItemRow(i),style:{...btnSmall,padding:"6px 10px"}},"✕"))),
-        h("button",{onClick:addItemRow,style:{...btnSmall,fontSize:11.5}},"+ Add item")),
+        RO ? null : h("button",{onClick:addItemRow,style:{...btnSmall,fontSize:11.5}},"+ Add item"))),
       err && h("div",{style:{fontSize:11.5,color:colors.danger,marginBottom:10}},err),
-      h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8}},
+      RO ? h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8}},   // 185f
+          h("button",{onClick:onCancel,style:btnSecondary},"Close"),
+          onWantEdit ? h("button",{"data-t":"enq-ro-edit",onClick:onWantEdit,style:btnPrimary},"\u270e Edit") : null)
+      : isEdit ? h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8}},
+          h("button",{"data-t":"enq-cancel",onClick:()=>{ if(editDirty()) setAskLeave(true); else onCancel(); },style:btnSecondary},"Cancel"),
+          h("button",{"data-t":"enq-save",onClick:saveEdit,disabled:saving,style:{...btnPrimary,opacity:saving?0.6:1}},saving?"Saving\u2026":"Save"))
+      : h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8}},
         h("button",{onClick:()=>{ const dirty = !!(subject.trim()||details.trim()||folderLink.trim()||closingDate||enquiryType||(source && !fromChase)||items.some(r=>r.item.trim())||(!RL && (quoteNo.trim()||customerRef.trim()||(!fromChase && companyName.trim())))); if(dirty) setAskLeave(true); else onCancel(); },style:btnSecondary},"Cancel"),
         h("button",{onClick:save,disabled:saving,style:{...btnPrimary,opacity:saving?0.6:1}},saving?"Saving…":"Save enquiry")),
-      askLeave ? h(UnsavedAsk,{ what:"This enquiry", onStay:()=>setAskLeave(false), onDiscard:()=>{ setAskLeave(false); onCancel(); }, onSave:()=>{ setAskLeave(false); save(); } }) : null));   // 137
+      askLeave ? h(UnsavedAsk,{ what:"This enquiry", onStay:()=>setAskLeave(false), onDiscard:()=>{ setAskLeave(false); onCancel(); }, onSave:()=>{ setAskLeave(false); if(isEdit) saveEdit(); else save(); } }) : null));   // 137
 }
 // doesn't already carry this package's name as a Customer Type — offer to
 // tag it right there. The type vocabulary grows from real assignments.
@@ -37475,6 +37610,8 @@ function EnquiryDetailScreen({ user, me, enquiryId, pos, total, onBack, onPrev, 
   const [quote,setQuote] = useState(null);       // {stage, customer}
   const [hist,setHist] = useState([]);
   const [edit,setEdit] = useState(null);
+  const [enqAsk,setEnqAsk] = useState(false);   // 185e: Cancel with changes asks
+  const [edForm,setEdForm] = useState(false);   // 185f: Edit opens the enquiry form
   const [types,setTypes] = useState([]);
   const [sources,setSources] = useState([]);
   const [sent,setSent] = useState({ date:today, note:"" });
@@ -37532,7 +37669,7 @@ function EnquiryDetailScreen({ user, me, enquiryId, pos, total, onBack, onPrev, 
       await sb.from("task_tbl").update(cp).eq("id",card.id);
       await taskLog(card.id, (me&&me.name)||user?.username||"", "Enquiry edited ("+changed.join(", ")+")");
     }
-    setBusy(false); setEdit(null); await load(); onChanged && onChanged();
+    setBusy(false); setEdit(null); savedMark("enq:"+e.id); appToast("✓ Saved — "+(e.enquiry_number||"enquiry")); await load(); onChanged && onChanged();   // 185e
   };
 
   const markSent = async()=>{
@@ -37557,13 +37694,14 @@ function EnquiryDetailScreen({ user, me, enquiryId, pos, total, onBack, onPrev, 
     h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},
       h("button",{onClick:onBack,style:{...btnPrimary,padding:"8px 14px",background:"#0f7a5c"}},"← Back to Enquiries"),
       h("span",{style:{fontSize:12,color:colors.muted}},pos+" of "+total),
+      e ? savedBadge("enq:"+e.id) : null,   // 185e
       h("button",{onClick:onPrev,disabled:!onPrev,style:{...btnSmall,opacity:onPrev?1:0.4}},"‹ Previous"),
       h("button",{onClick:onNext,disabled:!onNext,style:{...btnSmall,opacity:onNext?1:0.4}},"Next ›")),
     h("h2",{style:{margin:"14px 0 2px"}},e.enquiry_number+" — "+(e.subject||e.details||"")),
     h("div",{style:{fontSize:12.5,color:colors.muted,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},e.company_name+" · received "+fmtDMY(e.enquiry_date),statusPill),
     h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(360px,1fr))",gap:14,marginTop:14,alignItems:"start"}},
       h("div",null,
-        panel("Enquiry", canEdit && !edit ? h("button",{onClick:()=>setEdit({...e, closing_date:d10(e.closing_date)}),style:{...btnSmall,marginLeft:"auto"}},"Edit") : null,
+        panel("Enquiry", canEdit && !edit ? h("button",{"data-t":"enq-detail-edit",onClick:()=>setEdForm(true),style:{...btnSmall,marginLeft:"auto"}},"\u270e Edit") : null,   // 185f: the enquiry form
           edit
             ? h("div",{style:{display:"grid",gridTemplateColumns:"140px minmax(0,1fr)",gap:"8px 12px",fontSize:12.5,alignItems:"center"}},
                 ...kv("Subject",inp("subject")), ...kv("Customer RFQ / ref",inp("customer_ref")), ...kv("Last date for submission",inp("closing_date","date")),
@@ -37572,7 +37710,7 @@ function EnquiryDetailScreen({ user, me, enquiryId, pos, total, onBack, onPrev, 
                 ...kv("Source",h("select",{value:edit.source||"",onChange:ev=>setEdit({...edit,source:ev.target.value}),style:{...inputStyle,padding:"6px 8px",fontSize:12}},h("option",{value:""},"—"),sources.map(t=>h("option",{key:t,value:t},t)))),
                 h("div",{key:"dt",style:{gridColumn:"1 / -1"}},h("div",{style:{color:colors.muted,marginBottom:4}},"Details"),
                   h(NoteBox,{value:edit.details||"",onChange:v=>setEdit(x=>({...x,details:v})),height:240,title:"Details \u2014 "+e.enquiry_number})),   // 135 Build 3
-                h("div",{key:"b1"}), h("div",{key:"b2",style:{display:"flex",gap:8}},h("button",{onClick:()=>setEdit(null),style:btnSecondary},"Cancel"),h("button",{onClick:saveEdit,disabled:busy,style:btnPrimary},"Save")))
+                h("div",{key:"b1"}), h("div",{key:"b2",style:{display:"flex",gap:8}},h("button",{onClick:()=>{ const o = {...e, closing_date:d10(e.closing_date)}; const ch = Object.keys(edit).some(k=>String(edit[k]??"")!==String(o[k]??"")); if(ch) setEnqAsk(true); else setEdit(null); },style:btnSecondary},"Cancel"),h("button",{onClick:saveEdit,disabled:busy,style:btnPrimary},"Save")))
             : h("div",{style:{display:"grid",gridTemplateColumns:"140px minmax(0,1fr)",gap:"6px 12px",fontSize:12.5}},
                 ...kv("Customer",e.company_name), ...kv("Customer RFQ / ref",e.customer_ref||"—"), ...kv("Subject",e.subject||"—"),
                 ...kv("Received",fmtDMY(e.enquiry_date)+(e.created_by?" · logged by "+e.created_by:"")),
@@ -37617,7 +37755,10 @@ function EnquiryDetailScreen({ user, me, enquiryId, pos, total, onBack, onPrev, 
               h("div",{style:{display:"grid",gridTemplateColumns:"150px minmax(0,1fr)",gap:8,alignItems:"start"}},
                 h("input",{type:"date",value:sent.date,max:today,onChange:ev=>setSent({...sent,date:ev.target.value}),style:{...inputStyle,padding:"6px 8px",fontSize:12}}),
                 h("textarea",{rows:2,value:sent.note,onChange:ev=>setSent({...sent,note:ev.target.value}),placeholder:"Note — what was sent, to whom (saved as a follow-up on the quote)",style:{...inputStyle,padding:"6px 8px",fontSize:12}})),
-              h("button",{onClick:markSent,disabled:busy,style:{...btnPrimary,marginTop:8,background:"#0f7a5c",opacity:busy?0.6:1}},busy?"Saving…":"Mark offer sent"))))));
+              h("button",{onClick:markSent,disabled:busy,style:{...btnPrimary,marginTop:8,background:"#0f7a5c",opacity:busy?0.6:1}},busy?"Saving…":"Mark offer sent"))))),
+    enqAsk ? h(UnsavedAsk,{ what:"This enquiry", onStay:()=>setEnqAsk(false), onDiscard:()=>{ setEnqAsk(false); setEdit(null); }, onSave:()=>{ setEnqAsk(false); saveEdit(); } }) : null,   // 185e
+    edForm ? h(LogEnquiryModal,{ key:"enqdet-"+e.id, user, allocation:null, pkg:null, project:null, editEnq:e, onCancel:()=>setEdForm(false),   // 185f
+      onSaved:async()=>{ setEdForm(false); await load(); onChanged && onChanged(); } }) : null);
 }
 
 // ==== 137 (6 Oct, Build 7) — QUOTE REGISTER and REGISTER TABS & PEOPLE =====================
@@ -37626,7 +37767,7 @@ function EnquiryDetailScreen({ user, me, enquiryId, pos, total, onBack, onPrev, 
 // emirate / India zone) and the Super Admin ticks who covers it (register_tab_person_tbl, many to
 // many: FSE and telecallers). Once anybody is ticked, ownership follows the tabs instead of the
 // old State -> Country -> Zone Territory Rules; until then nothing changes.
-const REG = { loaded:0, tabs:[], people:[], zoneByState:{}, ok:false };
+const REG = { loaded:0, tabs:[], people:[], zoneByState:{}, ok:false, regions:[], rpeople:[], ownersBy:"tabs", regionsOk:false };   // 185h: regions
 const regKey = (s)=> String(s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
 const regNorm = (s)=> String(s||"").toUpperCase().replace(/[\s\-_.\/]/g,"");
 // 184: Hydronett numbers carry an H after the F (FXDS -> FHXDS). A tab takes its prefix with or without the H,
@@ -37639,6 +37780,9 @@ const hHas = (hay, needle)=> hFold(hay).toLowerCase().includes(hFold(needle).toL
 const hAltTerm = (t)=>{ t = String(t||""); const f = hFold(t); if(f!==t) return f; const m = t.match(/\b([Ff])([A-GI-Za-gi-z][A-Za-z]{0,4}[\s\-_.\/]*\d)/); return m ? t.replace(m[0], m[1]+(m[1]==="F"?"H":"h")+m[2]) : null; };
 const regHPair = (px)=>{ px = regNorm(px); if(!/^F[A-Z]/.test(px)) return [px, null]; return px[1]==="H" && px.length>2 ? [px, "F"+px.slice(2)] : [px, "FH"+px.slice(1)]; };
 const regList = (s)=> String(s||"").split(",").map(regKey).filter(Boolean);
+// 185h: every prefix a tab takes: its own (with and without the Hydronett H) and its "Also accepts" prefixes (each with its H form)
+const regTabAlso = (t)=> String((t&&t.also_prefixes)||"").split(/[,;\s]+/).map(regNorm).filter(Boolean);
+const regTabPrefixes = (t)=> !t || !t.prefix ? [] : Array.from(new Set([...regHPair(t.prefix), ...regTabAlso(t).flatMap(x=>regHPair(x))].filter(Boolean)));
 const regIsIndia = (c)=> regKey(c)==="india";
 async function regLoad(force){
   if(REG.loaded && !force && Date.now()-REG.loaded < 60000) return REG;
@@ -37652,6 +37796,15 @@ async function regLoad(force){
     REG.tabs = t.error ? [] : (t.data||[]);
     REG.people = p.error ? [] : (p.data||[]);
     REG.zoneByState = {}; ((z&&z.data)||[]).forEach(r=>{ if(r.state) REG.zoneByState[regKey(r.state)] = String(r.zone||"").toLowerCase(); });
+    // 185h: Sales Regions and their people; which one decides owners
+    const [sr,sp,ss] = await Promise.all([
+      sb.from("sales_region_tbl").select("*").order("sort_order"),
+      sb.from("sales_region_person_tbl").select("*").order("sort_order"),
+      sb.from("crm_owner_setting_tbl").select("*").eq("id",1).maybeSingle() ]);
+    REG.regionsOk = !sr.error;
+    REG.regions = sr.error ? [] : (sr.data||[]);
+    REG.rpeople = sp.error ? [] : (sp.data||[]);
+    REG.ownersBy = (!ss.error && ss.data && ss.data.owners_by==="regions") ? "regions" : "tabs";
   }catch(e){ console.error("Register tabs not read", e); }
   REG.loaded = Date.now();
   return REG;
@@ -37674,13 +37827,42 @@ function regTabsFor(country, state, emf){
 const regAnyTabsFor = (country, state)=> [...regTabsFor(country,state,false), ...regTabsFor(country,state,true)];
 const regPeople = (tabName, role)=> REG.people.filter(p=>p.tab_name===tabName && (!role || p.role===role))
   .sort((a,b)=>((a.sort_order??100)-(b.sort_order??100)) || ((a.id||0)-(b.id||0))).map(p=>p.employee_name);
-const regGridOn = ()=> REG.people.length > 0;
+// 185h: owners by Sales Region (once the Super Admin switches over) instead of by register tab.
+const regRegionsOn = ()=> REG.ownersBy==="regions" && REG.regions.length>0;
+const regGridOn = ()=> REG.people.length > 0 || regRegionsOn();
+// how well a region takes an address: states 4, India zone 3, country 2, catch-all 1, no 0
+function regRegionScore(r, country, state){
+  if(!r || r.is_active===false) return 0;
+  const ck = regKey(country); if(!ck) return 0;
+  if(r.is_catchall) return regIsIndia(country) ? 0 : 1;
+  const cs = regList(r.countries); if(cs.length && !cs.includes(ck)) return 0;
+  const ss = regList(r.states); if(ss.length) return ss.includes(regKey(state)) ? 4 : 0;
+  if(String(r.india_zone||"").trim()){ const z = REG.zoneByState[regKey(state)] || ""; return z.includes(String(r.india_zone).toLowerCase().trim()) ? 3 : 0; }
+  return cs.length ? 2 : 0;
+}
+function regRegionFor(country, state, regions){
+  let best = null, bs = 0;
+  (regions||REG.regions).forEach(r=>{ const sc = regRegionScore(r, country, state); if(sc>bs || (sc===bs && sc>0 && best && (r.sort_order??999)<(best.sort_order??999))){ best = r; bs = sc; } });
+  return best;
+}
+const regRegionPeople = (rid, role, rows)=> (rows||REG.rpeople).filter(p=>String(p.region_id)===String(rid) && (!role || p.role===role))
+  .sort((a,b)=>((a.sort_order??100)-(b.sort_order??100)) || ((a.id||0)-(b.id||0))).map(p=>p.employee_name);
+// the FSEs / telecallers of an address: its region's people (regions on), or everyone on the tabs it falls in
+function regAddrPeople(country, state, role){
+  if(regRegionsOn()){ const r = regRegionFor(country, state); return r ? regRegionPeople(r.id, role) : []; }
+  return Array.from(new Set(regTabsFor(country, state, false).flatMap(t=>regPeople(t.tab_name, role))));
+}
 function regOwnerFor(country, state){
+  if(regRegionsOn()) return regAddrPeople(country, state, "FSE")[0] || null;   // 185h
   for(const t of regTabsFor(country,state,false)){ const f = regPeople(t.tab_name,"FSE"); if(f.length) return f[0]; }
   return null;
 }
-const regMyTabs = (name)=> Array.from(new Set(REG.people.filter(p=>p.employee_name===name).map(p=>p.tab_name)));
-const regCompanyInTabs = (co, tabNames)=> regAnyTabsFor(co.billing_country, co.billing_state).some(t=>tabNames.includes(t.tab_name));
+// a person's "tabs": tab names, or region keys "R:<id>" once owners go by region
+const regMyTabs = (name)=> regRegionsOn() ? Array.from(new Set(REG.rpeople.filter(p=>p.employee_name===name).map(p=>"R:"+p.region_id)))
+  : Array.from(new Set(REG.people.filter(p=>p.employee_name===name).map(p=>p.tab_name)));
+const regCompanyInTabs = (co, tabNames)=>{
+  if((tabNames||[]).some(k=>String(k).startsWith("R:"))){ const r = regRegionFor(co.billing_country, co.billing_state); return !!r && tabNames.includes("R:"+r.id); }
+  return regAnyTabsFor(co.billing_country, co.billing_state).some(t=>tabNames.includes(t.tab_name)); };
 const regTabLabel = (n)=> String(n||"").trim().replace(/,\s*$/,"");
 function regTabDescribe(t){
   if(!t) return "";
@@ -37698,7 +37880,9 @@ async function regQuoteTabMap(){
   try{
     const rows = await fetchPaged(()=>sb.from("register_line_tbl").select("*").order("id"));
     REG.lineOwn = new Map();   // 149: quote -> the owner picked on its line (tabs that ask per line)
-    rows.forEach(r=>{ m.set(r.quote_norm, r.tab_name); if(r.line_fse || r.line_tc) REG.lineOwn.set(r.quote_norm, { fse:r.line_fse||"", tc:r.line_tc||"" }); });
+    REG.lineAddr = new Map();  // 185h: quote -> the line's country / state (owners by region)
+    rows.forEach(r=>{ m.set(r.quote_norm, r.tab_name); if(r.line_fse || r.line_tc) REG.lineOwn.set(r.quote_norm, { fse:r.line_fse||"", tc:r.line_tc||"" });
+      if(r.country) REG.lineAddr.set(r.quote_norm, { country:r.country, state:r.state||"" }); });
   }catch(e){}
   return m;
 }
@@ -37712,6 +37896,7 @@ function regPeopleOfLine(rl, role){
     if((!role || role==="TC") && rl.line_tc) out.push(rl.line_tc);
     return out;
   }
+  if(regRegionsOn() && rl.country) return regAddrPeople(rl.country, rl.state, role);   // 185h
   return regPeople(rl.tab_name, role);
 }
 // 149: does this person cover the quote (its line owner, or its tab when the line has none)?
@@ -37719,6 +37904,7 @@ function regCoversQuote(ref, tabName, name){
   if(!name) return false;
   const n = regNorm(ref); const own = REG.lineOwn && (REG.lineOwn.get(n) || REG.lineOwn.get(n.replace(/(REV|R)\d+$/,"")));
   if(own) return own.fse===name || own.tc===name;
+  if(regRegionsOn()){ const ad = REG.lineAddr && (REG.lineAddr.get(n) || REG.lineAddr.get(n.replace(/(REV|R)\d+$/,""))); if(ad) return regAddrPeople(ad.country, ad.state).includes(name); }   // 185h
   return !!tabName && regPeople(tabName).includes(name);
 }
 function regTabOfQuote(map, ref){
@@ -37746,6 +37932,28 @@ async function regCheckQuoteNo(ref){
 }
 
 // ---- Leaving with unsaved changes: Save / Discard / Stay ----
+// 185e: one green message for every save on the boards and forms, plus a "✓ Saved" badge on what was saved
+const REG_STRIKE = {
+  regret:  { label:"Regret",  icon:"\u2716", bg:"#eeeeea", fg:"#5f625a", help:"we won't quote (scope, AVL, capacity, price, time)", eg:"e.g. ADNOC AVL — not approved" },
+  ignored: { label:"Ignored", icon:"\u2298", bg:"#f3eefa", fg:"#5b3f8c", help:"not a real enquiry (duplicate, info only, spam, entered by mistake)", eg:"e.g. duplicate of FEX260518" },
+  other:   { label:"Others",  icon:"\u2022", bg:"#eef3f6", fg:"#3d5a73", help:"any other reason — say what", eg:"e.g. client merged it into their RFQ 4410" } };
+function appToast(msg){
+  try{
+    let box = document.getElementById("app_toast_box");
+    if(!box){ box = document.createElement("div"); box.id = "app_toast_box";
+      box.style.cssText = "position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:5000;display:flex;flex-direction:column;gap:6px;align-items:center;pointer-events:none";
+      document.body.appendChild(box); }
+    const el = document.createElement("div"); el.setAttribute("data-toast","1"); el.textContent = msg;
+    el.style.cssText = "background:#0f7a5c;color:#fff;border-radius:8px;padding:9px 16px;font:700 13px Arial,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.2);max-width:80vw";
+    box.appendChild(el); setTimeout(()=>{ try{ el.remove(); }catch(e){} }, 4000);
+  }catch(e){}
+}
+const SAVED_MARKS = new Map();   // key ("task:12", "reg:55", "enq:9") -> time saved
+function savedMark(key){ SAVED_MARKS.set(key, Date.now()); setTimeout(()=>{ const el = document.querySelector('[data-savedkey="'+key+'"]');
+  if(el){ try{ el.scrollIntoView({ behavior:"smooth", block:"nearest", inline:"center" }); }catch(e){} const o = el.style.outline; el.style.outline = "3px solid #0f7a5c"; setTimeout(()=>{ el.style.outline = o; }, 1800); } }, 350); }
+function savedBadge(key){ const t = SAVED_MARKS.get(key); if(!t || Date.now()-t > 10*60*1000) return null;
+  const d = new Date(t); return h("span",{"data-savedbadge":key,title:"Saved at "+d.toLocaleTimeString(),style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#e6f4ea",color:"#0f7a5c",border:"1px solid #0f7a5c",marginBottom:3,marginRight:4}},
+    "✓ Saved "+String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")); }
 function UnsavedAsk({ onSave, onDiscard, onStay, what }){
   return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:3200,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
     h("div",{style:{background:"#fff",borderRadius:10,padding:"16px 18px",width:420,maxWidth:"100%"}},
@@ -37775,6 +37983,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
   const [q,setQ] = useState(""); const [qAll,setQAll] = useState(false);
   // 137c: sort (Excel order, or by date either way) and full screen
   const [sortBy,setSortBy] = useState(()=>{ try{ return localStorage.getItem("qr_sort")||"excel"; }catch(e){ return "excel"; } });
+  const [regView,setRegView] = useState("all");   // 185e: all | open (no enquiry, not struck) | struck
   const [fs,setFs] = useState(false);
   const [me,setMe] = useState(null);            // {name, canEdit, sales}
   const [edit,setEdit] = useState(null);        // {id|null, d:{...}, orig:{...}, co:company row|null}
@@ -37790,7 +37999,10 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
   const [ownEdit,setOwnEdit] = useState(null);  // {id, fse, tc, line}
   const [edPick,setEdPick] = useState(null);    // 155: the line whose Edit asks "details or number"
   const [delL,setDelL] = useState(null);        // 155: {line, why, busy}
+  const [strikeL,setStrikeL] = useState(null);  // 185e: {line, kind, why, busy}
   const [rn,setRn] = useState(null);            // 155: {line, tab, no, why, preview, err, busy}
+  const [enqRows,setEnqRows] = useState({});    // 185f: enquiry rows of the lines shown (id -> row)
+  const [enqEd,setEnqEd] = useState(null);      // 185f: {line, enq, ro} - the enquiry form over the register
   const [rnGate,setRnGate] = useState(false);
   const tab = tabs.find(t=>t.tab_name===cur) || null;
   const perLine = !!(tab && tab.owner_per_line);
@@ -37807,7 +38019,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
     const sales = isAdmin || isSc || /sales/i.test(emp?.department||"") || (emp ? empBoards(emp).some(b=>/sales/i.test(b)) : false);
     const { data: sh } = await sb.from("post_holder_tbl").select("employee_name").eq("post_key","sales_head");
     const isSh = !!name && (sh||[]).some(r=>r.employee_name===name);
-    setMe({ name, canEdit: isAdmin || isSc, sales, canOwner: isSuper || isSh });   // 149: Super Admin / Sales Head change a fixed owner
+    setMe({ name, canEdit: isAdmin || isSc, sales, canOwner: isSuper || isSh, admin: !!isAdmin });   // 149: Super Admin / Sales Head change a fixed owner; 185e: admin reopens struck lines
     try{
       const { data: emps } = await sb.from("employee_tbl").select("employee_name,crm_role,status").order("employee_name");
       const live = (emps||[]).filter(e=>e.employee_name && !/inactive|left|relieved|resigned/i.test(e.status||""));
@@ -37827,6 +38039,8 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
     const qs = q.trim();
     let base = ()=>{ let b = sb.from("register_line_tbl").select("*",{count:"exact"});
       if(!(qs && qAll)) b = b.eq("tab_name",cur);
+      if(regView==="open") b = b.is("struck_kind",null).is("enquiry_id",null);   // 185e
+      else if(regView==="struck") b = b.not("struck_kind","is",null);
       if(qs){ const v = "%"+qs.replace(/[%,()]/g," ")+"%"; const alt = hAltTerm(qs); b = b.or("quote_no.ilike."+v+",customer_name.ilike."+v+",enquiry_no.ilike."+v+",city.ilike."+v+(alt?",quote_no.ilike.%"+alt.replace(/[%,()]/g," ")+"%":"")); }
       if(sortBy==="ed_asc"||sortBy==="ed_desc") return b.order("edate",{ascending:sortBy==="ed_asc",nullsFirst:false}).order("row_order",{ascending:sortBy==="ed_asc"}).order("id",{ascending:sortBy==="ed_asc"});
       if(sortBy==="od_asc"||sortBy==="od_desc") return b.order("offer_date",{ascending:sortBy==="od_asc",nullsFirst:false}).order("edate",{ascending:sortBy==="od_asc",nullsFirst:false}).order("id",{ascending:sortBy==="od_asc"});
@@ -37840,14 +38054,16 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
     let rs = data||[];
     if(qs){ rs = rs.filter(r=>hHas([r.quote_no,r.customer_name,r.enquiry_no,r.city].join(" "), qs)); }   // keeps the test stand-in honest too
     setRows(rs);
-  },[cur,page,q,qAll,sortBy]);
+    { const ids = Array.from(new Set(rs.map(r=>r.enquiry_id).filter(Boolean)));   // 185f: the enquiry numbers on the rows
+      if(ids.length){ const { data: es } = await sb.from("enquiry_tbl").select("*").in("id",ids); const m = {}; (es||[]).forEach(x=>{ m[x.id]=x; }); setEnqRows(m); } else setEnqRows({}); }
+  },[cur,page,q,qAll,sortBy,regView]);
   useEffect(()=>{ if(!fs) return; const f=(e)=>{ if(e.key==="Escape" && !ask && !logFor && !custForm) setFs(false); }; document.addEventListener("keydown",f); return ()=>document.removeEventListener("keydown",f); },[fs,ask,logFor,custForm]);
   useEffect(()=>{ if(ready) load(); },[ready,load]);
   // 151: gateway — go to the tab of the number's prefix and open a new line with the number (and the customer) filled in
   const gwDone = useRef(false);
   useEffect(()=>{ if(!ready || !gateway || gwDone.current) return; gwDone.current = true; (async()=>{
     const n = regNorm(gateway.quote_no); const px = (n.match(/^[A-Z]+/)||[""])[0];
-    const t = tabs.find(x=>x.is_open && x.prefix && regNorm(x.prefix)===px) || tabs.find(x=>x.is_open && x.prefix && regHPair(x.prefix).includes(px));   // 184: FHXDS… goes to the FXDS tab when it has no tab of its own
+    const t = tabs.find(x=>x.is_open && x.prefix && regNorm(x.prefix)===px) || tabs.find(x=>x.is_open && x.prefix && regHPair(x.prefix).includes(px)) || tabs.find(x=>x.is_open && regTabPrefixes(x).includes(px));   // 185h: or a tab that also accepts it; 184: FHXDS… goes to the FXDS tab when it has no tab of its own
     if(t){ setCur(t.tab_name); try{ localStorage.setItem("qr_tab",t.tab_name); }catch(e){} }
     else setErr("No open register tab uses the prefix "+(px||"of this number")+". Check the number, or pick the right tab and type it again.");
     setEdit({ id:null, d:{ ...blank, quote_no:n, edate:"" }, orig:{ ...blank, quote_no:"", edate:"" }, co:null, gw:true }); setChk({bad:[],warn:[],ok:false});
@@ -37873,7 +38089,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
   };
   const blank = { quote_no:"", offer_date:"", enquiry_no:"", edate:today, customer_name:"", company_id:null, city:"", state:"", country:"", line_fse:"", line_tc:"" };
   // 149: the region's FSE / first telecaller, offered as the starting choice on a per-line tab
-  const regionOwners = (country, state)=>{ const ts = regTabsFor(country, state, false); const f = ts.flatMap(t=>regPeople(t.tab_name,"FSE")); const c = ts.flatMap(t=>regPeople(t.tab_name,"TC")); return { fse:f[0]||"", tc:c[0]||"" }; };
+  const regionOwners = (country, state)=>{ const f = regAddrPeople(country, state, "FSE"); const c = regAddrPeople(country, state, "TC"); return { fse:f[0]||"", tc:c[0]||"" }; };   // 185h
   const startNew = ()=> guard(async()=>{
     if(!tab || !tab.is_open) return;
     const no = await nextNo(tab);
@@ -37902,7 +38118,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
   const runChecks = async(e)=>{
     const d = e.d, bad = [], warn = [];
     const n = regNorm(d.quote_no);
-    const t = tab;
+    const t = e.tab || tab;   // 185f: a line edited from the enquiry form is checked against its own tab
     // mandatory
     const miss = [];
     if(!n) miss.push("First OfferNo"); if(!String(d.enquiry_no||"").trim()) miss.push("Enquiry No (type NA if the customer gave none)");
@@ -37923,12 +38139,13 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
       if(!pm) warn.push("“"+d.quote_no+"” is not the usual PREFIX + YY + number.");
       else if(t && t.prefix){
         const [px, pxH] = regHPair(t.prefix);
-        if(pm[1]!==px && pm[1]!==pxH){ const owner = tabs.find(x=>x.is_open && regNorm(x.prefix)===pm[1]); bad.push(pm[1]+"… numbers are not used on this tab (it uses "+px+"…"+(pxH?" or "+pxH+"…":"")+")."+(owner?" "+pm[1]+"… numbers belong on the "+regTabLabel(owner.tab_name)+" tab.":"")); }
+        const okPx = regTabPrefixes(t);   // 185h: also the tab's "Also accepts" prefixes
+        if(!okPx.includes(pm[1])){ const owner = tabs.find(x=>x.is_open && regNorm(x.prefix)===pm[1]); bad.push(pm[1]+"… numbers are not used on this tab (it uses "+okPx.join("… or ")+"…)."+(owner?" "+pm[1]+"… numbers belong on the "+regTabLabel(owner.tab_name)+" tab.":"")); }
         else {
-          if(pm[2].length!==6){ const fix = px+pm[2].slice(0,2)+pm[2].slice(2).replace(/^0+/,"").padStart(4,"0"); warn.push("It has "+pm[2].length+" digits, not 6 — did you mean "+fix+"?"); }
+          if(pm[2].length!==6){ const fix = pm[1]+pm[2].slice(0,2)+pm[2].slice(2).replace(/^0+/,"").padStart(4,"0"); warn.push("It has "+pm[2].length+" digits, not 6 — did you mean "+fix+"?"); }
           else if(pm[2].slice(0,2)!==today.slice(2,4) && !e.id) warn.push("Year "+pm[2].slice(0,2)+" is not this year ("+today.slice(2,4)+").");
           // 184: one running number for both forms — FXDS260075 and FHXDS260075 cannot both exist
-          const twin = pm[1]===px ? pxH : px;
+          const twin = (()=>{ const pr = regHPair(pm[1]); return pr[0]===pm[1] ? pr[1] : pr[0]; })();   // 185h: the H twin of the prefix typed
           if(twin && !other.length){
             const { data: tw } = await sb.from("register_line_tbl").select("id,quote_no,customer_name,tab_name").eq("quote_norm",twin+pm[2]).limit(1);
             const th = (tw||[]).find(r=>r.id!==e.id);
@@ -38005,11 +38222,38 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
         }
       }
       setEdit(null); setChk({bad:[],warn:[],ok:false}); setUnsavedGuard(false);
+      { const sid = edit.id || (typeof ins!=="undefined" && ins && ins.id); if(sid) savedMark("reg:"+sid); appToast("\u2713 "+(edit.id?"Saved":"Added")+" — "+row.quote_no+(row.customer_name?" · "+row.customer_name:"")); }   // 185e
       await load();
       return true;
     } finally { setBusy(false); }
   };
 
+  // 185f: the line's fields changed on the enquiry form - the same checks as the line's own Edit
+  const saveLineFromEnq = async(line, p, force)=>{
+    const t0 = tabs.find(x=>x.tab_name===line.tab_name) || tab;
+    const d = { quote_no:line.quote_no||"", offer_date:line.offer_date?String(line.offer_date).slice(0,10):"", enquiry_no:p.enquiry_no||"", edate:p.edate||"", customer_name:p.customer_name||"", company_id:p.company_id||null,
+      city:p.city||"", state:p.state||"", country:p.country||"", line_fse:line.line_fse||"", line_tc:line.line_tc||"" };
+    const c = await runChecks({ id:line.id, d, tab:t0, line });
+    if(c.bad.length) return { bad:c.bad };
+    if(c.warn.length && !force) return { warn:c.warn };
+    const by = me?.name || user?.username || "";
+    const row = { enquiry_no:String(d.enquiry_no).trim(), edate:d.edate||null, customer_name:d.customer_name, company_id:d.company_id, city:d.city||null, state:d.state||null, country:d.country||null };
+    const { error } = await sb.from("register_line_tbl").update({ ...row, updated_by:by, updated_at:new Date().toISOString() }).eq("id",line.id);
+    if(error) return { error:"Could not save the register line: "+error.message };
+    await logAudit("UPDATE","register_line_tbl",line.quote_no,"Quote Register line edited from its enquiry form",by,line,row);
+    if(line.enquiry_id){
+      await sb.from("enquiry_tbl").update({ company_name:d.customer_name, customer_ref:row.enquiry_no, enquiry_date:d.edate||null }).eq("id",line.enquiry_id);
+      await logAudit("UPDATE","enquiry_tbl",String(line.enquiry_id),"Enquiry updated from its Quote Register line "+line.quote_no,by,null,{company_name:d.customer_name,customer_ref:row.enquiry_no,enquiry_date:d.edate});
+    }
+    return { ok:true };
+  };
+  const openEnqEdit = async(r, ro)=>{
+    let en = enqRows[r.enquiry_id];
+    if(!en){ const { data } = await sb.from("enquiry_tbl").select("*").eq("id",r.enquiry_id).maybeSingle(); en = data||null; }
+    if(!en){ alert("The enquiry on "+r.quote_no+" could not be found."); return; }
+    setEdit(null); setEnqEd({ line:r, enq:en, ro:!!ro });
+  };
+  const mayEditEnq = (r)=>{ const en = enqRows[r.enquiry_id]; return !!(me && (me.sales || me.canEdit || (en && me.name && en.assigned_to===me.name))); };
   const saveOwner = async()=>{
     if(!ownEdit || busy) return;
     if(!String(ownEdit.fse||"").trim()){ alert("Pick the FSE — it can't be blank."); return; }
@@ -38081,6 +38325,17 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
     const rowPerLine = !!(t && t.owner_per_line);
     if(r.struck_kind){   // 155: struck off — always shown, greyed, with its reason as a badge; its number is never used again
       const del = r.struck_kind==="deleted";
+      const SK = REG_STRIKE[r.struck_kind];   // 185e: Regret / Ignore / Others
+      if(SK){ const tip2 = SK.label+" by "+(r.struck_by||"")+(r.struck_at?" on "+fmtDMYTime(r.struck_at):"")+" \u2014 "+(r.struck_reason||"");
+        const sx2 = {textDecoration:"line-through",color:colors.mutedLight};
+        body.push(h("tr",{key:r.id,"data-savedkey":"reg:"+r.id,style:{background:"#f6f5f0"}},
+          td("n",h("b",{style:{color:colors.mutedLight,textDecoration:"line-through"}},r.quote_no),
+            h("div",null,h("span",{title:tip2,style:{display:"inline-block",marginTop:3,fontSize:10.5,fontWeight:700,borderRadius:9,padding:"1px 8px",cursor:"help",whiteSpace:"nowrap",background:SK.bg,color:SK.fg,border:"1px solid "+SK.fg}},
+              SK.icon+" "+SK.label+" \u00b7 "+(r.struck_reason||""))), savedBadge("reg:"+r.id)),
+          td("od",h("span",{style:sx2},r.offer_date?fmtDMY(r.offer_date):"")), td("en",h("span",{style:sx2},r.enquiry_no||"")), td("ed",h("span",{style:sx2},r.edate?fmtDMY(r.edate):"")),
+          td("cu",h("span",{style:sx2},r.customer_name||"")), td("ci",h("span",{style:sx2},r.city||"")), td("st",h("span",{style:sx2},r.state||"")), td("co",h("span",{style:sx2},r.country||"")),
+          td("x",""), td("b", me?.admin && !r.enquiry_id && t && t.is_open ? h("button",{onClick:()=>reopenLine(r),title:"Reopen this number (Admins) — the reason is kept in the log",style:{...btnSmall,fontSize:11}},"\u21ba Reopen") : h("span",{style:{fontSize:11,color:colors.mutedLight}},"closed"))));
+        return; }
       const tip = (del?"Deleted":"Number changed to "+(r.moved_to||""))+" by "+(r.struck_by||"")+(r.struck_at?" on "+fmtDMYTime(r.struck_at):"")+" \u2014 "+(r.struck_reason||"");
       const sx = {textDecoration:"line-through",color:colors.mutedLight};
       body.push(h("tr",{key:r.id,style:{background:"#f6f5f0"}},
@@ -38093,18 +38348,23 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
         td("x",""), td("b",h("span",{style:{fontSize:11,color:colors.mutedLight}},"struck off"))));
       return;
     }
-    body.push(h("tr",{key:r.id},
-      td("n",h("b",{style:{color:"#1f4e8c"}},r.quote_no), q.trim()&&qAll ? h("span",{style:{fontSize:10.5,color:colors.mutedLight}}," ("+regTabLabel(r.tab_name)+")") : null,
+    body.push(h("tr",{key:r.id,"data-savedkey":"reg:"+r.id},
+      td("n",h("b",{style:{color:"#1f4e8c"}},r.quote_no), savedBadge("reg:"+r.id), q.trim()&&qAll ? h("span",{style:{fontSize:10.5,color:colors.mutedLight}}," ("+regTabLabel(r.tab_name)+")") : null,
         r.source==="Log Follow-ups" ? h("div",{title:"Added from Log Follow-ups"+(r.created_by?" by "+r.created_by:"")+" — check it and log its enquiry",style:{fontSize:10,color:"#1f5fa8",background:"#e6eef8",borderRadius:8,padding:"0 6px",display:"inline-block",marginTop:2}},"from Log Follow-ups") : null,   // 151
         r.moved_from ? h("div",{title:"This number took over from "+r.moved_from,style:{fontSize:10,color:"#0f6b4f",background:"#e4f3ed",borderRadius:8,padding:"0 6px",display:"inline-block",marginTop:2}},"was "+r.moved_from) : null),   // 155
       td("od",dmyOrNote(r.offer_date,r.offer_date_note)), td("en",r.enquiry_no||""), td("ed",dmyOrNote(r.edate,r.edate_note)),
       td("cu",r.customer_name||"", rowPerLine ? ownerShow(r) : null), td("ci",r.city||""), td("st",r.state||""), td("co",r.country||""),
       td("x", r.enquiry_id
-        ? h("span",{style:{display:"inline-flex",gap:5,alignItems:"center"}},h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:9,padding:"2px 8px",background:"#e4f3ed",color:"#085041"}},"✓ Enquiry"),
-            h("button",{onClick:()=>guard(()=>{ setEdit(null); setEnqOpen(r.enquiry_id); }),style:{...btnSmall,fontSize:11}},"Edit"))
-        : (me?.sales && t && t.is_open ? h("button",{onClick:()=>guard(()=>{ setEdit(null); setLogFor(r); }),style:{...btnSmall,fontSize:11}},"Log Enquiry") : null)),
+        ? h("button",{"data-t":"reg-enq-pill",onClick:()=>guard(()=>{ setEdit(null); setEnqOpen(r.enquiry_id); }),title:"Open the enquiry",   // 185f: one Edit (on the right); this opens the enquiry
+            style:{fontSize:10.5,fontWeight:700,borderRadius:9,padding:"2px 8px",background:"#e4f3ed",color:"#085041",border:"1px solid #b7dcc9",cursor:"pointer"}},"\u2713 "+((enqRows[r.enquiry_id]||{}).enquiry_number||"Enquiry"))
+        : (me?.sales && t && t.is_open ? h("span",{style:{display:"inline-flex",gap:4}},
+            h("button",{onClick:()=>guard(()=>{ setEdit(null); setLogFor(r); }),style:{...btnSmall,fontSize:11}},"Log Enquiry"),
+            me?.canEdit ? h("button",{onClick:()=>guard(()=>{ setEdit(null); setStrikeL({ line:r, kind:"regret", why:"", busy:false }); }),title:"Close this number without an enquiry: Regret, Ignore or Others, with a reason",
+              style:{...btnSmall,fontSize:11,color:colors.danger,borderColor:colors.danger}},"Strike out \u25be") : null) : null)),   // 185e
       td("b", h("span",{style:{display:"inline-flex",gap:4}},
-        me?.canEdit && t && t.is_open ? h("button",{onClick:()=>guard(()=>setEdPick(r)),title:"Edit this line \u2014 its details, or its number",style:{...btnSmall,fontSize:11}},"\u270e Edit") : null,   // 155
+        r.enquiry_id
+          ? (mayEditEnq(r) ? h("button",{"data-t":"reg-edit",onClick:()=>guard(()=>openEnqEdit(r,false)),title:"Edit the enquiry and this line \u2014 the enquiry form, as logged",style:{...btnSmall,fontSize:11}},"\u270e Edit") : null)   // 185f
+          : (me?.canEdit && t && t.is_open ? h("button",{"data-t":"reg-edit",onClick:()=>guard(()=>setEdPick(r)),title:"Edit this line \u2014 its details, or its number",style:{...btnSmall,fontSize:11}},"\u270e Edit") : null),   // 155
         me?.canEdit && t && t.is_open ? h("button",{onClick:()=>{ if(r.enquiry_id){ alert("An enquiry is logged on "+r.quote_no+" \u2014 it can't be deleted.\n\nUse Edit: change its details, or give it a new number (on the right tab)."); return; } guard(()=>setDelL({ line:r, why:"", busy:false })); },
           title:r.enquiry_id?"An enquiry is logged on this number \u2014 use Edit":"Delete this line (it stays struck off, so the number is never reused)",style:{...btnSmall,fontSize:11,color:r.enquiry_id?colors.mutedLight:colors.danger,borderColor:r.enquiry_id?colors.border:colors.danger}},"\ud83d\uddd1") : null,
         rowPerLine && me?.canOwner && !edit ? h("button",{onClick:()=>setOwnEdit({ id:r.id, fse:r.line_fse||"", tc:r.line_tc||"", line:r }),title:"Change who owns this line (Super Admin / Sales Head)",style:{...btnSmall,fontSize:11}},"\ud83d\udc64") : null))));
@@ -38122,7 +38382,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
     setRn({ line, tab:t1?t1.tab_name:"", no: t1 ? await nextNo(t1) : "", why:"", preview:null, err:"", busy:false }); };
   const rnTabCheck = (x)=>{ const t1 = tabs.find(tt=>tt.tab_name===x.tab); if(!t1) return "Pick a tab.";
     const n = regNorm(x.no); const px = (n.match(/^[A-Z]+/)||[""])[0];
-    if(!n) return "Give the new number."; if(t1.prefix && !regHPair(t1.prefix).includes(px)) return px+"\u2026 numbers are not used on "+regTabLabel(t1.tab_name)+" (it uses "+regHPair(t1.prefix).filter(Boolean).join("\u2026 or ")+"\u2026).";
+    if(!n) return "Give the new number."; if(t1.prefix && !regTabPrefixes(t1).includes(px)) return px+"\u2026 numbers are not used on "+regTabLabel(t1.tab_name)+" (it uses "+regTabPrefixes(t1).join("\u2026 or ")+"\u2026).";   // 185h
     if(n===regNorm(x.line.quote_no)) return "That is the same number.";
     if(!t1.owner_per_line && x.line.country){ const ok = regTabsFor(x.line.country, x.line.state, !!t1.is_emf).some(tt=>tt.tab_name===t1.tab_name);
       if(!ok) return x.line.customer_name+" is in "+[x.line.state,x.line.country].filter(Boolean).join(", ")+" \u2014 "+regTabLabel(t1.tab_name)+" does not take it. Fix the customer's state / emirate first (Edit Customer), or pick the tab that takes it."; }
@@ -38160,6 +38420,30 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
     await logAudit("DELETE","register_line_tbl",L.quote_no,"Quote Register line "+L.quote_no+" deleted (struck off) \u2014 "+delL.why.trim(),by,L,null);
     setDelL(null); try{ QREF.at = 0; }catch(e){} await load();
   };
+  // 185e: close a number that will never get an enquiry — Regret / Ignore / Others, with a reason (no approval)
+  const strikeDo = async()=>{
+    const L = strikeL.line; const why = strikeL.why.trim(); if(!why){ alert("Give the reason."); return; }
+    setStrikeL(x=>({...x,busy:true}));
+    const n = regNorm(L.quote_no);
+    const [{ data: es },{ data: fresh }] = await Promise.all([ sb.from("estimates").select("reference_number").eq("reference_number",n).limit(1), sb.from("register_line_tbl").select("id,enquiry_id,struck_kind").eq("id",L.id).maybeSingle() ]);
+    if(fresh && fresh.enquiry_id){ setStrikeL(null); alert("An enquiry was logged on "+L.quote_no+" a moment ago \u2014 regret it from the enquiry."); load(); return; }
+    if(fresh && fresh.struck_kind){ setStrikeL(null); load(); return; }
+    if((es||[]).length){ setStrikeL(null); alert("A quote "+n+" has been made \u2014 close it by setting the quote's Stage, not here."); return; }
+    const by = me?.name||user?.username||"";
+    const { error } = await sb.from("register_line_tbl").update({ struck_kind:strikeL.kind, struck_reason:why, struck_by:by, struck_at:new Date().toISOString() }).eq("id",L.id);
+    if(error){ setStrikeL(x=>({...x,busy:false})); alert(/check|violates/.test(error.message||"") ? "Strike out needs structure_register_strike_2026-10-15.sql (both companies) \u2014 run it first." : "Could not strike out: "+error.message); return; }
+    await logAudit("UPDATE","register_line_tbl",L.quote_no,"Quote Register line "+L.quote_no+" struck out \u2014 "+REG_STRIKE[strikeL.kind].label+": "+why,by,L,null);
+    setStrikeL(null); try{ QREF.at = 0; }catch(e){} savedMark("reg:"+L.id); appToast("\u2713 "+L.quote_no+" struck out \u2014 "+REG_STRIKE[strikeL.kind].label); await load();
+  };
+  const reopenLine = async(L)=>{
+    const why = prompt("Reopen "+L.quote_no+" (struck out as "+((REG_STRIKE[L.struck_kind]||{}).label||L.struck_kind)+": "+(L.struck_reason||"")+").\n\nWhy? (kept in the log)");
+    if(!why || !why.trim()) return;
+    const by = me?.name||user?.username||"";
+    const { error } = await sb.from("register_line_tbl").update({ struck_kind:null, struck_reason:null, struck_by:null, struck_at:null }).eq("id",L.id);
+    if(error){ alert("Could not reopen: "+error.message); return; }
+    await logAudit("UPDATE","register_line_tbl",L.quote_no,"Quote Register line "+L.quote_no+" reopened (was "+((REG_STRIKE[L.struck_kind]||{}).label||L.struck_kind)+": "+(L.struck_reason||"")+") \u2014 "+why.trim(),by,L,null);
+    try{ QREF.at = 0; }catch(e){} savedMark("reg:"+L.id); appToast("\u2713 "+L.quote_no+" reopened"); await load();
+  };
   const regLineModals = ()=>{
     const box = (title, body, foot, onClose)=> h("div",{onClick:e=>{ if(e.target===e.currentTarget) onClose(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1250,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"60px 12px",overflowY:"auto"}},
       h("div",{style:{background:"#fff",borderRadius:10,width:560,maxWidth:"100%",padding:"14px 16px",display:"grid",gap:10,border:"1px solid #0f7a5c"}},h("b",{style:{fontSize:14}},title),body,h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end"}},foot)));
@@ -38169,6 +38453,14 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
         opt("Details only","Enquiry No, dates, customer, city \u2014 the number stays."+(r.enquiry_id?" The enquiry follows the change.":""),()=>{ setEdPick(null); startEdit(r); }),
         opt("The number","Wrong tab or wrong number: a new number on the tab you pick, carried into everything that uses "+r.quote_no+" (quote and revisions, documents, follow-ups, cards). Needs an Admin code. The old number stays struck off.",()=>{ setEdPick(null); openRn(r); })),
         [h("button",{key:"c",onClick:()=>setEdPick(null),style:btnSmall},"Cancel")], ()=>setEdPick(null)); }
+    if(strikeL){ const r = strikeL.line; const set = (p)=> setStrikeL(x=>({...x,...p}));
+      return box("Strike out "+r.quote_no+" \u00b7 "+(r.customer_name||""), h("div",{style:{display:"grid",gap:8}},
+        h("div",{style:{fontSize:12.5,color:colors.muted}},"Closes the number without an enquiry. It stays in the register struck out with your reason and is never used again."),
+        h("div",{style:{display:"grid",gap:6}}, Object.entries(REG_STRIKE).map(([k,v])=>h("label",{key:k,style:{display:"flex",gap:8,alignItems:"flex-start",border:"1px solid "+(strikeL.kind===k?v.fg:colors.border),background:strikeL.kind===k?v.bg:"#fff",borderRadius:7,padding:"7px 9px",cursor:"pointer",fontSize:12.5}},
+          h("input",{type:"radio",name:"reg_strike",checked:strikeL.kind===k,onChange:()=>set({kind:k}),style:{marginTop:2}}), h("span",null,h("b",null,v.icon+" "+v.label)," \u2014 ",h("span",{style:{color:colors.muted}},v.help))))),
+        fl("Reason (required)",h("input",{value:strikeL.why,autoFocus:true,onChange:e=>set({why:e.target.value}),placeholder:REG_STRIKE[strikeL.kind].eg,style:{...inputStyle,padding:"6px 8px"}}))),
+        [h("button",{key:"c",onClick:()=>setStrikeL(null),disabled:strikeL.busy,style:btnSmall},"Cancel"),h("button",{key:"d",onClick:strikeDo,disabled:strikeL.busy,style:{...btnPrimary,padding:"6px 14px",background:colors.danger}},strikeL.busy?"Saving\u2026":"Strike out")],
+        ()=>setStrikeL(null)); }
     if(delL){ const r = delL.line;
       return box("Delete "+r.quote_no+" \u00b7 "+(r.customer_name||""), h("div",{style:{display:"grid",gap:8}},
         h("div",{style:{fontSize:12.5,color:colors.muted}},"The line stays in the register struck off with your reason, so "+r.quote_no+" is never used again. Only possible while no enquiry is logged and no quote exists."),
@@ -38203,7 +38495,7 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
     h("div",{style:{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:4}},
       h("h2",{style:{margin:0,fontSize:fs?18:undefined}},gateway?"Quote Register — new quote number":"Quote Register"),
       h("button",{onClick:()=>setFs(x=>!x),title:fs?"Back to the normal view (Esc)":"Use the whole screen",style:{...btnSmall,marginLeft:fs?"auto":0,order:fs?9:0}},fs?"\u2715 Exit full screen":"\u26f6 Full screen"),
-      isSuper ? h("span",{style:{fontSize:11.5,color:colors.muted}},"Who covers each tab: Setup → CRM → Register Tabs & People") : null),
+      isSuper ? h("span",{style:{fontSize:11.5,color:colors.muted}},"Who covers each region: Setup → CRM → Sales Regions & People") : null),
     fs ? null : h("div",{style:{fontSize:12,color:colors.muted,marginBottom:10,maxWidth:980}},"The quote register, tab by tab as in the Excel. A new Quote# is made here first; then Log Enquiry on its line. "+(me?.canEdit?"You can add and edit lines.":"Only the Sales Coordinator and Admins add or edit lines.")),
     err ? h("div",{style:{background:"#fdecea",color:"#a3312a",padding:"10px 12px",borderRadius:7,fontSize:12.5}},err) : null,
     h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:8}},
@@ -38217,6 +38509,8 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
         h("option",{value:"ed_desc"},"Date (EDate) \u2014 newest first"),
         h("option",{value:"od_asc"},"Offer Date \u2014 oldest first"),
         h("option",{value:"od_desc"},"Offer Date \u2014 newest first")),
+      h("span",{style:{display:"inline-flex",gap:4,marginLeft:6}}, [["all","All"],["open","Open, no enquiry"],["struck","Struck out"]].map(([k,l])=>
+        h("button",{key:k,"data-regview":k,onClick:()=>guard(()=>{ setRegView(k); setPage(-1); }),style:{...btnSmall,fontSize:11.5,padding:"4px 9px",...(regView===k?{background:"#1f4e8c",color:"#fff",borderColor:"#1f4e8c"}:{})}},l))),   // 185e
       h("span",{style:{fontSize:12,color:colors.muted}},total+" line"+(total===1?"":"s")+(tab&&!tab.is_open?" · history — closed for new lines":""))),
     // tabs, wrapped, grouped as in the Excel
     h("div",{style:{display:"flex",flexWrap:"wrap",gap:3,background:"#e8e5d8",border:"1px solid "+colors.border,borderBottom:0,borderRadius:"8px 8px 0 0",padding:"5px 5px 0"}},
@@ -38241,10 +38535,207 @@ function QuoteRegisterScreen({ user, onOpenQuote, onStartQuote, onOpenCard, gate
     custForm ? h(CustomerCompanyForm,{ user, initial:custForm.initial||undefined, onCancel:()=>setCustForm(null),
       onSaved:async(co)=>{ setCustForm(null); if(co && co.company_name) await pickCustomer({ company_name:co.company_name }); } }) : null,
     logFor ? h(LogEnquiryModal,{ user, allocation:null, pkg:null, project:null, regLine:logFor, onCancel:()=>setLogFor(null),
-      onSaved:(r)=>{ setLogFor(null); load(); if(r) alert("Enquiry "+r.enquiryNumber+" logged for Quote# "+r.quoteNo+".\n\nIts card is in the "+ENQUIRY_DEPT+" Unassigned pile (Tasks)."); } }) : null);
+      onSaved:(r)=>{ const ln = logFor; setLogFor(null); load(); if(r){ appToast("✓ Enquiry "+r.enquiryNumber+" logged — Quote# "+r.quoteNo+" · card in the "+ENQUIRY_DEPT+" Unassigned pile"); if(ln && ln.id) savedMark("reg:"+ln.id); } } }) : null,   // 185e
+    enqEd ? (()=>{ const L = enqEd.line; const lt = tabs.find(x=>x.tab_name===L.tab_name); const lineOk = !!(me?.canEdit && lt && lt.is_open);   // 185f
+      return h(LogEnquiryModal,{ key:"enqed-"+L.id+(enqEd.ro?"-ro":""), user, allocation:null, pkg:null, project:null, regLine:L, editEnq:enqEd.enq, readOnly:!!enqEd.ro,
+        regSave: lineOk ? (p,force)=>saveLineFromEnq(L,p,force) : undefined,
+        onChangeNumber: lineOk ? (line)=>{ setEnqEd(null); openRn(line); } : undefined,
+        onWantEdit: enqEd.ro && mayEditEnq(L) ? ()=>setEnqEd(x=>({...x, ro:false})) : undefined,
+        onCancel:()=>setEnqEd(null), onSaved:()=>{ setEnqEd(null); load(); } }); })() : null);
 }
 
 // ---- REGISTER TABS & PEOPLE (CRM -> CRM Setup), Super Admin only: many to many grid ----
+// ---- 185h: SALES REGIONS & PEOPLE (Super Admin) — owners by region instead of by register tab ----
+function SalesRegionsPeopleScreen({ user, onGoToTab }){
+  const isSuper = user?.role==="super_admin";
+  const [regions,setRegions] = useState([]);
+  const [people,setPeople] = useState([]);
+  const [cur,setCur] = useState({});      // region id -> {name: "FSE"|"TC"}
+  const [saved,setSaved] = useState({});
+  const [ownersBy,setOwnersBy] = useState("tabs");
+  const [busy,setBusy] = useState(false);
+  const [msg,setMsg] = useState("");
+  const [err,setErr] = useState("");
+  const [swAsk,setSwAsk] = useState(null);   // {to}
+  const load = async()=>{
+    await regLoad(true);
+    if(!REG.regionsOk){ setErr("The Sales Regions tables are not there yet — run structure_sales_regions_2026-10-15.sql (both companies)."); return; }
+    setErr("");
+    setRegions(REG.regions.slice().sort((a,b)=>((a.sort_order??999)-(b.sort_order??999)) || String(a.region_name).localeCompare(String(b.region_name))));
+    setOwnersBy(REG.ownersBy);
+    const { data: emps } = await sb.from("employee_tbl").select("employee_name,crm_role,status").order("employee_name");
+    const live = (emps||[]).filter(e=>e.employee_name && !/inactive|left|relieved|resigned/i.test(e.status||""));
+    const role = (e)=> /fse|field/i.test(e.crm_role||"") ? "FSE" : /tele|inside/i.test(e.crm_role||"") ? "TC" : "";
+    const ticked = new Set([...REG.rpeople, ...REG.people].map(p=>p.employee_name));
+    const ps = live.filter(e=>role(e) || ticked.has(e.employee_name)).map(e=>({ name:e.employee_name, role:role(e)||"" }));
+    ps.sort((a,b)=> (a.role===b.role ? a.name.localeCompare(b.name) : a.role==="FSE" ? -1 : b.role==="FSE" ? 1 : a.role==="TC" ? -1 : 1));
+    setPeople(ps);
+    const m = {}; REG.rpeople.forEach(p=>{ (m[p.region_id]=m[p.region_id]||{})[p.employee_name] = p.role; });
+    setCur(JSON.parse(JSON.stringify(m))); setSaved(m);
+  };
+  useEffect(()=>{ if(isSuper) load(); },[isSuper]);
+  const get = (o,r,n)=> (o[r]||{})[n]||"";
+  const changes = []; regions.forEach(r=>people.forEach(p=>{ if(get(cur,r.id,p.name)!==get(saved,r.id,p.name)) changes.push([r.id,p.name]); }));
+  const dirty = changes.length>0;
+  useEffect(()=>{ setUnsavedGuard(dirty, "The Sales Regions & People grid has changes that are not saved. Leave anyway?"); return ()=>setUnsavedGuard(false); },[dirty]);
+  if(!isSuper) return h("div",{style:{padding:24}},h("b",null,"Sales Regions & People is for the Super Admin."));
+  const by = user?.username||"";
+  const rName = (id)=> (regions.find(r=>String(r.id)===String(id))||{}).region_name||id;
+  const cycle = (rid,n)=> setCur(o=>{ const x = JSON.parse(JSON.stringify(o)); x[rid]=x[rid]||{}; const v = x[rid][n]||""; const nx = v===""?"FSE":v==="FSE"?"TC":""; if(nx) x[rid][n]=nx; else delete x[rid][n]; return x; });
+  const fsesOf = (o,rid)=> Object.keys(o[rid]||{}).filter(n=>o[rid][n]==="FSE");
+  const save = async()=>{
+    if(!dirty) return true;
+    setBusy(true); setMsg("");
+    try{
+      for(const [rid,n] of changes){
+        const v = get(cur,rid,n);
+        if(!v){ const { error } = await sb.from("sales_region_person_tbl").delete().eq("region_id",rid).eq("employee_name",n); if(error) throw error; }
+        else { const order = Object.keys(cur[rid]||{}).indexOf(n);
+          const { error } = await sb.from("sales_region_person_tbl").upsert({ region_id:rid, employee_name:n, role:v, sort_order:order<0?100:order, updated_by:by, updated_at:new Date().toISOString() },{ onConflict:"region_id,employee_name" });
+          if(error) throw error; }
+      }
+      await logAudit("UPDATE","sales_region_person_tbl","grid","Sales Regions & People: "+changes.map(([r,n])=>rName(r)+" · "+n+" → "+(get(cur,r,n)||"none")).join("; "),by,null,null);
+      setSaved(JSON.parse(JSON.stringify(cur))); await regLoad(true);
+      setMsg(changes.length+" change"+(changes.length===1?"":"s")+" saved."); appToast("✓ Saved — Sales Regions & People");
+      setUnsavedGuard(false); return true;
+    }catch(e){ alert("Could not save:\n\n"+(e.message||e)); return false; }
+    finally{ setBusy(false); }
+  };
+  // one time: regions made from today's open register tabs (same countries / states / zone = one region), people carried over
+  const fromTabs = async()=>{
+    if(regions.length){ alert("There are regions already. Add or change them under Sales Regions (rules)."); return; }
+    const src = REG.tabs.filter(t=>t.is_open && !t.owner_per_line && !t.is_emf);
+    if(!src.length){ alert("No open register tabs to start from."); return; }
+    const groups = new Map();
+    src.forEach(t=>{ const k = [t.is_catchall?"*":"", regList(t.accepts_countries).sort().join(","), regList(t.accepts_states).sort().join(","), String(t.accepts_zone||"").toLowerCase().trim()].join("|");
+      if(!groups.has(k)) groups.set(k, []); groups.get(k).push(t); });
+    if(!confirm(groups.size+" region"+(groups.size===1?"":"s")+" will be made from "+src.length+" open register tab"+(src.length===1?"":"s")+" (EMF tabs and tabs that ask the owner on each line are left out), with the people ticked on those tabs.\n\nNothing is switched yet — the tabs still decide owners until you switch.\n\nOK = make them")) return;
+    setBusy(true);
+    try{
+      let k = 0; const now = new Date().toISOString();
+      for(const ts of groups.values()){
+        k++; const t = ts[0];
+        const row = { region_name: ts.map(x=>regTabLabel(x.tab_name)).join(" / ").slice(0,120), zone_label: t.group_label||null, countries: t.accepts_countries||null, states: t.accepts_states||null,
+          india_zone: t.accepts_zone||null, is_catchall: !!t.is_catchall, sort_order: k*10, is_active:true, updated_by:by, updated_at:now };
+        const { data: ins, error } = await sb.from("sales_region_tbl").insert(row).select().single();
+        if(error) throw error;
+        const pm = {}; ts.forEach(x=>REG.people.filter(p=>p.tab_name===x.tab_name).forEach(p=>{ if(pm[p.employee_name]!=="FSE") pm[p.employee_name] = p.role; }));
+        const ppl = Object.keys(pm).map((n,i)=>({ region_id:ins.id, employee_name:n, role:pm[n], sort_order:i, updated_by:by, updated_at:now }));
+        if(ppl.length){ const { error: e2 } = await sb.from("sales_region_person_tbl").insert(ppl); if(e2) throw e2; }
+      }
+      await logAudit("INSERT","sales_region_tbl","from tabs",groups.size+" sales regions made from the register tabs",by,null,null);
+      appToast("✓ "+groups.size+" regions made from the register tabs — check names and people");
+      await load();
+    }catch(e){ alert("Could not make the regions:\n\n"+(e.message||e)); }
+    finally{ setBusy(false); }
+  };
+  // the check: regions with their people and customer counts, and every customer whose FSEs would change
+  const checkXlsx = async()=>{
+    setBusy(true);
+    try{
+      const cos = (await fetchPaged(()=>sb.from("companies").select("*").order("id"))).filter(c=>!c.is_archived && c.company_name);
+      const rp = []; Object.keys(cur).forEach(rid=>Object.keys(cur[rid]||{}).forEach(n=>rp.push({ region_id:rid, employee_name:n, role:cur[rid][n] })));
+      const cnt = {}; const rows2 = [];
+      cos.forEach(c=>{
+        const r = regRegionFor(c.billing_country, c.billing_state, regions);
+        if(r) cnt[r.id] = (cnt[r.id]||0)+1;
+        const tabF = Array.from(new Set(regTabsFor(c.billing_country, c.billing_state, false).flatMap(t=>regPeople(t.tab_name,"FSE"))));
+        const regF = r ? regRegionPeople(r.id,"FSE",rp) : [];
+        if(tabF.join(", ")!==regF.join(", ")) rows2.push({ Customer:c.company_name, Country:c.billing_country||"", "State / emirate":c.billing_state||"",
+          "Register tab": regTabsFor(c.billing_country, c.billing_state, false).map(t=>regTabLabel(t.tab_name)).join(" / "), "FSE by tab (today)":tabF.join(", "),
+          "Sales region":r?r.region_name:"(none)", "FSE by region":regF.join(", "), "Account owner now":c.owner_employee_name||"", "Owner set by hand": String(c.owner_source||"").toLowerCase()==="manual" ? "yes" : "" });
+      });
+      const covers = (r)=> r.is_catchall ? "Any country outside India no other region takes" : [r.countries, r.states, r.india_zone?("India zone "+r.india_zone):""].filter(Boolean).join(" · ");
+      const rows1 = regions.map(r=>({ Region:r.region_name, Zone:r.zone_label||"", Covers:covers(r), FSE:regRegionPeople(r.id,"FSE",rp).join(", "), Telecaller:regRegionPeople(r.id,"TC",rp).join(", "), Customers:cnt[r.id]||0, "In use":r.is_active===false?"no":"yes" }));
+      const none = cos.filter(c=>!regRegionFor(c.billing_country, c.billing_state, regions)).map(c=>({ Customer:c.company_name, Country:c.billing_country||"", "State / emirate":c.billing_state||"" }));
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows1), "Regions");
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows2.length?rows2:[{ Customer:"No customer changes FSE" }]), "FSE changes");
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(none.length?none:[{ Customer:"Every customer falls in a region" }]), "No region");
+      XLSX.writeFile(wb, "sales_regions_check_"+toISODate(new Date())+".xlsx");
+      setMsg(rows1.length+" regions · "+rows2.length+" customer"+(rows2.length===1?"":"s")+" change FSE · "+none.length+" in no region.");
+    }catch(e){ alert("Could not make the check:\n\n"+(e.message||e)); }
+    finally{ setBusy(false); }
+  };
+  const doSwitch = async(to, moveExisting)=>{
+    setSwAsk(null); setBusy(true);
+    try{
+      if(dirty && !(await save())) return;
+      const now = new Date().toISOString();
+      const { data: ex } = await sb.from("crm_owner_setting_tbl").select("id").eq("id",1).maybeSingle();
+      const { error } = ex ? await sb.from("crm_owner_setting_tbl").update({ owners_by:to, switched_by:by, switched_at:now }).eq("id",1)
+                           : await sb.from("crm_owner_setting_tbl").insert({ id:1, owners_by:to, switched_by:by, switched_at:now });
+      if(error) throw error;
+      await logAudit("UPDATE","crm_owner_setting_tbl","1","Owners now come from "+(to==="regions"?"Sales Regions":"Register Tabs"),by,null,{owners_by:to});
+      await regLoad(true);
+      let moved = 0;
+      if(moveExisting){
+        const cos = await fetchPaged(()=>sb.from("companies").select("*").order("id"));
+        const byOwner = new Map(); const hist = [];
+        cos.forEach(c=>{ if(c.is_archived) return; if(String(c.owner_source||"").toLowerCase()==="manual") return;
+          const o = regOwnerFor(c.billing_country, c.billing_state); if(!o || o===c.owner_employee_name) return;
+          if(!byOwner.has(o)) byOwner.set(o,[]); byOwner.get(o).push(c.id);
+          hist.push({ company_name:c.company_name, old_owner:c.owner_employee_name||"", new_owner:o, reason:to==="regions"?"Sales regions":"Register tabs", changed_by:by }); });
+        for(const [o,ids] of byOwner){ for(let k=0;k<ids.length;k+=200){ const { error: e2 } = await sb.from("companies").update({ owner_employee_name:o, owner_source:"Auto" }).in("id",ids.slice(k,k+200)); if(e2) throw e2; } moved += ids.length;
+          await sb.from("notifications_tbl").insert({ employee_name:o, message:ids.length+" customer"+(ids.length===1?"":"s")+" moved to you: owners now come from "+(to==="regions"?"Sales Regions":"Register Tabs")+" ("+by+")." }); }
+        for(let k=0;k<hist.length;k+=500) await sb.from("ownership_history_tbl").insert(hist.slice(k,k+500));
+      }
+      setOwnersBy(to);
+      appToast("✓ Owners now come from "+(to==="regions"?"Sales Regions":"Register Tabs")+(moveExisting?" · "+moved+" customer"+(moved===1?"":"s")+" moved":""));
+    }catch(e){ alert("Could not switch:\n\n"+(e.message||e)); }
+    finally{ setBusy(false); }
+  };
+  const cellSt = { border:"1px solid #e3e0d4", textAlign:"center", cursor:"pointer", minWidth:38, height:32, padding:0, userSelect:"none" };
+  const chip = (v)=> v==="FSE" ? h("span",{style:{display:"inline-block",borderRadius:5,padding:"2px 6px",fontWeight:700,fontSize:11,background:"#e3edf9",color:"#1f4e8c"}},"FSE")
+                   : v==="TC" ? h("span",{style:{display:"inline-block",borderRadius:5,padding:"2px 6px",fontWeight:700,fontSize:11,background:"#fff1cc",color:"#7a4f00"}},"TC") : null;
+  const describe = (r)=> r.is_catchall ? "any country outside India that no other region takes" : [String(r.countries||"").split(",").map(x=>x.trim()).filter(Boolean).slice(0,6).join(", "), r.states ? "– "+r.states : "", r.india_zone ? "India – "+r.india_zone+" zone" : ""].filter(Boolean).join(" ");
+  const on = ownersBy==="regions";
+  return h("div",{style:{padding:20}},
+    h("div",{style:{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}},h("h2",{style:{margin:0}},"Sales Regions & People"),
+      h("span",{style:{fontSize:10.5,fontWeight:700,background:colors.dark,color:"#fff",borderRadius:9,padding:"2px 8px"}},"Super Admin only")),
+    h("div",{style:{fontSize:12,color:colors.muted,margin:"4px 0 10px",maxWidth:1000,lineHeight:1.5}},
+      "Who covers each sales region. A customer falls in the region of its billing country / state (the most specific wins: states, then India zone, then country, then the catch-all). Its FSEs and telecallers are the people ticked here — whatever prefix or register tab its quote numbers use. Click a cell: FSE → TC (telecaller) → blank."),
+    err ? h("div",{style:{color:colors.danger,fontWeight:700,marginBottom:10}},err) : null,
+    h("div",{"data-t":"owners-by",style:{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",padding:"10px 12px",borderRadius:8,marginBottom:10,background:on?"#e4f3ed":"#fff4d6",border:"1px solid "+(on?"#b7dcc9":"#f0d58a")}},
+      h("b",null,"Owners come from: "+(on?"Sales Regions (this grid)":"Register Tabs & People (the tab grid)")),
+      on ? null   // 185i: the Register Tabs & People grid is gone; owners stay with the regions
+         : h("button",{"data-t":"switch-regions",disabled:busy||!regions.length,onClick:()=>setSwAsk({to:"regions"}),style:{...btnPrimary,background:"#0f7a5c",borderColor:"#0f7a5c",opacity:regions.length?1:0.5}},"Switch to Sales Regions…"),
+      h("span",{style:{fontSize:11.5,color:colors.muted}},on?"Register tabs only number the quotes.":"Until you switch, nothing changes for anyone. Check first with the Excel.")),
+    h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:8}},
+      h("button",{"data-t":"reg-save",onClick:save,disabled:!dirty||busy,style:{...btnPrimary,opacity:!dirty||busy?0.5:1}},busy?"Working…":"Save all"),
+      h("button",{onClick:()=>setCur(JSON.parse(JSON.stringify(saved))),disabled:!dirty||busy,style:{...btnSecondary,opacity:!dirty?0.5:1}},"Discard"),
+      !regions.length && !err ? h("button",{"data-t":"from-tabs",onClick:fromTabs,disabled:busy,style:{...btnSmall,color:"#0f7a5c",borderColor:"#0f7a5c",fontWeight:700}},"Make regions from today's tabs") : null,
+      regions.length ? h("button",{"data-t":"check-xlsx",onClick:checkXlsx,disabled:busy,style:btnSmall},"⬇ Check (Excel)") : null,
+      onGoToTab ? h("button",{onClick:()=>{ if(!confirmLeaveIfDirty()) return; onGoToTab("sales_region_tbl"); },style:btnSmall},"Region rules…") : null,
+      h("span",{style:{fontSize:12,color:colors.muted}},(dirty?changes.length+" change(s) not saved · ":"")+(()=>{ const n = regions.filter(r=>r.is_active!==false && !fsesOf(cur,r.id).length).length; return n ? n+" region(s) with no FSE" : regions.length ? "Every region has an FSE" : ""; })()),
+      msg ? h("span",{style:{fontSize:12,color:"#0f7a5c"}},msg) : null),
+    regions.length===0 && !err ? h("div",{style:{fontSize:12.5,color:colors.muted,padding:"10px 0"}},"No regions yet. Start from today's tabs, or add them under Region rules…") :
+    h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,overflow:"auto",maxHeight:"calc(100vh - 300px)"}},
+      h("table",{style:{borderCollapse:"separate",borderSpacing:0,fontSize:12}},
+        h("thead",null,h("tr",null,
+          h("th",{style:{position:"sticky",top:0,left:0,zIndex:4,background:"#faf9f5",textAlign:"left",padding:"6px 8px",minWidth:230,border:"1px solid #e3e0d4",verticalAlign:"bottom",fontSize:11,color:colors.muted}},"Region · covers"),
+          ...people.map(p=>h("th",{key:p.name,style:{position:"sticky",top:0,zIndex:3,background:"#faf9f5",border:"1px solid #e3e0d4",padding:"6px 4px",verticalAlign:"bottom"}},
+            h("div",{style:{writingMode:"vertical-rl",transform:"rotate(180deg)",whiteSpace:"nowrap",fontSize:11.5,fontWeight:700,maxHeight:150}},p.name,h("span",{style:{fontWeight:400,color:colors.muted}}," · "+(p.role==="FSE"?"FSE":p.role==="TC"?"Telecaller":"—"))))),
+          h("th",{style:{position:"sticky",top:0,zIndex:3,background:"#faf9f5",border:"1px solid #e3e0d4",fontSize:11,color:colors.muted,padding:"6px 8px",verticalAlign:"bottom",whiteSpace:"nowrap"}},"Covered by"))),
+        h("tbody",null, regions.map(r=>{ const f = fsesOf(cur,r.id).length; const tc = Object.values(cur[r.id]||{}).filter(v=>v==="TC").length;
+          return h("tr",{key:r.id,"data-region":r.region_name},
+            h("td",{style:{position:"sticky",left:0,zIndex:2,background:"#fff",border:"1px solid #e3e0d4",padding:"5px 8px",minWidth:230}},
+              h("b",{style:{color:r.is_active===false?colors.mutedLight:colors.text}},r.region_name), r.zone_label ? h("span",{style:{fontSize:11,color:colors.muted}}," · "+r.zone_label) : null,
+              h("div",{style:{fontSize:10.5,color:colors.mutedLight,whiteSpace:"normal",maxWidth:260}},describe(r))),
+            ...people.map(p=>{ const v = get(cur,r.id,p.name), d = v!==get(saved,r.id,p.name);
+              return h("td",{key:p.name,"data-cell":r.region_name+"|"+p.name,onClick:()=>cycle(r.id,p.name),style:{...cellSt,background:d?"#fff7c2":undefined}},chip(v)); }),
+            h("td",{style:{border:"1px solid #e3e0d4",fontSize:11,padding:"0 8px",whiteSpace:"nowrap",color:r.is_active!==false&&!f?colors.danger:colors.muted,fontWeight:r.is_active!==false&&!f?700:400}},f+" FSE · "+tc+" TC")); })))),
+    swAsk ? h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:3200,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
+      h("div",{style:{background:"#fff",borderRadius:10,padding:"16px 18px",width:500,maxWidth:"100%"}},
+        h("b",{style:{fontSize:14}},swAsk.to==="regions" ? "Owners from Sales Regions" : "Back to Register Tabs"),
+        h("div",{style:{fontSize:12,color:colors.muted,margin:"6px 0 14px",lineHeight:1.5}},
+          (swAsk.to==="regions" ? "From now on a customer's FSEs and telecallers are the people of its sales region: My Worklist, follow-ups, Quote Funnel, overdue lists, who is told about a quote. Register tabs only number the quotes. Tenders keep the owner picked on each line." : "Owners go back to the Register Tabs & People grid.")
+          +" Also move the existing customers' account owner to the "+(swAsk.to==="regions"?"region's":"tab's")+" first FSE? Owners a Super Admin set by hand are never moved."),
+        h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",flexWrap:"wrap"}},
+          h("button",{onClick:()=>setSwAsk(null),style:btnSecondary},"Cancel"),
+          h("button",{"data-t":"sw-only",onClick:()=>doSwitch(swAsk.to,false),style:btnSecondary},"Switch, new customers only"),
+          h("button",{"data-t":"sw-move",onClick:()=>doSwitch(swAsk.to,true),style:btnPrimary},"Switch and move existing")))) : null);
+}
 function RegisterTabsPeopleScreen({ user, onGoToTab }){
   const isSuper = user?.role==="super_admin";
   const [tabs,setTabs] = useState([]);
@@ -38320,6 +38811,9 @@ function RegisterTabsPeopleScreen({ user, onGoToTab }){
   return h("div",{style:{padding:20}},
     h("div",{style:{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}},h("h2",{style:{margin:0}},"Register Tabs & People"),
       h("span",{style:{fontSize:10.5,fontWeight:700,background:colors.dark,color:"#fff",borderRadius:9,padding:"2px 8px"}},"Super Admin only")),
+    regRegionsOn() ? h("div",{"data-t":"tabs-not-used",style:{background:"#fff4d6",border:"1px solid #f0d58a",borderRadius:8,padding:"9px 12px",margin:"8px 0",fontSize:12.5}},
+      h("b",null,"Owners now come from Sales Regions & People.")," This grid is kept but no longer decides who owns a customer. ",
+      onGoToTab ? h("button",{onClick:()=>onGoToTab("region_people"),style:btnSmall},"Open Sales Regions & People") : null) : null,   // 185h
     h("div",{style:{fontSize:12,color:colors.muted,margin:"4px 0 10px",maxWidth:1000,lineHeight:1.5}},
       "Who covers each Quote Register tab. Click a cell: FSE → TC (telecaller) → blank. A tab can have several FSEs and telecallers; a person can cover several tabs. Every FSE and telecaller ticked on a tab gets its customers in My Worklist and the overdue-calls list; the first FSE ticked is the customer's owner and gets new customers. Until anybody is ticked, owners follow the old Territory Rules."),
     h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:8}},
@@ -40197,9 +40691,9 @@ function EnquiriesListScreen({ user, onGoToTab, onOpenQuote, onCreateQuoteFromEn
           th("Enquiry"),th("Customer"),th("Subject"),th("Quote#"),th("Assigned to"),th("Task due date"),th("Last date for submission"),th("Card"),th("Last follow-up"),th("Next follow-up"),th("Status"),canAssign?th("Assign"):null,th("","right"))),   // 138: Assign right after Status
         h("tbody",null, shown.map(enq=>{ const cd=d10(enq.closing_date); const open=enqIsOpen(enq); const qn=enq.linked_reference_number;
           const sd = staleDays(enq);
-          return h("tr",{key:enq.id,onClick:()=>setOpenId(enq.id),title:"Open this enquiry",style:{borderBottom:"1px solid #f0eee6",cursor:"pointer",background:sd?"#fdf1ef":undefined,boxShadow:sd?"inset 3px 0 0 #a3312a":undefined}},
+          return h("tr",{key:enq.id,"data-savedkey":"enq:"+enq.id,onClick:()=>setOpenId(enq.id),title:"Open this enquiry",style:{borderBottom:"1px solid #f0eee6",cursor:"pointer",background:sd?"#fdf1ef":undefined,boxShadow:sd?"inset 3px 0 0 #a3312a":undefined}},
             canAssign ? td({width:22,padding:"7px 4px"}, canAssignRow(enq) ? h("input",{type:"checkbox",checked:!!sel[enq.id],onClick:ev=>ev.stopPropagation(),onChange:ev=>{ const v=ev.target.checked; setSel(o=>{ const n={...o}; if(v) n[enq.id]=true; else delete n[enq.id]; return n; }); }}) : null) : null,
-            td({fontWeight:600,whiteSpace:"nowrap"},enq.enquiry_number,h("div",{style:{fontSize:11,fontWeight:400,color:colors.muted}},fmtDMY(enq.enquiry_date))),
+            td({fontWeight:600,whiteSpace:"nowrap"},enq.enquiry_number,h("div",{style:{fontSize:11,fontWeight:400,color:colors.muted}},fmtDMY(enq.enquiry_date)),savedBadge("enq:"+enq.id)),   // 185e
             td(null,enq.company_name,enq.customer_ref?h("div",{style:{fontSize:11,color:colors.muted}},enq.customer_ref):null),
             td({maxWidth:240},enq.subject||enq.details||"—",enq.folder_link?h("div",null,h("a",{href:enq.folder_link,target:"_blank",rel:"noopener noreferrer",onClick:ev=>ev.stopPropagation(),style:{fontSize:11}},"folder ↗")):null),
             td({whiteSpace:"nowrap"},qn||"—",enq.__quote?h("div",{style:{fontSize:11,color:colors.muted}},enq.__quote.quote_status||"Draft"):qn?h("div",{style:{fontSize:11,color:colors.mutedLight}},"not started"):null),
@@ -40237,7 +40731,7 @@ function EnquiriesListScreen({ user, onGoToTab, onOpenQuote, onCreateQuoteFromEn
           h("button",{onClick:()=>setAsg(null),disabled:asgBusy,style:btnSecondary},"Cancel"),
           h("button",{onClick:doAssign,disabled:asgBusy,style:btnPrimary},asgBusy?"Assigning\u2026":"Assign")))),
     showLog && h(LogEnquiryModal,{user,allocation:null,pkg:null,project:null,onCancel:()=>setShowLog(false),
-      onSaved:(r)=>{ setShowLog(false); load(); if(r) alert("Enquiry "+r.enquiryNumber+" logged with Quote# "+r.quoteNo+".\n\nIts card is waiting in the "+ENQUIRY_DEPT+" Unassigned pile (Tasks) for the daily review."); }})
+      onSaved:(r)=>{ setShowLog(false); load(); if(r){ appToast("✓ Enquiry "+r.enquiryNumber+" logged — Quote# "+r.quoteNo+" · card in the "+ENQUIRY_DEPT+" Unassigned pile"); savedMark("enq:"+r.enquiryId); } }})   // 185e
   );
 }
 
@@ -42751,7 +43245,7 @@ function OverdueCallsReport(){
         const co = coByName.get(a.company_name);
         const daysOverdue = Math.floor((Date.now()-new Date(a.next_followup_date).getTime())/86400000);
         const regTabs = co && REG.tabs.length ? regAnyTabsFor(co.billing_country, co.billing_state).map(t=>t.tab_name) : [];
-        return { ...a, owner:co?co.owner_employee_name:"", zone:co?co.zone:"", daysOverdue, regTabs };
+        return { ...a, owner:co?co.owner_employee_name:"", zone:co?co.zone:"", daysOverdue, regTabs, regOwners: co && regRegionsOn() ? regAddrPeople(co.billing_country, co.billing_state) : null };   // 185h
       })
       .sort((a,b)=>b.daysOverdue-a.daysOverdue);
     setOwners(Array.from(new Set(out.map(r=>r.owner).filter(Boolean))).sort());
@@ -42761,7 +43255,7 @@ function OverdueCallsReport(){
   },[]);
   useEffect(()=>{ load(); },[load]);
 
-  const filtered = rows.filter(r=>(!fOwner||r.owner===fOwner||(r.regTabs||[]).some(t=>regPeople(t).includes(fOwner))) && (!fZone||r.zone===fZone) && (!fTab||(r.regTabs||[]).includes(fTab)));
+  const filtered = rows.filter(r=>(!fOwner||r.owner===fOwner||(r.regOwners ? r.regOwners.includes(fOwner) : (r.regTabs||[]).some(t=>regPeople(t).includes(fOwner)))) && (!fZone||r.zone===fZone) && (!fTab||(r.regTabs||[]).includes(fTab)));
   const pageRows = filtered.slice(page*pageSize,(page+1)*pageSize);
   const oldestDays = filtered.length ? Math.max(...filtered.map(r=>r.daysOverdue)) : 0;
   const ownersAffected = new Set(filtered.map(r=>r.owner).filter(Boolean)).size;
@@ -48891,6 +49385,7 @@ function App() {
       onStartQuote:(ref,enquiryId,prefillCustomerName)=>{ setPendingNewSlNo({reference_number:ref,item_sl_no:1,linked_enquiry_id:enquiryId,prefillCustomerName}); setTab("estimator"); },
       onOpenCard:(taskId,enqId)=>{ setEnqNav({enqId,taskId}); setTab("task_board"); } }):
     tab==="register_people"?h(RegisterTabsPeopleScreen,{user,onGoToTab:setTab}):
+    tab==="region_people"?h(SalesRegionsPeopleScreen,{user,onGoToTab:setTab}):   // 185h
     tab==="enquiries_list"?h(EnquiriesListScreen,{user,onGoToTab:setTab,
       initialOpenId: enqNav&&enqNav.back ? enqNav.enqId : null, onConsumedNav:()=>setEnqNav(null),
       onOpenCard:(taskId,enqId)=>{ setEnqNav({enqId,taskId}); setTab("task_board"); },
@@ -50370,13 +50865,20 @@ function taskMentions(text, emps){
 // One reminder a day per person, in the bell: their overdue / due today / urgent / waiting-on-them cards; a board's
 // approver also gets the overdue count per person on that board.
 // 185c: whoever raised a card hears when it is completed (not when they completed it themselves or hold it)
-async function taskTellCreator(t, by){
+// 185g: how a completed card was closed, read from approved_by: "holder" (no approval) or "pile" (closed unassigned)
+const TASK_CLOSED_HOLDER = " (closed by holder, no approval)", TASK_CLOSED_PILE = " (closed unassigned)";
+const taskClosedKind = (t)=>{ const a = String((t&&t.approved_by)||""); return a.endsWith(TASK_CLOSED_HOLDER) ? "holder" : a.endsWith(TASK_CLOSED_PILE) ? "pile" : ""; };
+const taskClosedBy = (t)=> String((t&&t.approved_by)||"").replace(TASK_CLOSED_HOLDER,"").replace(TASK_CLOSED_PILE,"");
+async function taskTellCreator(t, by, patch){
   try{
     let who = String(t.created_by||"").trim(); if(!who || /^(app|legacy|system)/i.test(who)) return;
     const { data: u } = await sb.from("app_users").select("employee_name").eq("username",who).maybeSingle();
     if(u && u.employee_name) who = u.employee_name;
     if(!who || who===by || who===t.assignee) return;
-    await notifyRows([{ employee_name:who, message:"✓ "+(t.assignee||by||"Someone")+" completed: "+(t.title||"a task")+(by && by!==t.assignee ? " (approved by "+by+")" : ""), kind:"task_done" }]);
+    const k = taskClosedKind(patch||{});
+    const msg = k==="pile" ? "✓ Closed at the review by "+(by||"someone")+": "+(t.title||"a task")
+      : "✓ "+(t.assignee||by||"Someone")+" completed: "+(t.title||"a task")+(k==="holder" ? " (no approval)" : by && by!==t.assignee ? " (approved by "+by+")" : "");
+    await notifyRows([{ employee_name:who, message:msg, kind:"task_done" }]);
   }catch(e){ console.warn("Tell creator", e); }
 }
 async function taskDailyDigest(name){
@@ -50492,7 +50994,7 @@ const addDaysISO = (iso, n)=>{ const x=new Date(String(iso).slice(0,10)+"T12:00:
 async function taskSyncEnquiry(t, patch, by){
   if(!t || !t.enquiry_id || !patch) return;
   try{
-    const { data: e } = await sb.from("enquiry_tbl").select("id,status").eq("id",t.enquiry_id).maybeSingle();
+    const { data: e } = await sb.from("enquiry_tbl").select("id,status,regret_reason").eq("id",t.enquiry_id).maybeSingle();
     if(!e) return;
     const eu = {};
     const nextAssignee = ("assignee" in patch) ? patch.assignee : t.assignee;
@@ -50502,8 +51004,48 @@ async function taskSyncEnquiry(t, patch, by){
       if(patch.status==="done") eu.status = "Regretted";
       else if(patch.status==="open") eu.status = nextAssignee ? "Assigned" : "Unassigned";
     } else if(enqIsOpen(e) && "assigned_to" in eu){ eu.status = patch.assignee ? "Assigned" : "Unassigned"; }
-    if(Object.keys(eu).length){ const { error } = await sb.from("enquiry_tbl").update(eu).eq("id",e.id); if(error) console.error("Enquiry not updated from its card", error); }
+    if(Object.keys(eu).length){ const { error } = await sb.from("enquiry_tbl").update(eu).eq("id",e.id); if(error) console.error("Enquiry not updated from its card", error);
+      // 185e: a regret approved -> its Quote Register line is struck out (Regret) with the enquiry's reason
+      if(!error && eu.status==="Regretted"){ try{ await sb.from("register_line_tbl").update({ struck_kind:"regret", struck_reason:"Enquiry regretted"+(e.regret_reason?" \u00b7 "+e.regret_reason:""), struck_by:by||"App", struck_at:new Date().toISOString() }).eq("enquiry_id",e.id).is("struck_kind",null); }catch(x){ console.warn("Register line not struck", x); } } }
   }catch(err){ console.error("Enquiry not updated from its card", err); }
+}
+// 185f: an enquiry edited (one form everywhere) -> its card follows: title, folder link, customer;
+// details go into the card notes unless the holder has already written there, then as a dated note.
+// Stage, holder, due date and checklist are never touched. The holder gets a bell line.
+async function enqCardSync(e, np, changes, by){
+  const out = { card:null, noted:false };
+  if(!e) return out;
+  const nrm = (x)=> String(x||"").replace(/\r/g,"").trim();
+  try{
+    let card = null;
+    if(e.task_id){ const { data } = await sb.from("task_tbl").select("*").eq("id",e.task_id).maybeSingle(); card = data||null; }
+    if(!card){ const { data } = await sb.from("task_tbl").select("*").eq("enquiry_id",e.id).limit(1); card = (data&&data[0])||null; }
+    if(!card) return out;
+    out.card = card;
+    const cp = {}; let note = null;
+    if(np.subject!==undefined && nrm(np.subject) && nrm(np.subject)!==nrm(card.title)) cp.title = nrm(np.subject);
+    if(np.folder_link!==undefined && nrm(np.folder_link)!==nrm(e.folder_link)){
+      const links = (card.links||[]).filter(l=>l.name!=="Enquiry folder");
+      cp.links = nrm(np.folder_link) ? [{ name:"Enquiry folder", url:nrm(np.folder_link) }, ...links] : links;
+    }
+    if(np.company_name!==undefined && nrm(np.company_name) && nrm(np.company_name)!==nrm(card.customer)) cp.customer = nrm(np.company_name);
+    if(np.details!==undefined && nrm(np.details)!==nrm(e.details)){
+      if(!nrm(card.notes) || nrm(card.notes)===nrm(e.details)) cp.notes = nrm(np.details) || null;
+      else note = "📝 Enquiry details updated "+fmtDMY(toISODate(new Date()))+" by "+(by||"")+":\n"+(nrm(np.details)||"(details cleared)");
+    }
+    if(Object.keys(cp).length){ const { error } = await sb.from("task_tbl").update(cp).eq("id",card.id); if(error) console.error("Card not updated from its enquiry", error); }
+    if(note){
+      out.noted = true;
+      const { error } = await sb.from("task_comment_tbl").insert({ task_id:card.id, by_name:by||"App", body:note, mentions:[] });
+      if(error){ await sb.from("task_tbl").update({ notes:(card.notes||"")+"\n\n"+note }).eq("id",card.id); }   // comments table not there: dated note at the end of the notes
+    }
+    const what = "Enquiry edited"+(changes&&changes.length?" ("+changes.join(", ")+")":"")+(note?" — new details added as a dated note":"");
+    await taskLog(card.id, by||"App", what);
+    const holder = taskIsPile(card) ? null : card.assignee;
+    if(holder && holder!==by && changes && changes.length)
+      await notifyRows([{ employee_name:holder, message:"✎ "+(by||"Someone")+" edited "+(e.enquiry_number||"the enquiry")+(e.linked_reference_number?" · "+e.linked_reference_number:"")+": "+changes.join(", ")+" (card “"+(cp.title||card.title)+"”)", kind:"enquiry" }]);
+  }catch(err){ console.error("Card not updated from its enquiry", err); }
+  return out;
 }
 // Called whenever a quote leaves Draft (updateQuoteStatusForQuote) and, as a safety
 // net, when the Task board loads. Safe to call more than once.
@@ -52824,6 +53366,9 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
   const [dueOk,setDueOk] = useState(null);
   const [cardAct,setCardAct] = useState(null);   // { kind:"move"|"copy", t, dept, to, due, why, title, people:{}, chk, sub, lnk, busy }
   const [docDone,setDocDone] = useState(null);   // 175: { t, date, link, what, busy } — ✓ Completed on a document card
+  const [cmpAsk,setCmpAsk] = useState(null);     // 185g: {t, left} — the holder picks Completed or Send for approval
+  const [pileClose,setPileClose] = useState(null);   // 185g: {t} — enquiry card closed from the pile: Regret / Ignored / Others
+  const [pileDoneTab,setPileDoneTab] = useState("today");   // 185g
   const [docLab,setDocLab] = useState({});       // 176: document id -> status label for document task cards
   // 151: All boards — every department's board as a band; folded / open and the band order are kept per person in this browser
   const [abOpen,setAbOpen] = useState(()=>{ try{ return JSON.parse(localStorage.getItem("ab_open")||"null"); }catch(e){ return null; } });
@@ -53015,9 +53560,10 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     if(error && /wait_on|wait_what|urgent|repeat_/.test(error.message||"")){ alert("This needs structure_tasks_handover_2026-10-12.sql (both companies) to be run first."); return false; }   // 178
     if(error){ alert("Could not move the task:\n\n"+error.message); return false; }
     await taskLog(t.id, me, what);
-    if(patch.status==="done" && t.status!=="done") await taskTellCreator(t, me);   // 185c
+    if(patch.status==="done" && t.status!=="done") await taskTellCreator(t, me, patch);   // 185c / 185g
     await taskSyncEnquiry(t, patch, me);   // 123: hand-out / re-plan / regret decision reach the enquiry
     setTasks(ts=>ts.map(x=>x.id===t.id?{...x,...patch,...stamp}:x));
+    savedMark("task:"+t.id); appToast("✓ "+(t.title||"Task")+" — "+String(what||"saved").replace(/\s*\(.*\)$/,""));   // 185e
     if(t.proc_plan_id){ await pgTaskChanged({...t,...patch}, t, me); load(false); }   // 139: procurement card -> Gantt
     if(t.enquiry_id) load(false);
     return true;
@@ -53184,7 +53730,8 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     return h("div",{onClick:ev=>ev.stopPropagation(),style:{display:"flex",gap:5,flexWrap:"wrap",borderTop:small?"none":"1px dashed "+colors.border,marginTop:small?0:6,paddingTop:small?0:6,cursor:"default"}},
       appr ? (canApprove(t) ? gb(small?"\u2713":"\u2713 Approve",()=>approveCard(t),"Approve: the card is completed") : null)
            : (t.doc_id || t.doc_request_id) && !t.chase_letter_id ? docSendBtn(t, small, noMove)   // 178: document cards say what the button does
-           : gb(small?"\u2713":"\u2713 Completed",()=>completeCard(t), canApprove(t)?"Complete the card (you approve it)":"Send the card for approval", noMove),   // 175
+           : (taskIsPile(t) && !t.parent_id) ? gb(small?"\u2713":"\u2713 Close",()=>closePileCard(t), "Close this card without assigning it (it goes to Closed without assignment)", mayClosePile(t) ? null : "Only the board's approver or an Admin closes cards in the Unassigned pile.")   // 185g
+           : gb(small?"\u2713":"\u2713 Completed",()=>completeCard(t), canApprove(t)?"Complete the card (you approve it)":"Completed, or send for approval", noMove),   // 175
       appr && canApprove(t) ? b("\u21a9","Send back",()=>sendBackCard(t),"Send it back to "+taskWho(t)+" with a reason",null) : null,
       b("\ud83d\udcc5","Due",()=>setDueEd(t.id),"Change the due date",noDue),
       b("\u21c4","Move",()=>openCardMove(t),"Move to another person, pile or department",noMove),
@@ -53198,12 +53745,74 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
       setDocDone({ t, date:today, link:"", what:"", busy:false }); return; }
     const left = openItems(t);
     const self = canApprove(t);
-    if(!confirm("“"+t.title+"”\n\n"+(left?left+" checklist item"+(left===1?" is":"s are")+" still open; they will be ticked.\n\n":"")+(self?"Complete the card now? It counts in Tasks Completed.":"Send it for approval to "+(approversFor(t).join(" / ")||"an Admin")+"?"))) return;
+    if(!self){ setCmpAsk({ t, left }); return; }   // 185g: the holder picks: Completed (no approval) or Send for approval
+    if(!confirm("“"+t.title+"”\n\n"+(left?left+" checklist item"+(left===1?" is":"s are")+" still open; they will be ticked.\n\n":"")+"Complete the card now? It counts in Tasks Completed.")) return;
     const now = new Date().toISOString();
     const chk = left && (t.checklists||[]).length ? { checklists:(t.checklists||[]).map(c=>({ ...c, items:tickAll(c.items) })) } : {};
     const from = taskStageLabel(taskStage(t,today));
     if(self) await move(t,{ status:"done", approved_by:me, approved_at:now, sent_at:t.sent_at||now, ...chk }, from+" → Completed (✓ Completed on the card, approved)");
     else await move(t,{ status:"approval", sent_at:now, ...chk }, from+" → Under Approval (✓ Completed on the card)");
+  };
+  // 185g: the holder's choice, and closing a card straight from the Unassigned pile
+  const holderFinish = async(t, how)=>{
+    setCmpAsk(null);
+    const now = new Date().toISOString(); const left = openItems(t);
+    const chk = left && (t.checklists||[]).length ? { checklists:(t.checklists||[]).map(c=>({ ...c, items:tickAll(c.items) })) } : {};
+    const from = taskStageLabel(taskStage(t,today));
+    if(how==="done") await move(t,{ status:"done", approved_by:me+TASK_CLOSED_HOLDER, approved_at:now, sent_at:t.sent_at||now, ...chk }, from+" → Completed by "+me+" (no approval)");
+    else await move(t,{ status:"approval", sent_at:now, ...chk }, from+" → Under Approval (✓ Completed on the card)");
+  };
+  const mayClosePile = (t)=> !!(isAdmin || canApprove(t));
+  const closePileCard = async(t, kind)=>{
+    if(t.enquiry_id && !kind){ setPileClose({ t }); return; }
+    setPileClose(null);
+    const now = new Date().toISOString();
+    if(t.enquiry_id){
+      const word = { regret:"Regret", ignored:"Ignored", other:"Others" }[kind] || "Others";
+      const { data: en } = await sb.from("enquiry_tbl").select("id,status,linked_reference_number").eq("id",t.enquiry_id).maybeSingle();
+      if(en && enqIsOpen(en)){
+        const { error } = await sb.from("enquiry_tbl").update({ status:"Regretted", regret_reason:word+" \u2014 closed at the review by "+me }).eq("id",en.id);
+        if(error){ alert("The enquiry could not be closed:\n\n"+error.message); return; }
+        try{ await sb.from("register_line_tbl").update({ struck_kind:kind, struck_reason:word+" \u2014 enquiry card closed at the review", struck_by:me, struck_at:now }).eq("enquiry_id",en.id).is("struck_kind",null); }catch(x){ console.warn("Register line not struck", x); }
+        await logAudit("UPDATE","enquiry_tbl",String(en.id),"Enquiry closed from the Unassigned pile: "+word,me,null,{status:"Regretted"});
+      }
+      await move(t,{ status:"done", approved_by:me+TASK_CLOSED_PILE, approved_at:now, sent_at:now }, "Unassigned → Closed at the review ("+word+")");
+    } else {
+      await move(t,{ status:"done", approved_by:me+TASK_CLOSED_PILE, approved_at:now, sent_at:now }, "Unassigned → Closed at the review, not assigned");
+    }
+  };
+  const reopenPileCard = async(t)=>{
+    if(t.enquiry_id){   // the enquiry and its register line reopen too, if they were closed here
+      const { data: en } = await sb.from("enquiry_tbl").select("id,status,regret_reason").eq("id",t.enquiry_id).maybeSingle();
+      if(en && en.status==="Regretted" && /closed at the review/.test(en.regret_reason||"")){
+        await sb.from("enquiry_tbl").update({ status:"Unassigned", regret_reason:null }).eq("id",en.id);
+        try{ await sb.from("register_line_tbl").update({ struck_kind:null, struck_reason:null, struck_by:null, struck_at:null }).eq("enquiry_id",en.id).like("struck_reason","%closed at the review%"); }catch(x){}
+      }
+    }
+    await move(t,{ status:"open", approved_by:null, approved_at:null, sent_at:null }, "Closed without assignment → back to the Unassigned pile");
+  };
+  const closedChip = (t)=>{ if(t.status!=="done") return null; const k = taskClosedKind(t); if(!k) return null;
+    return h("span",{"data-closed":k,title:(k==="pile"?"Closed at the review without assignment by ":"Completed by the holder without approval: ")+taskClosedBy(t),
+      style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#eef0ea",color:"#4f5a4a",marginBottom:3,marginRight:4}}, k==="pile" ? "closed unassigned" : "closed by holder"); };
+  const cmpModal = ()=>{
+    const a = cmpAsk; const pc = pileClose;
+    const opt = (key, ttl, sub, on, primary)=> h("button",{key, "data-t":key, onClick:on,style:{textAlign:"left",border:"1px solid "+(primary?"#0f7a5c":colors.border),background:primary?"#f1faf5":"#fff",borderRadius:8,padding:"10px 12px",cursor:"pointer",font:"inherit"}},
+      h("b",{style:{display:"block",fontSize:13}},ttl),h("span",{style:{fontSize:12,color:colors.muted}},sub));
+    const shell = (title, kids, onX)=> h("div",{onClick:ev=>{ if(ev.target===ev.currentTarget) onX(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.35)",zIndex:1300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
+      h("div",{style:{background:"#fff",borderRadius:9,padding:"16px 18px",width:420,maxWidth:"100%"}},
+        h("div",{style:{fontWeight:700,fontSize:14,marginBottom:10}},title),
+        h("div",{style:{display:"flex",flexDirection:"column",gap:8}},...kids),
+        h("div",{style:{textAlign:"right",marginTop:10}},h("button",{onClick:onX,style:btnSmall},"Cancel"))));
+    if(a) return shell("\u2713 Completed \u2014 \u201c"+a.t.title+"\u201d", [
+        opt("cmp-done","\u2713 Completed","Done; no approval needed. Goes straight to Completed.",()=>holderFinish(a.t,"done"),true),
+        opt("cmp-appr","\u279c Send for approval","Goes to Under Approval for "+(approversFor(a.t).join(" / ")||"an Admin")+" to approve or send back.",()=>holderFinish(a.t,"approval"),false),
+        a.left ? h("div",{key:"l",style:{fontSize:11.5,color:colors.muted}},a.left+" checklist item"+(a.left===1?" is":"s are")+" still open \u2014 they will be ticked.") : null], ()=>setCmpAsk(null));
+    if(pc) return shell("\u2713 Close \u2014 "+((enqOf(pc.t)||{}).enquiry_number||pc.t.title), [
+        h("div",{key:"n",style:{fontSize:12,color:colors.muted}},"The enquiry closes and its Quote Register line is struck out with this word. No approval."),
+        opt("pc-regret","\u2716 Regret","We won't quote.",()=>closePileCard(pc.t,"regret"),false),
+        opt("pc-ignored","\u2298 Ignored","Not a real enquiry (duplicate, info only).",()=>closePileCard(pc.t,"ignored"),false),
+        opt("pc-other","Others","Closed for another reason.",()=>closePileCard(pc.t,"other"),false)], ()=>setPileClose(null));
+    return null;
   };
   const approveCard = async(t)=>{ const now = new Date().toISOString(); await move(t,{ status:"done", approved_by:me, approved_at:now, sent_at:t.sent_at||now }, "Under Approval → Completed (approved on the card)"); };
   const sendBackCard = async(t)=>{ const why = prompt("Why is “"+t.title+"” sent back to "+taskWho(t)+"?"); if(why===null) return; if(!why.trim()){ alert("Say what needs fixing."); return; } await move(t,{ status:"open", sent_at:null }, "Under Approval → sent back: "+why.trim()); };
@@ -53348,10 +53957,12 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
                   : [h("b",{key:"c",style:{flex:1,minWidth:0,fontSize:12.5}},(st==="done"?"✓ ":"")+t.title), tCt ? h("span",{key:"ct",style:{fontSize:11,whiteSpace:"nowrap",color:colors.muted}},ctClientTag(tCt, ctClientOf(tCt)||t.customer)) : null];   // 178
     const line2 = e ? (e.enquiry_number+" · "+fmtDMY(e.enquiry_date)) : [t.task_type, tCt?null:t.customer, t.ref].filter(Boolean).join(" · ") || (t.created_at?"created "+fmtDMY(t.created_at):"");
     const dueTxt = (st!=="done" && t.start_date ? "starts "+fmtDMY(t.start_date)+" · " : "")+(st==="done" ? "✓ completed "+(t.approved_at?fmtDMY(t.approved_at):"") : t.due_date ? "Task due "+fmtDMY(t.due_date)+(od?" · "+over+" day"+(over===1?"":"s")+" over":"") : "No task due date");   // 139: start date
-    return h("div",{key:t.id, draggable:true, onDragStart:ev=>ev.dataTransfer.setData("text/plain",String(t.id)), onClick:()=>setOpenId(t.id),
+    return h("div",{key:t.id, "data-savedkey":"task:"+t.id, draggable:true, onDragStart:ev=>ev.dataTransfer.setData("text/plain",String(t.id)), onClick:()=>setOpenId(t.id),
         style:{background:"#fff",border:"1px solid "+colors.border,borderLeft:edge,borderRadius:7,padding:"7px 9px",marginBottom:7,cursor:"grab",opacity:st==="done"?0.8:1,overflow:"hidden"}},
       t.doc_id && st!=="done" ? docLabelStrip(docLab[String(t.doc_id)], "dl") : null,   // 176
       (()=>{ const sm = taskSourceMeta(taskSource(t)); return h("span",{title:"From: "+sm[1],style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:sm[2],color:sm[3],marginBottom:3,marginRight:4}},sm[1]); })(),   // 130
+      savedBadge("task:"+t.id),   // 185e
+      closedChip(t),   // 185g
       sharedChip(t),   // 150
       urgentChip(t), t.repeat_rule&&t.repeat_rule.every || t.repeat_of ? h("span",{title:t.repeat_rule&&t.repeat_rule.every?taskRepeatLabel(t.repeat_rule):"Part of a repeating card",style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#e8f3f0",color:"#0f6b4f",marginBottom:3,marginRight:4}},"\u21bb") : null,   // 178
       comments[t.id] ? h("span",{title:comments[t.id]+" comment"+(comments[t.id]===1?"":"s"),style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#f1efe8",color:colors.muted,marginBottom:3,marginRight:4}},"\ud83d\udcac "+comments[t.id]) : null,
@@ -53821,7 +54432,22 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
             h("span",null,"Shared with "+dept,h("div",{style:{fontWeight:400,fontSize:10.5,color:colors.muted}},"held by people on other boards")),
             h("span",{style:{marginLeft:"auto",fontWeight:400,fontSize:11,background:"#fff",borderRadius:9,padding:"1px 8px",color:colors.muted}},shList.length)),
           listBar("sh:"+dept, shList, "Shared with "+dept, false),
-          listBody(shList.map(t=>h("div",{key:t.id},h("div",{style:{fontSize:10.5,color:"#5b3a99",fontWeight:700,margin:"0 0 2px 2px"}},taskWho(t)),card(t))))) : null));
+          listBody(shList.map(t=>h("div",{key:t.id},h("div",{style:{fontSize:10.5,color:"#5b3a99",fontWeight:700,margin:"0 0 2px 2px"}},taskWho(t)),card(t))))) : null,
+        // 185g: cards closed straight from the Unassigned pile
+        (()=>{ const all = tasks.filter(t=>t.status==="done" && taskIsPile(t) && !t.parent_id && onBoard(t,dept) && passes(t));
+          const bk = (t)=> taskDoneBucket(t,today);
+          const inTab = { today:t=>bk(t)==="d_today", week:t=>["d_today","d_week"].includes(bk(t)), month:t=>["d_today","d_week","d_month"].includes(bk(t)) };
+          const tab = inTab[pileDoneTab] ? pileDoneTab : "today";
+          const list = sortList("pdone:"+dept, all.filter(inTab[tab]));
+          return h("div",{key:"__pdone","data-t":"pile-done",style:{minWidth:250,width:250,flexShrink:0,background:"#eceae4",borderRadius:8,padding:8,minHeight:240,display:"flex",flexDirection:"column"}},
+            h("div",{style:{display:"flex",alignItems:"center",gap:7,fontWeight:700,fontSize:12.5,marginBottom:6}},
+              h("span",null,"Closed without assignment",h("div",{style:{fontWeight:400,fontSize:10.5,color:colors.muted}},"closed from the Unassigned pile")),
+              h("span",{style:{marginLeft:"auto",fontWeight:400,fontSize:11,background:"#fff",borderRadius:9,padding:"1px 8px",color:colors.muted}},list.length)),
+            h("div",{style:{display:"flex",flexWrap:"wrap",gap:3,marginBottom:6}}, [["today","Today"],["week","Week"],["month","Month"]].map(([k,l])=>
+              h("button",{key:k,"data-pdtab":k,onClick:()=>setPileDoneTab(k),style:{fontSize:10.5,padding:"2px 7px",borderRadius:5,cursor:"pointer",border:"1px solid "+(k===tab?"#5f625a":"#d5d3cb"),background:k===tab?"#5f625a":"#fff",color:k===tab?"#fff":"#5f625a"}},l+" "+all.filter(inTab[k]).length))),
+            listBody(list.length ? list.map(t=>h("div",{key:"pd"+t.id},card(t),
+                mayClosePile(t) ? h("div",{style:{textAlign:"right",margin:"-4px 0 6px"}},h("button",{"data-t":"pile-reopen",onClick:ev=>{ ev.stopPropagation(); reopenPileCard(t); },title:"Put it back in the Unassigned pile (logged)",style:{...btnSmall,fontSize:10.5,padding:"1px 7px"}},"\u21ba Reopen")) : null))
+              : h("div",{style:{fontSize:11.5,color:colors.mutedLight,textAlign:"center",padding:"14px 4px"}},"Nothing closed"))); })()));
   };
 
   // ---------- 151: ALL BOARDS — every department's Task Assignment Board as a band, cards movable across lists and departments ----------
@@ -54021,7 +54647,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     openId!==null && h(TaskDetailModal,{ key:String(openId)+(openId==="new"&&newWho?"|"+newWho:""), taskId:openId, tasks, emps, labels, me, who:(openId==="new" && newWho ? (newWho===TASK_PILE?null:newWho) : (mode==="assign"?null:who)), today,
       defaultDept:(mode==="assign"?dept:deptOf(who)), deptOf, boards:deptMaster,
       canApprove, canEdit, approversFor, labelColor, move,
-      enqOf, quoteMade, onStartQuote, onOpenQuote, taskTypes, isAdmin, onGoToTab, onOpenGantt,
+      enqOf, quoteMade, onStartQuote, onOpenQuote, taskTypes, isAdmin, onGoToTab, onOpenGantt, user, onEnqChanged:()=>load(),   // 185f
       onCommented:(id)=>setComments(c=>({...c,[id]:(c[id]||0)+1})),   // 178
       onClose:()=>{ setOpenId(null); setNewWho(null); }, onOpen:(id)=>{ setNewWho(null); setOpenId(id); },
       onChanged:(row, remove)=>{ setTasks(ts=> remove ? ts.filter(x=>x.id!==row.id) : ts.some(x=>x.id===row.id) ? ts.map(x=>x.id===row.id?row:x) : [...ts,row]); if(row && row.proc_plan_id && !remove) load(); } }),   // 139: a procurement card change can move its siblings
@@ -54045,6 +54671,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     doneListModal(),
     cardActModal(),   // 154
     docDoneModal(),   // 175
+    cmpModal(),   // 185g
     xferModal(),   // 145
     dateAsk && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center"}},
       h("div",{style:{background:"#fff",borderRadius:8,padding:"18px 20px",width:360}},
@@ -54591,7 +55218,7 @@ function ProcItemsPanel({ task, me, onChanged }){
           style:{...inputStyle,padding:"2px 6px",fontSize:11.5,width:140}})
         : h("span",{style:{fontSize:10.5,fontWeight:700,color:"#a3312a",background:"#fdecea",borderRadius:9,padding:"1px 8px",justifySelf:"start"}},"pending"))));
 }
-function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultDept, deptOf, canApprove, canEdit, approversFor, labelColor, move, onClose, onOpen, onChanged, enqOf, quoteMade, onStartQuote, onOpenQuote, taskTypes, isAdmin, onGoToTab, onOpenGantt, boards, onCommented }){
+function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultDept, deptOf, canApprove, canEdit, approversFor, labelColor, move, onClose, onOpen, onChanged, enqOf, quoteMade, onStartQuote, onOpenQuote, taskTypes, isAdmin, onGoToTab, onOpenGantt, boards, onCommented, user, onEnqChanged }){
   const isNew = taskId==="new";
   const saved = isNew ? null : tasks.find(t=>t.id===taskId);
   const blank = { title:"", assignee:who||"", department:(isInterDept(defaultDept)?"":(defaultDept||"")), due_date:"", status:"open", labels:[], links:[], checklists:[], parent_id:null, ref:"", customer:"", notes:"", task_type:"", also_departments:[] };
@@ -54614,13 +55241,34 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
   useEffect(()=>{ if(!isNew) sb.from("task_history_tbl").select("*").eq("task_id",taskId).order("at",{ascending:false}).then(({data})=>setHist(data||[])); },[taskId]);
   const enq = (!isNew && saved && enqOf) ? enqOf(saved) : null;   // 123: enquiry card
   const [enqItems,setEnqItems] = useState([]);
-  useEffect(()=>{ if(enq && enq.id) sb.from("enquiry_item_tbl").select("item,qty").eq("enquiry_id",enq.id).then(({data})=>setEnqItems(data||[])); },[enq && enq.id]);
+  const [enqItemsTick,setEnqItemsTick] = useState(0);
+  useEffect(()=>{ if(enq && enq.id) sb.from("enquiry_item_tbl").select("item,qty").eq("enquiry_id",enq.id).then(({data})=>setEnqItems(data||[])); },[enq && enq.id, enqItemsTick]);
+  // 185f: the enquiry on the card - asks View or Edit; both use the enquiry form
+  const [enqPick,setEnqPick] = useState(false);
+  const [enqForm,setEnqForm] = useState(null);   // {row, ro}
+  const mayEditEnqHere = !!(enq && (isAdmin || (me && (enq.assigned_to===me || (saved && saved.assignee===me) || enq.created_by===me))));
+  const openEnqForm = async(ro)=>{
+    setEnqPick(false);
+    if(!ro && dirty){ alert("Save or discard your changes on this card first \u2014 editing the enquiry updates the card."); return; }
+    const { data } = await sb.from("enquiry_tbl").select("*").eq("id",enq.id).maybeSingle();
+    setEnqForm({ row:data||enq, ro:!!ro });
+  };
+  const afterEnqSaved = async()=>{
+    setEnqForm(null);
+    const { data: fresh } = await sb.from("task_tbl").select("*").eq("id",saved.id).maybeSingle();
+    if(fresh){ setD(x=>({ ...x, title:fresh.title, notes:fresh.notes, links:fresh.links||[], customer:fresh.customer })); setDirty(false); onChanged && onChanged(fresh); }
+    sb.from("task_comment_tbl").select("*").eq("task_id",saved.id).order("at",{ascending:true}).then(({data})=>{ if(data) setCms(data); });
+    sb.from("task_history_tbl").select("*").eq("task_id",saved.id).order("at",{ascending:false}).then(({data})=>setHist(data||[]));
+    setEnqItemsTick(n=>n+1);
+    onEnqChanged && onEnqChanged();
+  };
   if(!isNew && !saved) return null;
   const st = saved ? taskStage(saved,today) : "assigned";
   const editable = isNew || canEdit(saved);
   const par = d.parent_id ? tasks.find(t=>t.id===d.parent_id) : null;
   const subs = isNew ? [] : tasks.filter(t=>t.parent_id===saved.id);
-  const close = ()=>{ if(dirty && !confirm("You have changes that are not saved.\n\nOK = close without saving\nCancel = go back")) return; onClose(); };
+  const [askClose,setAskClose] = useState(false);   // 185e: Save and close / Discard / Keep editing
+  const close = ()=>{ if(dirty){ setAskClose(true); return; } onClose(); };
 
   const save = async()=>{
     if(!d.title.trim()){ alert("Give the task a title."); return; }
@@ -54654,7 +55302,9 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
       setBusy(false);
       if(error){ alert("Could not save the task:\n\n"+error.message); return; }
       await taskLog(data.id, me, "Created "+(data.assignee?"on "+data.assignee+"'s board":"in the "+(data.department||"")+" Unassigned pile")+(data.due_date?", due "+fmtDMY(data.due_date):""));
-      onChanged(data); setDirty(false); onOpen(data.id); return;
+      savedMark("task:"+data.id);
+      appToast("✓ Task added — "+(data.assignee?"on "+data.assignee+"'s board":"in the "+(data.department||"")+" Unassigned pile")+(data.due_date?", due "+fmtDMY(data.due_date):""));   // 185e
+      onChanged(data); setDirty(false); onClose(); return;
     }
     const changes = [];
     if((taskIsPile(saved)?null:saved.assignee)!==row.assignee) changes.push("reassigned "+taskWho(saved)+" → "+(row.assignee||(department+" Unassigned pile")));
@@ -54673,6 +55323,7 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
     await taskLog(saved.id, me, changes.length ? changes.join("; ") : "Edited");
     if(changes.length) await taskSyncEnquiry(saved, { assignee:row.assignee, due_date:row.due_date }, me);   // 123
     if(saved.proc_plan_id) await pgTaskChanged({...saved,...data}, saved, me);   // 139: procurement card / sub-task -> Gantt (and a reassigned card takes its open sub-tasks)
+    savedMark("task:"+saved.id); appToast("✓ Saved — "+(data&&data.title||saved.title||"task"));   // 185e
     onChanged(data); setDirty(false); onClose();
   };
   const act = async(patch, what)=>{ if(dirty){ alert("Save your changes first."); return; } const ok = await move(saved, patch, what); if(ok) onClose(); };
@@ -54750,7 +55401,8 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
         const kv = (k,v)=> h("div",{style:{fontSize:12,padding:"1px 0"}},h("span",{style:{color:colors.muted}},k+": "),v);
         return h("div",{style:{marginTop:12,border:"1px solid #c9dbe9",background:"#f3f8fc",borderRadius:8,padding:"10px 12px"}},
           h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:6}},
-            h("b",{style:{fontSize:13}},"Enquiry "+enq.enquiry_number), qn ? h("span",{style:{fontSize:12}},"· Quote# ",h("b",null,qn)) : null,
+            h("button",{"data-t":"card-enq",onClick:()=>setEnqPick(true),title:"View or edit the enquiry",style:{border:"none",background:"none",padding:0,cursor:"pointer",font:"inherit",fontWeight:700,fontSize:13,color:"#1f5fa8",textDecoration:"underline"}},"Enquiry "+enq.enquiry_number),   // 185f
+            qn ? h("span",{style:{fontSize:12}},"· Quote# ",h("b",null,qn)) : null,
             h("span",{style:{fontSize:11,fontWeight:700,borderRadius:9,padding:"2px 8px",background:"#fff",color:colors.muted}},enq.status||"—")),
           h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:"2px 16px"}},
             kv("Customer", enq.company_name||"—"), kv("Customer ref", enq.customer_ref||"—"),
@@ -54862,7 +55514,7 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
         h(NoteBox,{value:d.notes||"",disabled:!editable,onChange:v=>set({notes:v}),height:wide?330:200,title:"Note \u2014 "+(d.title||"task")+(enq?" \u00b7 "+enq.enquiry_number:"")}));
   const footer = h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:14}},
         (!isNew && editable) ? h("button",{onClick:del,style:{...btnSmall,color:colors.danger}},"Delete task") : h("span"),
-        editable ? h("button",{onClick:save,disabled:busy,style:btnPrimary},busy?"Saving…":isNew?"Create task":"Save") : h("span",{style:{fontSize:12,color:colors.mutedLight}},"View only — "+taskWho(saved)+", the creator, an approver or an Admin can change it."));
+        editable ? h("button",{onClick:save,disabled:busy,style:btnPrimary},busy?"Saving…":isNew?"Add task":"Save") : h("span",{style:{fontSize:12,color:colors.mutedLight}},"View only — "+taskWho(saved)+", the creator, an approver or an Admin can change it."));
   const histSec = !isNew ? sec("History",null, hist.length ? hist.map(x=>h("div",{key:x.id,style:{fontSize:11.5,color:colors.muted,padding:"2px 0"}},fmtDMYTime(x.at)+" · ",h("b",null,x.by_name||"—")," — "+x.action)) : h("div",{style:{fontSize:11.5,color:colors.mutedLight}},"Nothing yet")) : null;
   return h("div",{onClick:e=>{ if(e.target===e.currentTarget) close(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1100,display:"flex",justifyContent:"center",alignItems:"flex-start",padding:"30px 12px",overflowY:"auto"}},
     h("div",{style:{background:"#fff",borderRadius:9,width:wide?1180:780,maxWidth:"100%",padding:"18px 22px 22px"}},
@@ -54883,7 +55535,7 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
                  h("button",{key:"b",disabled:busy,onClick:()=>{ const why=prompt("Why is it sent back?"); if(!why||!why.trim()) return; act({status:"open",sent_at:null},"Under Approval → sent back: "+why.trim()); },style:btnSmall},"Send back")]
               : h("span",{style:{fontSize:12,color:colors.muted}},"Waiting for "+(ap.length?ap.join(" / "):"an Admin")+" to approve."))
           : st==="done"
-            ? [h("span",{key:"x",style:{fontSize:12,color:"#0f7a5c"}},"Approved by "+(saved.approved_by||"—")+(saved.approved_at?" · "+fmtDMYTime(saved.approved_at):"")),
+            ? [h("span",{key:"x",style:{fontSize:12,color:"#0f7a5c"}},(taskClosedKind(saved)==="holder" ? "Completed by "+taskClosedBy(saved)+" (no approval)" : taskClosedKind(saved)==="pile" ? "Closed without assignment by "+taskClosedBy(saved) : "Approved by "+(saved.approved_by||"—"))+(saved.approved_at?" · "+fmtDMYTime(saved.approved_at):"")),   // 185g
                canApprove(saved)?h("button",{key:"r",onClick:()=>act({status:"open",approved_by:null,approved_at:null,sent_at:null},"Completed → reopened"),style:btnSmall},"Reopen"):null]
             : editable ? [saved.assignee===me && (saved.status==="open" || (enq && enqQn && saved.status==="progress")) ? h("button",{key:"p",disabled:busy,onClick:startTask,title:enq?"Moves the card to In Progress and opens Quote# "+(enqQn||"")+" in the Estimator":(saved.links||[]).length?"Moves the card to In Progress and opens the latest file":"Moves the card to In Progress",style:{...btnSmall,background:"#fff6d5",borderColor:"#c99a06",color:"#7a5c00",fontWeight:700}},"\u25b6 Start Task") : null,   // 135 Build 4
                           saved.wait_reason ? h("button",{key:"w",disabled:busy,onClick:doResume,style:{...btnSmall,borderColor:"#c99a06",color:"#8a5a00",fontWeight:700}},"\u25b6 Resume (customer replied)")
@@ -54891,7 +55543,11 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
                           saved.wait_on ? h("button",{key:"wo",disabled:busy,onClick:doWaitOnDone,style:{...btnSmall,borderColor:"#7c80d0",color:"#3b3f9a",fontWeight:700}},"\u25b6 Got it from "+saved.wait_on)
                                         : h("button",{key:"wo",disabled:busy,onClick:()=>{ if(dirty){ alert("Save your changes first."); return; } setWo({on:"",what:""}); },style:btnSmall,title:"Waiting on a colleague, a supplier or anyone else: the card is not counted as overdue while it waits"},"\u23f3 Waiting on someone"),   // 178
                           enq && enq.status!=="Regret proposed" ? h("button",{key:"r",disabled:busy,onClick:()=>{ if(dirty){ alert("Save your changes first."); return; } setRd("regret"); },style:{...btnSmall,color:colors.danger,borderColor:"#e3a7a2"}},"\u2716 Regret Quote") : null,
-                          h("button",{key:"s",disabled:busy,onClick:()=>act({status:"approval",sent_at:new Date().toISOString()},taskStageLabel(st)+" → Under Approval (sent for approval)"),style:{...btnPrimary,padding:"7px 14px"}},"Send for approval"),
+                          taskIsPile(saved) && !saved.parent_id
+                            ? ((isAdmin || canApprove(saved)) && !saved.enquiry_id ? h("button",{key:"pc","data-t":"modal-pile-close",disabled:busy,onClick:()=>{ const now = new Date().toISOString(); act({status:"done",approved_by:me+TASK_CLOSED_PILE,approved_at:now,sent_at:now},"Unassigned → Closed at the review, not assigned"); },style:{...btnPrimary,padding:"7px 14px",background:"#5f625a",borderColor:"#5f625a"}},"\u2713 Close (not assigned)")
+                               : h("span",{key:"pc",style:{fontSize:11.5,color:colors.muted}},saved.enquiry_id ? "Close an enquiry card in the pile with \u2713 Close on the board (Regret / Ignored / Others)." : "In the Unassigned pile \u2014 the board's approver or an Admin closes it, or hands it out."))   // 185g
+                            : h("button",{key:"c","data-t":"modal-complete",disabled:busy,onClick:()=>{ const now = new Date().toISOString(); const self = canApprove(saved); act({status:"done",approved_by:self?me:me+TASK_CLOSED_HOLDER,approved_at:now,sent_at:saved.sent_at||now}, taskStageLabel(st)+" → Completed"+(self?" (you approve it)":" by "+me+" (no approval)")); },title:"Done; no approval needed",style:{...btnPrimary,padding:"7px 14px",background:"#0f7a5c",borderColor:"#0f7a5c"}},"\u2713 Completed"),   // 185g
+                          (taskIsPile(saved) && !saved.parent_id) ? null : h("button",{key:"s",disabled:busy,onClick:()=>act({status:"approval",sent_at:new Date().toISOString()},taskStageLabel(st)+" → Under Approval (sent for approval)"),style:{...btnSmall,padding:"7px 14px",fontWeight:700}},"Send for approval"),
                           h("span",{key:"h",style:{fontSize:11.5,color:colors.mutedLight}},"Approver: "+(ap.length?ap.join(" / "):"an Admin"))] : null) : null,
       (!isNew && saved.wait_reason) ? waitBadge(saved,true) : null,   // 135 Build 4
       !isNew ? waitOnBadge(saved,true) : null,   // 178
@@ -54923,9 +55579,22 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
           h("input",{value:wo.what,onChange:e=>setWo(x=>({...x,what:e.target.value})),placeholder:"e.g. revised nozzle loads",style:{...inputStyle,padding:"6px 8px"}}),
           h("div",{style:{background:"#eef0fb",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:10}},"The card shows who and what, and is not counted as overdue while it waits. A colleague gets a bell message. Press \u25b6 Got it when it comes."),
           h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}},h("button",{style:btnSmall,onClick:()=>setWo(null)},"Cancel"),h("button",{style:{...btnPrimary,padding:"6px 12px"},onClick:doWaitOn},"Mark waiting")))) : null,
+      enqPick && enq ? h("div",{"data-t":"card-enq-pick",onClick:ev=>{ if(ev.target===ev.currentTarget) setEnqPick(false); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.35)",zIndex:1300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},   // 185f
+        h("div",{style:{background:"#fff",borderRadius:9,padding:"16px 18px",width:380,maxWidth:"100%"}},
+          h("div",{style:{fontWeight:700,fontSize:14,marginBottom:10}},"Enquiry "+enq.enquiry_number),
+          h("div",{style:{display:"flex",flexDirection:"column",gap:8}},
+            h("button",{"data-t":"card-enq-view",onClick:()=>openEnqForm(true),style:{textAlign:"left",border:"1px solid "+colors.border,background:"#fff",borderRadius:8,padding:"10px 12px",cursor:"pointer",font:"inherit"}},
+              h("b",{style:{display:"block",fontSize:13}},"\ud83d\udc41 View"),h("span",{style:{fontSize:12,color:colors.muted}},"The enquiry form as logged, locked.")),
+            h("button",{"data-t":"card-enq-edit",disabled:!mayEditEnqHere,onClick:()=>openEnqForm(false),title:mayEditEnqHere?"":"Only the card holder, the person who logged it, or an Admin can edit it here",style:{textAlign:"left",border:"1px solid "+colors.border,background:mayEditEnqHere?"#fff":"#f4f4f2",borderRadius:8,padding:"10px 12px",cursor:mayEditEnqHere?"pointer":"not-allowed",font:"inherit",opacity:mayEditEnqHere?1:0.6}},
+              h("b",{style:{display:"block",fontSize:13}},"\u270e Edit"),h("span",{style:{fontSize:12,color:colors.muted}},"Change the enquiry. This card's title, folder link and notes follow; its stage and due date stay."))),
+          h("div",{style:{textAlign:"right",marginTop:10}},h("button",{onClick:()=>setEnqPick(false),style:btnSmall},"Cancel")))) : null,
+      enqForm ? h(LogEnquiryModal,{ key:"cardenq-"+enqForm.row.id+(enqForm.ro?"-ro":""), user:user||{ username:me }, allocation:null, pkg:null, project:null, editEnq:enqForm.row, readOnly:enqForm.ro,
+        onWantEdit: enqForm.ro && mayEditEnqHere ? ()=>{ if(dirty){ alert("Save or discard your changes on this card first \u2014 editing the enquiry updates the card."); return; } setEnqForm(x=>({...x, ro:false})); } : undefined,
+        onCancel:()=>setEnqForm(null), onSaved:afterEnqSaved }) : null,
       rd==="wait" ? h(ReasonDialog,{title:"\u23f8 Waiting For Customer",subtitle:(enq?enq.enquiry_number+" \u00b7 "+(enq.company_name||""):saved.title),placeholder:"What are we waiting for?",picks:waitPicks,
         info:"Due moves to "+fmtDMY(addDaysISO(today,3))+" (+3 days), label \u201cWaiting customer\u201d is added, and the card is not counted as stale.",okLabel:"Mark waiting",onOk:doWait,onCancel:()=>setRd(null)}) : null,
-      rd==="regret" ? h(ReasonDialog,{title:"\u2716 Regret Quote \u2014 "+(enq?enq.enquiry_number:""),subtitle:"Goes to the approver; the enquiry closes as Regretted once approved.",placeholder:"Why are we regretting?",picks:regretPicks,okLabel:"Send for approval",okStyle:{background:colors.danger,borderColor:colors.danger},onOk:doRegret,onCancel:()=>setRd(null)}) : null));
+      rd==="regret" ? h(ReasonDialog,{title:"\u2716 Regret Quote \u2014 "+(enq?enq.enquiry_number:""),subtitle:"Goes to the approver; the enquiry closes as Regretted once approved.",placeholder:"Why are we regretting?",picks:regretPicks,okLabel:"Send for approval",okStyle:{background:colors.danger,borderColor:colors.danger},onOk:doRegret,onCancel:()=>setRd(null)}) : null,
+      askClose ? h(UnsavedAsk,{ what:"This task", onStay:()=>setAskClose(false), onDiscard:()=>{ setAskClose(false); setDirty(false); onClose(); }, onSave:()=>{ setAskClose(false); save(); } }) : null));   // 185e
 }
 
 // =====================================================================================================
