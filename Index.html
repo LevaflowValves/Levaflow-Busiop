@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-17T02:15:00Z";
+  var APP_BUILD_VERSION = "2026-10-17T05:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -380,6 +380,18 @@ async function noPermission(what, who){
 }
 // A button the user may not use stays visible (dimmed); clicking it explains why.
 function permBtnStyle(ok, style){ return ok ? style : {...(style||{}), opacity:0.5, cursor:"help"}; }
+// 188: Employees screen — add a Department or Designation without leaving the screen; it is ready to pick at once.
+async function empAddMaster(table, col, label, ok, setOpts, optCol, user){
+  if(!ok){ noPermission("add a "+label.toLowerCase(), { roles:["admin","super_admin","hr_admin"] }); return; }
+  const v = (prompt("New "+label.toLowerCase()+":")||"").trim(); if(!v) return;
+  const { data: ex } = await sb.from(table).select(col);
+  if((ex||[]).some(r=>String(r[col]||"").trim().toLowerCase()===v.toLowerCase())){ alert("\""+v+"\" is already in the "+label+" list."); return; }
+  const { error } = await sb.from(table).insert({ [col]:v });
+  if(error){ alert(saveFailedText("The "+label.toLowerCase(), error)); return; }
+  try{ logAudit("INSERT", table, v, label+" \""+v+"\" added from the Employees screen", user?.username||"unknown", null, { [col]:v }); }catch(e){}
+  setOpts(o=>({ ...o, [optCol]:Array.from(new Set([...(o[optCol]||[]), v])).sort() }));
+  alert("\""+v+"\" is added to the "+label+" list. You can pick it now.");
+}
 // 186: next free employee code in the series most codes already use (EMP-0030 -> EMP-0031).
 function empNextCode(codes){
   const by = {};
@@ -919,7 +931,7 @@ const MASTER_TABLES = [
   { key: "warranty_coverage_tbl", label: "Warranty Coverage", columns: ["value"], addLabel:"New entry", freeText:["value"] },
   { key: "companies", label: "Customers", columns: ["company_name","account_type","industry","rating","website","phone","billing_city","billing_country","gst_tax_id","account_owner","source","crm_status","owner_employee_name"], addLabel:"New customer", cascade:[{col:"crm_status",from:"crm_status_tbl",field:"value"},{col:"account_owner",from:"employee_tbl",field:"employee_name"},{col:"owner_employee_name",from:"employee_tbl",field:"employee_name"}], freeText:["company_name","account_type","industry","rating","website","phone","billing_city","billing_country","gst_tax_id","source"] },
   { key: "contacts", label: "Contacts", columns: ["company_name","contact_name","designation","email","phone","department","is_primary"], addLabel:"New contact", cascade:[{col:"company_name",from:"companies",field:"company_name"}], freeText:["contact_name","designation","email","phone","department","is_primary"] },
-  { key: "department_tbl", label: "Departments", columns: ["department"], addLabel:"New department", freeText:["department"] },
+  { key: "department_tbl", label: "Departments", columns: ["department"], addLabel:"Add Department", freeText:["department"] },
   { key: "crm_role_tbl", label: "CRM Roles", columns: ["value"], addLabel:"New CRM role", freeText:["value"] },
   { key: "employee_status_tbl", label: "Employee Status", columns: ["value"], addLabel:"New status", freeText:["value"] },
   { key: "crm_status_tbl", label: "CRM Status (customer funnel)", columns: ["value"], addLabel:"New CRM status", freeText:["value"] },
@@ -929,7 +941,7 @@ const MASTER_TABLES = [
   { key: "task_dept_setting_tbl", label: "Task Department Limits", columns: ["department","amber_open","red_open","stale_days","approval_wait_days"], colLabels:{amber_open:"Amber at (open cards)",red_open:"Red at (open cards)",stale_days:"Stale after (days)",approval_wait_days:"Approval wait (days)"}, addLabel:"New department limits", cascade:[{col:"department",from:"department_tbl",field:"department"}], freeText:["amber_open","red_open","stale_days","approval_wait_days"] },   // 122: departments not listed use 15 / 25 / 7 / 2
   { key: "handover_reason_tbl", label: "Hand-over Reasons", columns: ["reason","offers_deactivate","sort_order","is_active"], colLabels:{reason:"Reason for transfer",offers_deactivate:"Offer to switch off the login",sort_order:"Order",is_active:"In use"}, addLabel:"New reason", freeText:["reason","sort_order"], boolCols:["offers_deactivate","is_active"] },   // 178
   { key: "task_approver_tbl", label: "Task Approvers", columns: ["department","employee_name"], addLabel:"New approver", cascade:[{col:"department",from:"department_tbl",field:"department"},{col:"employee_name",from:"employee_tbl",field:"employee_name"}], groupBy:["department"] },
-  { key: "designation_tbl", label: "Designations", columns: ["value"], addLabel:"New designation", freeText:["value"] },
+  { key: "designation_tbl", label: "Designations", columns: ["value"], addLabel:"Add Designation", freeText:["value"] },
   { key: "state_zone_tbl", label: "States and Zones (India)", columns: ["state","zone"], addLabel:"New state", freeText:["state","zone"], editAllEnabled:true, exportEnabled:true },
   { key: "country_zone_tbl", label: "Countries and Zones (outside India)", columns: ["country","zone"], addLabel:"New country", freeText:["country","zone"], editAllEnabled:true, exportEnabled:true },
   // Cities (3 Sep). city_tbl was seeded 14 Aug and had NO screen until now,
@@ -942,7 +954,7 @@ const MASTER_TABLES = [
   // Column order is the ENTRY order: Country, then State, then City —
   // the cascade reads that way round, so the form should too.
   { key: "city_tbl", label: "Cities", columns: ["country","state","city"], addLabel:"New city", cascade:[{col:"state",from:"state_zone_tbl",field:"state"}], freeText:["city"], constOptions:{country:WORLD_COUNTRIES}, nullableCols:["state"], groupBy:["country"], editAllEnabled:true, exportEnabled:true },
-  { key: "employee_tbl", label: "Employees", columns: ["employee_code","employee_name","nickname","department","designation","crm_role","phone_primary","email","status"], addLabel:"New employee", cascade:[{col:"department",from:"department_tbl",field:"department"},{col:"designation",from:"designation_tbl",field:"value"},{col:"crm_role",from:"crm_role_tbl",field:"value"},{col:"status",from:"employee_status_tbl",field:"value"}], freeText:["employee_code","employee_name","nickname","phone_primary","email"], exportEnabled:true },
+  { key: "employee_tbl", label: "Employees", columns: ["employee_code","employee_name","nickname","department","designation","crm_role","phone_primary","email","status"], addLabel:"Add Employee", cascade:[{col:"department",from:"department_tbl",field:"department"},{col:"designation",from:"designation_tbl",field:"value"},{col:"crm_role",from:"crm_role_tbl",field:"value"},{col:"status",from:"employee_status_tbl",field:"value"}], freeText:["employee_code","employee_name","nickname","phone_primary","email"], exportEnabled:true },
   { key: "territory_rule_state_tbl", label: "Territory Rules — States", columns: ["employee_name","state"], addLabel:"New rule", cascade:[{col:"employee_name",from:"employee_tbl",field:"employee_name"},{col:"state",from:"state_zone_tbl",field:"state"}], groupBy:["employee_name"], editAllEnabled:true },
   { key: "territory_rule_country_tbl", label: "Territory Rules — Countries", columns: ["employee_name","country"], addLabel:"New rule", cascade:[{col:"employee_name",from:"employee_tbl",field:"employee_name"},{col:"country",from:"country_zone_tbl",field:"country"}], groupBy:["employee_name"], editAllEnabled:true },
   // Zone-level rule (31 Aug) — a third, broader tier: covers a whole
@@ -2248,7 +2260,11 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
     ...(isApprovalRole && !isAdmin ? [] : [{ label:"Inward", tabs:[{key:"material_inward",label:"Material Inward Register"},{key:"tag_register",label:"Tag Register"}] }]),   // 173: PO Register → Purchase
     { label:"Despatch", tabs:[{key:"despatch_dc",label:"Delivery Challans (DC)"},{key:"gate_pass",label:"Gate Passes"}] },
   ]};
-  const accountsGroup = { label:"Accounts", subgroups:[{ label:"Billing", tabs:[{key:"proforma_invoices",label:"Proforma Invoices"},{key:"tax_invoices",label:"Tax Invoices"}] }] };   // 166, 185k proforma
+  const accountsGroup = { label:"Accounts", subgroups:[
+    { label:"Billing", tabs:[{key:"proforma_invoices",label:"Proforma Invoices"},{key:"tax_invoices",label:"Tax Invoices"}] },   // 166, 185k proforma
+    { label:"Vouchers & Books", tabs:[{key:"acc_voucher_new",label:"Vouchers"},{key:"acc_vouchers",label:"Voucher Register"},{key:"acc_daybook",label:"Day Book"},{key:"acc_ledger",label:"Ledger"}] },   // 188 accounts
+    { label:"Statements", tabs:[{key:"acc_tb",label:"Trial Balance"},{key:"acc_pl",label:"Profit & Loss"},{key:"acc_bs",label:"Balance Sheet"},{key:"acc_cf",label:"Cash Flow"}] },
+    { label:"Close & Masters", tabs:[{key:"acc_period",label:"Period Close"},{key:"acc_coa",label:"Chart of Accounts"},{key:"acc_ledgers",label:"Ledgers"},{key:"acc_import",label:"FFS Import"}] } ] };
   // SETUP — every master and setting. Admins see all of it; others only Despatch Settings & LUT, as before.
   const setupGroup = { label:"Setup", subgroups: isAdmin ? [
     { label:"Company", tabs:[{key:"company_master",label:"Company Master"},{key:"contract_number_setup",label:"Contract Numbering"},...(isSuperAdmin?[{key:"posts",label:"Posts"}]:[]),{key:"despatch_settings",label:"Despatch Settings & LUT"},{key:"sale_order_status_tbl",label:"Sale Order Status"},{key:"data_quality_flags",label:"Data Quality Flags"}] },
@@ -5204,6 +5220,8 @@ function MasterEditor({ tableKey, user }) {
           h("button",{onClick:saveGenericAllEdits,disabled:genericSavingAll,style:{...btnPrimary,background:"#0f6e56"}},genericSavingAll?"Saving…":"Save all changes"),
           h("button",{onClick:cancelGenericEditAll,disabled:genericSavingAll,style:btnSecondary},"Cancel all")
         ),
+        tableKey==="employee_tbl"&&h("button",{onClick:()=>empAddMaster("department_tbl","department","Department",isAdmin,setCascadeOptions,"department",user),style:permBtnStyle(isAdmin,btnSecondary)},"Add Department"),   // 188
+        tableKey==="employee_tbl"&&h("button",{onClick:()=>empAddMaster("designation_tbl","value","Designation",isAdmin,setCascadeOptions,"designation",user),style:permBtnStyle(isAdmin,btnSecondary)},"Add Designation"),
         h("button",{onClick:()=>{ if(tableKey==="material_rates" && !canEditMR){ noPermission("add material rates"); return; } setAdding(v=>!v);setAddDraft({});},style:permBtnStyle(tableKey!=="material_rates"||canEditMR,btnPrimary)},"+ "+addLabel)
       )
     ),
@@ -26731,6 +26749,21 @@ const MANUAL_SECTIONS = [
     "group": "Master Data",
     "articles": [
       {
+        "key": "emp_add_dept",
+        "title": "Adding a Department or Designation from the Employees screen",
+        "tag": "Master Data",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "HR → Employees has Add Department and Add Designation next to Add Employee. Type the new name; it is added to the list and can be picked at once in the employee form. A name already in the list is not added twice."
+          },
+          {
+            "type": "tip",
+            "text": "Admins, super admins and HR admins can add them; anyone else is told who can."
+          }
+        ]
+      },
+      {
         "key": "bom_setup",
         "title": "BOM setup masters",
         "tag": "Setup \u2192 BOM setup",
@@ -28781,6 +28814,194 @@ const MANUAL_SECTIONS = [
     ]
   },
   {
+    "group": "Accounts",
+    "articles": [
+      {
+        "key": "acc_overview",
+        "title": "Accounts: the books and who can do what",
+        "tag": "Accounts",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "Accounts keeps the company's books in the app: one journal of vouchers (debit = credit) under a tree of groups and ledgers, the same way Tally and FFS do. Menu: Accounts → Vouchers & Books, Statements, Close & Masters. Billing (Proforma and Tax Invoices) stays where it was."
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "Finance & Accounts Manager and Finance Director posts: everything — vouchers, chart of accounts, FFS import, Raw Material closing stock, locking months.",
+              "Accountant post: enter, change and cancel vouchers; see every book and statement.",
+              "Super admins: everything, plus the WIP & FG closing figure and unlocking a month.",
+              "Admins can look at the books. Anyone else sees who to ask for access."
+            ]
+          },
+          {
+            "type": "p",
+            "text": "Access follows the post, not the person: whoever holds the post later gets the same rights. Posts are set in Setup → Company → Posts."
+          },
+          {
+            "type": "p",
+            "text": "ERP view / Tally-style view (top right of every Accounts screen) only changes the look. The Tally-style view has the Gateway of Accounts menu on the left; there are no Tally keyboard keys."
+          },
+          {
+            "type": "tip",
+            "text": "Until the go-live date (1 Nov 2026) the books come from FFS through FFS Import. From go-live, vouchers are entered in the app."
+          }
+        ]
+      },
+      {
+        "key": "acc_import",
+        "title": "Bringing the FFS books in (FFS Import)",
+        "tag": "Accounts",
+        "blocks": [
+          {
+            "type": "steps",
+            "items": [
+              "In FFS export, to the same date: every group's Ledger Report (Excel), the Trial Balance, the Profit & Loss and the Balance Sheet.",
+              "Accounts → Close & Masters → FFS Import → Choose FFS files, and pick all of them together.",
+              "Read the tie-out. The app checks that every voucher balances, that the totals and each ledger agree with the FFS Trial Balance, that the opening balances agree, and that the profit and the Balance Sheet total agree with FFS. A file it can't place in a group asks you to pick the group.",
+              "Press Import into the books."
+            ]
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "It can be run again at any time with fresh files: FFS vouchers in months that are not locked are replaced; locked months and vouchers entered in the app are never touched.",
+              "A ledger already moved to another group in the Chart of Accounts stays where you put it.",
+              "A voucher that is off by a few paise in FFS is balanced into \"FFS paisa differences\" under Suspense A/c, so the profit stays exactly as FFS (FFS shows the same paise as Diff. in Opening Balances).",
+              "The FFS closing stock on the P&L can be saved as the provisional Raw Material closing for that month; Period Close replaces it."
+            ]
+          },
+          {
+            "type": "warn",
+            "text": "Files with entries on or after the go-live date are refused: from go-live the books are kept in the app."
+          }
+        ]
+      },
+      {
+        "key": "acc_vouchers",
+        "title": "Entering a voucher",
+        "tag": "Accounts",
+        "blocks": [
+          {
+            "type": "steps",
+            "items": [
+              "Accounts → Vouchers & Books → Vouchers. Pick the type: Payment, Receipt, Contra, Journal, Purchase, Debit Note or Credit Note.",
+              "Give the date and the reference (bill no, cheque no).",
+              "On each line pick a ledger from the list and put the amount in Debit or Credit. + Add line for more lines. Clicking into an empty Debit box fills in the difference.",
+              "Write the narration and press Save voucher (or Save and enter another)."
+            ]
+          },
+          {
+            "type": "p",
+            "text": "The number is given on save and continues the FFS series for the year (e.g. PAY/0249/26-27 after FFS's PAY/0248/26-27)."
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "Debit and credit must agree; the voucher must be on or after the go-live date and in a month that isn't locked.",
+              "A Contra is only between bank and cash ledgers.",
+              "Click any voucher (Day Book, Voucher Register, Ledger) to see it. A voucher entered in the app can be changed (Edit voucher) or cancelled with a reason until its month is locked. A cancelled voucher stays in the list as Cancelled and its number is not used again.",
+              "FFS vouchers can't be changed in the app: correct them with a journal in an open month."
+            ]
+          },
+          {
+            "type": "tip",
+            "text": "A ledger that isn't in the list is added in Chart of Accounts or Ledgers (Add Ledger)."
+          }
+        ]
+      },
+      {
+        "key": "acc_books",
+        "title": "Day Book, Voucher Register and Ledger",
+        "tag": "Accounts",
+        "blocks": [
+          {
+            "type": "bullets",
+            "items": [
+              "Day Book: every voucher of a day (or a range) in date order, with Previous day / Next day.",
+              "Voucher Register: all vouchers, newest first, filtered by dates, type, source (FFS import, entered in app, from invoices) and a search on number, narration or ledger. Show cancelled brings cancelled vouchers back into the list.",
+              "Ledger: pick a ledger and the dates; it shows the opening, every entry with the other side, the running balance and the closing. Download Excel saves it."
+            ]
+          },
+          {
+            "type": "p",
+            "text": "Lists show 25 rows a page; use Previous and Next."
+          }
+        ]
+      },
+      {
+        "key": "acc_statements",
+        "title": "Trial Balance, Profit & Loss, Balance Sheet, Cash Flow",
+        "tag": "Accounts",
+        "blocks": [
+          {
+            "type": "bullets",
+            "items": [
+              "Trial Balance: as on a date, by group; click a group to open it and a ledger to see its entries. Download Excel.",
+              "Profit & Loss: month by month from 1 April. Raw Material stock comes from Period Close; a month marked * has no closing stock yet, so the last figure is carried. Show WIP & FG adjustment adds the change in WIP & FG (at selling value) for the profit with work on the shop floor counted. Click a line to see its ledgers.",
+              "Balance Sheet: FFS basis gives the same figures as the FFS Balance Sheet; With WIP & FG brings in WIP & FG at selling value, with the 1 April WIP against the prior-period line under Capital Account.",
+              "Cash Flow: profit adjusted for every balance-sheet change, month by month, with the biggest places cash went (is locked) and came from. Its last two lines must agree."
+            ]
+          },
+          {
+            "type": "tip",
+            "text": "Cash Flow shows Manikandan Constructions under Investing (building advance). If it is a supplier advance, tell the developer and it moves to working capital."
+          }
+        ]
+      },
+      {
+        "key": "acc_period",
+        "title": "Period Close: closing stock and locking a month",
+        "tag": "Accounts",
+        "blocks": [
+          {
+            "type": "steps",
+            "items": [
+              "After a month ends, the Finance & Accounts Manager enters the Raw Material closing stock (Enter RM stock).",
+              "A super admin enters the WIP & FG closing at selling value, with a note (Enter WIP & FG).",
+              "Check the books, then Lock month. Months are locked in order."
+            ]
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "A locked month can't take, change or lose a voucher, and the FFS import leaves it alone.",
+              "Only a super admin can unlock, with a reason; the latest locked month comes off first.",
+              "Missing closing stock and months ready to lock show in Pending Actions for the post that owes them."
+            ]
+          },
+          {
+            "type": "p",
+            "text": "Settings (super admins): the financial year start and the go-live date."
+          }
+        ]
+      },
+      {
+        "key": "acc_coa",
+        "title": "Chart of Accounts: tree and kanban",
+        "tag": "Accounts",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "Accounts → Close & Masters → Chart of Accounts. Groups nest to any depth. Tree and Kanban change the same tree."
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "Tree: Add Group, Add Ledger, Rename, Move, Make Inactive, Delete on each row; Expand all / Collapse all.",
+              "Kanban: each column is a group. Drag a card to another column to move it, or use its Move to… list. Click a column heading or a folder card to go one level down; All groups goes back to the top.",
+              "Ledgers screen: search and filter, Add Ledger with GSTIN and opening, Edit, Download Excel."
+            ]
+          },
+          {
+            "type": "warn",
+            "text": "Safeguards: top-level groups can't be moved or deleted; nothing can go under its own sub-group; a ledger or group with entries can't move to a different nature (Asset, Liability, Income, Expense); only empty groups and unused ledgers can be deleted — anything else is made Inactive. Every change is in the change log."
+          }
+        ]
+      }
+    ]
+  },
+  {
     "group": "Documents",
     "articles": [
       {
@@ -28863,6 +29084,14 @@ const MANUAL_SECTIONS = [
 // English text with a note. Screen and button names stay in English on purpose,
 // so they match what is on the screen. Not proofread — small errors accepted.
 const MANUAL_TA = {
+ "acc_overview": {"title":"கணக்குகள்: புத்தகங்கள், யார் என்ன செய்யலாம்","tag":"கணக்குகள்","blocks":[{"type":"p","text":"நிறுவனத்தின் கணக்குப் புத்தகங்கள் இப்போது app-இலேயே: groups, ledgers கொண்ட tree-இன் கீழ் vouchers (debit = credit) — Tally, FFS போலவே. Menu: Accounts → Vouchers & Books, Statements, Close & Masters. Billing (Proforma, Tax Invoices) முன்பு இருந்த இடத்திலேயே."},{"type":"bullets","items":["Finance & Accounts Manager, Finance Director post: எல்லாம் — vouchers, chart of accounts, FFS import, Raw Material closing stock, மாதத்தை lock செய்வது.","Accountant post: vouchers பதிவு, மாற்றம், cancel; எல்லா books, statements-ஐயும் பார்க்கலாம்.","Super admins: எல்லாம், அதோடு WIP & FG closing தொகை, மாதத்தை unlock செய்வது.","Admins புத்தகங்களைப் பார்க்கலாம். மற்றவர்களுக்கு யாரிடம் அனுமதி கேட்க வேண்டும் என்று காட்டும்."]},{"type":"p","text":"அனுமதி நபருக்கு அல்ல, post-க்கு: பின்னர் அந்த post-ஐ வகிப்பவருக்கு அதே உரிமைகள் கிடைக்கும். Posts: Setup → Company → Posts."},{"type":"p","text":"ERP view / Tally-style view (ஒவ்வொரு Accounts திரையின் மேல் வலது) தோற்றத்தை மட்டும் மாற்றும். Tally-style view-இல் இடது பக்கம் Gateway of Accounts menu; Tally keyboard keys இல்லை."},{"type":"tip","text":"Go-live தேதி (1 Nov 2026) வரை புத்தகங்கள் FFS Import மூலம் FFS-இலிருந்து வரும். Go-live முதல் vouchers app-இல் பதிவு செய்யப்படும்."}],"en_sig":"1a2d5a2"},
+ "acc_import": {"title":"FFS புத்தகங்களைக் கொண்டு வருதல் (FFS Import)","tag":"கணக்குகள்","blocks":[{"type":"steps","items":["FFS-இல் ஒரே தேதி வரை export செய்யுங்கள்: ஒவ்வொரு group-இன் Ledger Report (Excel), Trial Balance, Profit & Loss, Balance Sheet.","Accounts → Close & Masters → FFS Import → Choose FFS files, எல்லா கோப்புகளையும் ஒன்றாகத் தேர்ந்தெடுங்கள்.","Tie-out-ஐப் படியுங்கள். ஒவ்வொரு voucher-உம் balance ஆகிறதா, totals மற்றும் ஒவ்வொரு ledger-உம் FFS Trial Balance-உடன் ஒத்துப்போகிறதா, opening balances ஒத்துப்போகிறதா, profit, Balance Sheet total FFS-உடன் ஒத்துப்போகிறதா என்று app சரிபார்க்கும். Group தெரியாத கோப்புக்கு group-ஐத் தேர்வு செய்யச் சொல்லும்.","Import into the books அழுத்துங்கள்."]},{"type":"bullets","items":["புதிய கோப்புகளுடன் எப்போது வேண்டுமானாலும் மீண்டும் ஓட்டலாம்: lock ஆகாத மாதங்களின் FFS vouchers மாற்றப்படும்; lock ஆன மாதங்களும் app-இல் பதிவான vouchers-உம் தொடப்படாது.","Chart of Accounts-இல் வேறு group-க்கு நகர்த்திய ledger அங்கேயே இருக்கும்.","FFS-இல் சில பைசா வித்தியாசம் உள்ள voucher, Suspense A/c கீழ் \"FFS paisa differences\"-இல் சமன் செய்யப்படும்; profit FFS-இல் உள்ளபடியே இருக்கும் (FFS அதே பைசாவை Diff. in Opening Balances-ஆகக் காட்டும்).","P&L-இல் உள்ள FFS closing stock-ஐ அந்த மாதத்தின் தற்காலிக Raw Material closing-ஆகச் சேமிக்கலாம்; Period Close அதை மாற்றும்."]},{"type":"warn","text":"Go-live தேதி அல்லது அதற்குப் பிறகு entries உள்ள கோப்புகள் ஏற்கப்படாது: go-live முதல் புத்தகங்கள் app-இல் தான்."}],"en_sig":"5810b442"},
+ "acc_vouchers": {"title":"Voucher பதிவு செய்தல்","tag":"கணக்குகள்","blocks":[{"type":"steps","items":["Accounts → Vouchers & Books → Vouchers. வகையைத் தேர்வு செய்யுங்கள்: Payment, Receipt, Contra, Journal, Purchase, Debit Note அல்லது Credit Note.","தேதியும் reference-உம் (bill no, cheque no) கொடுங்கள்.","ஒவ்வொரு வரியிலும் list-இலிருந்து ledger-ஐத் தேர்வு செய்து தொகையை Debit அல்லது Credit-இல் இடுங்கள். மேலும் வரிகளுக்கு + Add line. காலியான Debit பெட்டியில் click செய்தால் வித்தியாசம் தானாக நிரம்பும்.","Narration எழுதி Save voucher (அல்லது Save and enter another) அழுத்துங்கள்."]},{"type":"p","text":"எண் save செய்யும்போது கொடுக்கப்படும், அந்த ஆண்டின் FFS வரிசையைத் தொடரும் (எ.கா. FFS-இன் PAY/0248/26-27-க்குப் பின் PAY/0249/26-27)."},{"type":"bullets","items":["Debit-உம் credit-உம் சமமாக இருக்க வேண்டும்; voucher go-live தேதி அல்லது அதற்குப் பிறகு, lock ஆகாத மாதத்தில் இருக்க வேண்டும்.","Contra வங்கி, ரொக்க ledgers இடையே மட்டும்.","எந்த voucher-ஐயும் (Day Book, Voucher Register, Ledger) click செய்து பார்க்கலாம். App-இல் பதிவான voucher-ஐ அதன் மாதம் lock ஆகும் வரை மாற்றலாம் (Edit voucher) அல்லது காரணத்துடன் cancel செய்யலாம். Cancel ஆன voucher பட்டியலில் Cancelled-ஆக இருக்கும்; அதன் எண் மீண்டும் பயன்படாது.","FFS vouchers-ஐ app-இல் மாற்ற முடியாது: திறந்த மாதத்தில் journal மூலம் திருத்துங்கள்."]},{"type":"tip","text":"List-இல் இல்லாத ledger-ஐ Chart of Accounts அல்லது Ledgers-இல் (Add Ledger) சேர்க்கலாம்."}],"en_sig":"872d4a4f"},
+ "acc_books": {"title":"Day Book, Voucher Register, Ledger","tag":"கணக்குகள்","blocks":[{"type":"bullets","items":["Day Book: ஒரு நாளின் (அல்லது ஒரு காலத்தின்) எல்லா vouchers-உம் தேதி வரிசையில்; Previous day / Next day.","Voucher Register: எல்லா vouchers-உம், புதியது முதலில்; தேதி, வகை, மூலம் (FFS import, app-இல் பதிவு, invoices-இலிருந்து) மூலம் வடிகட்டலாம்; எண், narration, ledger மூலம் தேடலாம். Show cancelled, cancel ஆனவற்றையும் காட்டும்.","Ledger: ledger-ஐயும் தேதிகளையும் தேர்வு செய்யுங்கள்; opening, ஒவ்வொரு entry-உம் மறுபக்கத்துடன், running balance, closing காட்டும். Download Excel சேமிக்கும்."]},{"type":"p","text":"பட்டியல்கள் ஒரு பக்கத்துக்கு 25 வரிகள்; Previous, Next பயன்படுத்துங்கள்."}],"en_sig":"cc36e410"},
+ "acc_statements": {"title":"Trial Balance, Profit & Loss, Balance Sheet, Cash Flow","tag":"கணக்குகள்","blocks":[{"type":"bullets","items":["Trial Balance: ஒரு தேதியில், group வாரியாக; group-ஐ click செய்தால் திறக்கும், ledger-ஐ click செய்தால் அதன் entries. Download Excel.","Profit & Loss: 1 ஏப்ரல் முதல் மாதம் மாதமாக. Raw Material stock, Period Close-இலிருந்து; * குறியிட்ட மாதத்துக்கு closing stock இன்னும் இல்லை, கடைசித் தொகை தொடரும். Show WIP & FG adjustment, WIP & FG மாற்றத்தை (விற்பனை மதிப்பில்) சேர்த்து, தொழிற்சாலையில் உள்ள வேலையையும் கணக்கில் கொண்ட profit-ஐக் காட்டும். வரியை click செய்தால் அதன் ledgers.","Balance Sheet: FFS basis, FFS Balance Sheet-இன் அதே தொகைகள்; With WIP & FG, WIP & FG-ஐ விற்பனை மதிப்பில் சேர்க்கும்; 1 ஏப்ரல் WIP, Capital Account கீழ் உள்ள prior-period வரிக்கு எதிராக.","Cash Flow: ஒவ்வொரு balance-sheet மாற்றத்துக்கும் சரிசெய்த profit, மாதம் மாதமாக; பணம் அதிகம் சென்ற (முடங்கிய) இடங்களும் வந்த இடங்களும். கடைசி இரண்டு வரிகள் ஒத்துப்போக வேண்டும்."]},{"type":"tip","text":"Cash Flow, Manikandan Constructions-ஐ Investing-இல் (கட்டட advance) காட்டுகிறது. அது supplier advance என்றால் developer-இடம் சொல்லுங்கள்; working capital-க்கு நகரும்."}],"en_sig":"be57d04"},
+ "acc_period": {"title":"Period Close: closing stock, மாதத்தை lock செய்தல்","tag":"கணக்குகள்","blocks":[{"type":"steps","items":["மாதம் முடிந்ததும் Finance & Accounts Manager, Raw Material closing stock-ஐ பதிவு செய்கிறார் (Enter RM stock).","Super admin, WIP & FG closing-ஐ விற்பனை மதிப்பில், குறிப்புடன் பதிவு செய்கிறார் (Enter WIP & FG).","புத்தகங்களைச் சரிபார்த்து Lock month. மாதங்கள் வரிசைப்படி lock ஆகும்."]},{"type":"bullets","items":["Lock ஆன மாதத்தில் voucher சேர்க்கவோ, மாற்றவோ, நீக்கவோ முடியாது; FFS import அதைத் தொடாது.","Super admin மட்டுமே காரணத்துடன் unlock செய்யலாம்; கடைசியாக lock ஆன மாதம் முதலில்.","இல்லாத closing stock-உம் lock செய்யத் தயாரான மாதங்களும், அதற்குப் பொறுப்பான post-க்கு Pending Actions-இல் வரும்."]},{"type":"p","text":"Settings (super admins): நிதியாண்டு தொடக்கம், go-live தேதி."}],"en_sig":"42fd9322"},
+ "acc_coa": {"title":"Chart of Accounts: tree, kanban","tag":"கணக்குகள்","blocks":[{"type":"p","text":"Accounts → Close & Masters → Chart of Accounts. Groups எந்த ஆழத்துக்கும் உள்ளடங்கலாம். Tree-உம் Kanban-உம் ஒரே tree-ஐ மாற்றும்."},{"type":"bullets","items":["Tree: ஒவ்வொரு வரியிலும் Add Group, Add Ledger, Rename, Move, Make Inactive, Delete; Expand all / Collapse all.","Kanban: ஒவ்வொரு column-உம் ஒரு group. Card-ஐ வேறு column-க்கு இழுத்து நகர்த்தலாம், அல்லது அதன் Move to… list. Column தலைப்பையோ folder card-ஐயோ click செய்தால் ஒரு நிலை கீழே; All groups மேலே திரும்பும்.","Ledgers திரை: தேடல், வடிகட்டல், GSTIN, opening-உடன் Add Ledger, Edit, Download Excel."]},{"type":"warn","text":"பாதுகாப்புகள்: மேல்நிலை groups-ஐ நகர்த்தவோ நீக்கவோ முடியாது; எதுவும் தன் சொந்த sub-group-இன் கீழ் போக முடியாது; entries உள்ள ledger அல்லது group வேறு தன்மைக்கு (Asset, Liability, Income, Expense) நகர முடியாது; காலியான groups, பயன்படாத ledgers மட்டுமே நீக்கப்படும் — மற்றவை Inactive ஆக்கப்படும். ஒவ்வொரு மாற்றமும் change log-இல்."}],"en_sig":"83234147"},
+ "emp_add_dept": {"title":"Employees திரையிலிருந்து Department அல்லது Designation சேர்த்தல்","tag":"Master Data","blocks":[{"type":"p","text":"HR → Employees-இல் Add Employee அருகில் Add Department, Add Designation உள்ளன. புதிய பெயரை type செய்யுங்கள்; அது பட்டியலில் சேர்ந்து, employee form-இல் உடனே தேர்வு செய்யலாம். ஏற்கனவே உள்ள பெயர் மீண்டும் சேர்க்கப்படாது."},{"type":"tip","text":"Admins, super admins, HR admins சேர்க்கலாம்; மற்றவர்களுக்கு யார் செய்யலாம் என்று app சொல்லும்."}],"en_sig":"1d3466bd"},
  "no_permission": {"title": "\u0b89\u0b99\u0bcd\u0b95\u0bb3\u0bc1\u0b95\u0bcd\u0b95\u0bc1 \u0b85\u0ba9\u0bc1\u0bae\u0ba4\u0bbf \u0b87\u0bb2\u0bcd\u0bb2\u0bbe\u0ba4\u0baa\u0bcb\u0ba4\u0bc1", "tag": "\u0ba4\u0bca\u0b9f\u0b95\u0bcd\u0b95\u0bae\u0bcd", "blocks": [{"type": "p", "text": "\u0b9a\u0bbf\u0bb2 \u0baa\u0bca\u0ba4\u0bcd\u0ba4\u0bbe\u0ba9\u0bcd\u0b95\u0bb3\u0bcd \u0b95\u0bc1\u0bb1\u0bbf\u0baa\u0bcd\u0baa\u0bbf\u0b9f\u0bcd\u0b9f login \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 post-\u0b95\u0bcd\u0b95\u0bc1 \u0bae\u0b9f\u0bcd\u0b9f\u0bc1\u0bae\u0bc7 \u2014 \u0b89\u0ba4\u0bbe\u0bb0\u0ba3\u0bae\u0bbe\u0b95 quote-\u0b90 delete \u0b9a\u0bc6\u0baf\u0bcd\u0bb5\u0ba4\u0bc1, customer-\u0b87\u0ba9\u0bcd contact-\u0b90 \u0ba8\u0bc0\u0b95\u0bcd\u0b95\u0bc1\u0bb5\u0ba4\u0bc1, master list-\u0b87\u0bb2\u0bcd \u0baa\u0bc1\u0ba4\u0bbf\u0baf \u0bae\u0ba4\u0bbf\u0baa\u0bcd\u0baa\u0bc8\u0b9a\u0bcd \u0b9a\u0bc7\u0bb0\u0bcd\u0baa\u0bcd\u0baa\u0ba4\u0bc1. \u0b89\u0b99\u0bcd\u0b95\u0bb3\u0bc1\u0b95\u0bcd\u0b95\u0bc1 \u0b85\u0ba9\u0bc1\u0bae\u0ba4\u0bbf \u0b87\u0bb2\u0bcd\u0bb2\u0bc8\u0baf\u0bc6\u0ba9\u0bcd\u0bb1\u0bbe\u0bb2\u0bcd, \u0baa\u0bca\u0ba4\u0bcd\u0ba4\u0bbe\u0ba9\u0bcd \u0bae\u0bb1\u0bc8\u0baf\u0bbe\u0ba4\u0bc1; \u0bae\u0b99\u0bcd\u0b95\u0bb2\u0bbe\u0b95\u0ba4\u0bcd \u0ba4\u0bc6\u0bb0\u0bbf\u0baf\u0bc1\u0bae\u0bcd."}, {"type": "p", "text": "\u0b85\u0ba4\u0bc8 click \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbe\u0bb2\u0bcd, \u0ba8\u0bc0\u0b99\u0bcd\u0b95\u0bb3\u0bcd \u0b8e\u0ba9\u0bcd\u0ba9 \u0b9a\u0bc6\u0baf\u0bcd\u0baf \u0bae\u0bc1\u0baf\u0ba9\u0bcd\u0bb1\u0bc0\u0bb0\u0bcd\u0b95\u0bb3\u0bcd, \u0b8e\u0ba8\u0bcd\u0ba4 login \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 post \u0b85\u0ba4\u0bc8\u0b9a\u0bcd \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0bb2\u0bbe\u0bae\u0bcd, \u0b85\u0ba4\u0bc8 \u0bb5\u0bc8\u0ba4\u0bcd\u0ba4\u0bbf\u0bb0\u0bc1\u0baa\u0bcd\u0baa\u0bb5\u0bb0\u0bcd\u0b95\u0bb3\u0bbf\u0ba9\u0bcd \u0baa\u0bc6\u0baf\u0bb0\u0bcd\u0b95\u0bb3\u0bcd \u0b86\u0b95\u0bbf\u0baf\u0bb5\u0bb1\u0bcd\u0bb1\u0bc8 app \u0b9a\u0bca\u0bb2\u0bcd\u0bb2\u0bc1\u0bae\u0bcd. \u0b85\u0bb5\u0bb0\u0bcd\u0b95\u0bb3\u0bbf\u0bb2\u0bcd \u0b92\u0bb0\u0bc1\u0bb5\u0bb0\u0bbf\u0b9f\u0bae\u0bcd \u0b85\u0ba4\u0bc8\u0b9a\u0bcd \u0b9a\u0bc6\u0baf\u0bcd\u0baf\u0b9a\u0bcd \u0b9a\u0bca\u0bb2\u0bcd\u0bb2\u0bc1\u0b99\u0bcd\u0b95\u0bb3\u0bcd, \u0b85\u0bb2\u0bcd\u0bb2\u0ba4\u0bc1 \u0b85\u0ba9\u0bc1\u0bae\u0ba4\u0bbf \u0b95\u0bc7\u0bb3\u0bc1\u0b99\u0bcd\u0b95\u0bb3\u0bcd."}, {"type": "tip", "text": "\u0b8e\u0ba4\u0bc1\u0bb5\u0bc1\u0bae\u0bcd \u0b85\u0bae\u0bc8\u0ba4\u0bbf\u0baf\u0bbe\u0b95 \u0bae\u0bb1\u0bc8\u0b95\u0bcd\u0b95\u0baa\u0bcd\u0baa\u0b9f\u0bbe\u0ba4\u0bc1: click \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bc1\u0bae\u0bcd \u0b8e\u0ba4\u0bc1\u0bb5\u0bc1\u0bae\u0bcd \u0ba8\u0b9f\u0b95\u0bcd\u0b95\u0bb5\u0bbf\u0bb2\u0bcd\u0bb2\u0bc8, \u0b8e\u0ba8\u0bcd\u0ba4\u0b9a\u0bcd \u0b9a\u0bc6\u0baf\u0bcd\u0ba4\u0bbf\u0baf\u0bc1\u0bae\u0bcd \u0bb5\u0bb0\u0bb5\u0bbf\u0bb2\u0bcd\u0bb2\u0bc8 \u0b8e\u0ba9\u0bcd\u0bb1\u0bbe\u0bb2\u0bcd, menu-\u0bb5\u0bbf\u0bb2\u0bcd \u0b89\u0bb3\u0bcd\u0bb3 Report an issue \u0bae\u0bc2\u0bb2\u0bae\u0bcd \u0ba4\u0bc6\u0bb0\u0bbf\u0bb5\u0bbf\u0baf\u0bc1\u0b99\u0bcd\u0b95\u0bb3\u0bcd."}], "en_sig": "d1c340f1"},
  "nav": {
   "title": "\u0b89\u0bb3\u0bcd\u0ba8\u0bc1\u0bb4\u0bc8\u0bb5\u0bc1 \u0bae\u0bb1\u0bcd\u0bb1\u0bc1\u0bae\u0bcd \u0bb5\u0bb4\u0bbf\u0b9a\u0bc6\u0bb2\u0bc1\u0ba4\u0bcd\u0ba4\u0bb2\u0bcd",
@@ -31714,6 +31943,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"17 Oct 2026 (188)", summary:"Built on 2026-10-17T05:00:00Z. SQL: structure_accounts_2026-10-17.sql (BOTH companies), then data_accounts_flometriq_openings_2026-10-17.sql (Flometriq only). ACCOUNTS MODULE (Build A). New menus under Accounts: Vouchers & Books (Vouchers, Voucher Register, Day Book, Ledger), Statements (Trial Balance, Profit & Loss month by month, Balance Sheet FFS basis / with WIP & FG, Cash Flow showing where cash is locked), Close & Masters (Period Close, Chart of Accounts, Ledgers, FFS Import). FFS IMPORT in the app: add every group's ledger export plus the Trial Balance, P&L and Balance Sheet; it ties out (vouchers balance, totals and each ledger against the FFS Trial Balance, openings, profit 21,50,676.91 and Balance Sheet 10,29,72,154.52 to 10/10/2026) before saving; re-runnable (FFS vouchers in unlocked months are replaced; locked months and app vouchers untouched). VOUCHERS: Payment, Receipt, Contra, Journal, Purchase, Debit Note, Credit Note from the go-live date (1 Nov 2026); numbers continue the FFS series; app vouchers can be changed or cancelled (with a reason) until the month is locked. CHART OF ACCOUNTS: recursive tree and kanban (drag to move), add / rename / move / inactive / delete with safeguards (no nature change for used ledgers, only unused ledgers and empty groups deleted) and a change log. PERIOD CLOSE: Raw Material closing (Finance & Accounts Manager), WIP & FG at selling value (super admins), lock in order, unlock by super admin with a reason; missing closing stock and months to lock go to Pending Actions. ACCESS BY POST: Finance & Accounts Manager and Finance Director everything; Accountant vouchers; super admins everything plus WIP and unlock; others are told who to ask. ERP view / Tally-style view switch (look only). EMPLOYEES: Add Department and Add Designation buttons next to Add Employee. User manual: 8 new articles (English and Tamil)." },
   { date:"17 Oct 2026 (187)", summary:"Built on 2026-10-17T01:30:00Z. SQL: data_add_karthikeyan_hr_2026-10-17.sql (Flometriq). NEVER GO BLANK ON A MISSING PERMISSION: a button someone isn't allowed to use now stays on screen, dimmed, and a click explains what they tried to do, which login or post can do it, and the names of the people who hold it (instead of the button vanishing or a click doing nothing). Applied to: + Add stage (Quote Stages), Material Rates add / Edit all lines / Delete filtered, Delete this Sl No, customer contact and address Remove, Major Projects Delete project (both places), Validate line, + Add row, and the + Add new… item in master drop-downs (shown as needs permission). The existing Only-an-Admin messages (Out/In sequence, reverse OA, release production, delete quotes, approve Production BOM, mark letter sent, Doc Controller / Technical Head change) now also name who to contact. User Manual: When you don't have permission (English and Tamil). Standing rule for every future build." },
   { date:"17 Oct 2026 (186)", summary:"Built on 2026-10-17T01:30:00Z. SQL: structure_finance_posts_2026-10-17.sql (both companies). (1) EMPLOYEES — adding an employee failed with \"duplicate key value violates unique constraint employee_tbl_employee_code_key\": a blank Employee Code was saved as an empty code, and only one employee can have it. A blank code now takes the next free code in the series already used (e.g. EMP-0031). If the code typed is already in use, the app says who has it and offers the next free code. (2) FINANCE POSTS (SQL): post \"accounts\" relabelled Finance & Accounts Manager (key unchanged, so Pending Actions and the despatch / LUT cards still reach it); new posts Finance Director (finance_director) and Accountant (accountant). Holders are given on the Posts screen. Accounts access will follow these posts, not names." },
   { date:"16 Oct 2026 (185k)", summary:"Built on 2026-10-16T05:00:00Z. SQL: structure_proforma_invoice_2026-10-16.sql (both companies). (1) PROFORMA INVOICE, new menu Accounts → Billing → Proforma Invoices. Make proforma from a contract number (no DC needed); contracts whose advance was answered Yes and have no PI yet are listed with a Make proforma button. The draft fills itself like the tax invoice: buyer, deliver to, notifying party (export), every Sl No at its ordered quantity (lower it or set 0 to leave a Sl No off), prices (PO price, else the contract), P&F / freight / insurance, GST per the contract, terms, and the advance from the Sale Order (% of the total including tax, or a fixed amount). PDF: the tax invoice layout with the heading PROFORMA INVOICE (export: PROFORMA INVOICE — EXPORT), one copy, no IRN / DC / e-way / shipping bill, the Advance payable line and its amount in words, bank details, and the note that it is not a tax invoice. (2) RULES: a draft has no number and can be deleted; Issue gives the next number of its own series PI/0001/26-27 (the first PI of a year asks its starting number); an issued PI is locked — Revise makes Rev 1 with the same number (the old one becomes Superseded), Cancel needs a reason and keeps the PI and its number. Issuing marks the Advance Register entry Proforma sent with the PI number; cancelling puts it back to Pending proforma. Pending Actions (Accounts): advance answered Yes with no PI; PI draft older than a day. (3) NOTIFYING PARTY: “Notify / handoff party” is now “Notifying party” everywhere (Sale Order despatch details, the Accounts Head card sub-task, DC, packing slip, invoice, manual)." },
@@ -49475,6 +49705,7 @@ function App() {
     tab==="despatch_dc"?h(DespatchScreen,{user}):
     tab==="gate_pass"?h(GatePassScreen,{user}):
     tab==="despatch_settings"?h(DespatchSettingsScreen,{user}):
+    String(tab||"").startsWith("acc_")?h(AccountsScreen,{user,route:tab,onGo:setTab}):   // 188
     tab==="tax_invoices"?h(InvoicesScreen,{user}):
     tab==="proforma_invoices"?h(ProformaScreen,{user}):
     tab==="period_reports"?h(PeriodReportsScreen,{user}):   // 148
@@ -56622,6 +56853,7 @@ async function despPendingItems(){
   try{ (await piPendingItems(P)).forEach(x=>out.push(x)); }catch(e){ console.error("Proforma pending items", e); }
   try{ (await invLutPending(P)).forEach(x=>out.push(x)); }catch(e){ console.error("LUT pending items", e); }
   try{ (await pbomPendingItems(P)).forEach(x=>out.push(x)); }catch(e){ console.error("PO release pending items", e); }   // 184c
+  try{ (await accPendingItems(P)).forEach(x=>out.push(x)); }catch(e){ console.error("Accounts pending items", e); }   // 188: closing stock / lock month
   return out;
 }
 
@@ -57498,6 +57730,1330 @@ async function piPendingItems(P){
     (a||[]).filter(x=>!drafted.has(x.contract_number)).forEach(x=>to(P.acc, { what:"Contract "+x.contract_number+" has an advance"+(x.advance_percent?" of "+x.advance_percent+"%":"")+" — make and issue the proforma (Accounts → Billing → Proforma Invoices)", entity_key:x.contract_number, detail_key:"pi-make", owed_by_role:"accounts", days_waiting:days(x.created_at)||null, urgency:days(x.created_at)>=2?"overdue":"due", source:"invoice" })); }catch(e){}
   return out;
 }
+// =====================================================================================================
+// ACCOUNTS — Build A (17 Oct 2026). Books, vouchers, statements, period close, chart of accounts,
+// FFS import. One journal (acc_voucher_tbl + acc_voucher_line_tbl, debit = credit) under Tally-style
+// groups and ledgers. Access follows POSTS, not people: accounts (Finance & Accounts Manager) and
+// finance_director = everything; accountant = vouchers; super admins = everything + unlock months.
+// SQL: structure_accounts_2026-10-17.sql (both companies) + data_accounts_flometriq_openings_2026-10-17.sql.
+// =====================================================================================================
+const ACC_NAT = { A:"Asset", L:"Liability", I:"Income", E:"Expense" };
+const ACC_STK = { rm:"STK-RM", wip:"STK-WIP", ppa:"PPA-WIP" };
+const ACC_VTYPES = [
+  { t:"Payment", pre:"PAY" }, { t:"Receipt", pre:"RPT" }, { t:"Contra", pre:"CT" }, { t:"Journal", pre:"JV" },
+  { t:"Purchase", pre:"PINV" }, { t:"Debit Note", pre:"DN" }, { t:"Credit Note", pre:"CN" } ];
+// FFS voucher-type words -> the app's own names
+const ACC_FFS_TYPE = { "Journal Voucher":"Journal", "Purchase Invoice":"Purchase", "Supplier Invoice - Service":"Purchase (service)",
+  "Payment":"Payment", "Receipt":"Receipt", "Sales Invoice":"Sales", "Sales":"Sales", "Contra Voucher":"Contra",
+  "Debit Note Voucher":"Debit Note", "Credit Note Voucher":"Credit Note", "Invoice Return":"Credit Note (sales return)",
+  "Invoice Return - Without Stock":"Credit Note (no stock)", "PO Invoice Return":"Debit Note (purchase return)" };
+// FFS group file name (as exported) -> app group
+const ACC_FILE_GROUP = { capitalaccount:"Capital Account", loansliability:"Loans (Liability)", securedloans:"Secured Loans",
+  packingcreditused:"Packing Credit Used", unsecuredloans:"Unsecured Loans", bankodaccount:"Bank OD A/c", currentliabilities:"Current Liabilities",
+  tdspayable:"TDS Payable", creditcards:"Credit Cards", otheroutstandingpayable:"Other Outstanding Payable",
+  telephoneexpensespayable:"Telephone Expenses Payable", salaryarrears:"Salary Arrears", othercreditors:"Other Creditors",
+  sundrycreditors:"Sundry Creditors", dutiestaxes:"Duties & Taxes", gst:"Goods & Service Tax", fixedassets:"Fixed Assets",
+  currentassets:"Current Assets", gstinputtaxcredit:"GST Input Tax Credit", salarywagesadvance:"Salary & Wages Advance",
+  sundrydebtors:"Sundry Debtors", loansadvancesassets:"Loans & Advances (Asset)", depositsassets:"Deposits (Asset)",
+  cashinhand:"Cash-in-Hand", bankaccounts:"Bank Accounts", suspenseaccount:"Suspense A/c", salesaccounts:"Sales Accounts",
+  indirectincomes:"Indirect Incomes", purchaseaccounts:"Purchase Accounts", directexpenses:"Direct Expenses",
+  productionexpenses:"Production Expenses", indirectexpenses:"Indirect Expenses", adminexpenses:"Admin Expenses",
+  employeebenefitexpenses:"Employee Benefits Expenses", financecharges:"Finance Expenses", salesexpenses:"Sales Expenses" };
+
+const accR2 = n => Math.round((Number(n)||0)*100)/100;
+function accInr(n, dp){ const d = dp===undefined?2:dp; const v = Number(n)||0; const s = Math.abs(v).toLocaleString("en-IN",{minimumFractionDigits:d,maximumFractionDigits:d}); return (v<-0.004?"-":"")+s; }
+function accDrCr(n){ const v = Number(n)||0; return Math.abs(v)<0.005 ? "0.00" : accInr(Math.abs(v))+(v>0?" Dr":" Cr"); }
+const accMonthOf = d => String(d||"").slice(0,7);
+function accFySuffix(iso){ const y = Number(iso.slice(0,4)), m = Number(iso.slice(5,7)); const s = m>=4 ? y : y-1; return String(s).slice(2)+"-"+String(s+1).slice(2); }
+function accMonthsFrom(start, n){ const out=[]; let y=Number(start.slice(0,4)), m=Number(start.slice(5,7)); for(let i=0;i<n;i++){ out.push(y+"-"+String(m).padStart(2,"0")); m++; if(m>12){m=1;y++;} } return out; }
+const accPrevMonth = mo => { let y=Number(mo.slice(0,4)), m=Number(mo.slice(5,7))-1; if(m<1){m=12;y--;} return y+"-"+String(m).padStart(2,"0"); };
+const accMonthEnd = mo => { const y=Number(mo.slice(0,4)), m=Number(mo.slice(5,7)); return mo+"-"+String(new Date(y,m,0).getDate()).padStart(2,"0"); };
+const accMonthLabel = mo => ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][Number(mo.slice(5,7))-1]+" "+mo.slice(2,4);
+
+// ---------------------------------------------------------------------------- data cache
+let ACC_CACHE = null, ACC_LOADING = null;
+function accInvalidate(){ ACC_CACHE = null; ACC_LOADING = null; }
+async function accLoad(force){
+  if(ACC_CACHE && !force) return ACC_CACHE;
+  if(ACC_LOADING && !force) return ACC_LOADING;
+  ACC_LOADING = (async()=>{
+    const probe = await sb.from("acc_group_tbl").select("id").limit(1);
+    if(probe.error) return { missing:true, err:probe.error.message };
+    const [groups, ledgers, vouchers, lines, periodsR, settingsR] = await Promise.all([
+      fetchPaged(()=>sb.from("acc_group_tbl").select("*")),
+      fetchPaged(()=>sb.from("acc_ledger_tbl").select("*")),
+      fetchPaged(()=>sb.from("acc_voucher_tbl").select("id,voucher_no,voucher_date,vtype,narration,ref,source,status,cancel_reason,created_by,created_at,updated_by,updated_at")),
+      fetchPaged(()=>sb.from("acc_voucher_line_tbl").select("id,voucher_id,ledger_id,dr,cr,line_no")),
+      sb.from("acc_period_tbl").select("*"),
+      sb.from("acc_settings_tbl").select("*") ]);
+    const C = { groups: groups.filter(g=>g.is_active!==false), allGroups: groups, ledgers, vouchers, lines,
+      periods:{}, settings:{}, at: Date.now() };
+    (periodsR.data||[]).forEach(p=>C.periods[p.month]=p);
+    (settingsR.data||[]).forEach(s=>C.settings[s.key]=s.value);
+    C.fyStart = C.settings.fy_start || "2026-04-01";
+    C.goLive = C.settings.go_live_date || "2026-11-01";
+    C.months = accMonthsFrom(C.fyStart.slice(0,7), 12);
+    C.gById = {}; C.groups.forEach(g=>C.gById[g.id]=g);
+    C.kids = {}; C.groups.slice().sort((a,b)=>(a.sort_order||0)-(b.sort_order||0)||String(a.name).localeCompare(b.name))
+      .forEach(g=>{ const k = g.parent_id||0; (C.kids[k]=C.kids[k]||[]).push(g.id); });
+    C.lById = {}; ledgers.forEach(l=>C.lById[l.id]=l);
+    C.lByCode = {}; ledgers.forEach(l=>{ if(l.code) C.lByCode[l.code]=l; });
+    C.vById = {}; vouchers.forEach(v=>{ v._lines=[]; C.vById[v.id]=v; });
+    lines.sort((a,b)=>(a.line_no||0)-(b.line_no||0)).forEach(ln=>{ const v=C.vById[ln.voucher_id]; if(v){ v._lines.push(ln); ln._v=v; } });
+    C.posted = vouchers.filter(v=>v.status!=="Cancelled");
+    C.entryCount = {}; lines.forEach(ln=>{ if(ln._v && ln._v.status!=="Cancelled") C.entryCount[ln.ledger_id]=(C.entryCount[ln.ledger_id]||0)+1; });
+    return C;
+  })();
+  const C = await ACC_LOADING; if(!C.missing) ACC_CACHE = C; else ACC_LOADING = null;
+  return C;
+}
+// group helpers
+const accAnc = (C, gid)=>{ const out=[]; let g=C.gById[gid]; while(g){ out.push(g.id); g = g.parent_id ? C.gById[g.parent_id] : null; } return out; };
+const accTop = (C, gid)=>{ const a = accAnc(C,gid); return C.gById[a[a.length-1]]; };
+const accNature = (C, gid)=> (accTop(C,gid)||{}).nature;
+const accDesc = (C, gid)=>{ const out=new Set([gid]); const walk=id=>(C.kids[id]||[]).forEach(k=>{ out.add(k); walk(k); }); walk(gid); return out; };
+const accPath = (C, gid)=> accAnc(C,gid).map(id=>C.gById[id].name).reverse().join(" › ");
+const accIsStock = l => l && (l.code===ACC_STK.rm || l.code===ACC_STK.wip);
+// Balances: opening at `from` (ledger opening + entries before from) and movement from..to (inclusive)
+function accBalances(C, from, to){
+  const op = {}, dr = {}, cr = {};
+  C.ledgers.forEach(l=>{ op[l.id]=Number(l.opening)||0; dr[l.id]=0; cr[l.id]=0; });
+  C.lines.forEach(ln=>{ const v=ln._v; if(!v || v.status==="Cancelled") return; const d=v.voucher_date;
+    if(to && d>to) return; const a=Number(ln.dr)||0, b=Number(ln.cr)||0;
+    if(from && d<from) op[ln.ledger_id]=(op[ln.ledger_id]||0)+a-b; else { dr[ln.ledger_id]=(dr[ln.ledger_id]||0)+a; cr[ln.ledger_id]=(cr[ln.ledger_id]||0)+b; } });
+  return { op, dr, cr, cl: id=> (op[id]||0)+(dr[id]||0)-(cr[id]||0) };
+}
+// Closing stock for a month: the Period Close figure, else the latest one entered before it.
+function accStockAt(C, month, kind){   // kind "rm" | "wip"
+  const key = kind==="rm" ? "rm_closing" : "wip_closing";
+  let m = month, guard = 0;
+  while(guard++<40){ const p = C.periods[m]; if(p && p[key]!==null && p[key]!==undefined && p[key]!=="") return { value:Number(p[key]), month:m, exact: m===month };
+    if(m <= accPrevMonth(C.fyStart.slice(0,7))) break; m = accPrevMonth(m); }
+  const l = C.lByCode[kind==="rm"?ACC_STK.rm:ACC_STK.wip];
+  return { value: l ? Number(l.opening)||0 : 0, month: accPrevMonth(C.fyStart.slice(0,7)), exact:false };
+}
+
+// ---------------------------------------------------------------------------- access (by post)
+async function accAccess(user){
+  const { me, keys } = await myPostKeys(user);
+  const sa = user && user.role==="super_admin";
+  const full = sa || keys.includes("accounts") || keys.includes("finance_director");
+  const enter = full || keys.includes("accountant");
+  const admin = user && (user.role==="admin" || sa);
+  return { me, keys, view: enter || admin, enter, tree: full, close: full, lock: full, unlock: sa, wip: sa, superAdmin: sa };
+}
+const ACC_WHO = { enter:{ posts:["accounts","finance_director","accountant"], roles:["super_admin"] },
+  full:{ posts:["accounts","finance_director"], roles:["super_admin"] }, sa:{ roles:["super_admin"] } };
+async function accLog(user, entity, entityId, action, detail){
+  try{ await sb.from("acc_change_log_tbl").insert({ by_user:user?.username||"unknown", entity, entity_id:String(entityId??""), action, detail }); }catch(e){}
+}
+
+// ---------------------------------------------------------------------------- shared look
+const accTh = { textAlign:"left", padding:"6px 8px", fontSize:11.5, color:"#4a4d44", background:"#f0eee6", borderBottom:"1px solid "+colors.border, position:"sticky", top:0, whiteSpace:"nowrap", zIndex:1 };
+const accTd = { padding:"5px 8px", fontSize:12.5, borderBottom:"1px solid #f0eee6", verticalAlign:"top" };
+const accNum = { ...accTd, textAlign:"right", fontVariantNumeric:"tabular-nums", whiteSpace:"nowrap" };
+const accNote = (txt, tone)=> h("div",{style:{background: tone==="warn"?"#fff4d6": tone==="bad"?"#fdecea":"#e6f1fb", color: tone==="warn"?"#5a3a00": tone==="bad"?"#7a1f1a":"#0c3460", borderRadius:6, padding:"8px 11px", fontSize:12.5, margin:"6px 0 10px", lineHeight:1.45}}, txt);
+const accBadge = (txt, tone)=> h("span",{style:{display:"inline-block", borderRadius:10, padding:"1px 8px", fontSize:11, fontWeight:600, whiteSpace:"nowrap",
+  background: tone==="ffs"?"#eceae0": tone==="app"?"#e4f3ed": tone==="red"?"#fdecea": tone==="amb"?"#fff4d6":"#e6f1fb",
+  color: tone==="ffs"?"#4a4d44": tone==="app"?"#085041": tone==="red"?"#a3312a": tone==="amb"?"#854f0b":"#0c447c"}}, txt);
+const accCard = (title, ...kids)=> h("div",{style:{background:"#fff", border:"1px solid "+colors.border, borderRadius:8, padding:14, marginBottom:12}},
+  title ? h("div",{style:{fontWeight:700, fontSize:15, marginBottom:8}}, title) : null, ...kids);
+const accTable = (head, rows, maxH)=> h("div",{style:{overflow:"auto", maxHeight:maxH||"68vh", border:"1px solid #eceae0", borderRadius:6}},
+  h("table",{style:{borderCollapse:"collapse", width:"100%"}}, h("thead",null,head), h("tbody",null,rows)));
+function accPager(page, setPage, total, size){
+  const pages = Math.max(1, Math.ceil(total/(size||25)));
+  if(pages<=1) return h("span",{style:{fontSize:12,color:colors.muted}}, total+" row"+(total===1?"":"s"));
+  return h("span",{style:{display:"inline-flex",gap:6,alignItems:"center",fontSize:12}},
+    h("button",{style:btnSmall,disabled:page<=0,onClick:()=>setPage(page-1)},"‹ Previous"),
+    h("span",{style:{color:colors.muted}},"Page "+(page+1)+" of "+pages+" · "+total+" rows"),
+    h("button",{style:btnSmall,disabled:page>=pages-1,onClick:()=>setPage(page+1)},"Next ›"));
+}
+// one-time CSS for the Tally-style view and kanban
+(function(){ try{ if(document.getElementById("acc-css")) return; const s=document.createElement("style"); s.id="acc-css"; s.textContent = `
+.acc-tally{font-family:Verdana,Tahoma,"Segoe UI",sans-serif}
+.acc-tally .acc-body{background:#fdfbe9;border:1px solid #7f98a8}
+.acc-tally table th{background:#fdfbe9 !important;color:#1c1f1a !important;border-top:1px solid #1c1f1a !important;border-bottom:1px solid #1c1f1a !important}
+.acc-tally table td{border-bottom:0 !important;padding-top:2px !important;padding-bottom:2px !important}
+.acc-tally tr.acc-tot td{border-top:1px solid #1c1f1a !important;border-bottom:3px double #1c1f1a !important;background:transparent !important}
+.acc-tally tr.acc-click:hover td{background:#ffd54f !important}
+.acc-tally button{border-radius:0 !important}
+tr.acc-click{cursor:pointer} tr.acc-click:hover td{background:#f7f6ef}
+.acc-kcol.acc-over{outline:2px dashed #0f6e56;background:#e4f3ed !important}
+`; document.head.appendChild(s); }catch(e){} })();
+
+// Shell: header with ERP / Tally-style switch; in the Tally-style view a gateway menu sits on the left.
+const ACC_GATEWAY = [
+  ["Masters", [["acc_coa","Chart of Accounts"],["acc_ledgers","Ledgers"],["acc_import","FFS Import"]]],
+  ["Transactions", [["acc_voucher_new","Vouchers"],["acc_vouchers","Voucher Register"],["acc_daybook","Day Book"]]],
+  ["Reports", [["acc_bs","Balance Sheet"],["acc_pl","Profit & Loss A/c"],["acc_tb","Trial Balance"],["acc_cf","Cash Flow"],["acc_ledger","Ledger"]]],
+  ["Utilities", [["acc_period","Period Close"],["tax_invoices","Tax Invoices"],["proforma_invoices","Proforma Invoices"]]] ];
+function AccShell({ user, route, onGo, title, children, A, C, onReload }){
+  const [view,setView] = useState(()=>{ try{ return localStorage.getItem("acc_view")||"erp"; }catch(e){ return "erp"; } });
+  const setV = v=>{ setView(v); try{ localStorage.setItem("acc_view",v); }catch(e){} };
+  const tally = view==="tally";
+  const bar = h("div",{style:{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",padding:"8px 14px",background: tally?"#1d4f6e":"#085041",color:"#fff",borderRadius: tally?0:"8px 8px 0 0"}},
+    h("b",{style:{fontSize:15}}, tally ? "Gateway of Accounts" : "Accounts"), h("span",{style:{opacity:.85,fontSize:13}},"› "+title),
+    h("span",{style:{flex:1}}),
+    C && !C.missing ? h("span",{style:{fontSize:11.5,opacity:.85}},"FY from "+fmtDMY(C.fyStart)+" · go-live "+fmtDMY(C.goLive)) : null,
+    onReload ? h("button",{onClick:onReload,style:{...btnSmall,background:"transparent",color:"#fff",borderColor:"rgba(255,255,255,.5)"}},"Refresh") : null,
+    h("span",{style:{display:"inline-flex",background:"rgba(255,255,255,.15)",borderRadius:6,padding:2}},
+      ["erp","tally"].map(v=>h("button",{key:v,onClick:()=>setV(v),style:{border:0,borderRadius:5,padding:"4px 10px",cursor:"pointer",fontWeight:600,fontSize:12,
+        background: view===v?"#fff":"transparent", color: view===v?"#085041":"#fff"}}, v==="erp"?"ERP view":"Tally-style view"))));
+  const body = h("div",{className:"acc-body",style:{padding:14,background:"#fff",border:"1px solid "+colors.border,borderTop:0,borderRadius: tally?0:"0 0 8px 8px",minHeight:300}}, children);
+  if(!tally) return h("div",{style:{padding:"12px 16px"}}, bar, body);
+  const gate = h("div",{style:{width:220,flex:"0 0 220px",background:"#fff",border:"1px solid #7f98a8",alignSelf:"flex-start"}},
+    h("div",{style:{background:"#2f6f8f",color:"#fff",textAlign:"center",fontWeight:700,padding:5,fontSize:12.5}},"Gateway of Accounts"),
+    ACC_GATEWAY.map(([hd,items])=>h("div",{key:hd},
+      h("div",{style:{color:"#2f6f8f",fontSize:11,fontWeight:700,padding:"8px 12px 2px",letterSpacing:.5}}, hd.toUpperCase()),
+      items.map(([k,lab])=>h("div",{key:k,onClick:()=>onGo&&onGo(k),style:{padding:"3px 20px",cursor:"pointer",fontSize:12.5,background: route===k?"#ffd54f":"transparent",fontWeight: route===k?700:400}}, lab)))));
+  return h("div",{className:"acc-tally",style:{padding:"10px 12px",background:"#d9dfe3",minHeight:"80vh"}}, bar,
+    h("div",{style:{display:"flex",gap:10,marginTop:8,alignItems:"flex-start",flexWrap:"wrap"}}, gate, h("div",{style:{flex:1,minWidth:300}}, body)));
+}
+function AccNoAccess({ what }){
+  return h("div",null, accNote("You don't have access to "+(what||"the books")+". The Finance & Accounts Manager, Finance Director, Accountant posts and super admins have it.", "warn"),
+    h("button",{style:btnSecondary,onClick:()=>noPermission("open "+(what||"the books"), ACC_WHO.enter)},"Who can give me access?"));
+}
+function AccMissing({ C }){
+  return accNote("The accounts tables are not in the database yet. Run structure_accounts_2026-10-17.sql (both companies), then data_accounts_flometriq_openings_2026-10-17.sql (Flometriq). ("+(C&&C.err||"")+")", "bad");
+}
+// Hook used by every screen: access + data
+function useAccData(user){
+  const [A,setA] = useState(null); const [C,setC] = useState(null); const [tick,setTick] = useState(0);
+  useEffect(()=>{ let alive=true; (async()=>{ const a = await accAccess(user); const c = await accLoad(false); if(alive){ setA(a); setC(c); } })(); return ()=>{ alive=false; }; },[user && user.username, tick]);
+  const reload = useCallback(()=>{ accInvalidate(); setTick(t=>t+1); },[]);
+  return { A, C, reload };
+}
+
+// ---------------------------------------------------------------------------- vouchers: popup, entry, register, day book, ledger
+const accLedgerLabel = l => l.name+" · "+l.code;
+const accVType = v => ACC_FFS_TYPE[v.vtype] || v.vtype;
+const accVAmt = v => (v._lines||[]).reduce((s,ln)=>s+(Number(ln.dr)||0),0);
+function accParty(C, v){   // the largest line: usually the party, bank or the expense
+  let best=null; (v._lines||[]).forEach(ln=>{ const a=Math.max(Number(ln.dr)||0, Number(ln.cr)||0); if(!best||a>best.a) best={a, id:ln.ledger_id}; });
+  return best && C.lById[best.id] ? C.lById[best.id].name : "";
+}
+const accMonthLocked = (C, iso)=> { const p = C.periods[accMonthOf(iso)]; return !!(p && p.status==="Locked"); };
+function accCanEdit(C, A, v){
+  if(!A || !A.enter) return { ok:false, why:"Only the Finance & Accounts Manager, Finance Director, Accountant and super admins can change vouchers." };
+  if(v.status==="Cancelled") return { ok:false, why:"This voucher is cancelled." };
+  if(v.source==="FFS") return { ok:false, why:"Vouchers imported from FFS can't be changed in the app. Make a correcting journal in an open month." };
+  if(v.source==="Invoice") return { ok:false, why:"This voucher was posted from a tax invoice. Change the invoice instead." };
+  if(accMonthLocked(C, v.voucher_date)) return { ok:false, why:accMonthLabel(accMonthOf(v.voucher_date))+" is locked. A super admin can unlock it with a reason." };
+  return { ok:true };
+}
+
+function AccVoucherPopup({ C, A, v, user, onClose, onLedger, onEdit, onChanged }){
+  const [cancelling,setCancelling] = useState(false);
+  if(!v) return null;
+  const tot = (v._lines||[]).reduce((a,ln)=>[a[0]+(Number(ln.dr)||0), a[1]+(Number(ln.cr)||0)],[0,0]);
+  const can = accCanEdit(C, A, v);
+  const doCancel = async(reason)=>{
+    setCancelling(false);
+    const { error } = await sb.from("acc_voucher_tbl").update({ status:"Cancelled", cancel_reason:reason, updated_by:user.username, updated_at:new Date().toISOString() }).eq("id",v.id);
+    if(error){ alert(saveFailedText("The cancellation", error)); return; }
+    await accLog(user,"voucher",v.id,"cancel",v.voucher_no+" cancelled: "+reason);
+    try{ logAudit("UPDATE","acc_voucher_tbl",v.id,"Voucher "+v.voucher_no+" cancelled: "+reason,user?.username||"unknown",{status:v.status},{status:"Cancelled"}); }catch(e){}
+    accInvalidate(); onChanged && onChanged(); onClose();
+  };
+  return h("div",{onClick:e=>{ if(e.target===e.currentTarget) onClose(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:2400,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"50px 16px",overflow:"auto"}},
+    h("div",{style:{background:"#fff",borderRadius:10,width:760,maxWidth:"100%",padding:"16px 18px"}},
+      h("div",{style:{fontWeight:700,fontSize:16}}, accVType(v)+" · "+v.voucher_no),
+      h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",fontSize:12.5,color:colors.muted,margin:"4px 0 10px"}},
+        "Date "+fmtDMY(v.voucher_date), v.ref ? " · Ref "+v.ref : null,
+        v.source==="FFS" ? accBadge("Imported from FFS — locked","ffs") : v.source==="Invoice" ? accBadge("Posted from invoice","") : accBadge("Entered in app","app"),
+        v.status==="Cancelled" ? accBadge("Cancelled: "+(v.cancel_reason||""),"red") : null,
+        accMonthLocked(C, v.voucher_date) ? accBadge("Month locked","amb") : null),
+      accTable(h("tr",null, h("th",{style:accTh},"Ledger"), h("th",{style:accTh},"Group"), h("th",{style:{...accTh,textAlign:"right"}},"Debit"), h("th",{style:{...accTh,textAlign:"right"}},"Credit")),
+        [...(v._lines||[]).map(ln=>{ const l = C.lById[ln.ledger_id]||{};
+          return h("tr",{key:ln.id||Math.random(),className:"acc-click",onClick:()=>{ onClose(); onLedger && onLedger(ln.ledger_id); }},
+            h("td",{style:accTd}, l.name||"?", " ", h("span",{style:{color:colors.muted,fontSize:11}}, l.code||"")),
+            h("td",{style:{...accTd,color:colors.muted}}, (C.gById[l.group_id]||{}).name||""),
+            h("td",{style:accNum}, Number(ln.dr) ? accInr(ln.dr) : ""), h("td",{style:accNum}, Number(ln.cr) ? accInr(ln.cr) : "")); }),
+          h("tr",{key:"t",className:"acc-tot"}, h("td",{style:{...accTd,fontWeight:700},colSpan:2},"Total"), h("td",{style:{...accNum,fontWeight:700}},accInr(tot[0])), h("td",{style:{...accNum,fontWeight:700}},accInr(tot[1])))], "50vh"),
+      v.narration ? h("div",{style:{fontSize:13,marginTop:10}}, h("b",null,"Narration: "), v.narration) : null,
+      h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:8}}, "Click a line to open that ledger.", v.created_by ? " Entered by "+v.created_by+(v.created_at?" on "+fmtDMYTime(v.created_at):"")+"." : "", v.updated_by ? " Last changed by "+v.updated_by+(v.updated_at?" on "+fmtDMYTime(v.updated_at):"")+"." : ""),
+      h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14,flexWrap:"wrap"}},
+        v.source==="App" && v.status!=="Cancelled" ? h("button",{style:permBtnStyle(can.ok,btnSecondary),onClick:()=>{ if(!can.ok){ alert(can.why); return; } onClose(); onEdit && onEdit(v.id); }},"Edit voucher") : null,
+        v.source==="App" && v.status!=="Cancelled" ? h("button",{style:permBtnStyle(can.ok,{...btnSecondary,color:"#a3312a",borderColor:"#e0b4ae"}),onClick:()=>{ if(!can.ok){ alert(can.why); return; } setCancelling(true); }},"Cancel voucher") : null,
+        h("button",{style:btnPrimary,onClick:onClose},"Close")),
+      cancelling ? h(ReasonDialog,{ title:"Cancel voucher "+v.voucher_no, subtitle:"The voucher stays in the books as Cancelled and its number is not used again.", placeholder:"Why is it being cancelled?", okLabel:"Cancel voucher", onOk:doCancel, onCancel:()=>setCancelling(false) }) : null));
+}
+
+async function accNextNo(pre, fy){
+  const rows = await fetchPaged(()=>sb.from("acc_voucher_tbl").select("id,voucher_no").like("voucher_no", pre+"/%/"+fy));
+  let max = 0, width = 4; const re = new RegExp("^"+pre+"/(\\d+)/"+fy.replace("-","\\-")+"$");
+  rows.forEach(r=>{ const m = re.exec(r.voucher_no||""); if(m){ max = Math.max(max, Number(m[1])); width = Math.max(width, m[1].length); } });
+  return pre+"/"+String(max+1).padStart(width,"0")+"/"+fy;
+}
+async function accSaveVoucher(user, C, d, editing){
+  const lines = d.lines.filter(x=>x.ledger_id && (accR2(x.dr)||accR2(x.cr)));
+  const ins = lines.map((x,i)=>({ ledger_id:x.ledger_id, dr:accR2(x.dr), cr:accR2(x.cr), line_no:i+1 }));
+  if(editing){
+    const old = C.vById[editing];
+    const { error } = await sb.from("acc_voucher_tbl").update({ voucher_date:d.date, narration:d.narration||null, ref:d.ref||null, updated_by:user.username, updated_at:new Date().toISOString() }).eq("id",editing);
+    if(error) return { err:error };
+    const del = await sb.from("acc_voucher_line_tbl").delete().eq("voucher_id",editing);
+    if(del.error) return { err:del.error };
+    const r = await sb.from("acc_voucher_line_tbl").insert(ins.map(x=>({ ...x, voucher_id:editing })));
+    if(r.error) return { err:r.error };
+    const was = (old._lines||[]).map(ln=>(C.lById[ln.ledger_id]||{}).name+" "+(Number(ln.dr)?"Dr "+accInr(ln.dr):"Cr "+accInr(ln.cr))).join("; ");
+    const now = ins.map(x=>(C.lById[x.ledger_id]||{}).name+" "+(x.dr?"Dr "+accInr(x.dr):"Cr "+accInr(x.cr))).join("; ");
+    await accLog(user,"voucher",editing,"edit",old.voucher_no+" changed. Was: "+fmtDMY(old.voucher_date)+" "+was+" | Now: "+fmtDMY(d.date)+" "+now);
+    try{ logAudit("UPDATE","acc_voucher_tbl",editing,"Voucher "+old.voucher_no+" changed",user?.username||"unknown",{date:old.voucher_date,lines:was},{date:d.date,lines:now}); }catch(e){}
+    return { no: old.voucher_no, id: editing };
+  }
+  const vt = ACC_VTYPES.find(x=>x.t===d.vtype) || ACC_VTYPES[3];
+  const fy = accFySuffix(d.date);
+  for(let attempt=0; attempt<3; attempt++){
+    const no = await accNextNo(vt.pre, fy);
+    const { data, error } = await sb.from("acc_voucher_tbl").insert({ voucher_no:no, voucher_date:d.date, vtype:d.vtype, narration:d.narration||null, ref:d.ref||null, source:"App", status:"Posted", created_by:user.username }).select("id");
+    if(error) return { err:error };
+    const id = data[0].id;
+    const dup = await sb.from("acc_voucher_tbl").select("id").eq("voucher_no",no);
+    if((dup.data||[]).length>1 && (dup.data||[]).some(x=>x.id<id)){ await sb.from("acc_voucher_tbl").delete().eq("id",id); continue; }   // someone took the number at the same moment
+    const r = await sb.from("acc_voucher_line_tbl").insert(ins.map(x=>({ ...x, voucher_id:id })));
+    if(r.error){ await sb.from("acc_voucher_tbl").delete().eq("id",id); return { err:r.error }; }
+    await accLog(user,"voucher",id,"add",no+" "+d.vtype+" "+accInr(ins.reduce((s,x)=>s+x.dr,0)));
+    try{ logAudit("INSERT","acc_voucher_tbl",id,"Voucher "+no+" entered",user?.username||"unknown",null,{ voucher_no:no, date:d.date }); }catch(e){}
+    return { no, id };
+  }
+  return { err:{ message:"Couldn't get a free voucher number. Try again." } };
+}
+
+const accBlankLine = ()=>({ k:Math.random().toString(36).slice(2), ledger_id:null, label:"", dr:"", cr:"" });
+function AccVoucherEntry({ user, A, C, editId, onDone, onClose, onOpenVoucher }){
+  const editing = editId ? C.vById[editId] : null;
+  const today = toISODate(new Date());
+  const [d,setD] = useState(()=> editing
+    ? { vtype:editing.vtype, date:editing.voucher_date, ref:editing.ref||"", narration:editing.narration||"",
+        lines:(editing._lines||[]).map(ln=>({ ...accBlankLine(), ledger_id:ln.ledger_id, label:C.lById[ln.ledger_id]?accLedgerLabel(C.lById[ln.ledger_id]):"", dr:Number(ln.dr)?String(ln.dr):"", cr:Number(ln.cr)?String(ln.cr):"" })) }
+    : { vtype:"Payment", date: today < C.goLive ? C.goLive : today, ref:"", narration:"", lines:[accBlankLine(), accBlankLine()] });
+  const [dirty,setDirty] = useState(false); const [busy,setBusy] = useState(false); const [last,setLast] = useState(null);
+  useEffect(()=>{ setUnsavedGuard(dirty, "This voucher isn't saved. Leave anyway?"); return ()=>setUnsavedGuard(false); },[dirty]);
+  const active = useMemo(()=>C.ledgers.filter(l=>l.is_active!==false && !accIsStock(l) && l.code!==ACC_STK.ppa && l.source!=="System").sort((a,b)=>a.name.localeCompare(b.name)),[C]);
+  const opts = useMemo(()=>active.map(accLedgerLabel),[active]);
+  const byLabel = useMemo(()=>{ const m={}; active.forEach(l=>m[accLedgerLabel(l)]=l); return m; },[active]);
+  const upd = (patch)=>{ setD(x=>({ ...x, ...patch })); setDirty(true); };
+  const updLine = (k, patch)=>{ setD(x=>({ ...x, lines:x.lines.map(ln=>ln.k===k?{ ...ln, ...patch }:ln) })); setDirty(true); };
+  const tDr = accR2(d.lines.reduce((s,x)=>s+(Number(x.dr)||0),0)), tCr = accR2(d.lines.reduce((s,x)=>s+(Number(x.cr)||0),0));
+  const diff = accR2(tDr - tCr);
+  const bal = C.ledgers.length ? accBalances(C, null, null) : null;
+  const hint = { Payment:"Money going out: Debit the expense or party, Credit the bank or cash.", Receipt:"Money coming in: Debit the bank or cash, Credit the customer or income.",
+    Contra:"Between your own bank and cash accounts only.", Journal:"Adjustments with no cash or bank: provisions, transfers, corrections.",
+    Purchase:"A supplier bill: Debit the purchase / expense and GST input, Credit the supplier (and TDS payable if deducted).",
+    "Debit Note":"Goods returned to a supplier or a price reduction from them: Debit the supplier.", "Credit Note":"Goods returned by a customer or a price reduction to them: Credit the customer." }[d.vtype];
+  const problems = ()=>{
+    const out = [];
+    if(!d.date) out.push("Give the voucher date.");
+    if(d.date && d.date < C.goLive) out.push("The books start in the app on "+fmtDMY(C.goLive)+". Entries before that come from FFS (Masters → FFS Import).");
+    if(d.date && accMonthLocked(C, d.date)) out.push(accMonthLabel(accMonthOf(d.date))+" is locked. Pick a date in an open month, or ask a super admin to unlock it.");
+    if(d.date && editing && accFySuffix(d.date)!==accFySuffix(editing.voucher_date)) out.push("The date can't move to another financial year (the number belongs to "+accFySuffix(editing.voucher_date)+"). Cancel this one and enter a new voucher.");
+    const used = d.lines.filter(x=>x.ledger_id || Number(x.dr) || Number(x.cr));
+    if(used.length<2) out.push("A voucher needs at least two lines.");
+    used.forEach((x,i)=>{ if(!x.ledger_id) out.push("Line "+(i+1)+": pick a ledger from the list.");
+      if(Number(x.dr) && Number(x.cr)) out.push("Line "+(i+1)+": put the amount in Debit or Credit, not both.");
+      if(Number(x.dr)<0 || Number(x.cr)<0) out.push("Line "+(i+1)+": amounts can't be negative; use the other column.");
+      if(x.ledger_id && !Number(x.dr) && !Number(x.cr)) out.push("Line "+(i+1)+": give an amount."); });
+    if(Math.abs(diff)>=0.005) out.push("Debit and credit don't agree: Debit "+accInr(tDr)+", Credit "+accInr(tCr)+" (difference "+accInr(Math.abs(diff))+").");
+    if(tDr<=0) out.push("The voucher total is zero.");
+    if(d.vtype==="Contra"){ const cb = new Set(C.groups.filter(g=>/^(cash-in-hand|bank accounts|bank od a\/c)$/i.test(g.name)).flatMap(g=>[...accDesc(C,g.id)]));
+      used.forEach((x,i)=>{ const l=C.lById[x.ledger_id]; if(l && !cb.has(l.group_id)) out.push("Line "+(i+1)+": a Contra is only between bank and cash ledgers. Use a Journal or Payment for "+l.name+"."); }); }
+    return out;
+  };
+  const save = async(again)=>{
+    if(!A.enter){ noPermission(editing?"change vouchers":"enter vouchers", ACC_WHO.enter); return; }
+    const p = problems(); if(p.length){ alert("The voucher can't be saved yet:\n\n• "+p.join("\n• ")); return; }
+    setBusy(true);
+    const r = await accSaveVoucher(user, C, d, editing && editing.id);
+    setBusy(false);
+    if(r.err){ alert(saveFailedText("The voucher", r.err)); return; }
+    setDirty(false); setUnsavedGuard(false); accInvalidate();
+    setLast(r);
+    if(editing){ onDone && onDone(r, false); return; }
+    setD(x=>({ ...x, ref:"", narration:"", lines:[accBlankLine(), accBlankLine()] }));
+    onDone && onDone(r, again);
+  };
+  const close = ()=>{ if(dirty && !confirm("This voucher isn't saved. Leave without saving?")) return; setUnsavedGuard(false); onClose(); };
+  const fill = (k)=>{ if(Math.abs(diff)<0.005) return; const ln = d.lines.find(x=>x.k===k); if(!ln || Number(ln.dr) || Number(ln.cr)) return;
+    if(diff>0) updLine(k,{ cr:String(diff) }); else updLine(k,{ dr:String(-diff) }); };
+  const vt = ACC_VTYPES.find(x=>x.t===d.vtype);
+  const lab = { fontSize:11, color:colors.muted, fontWeight:600, display:"block", marginBottom:3 };
+  return h("div",null,
+    !A.enter ? accNote("You can look but not save: entering vouchers is for the Finance & Accounts Manager, Finance Director, Accountant and super admins.","warn") : null,
+    last && !editing ? accNote(h("span",null,"Saved as ", h("b",{style:{cursor:"pointer",textDecoration:"underline"},onClick:()=>onOpenVoucher && onOpenVoucher(last.id)}, last.no), ". Enter the next one below."), "") : null,
+    accCard(editing ? "Change voucher "+editing.voucher_no : "New voucher",
+      h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}},
+        ACC_VTYPES.map(x=>h("button",{key:x.t,disabled:!!editing,onClick:()=>upd({ vtype:x.t }),style:{...btnSmall, background:d.vtype===x.t?"#085041":"#fff", color:d.vtype===x.t?"#fff":colors.text, opacity: editing && d.vtype!==x.t ? .4 : 1}}, x.t))),
+      h("div",{style:{display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-end"}},
+        h("label",null,h("span",{style:lab},"Date"), h("input",{type:"date",value:d.date,onChange:e=>upd({ date:e.target.value }),style:{...inputStyle,width:160}})),
+        h("div",null,h("span",{style:lab},"Number"), h("div",{style:{fontSize:13,padding:"7px 0"}}, editing ? editing.voucher_no : vt.pre+"/next/"+(d.date?accFySuffix(d.date):""), h("span",{style:{color:colors.muted,fontSize:11.5}}, editing?"":"  (given on save, continuing the FFS series)"))),
+        h("label",{style:{flex:1,minWidth:180}},h("span",{style:lab},"Reference (bill no, cheque no…)"), h("input",{value:d.ref,onChange:e=>upd({ ref:e.target.value }),style:inputStyle}))),
+      hint ? h("div",{style:{fontSize:12,color:colors.muted,margin:"8px 0"}}, hint) : null,
+      h("div",{style:{overflowX:"auto"}}, h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:620}},
+        h("thead",null,h("tr",null, h("th",{style:accTh},"#"), h("th",{style:accTh},"Ledger"), h("th",{style:{...accTh,textAlign:"right"}},"Balance now"), h("th",{style:{...accTh,textAlign:"right",width:150}},"Debit"), h("th",{style:{...accTh,textAlign:"right",width:150}},"Credit"), h("th",{style:accTh},""))),
+        h("tbody",null, d.lines.map((ln,i)=>h("tr",{key:ln.k},
+          h("td",{style:accTd}, i+1),
+          h("td",{style:{...accTd,minWidth:260}}, h(LimitToListCombo,{ value:ln.label, options:opts, placeholder:"Type to find a ledger", style:inputStyle,
+            invalidMessage:v=>"\""+v+"\" isn't a ledger. Pick one from the list, or add it in Accounts → Masters → Chart of Accounts.",
+            onChange:v=>{ const l = byLabel[v]; updLine(ln.k,{ label:v, ledger_id: l ? l.id : null }); } })),
+          h("td",{style:{...accNum,color:colors.muted}}, ln.ledger_id && bal ? accDrCr(bal.cl(ln.ledger_id)) : ""),
+          h("td",{style:accTd}, h("input",{type:"number",step:"0.01",value:ln.dr,onFocus:()=>fill(ln.k),onChange:e=>updLine(ln.k,{ dr:e.target.value, cr: e.target.value?"":ln.cr }),style:{...inputStyle,textAlign:"right"}})),
+          h("td",{style:accTd}, h("input",{type:"number",step:"0.01",value:ln.cr,onChange:e=>updLine(ln.k,{ cr:e.target.value, dr: e.target.value?"":ln.dr }),style:{...inputStyle,textAlign:"right"}})),
+          h("td",{style:accTd}, d.lines.length>2 ? h("button",{style:btnSmall,title:"Remove this line",onClick:()=>{ setD(x=>({ ...x, lines:x.lines.filter(y=>y.k!==ln.k) })); setDirty(true); }},"Remove line") : null))),
+          h("tr",{className:"acc-tot"}, h("td",{style:accTd}), h("td",{style:{...accTd,fontWeight:700}}, h("button",{style:btnSmall,onClick:()=>{ setD(x=>({ ...x, lines:[...x.lines, accBlankLine()] })); setDirty(true); }},"+ Add line")),
+            h("td",{style:{...accNum,color: Math.abs(diff)<0.005?"#0f6e56":"#a3312a",fontWeight:600}}, Math.abs(diff)<0.005 ? "Balanced" : "Difference "+accInr(Math.abs(diff))),
+            h("td",{style:{...accNum,fontWeight:700}}, accInr(tDr)), h("td",{style:{...accNum,fontWeight:700}}, accInr(tCr)), h("td",{style:accTd}))))),
+      h("label",{style:{display:"block",marginTop:10}}, h("span",{style:lab},"Narration"), h("textarea",{rows:2,value:d.narration,onChange:e=>upd({ narration:e.target.value }),style:{...inputStyle,fontSize:13}})),
+      h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:6}}, "Tip: click into an empty Debit box and the difference fills in for you. App vouchers can be changed or cancelled until their month is locked."),
+      h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12,flexWrap:"wrap"}},
+        !editing ? h("button",{style:permBtnStyle(A.enter,btnSecondary),disabled:busy,onClick:()=>save(true)}, busy?"Saving…":"Save and enter another") : null,
+        h("button",{style:permBtnStyle(A.enter,btnPrimary),disabled:busy,onClick:()=>save(false)}, busy?"Saving…": editing?"Save changes":"Save voucher"),
+        h("button",{style:btnSecondary,onClick:close},"Close"))));
+}
+
+// Voucher register (all vouchers, filters) and Day Book (a date range, in date order)
+function AccVoucherList({ C, onOpen, mode }){
+  const day = mode==="day";
+  const lastDate = C.posted.reduce((m,v)=>v.voucher_date>m?v.voucher_date:m, "");
+  const [from,setFrom] = useState(day ? (lastDate||toISODate(new Date())) : C.fyStart);
+  const [to,setTo] = useState(day ? (lastDate||toISODate(new Date())) : "");
+  const [type,setType] = useState(""); const [src,setSrc] = useState(""); const [q,setQ] = useState(""); const [showCan,setShowCan] = useState(false);
+  const [page,setPage] = useState(0);
+  useEffect(()=>setPage(0),[from,to,type,src,q,showCan]);
+  const types = useMemo(()=>[...new Set(C.vouchers.map(accVType))].sort(),[C]);
+  const ql = q.trim().toLowerCase();
+  const rows = useMemo(()=>C.vouchers.filter(v=>{
+    if(!showCan && v.status==="Cancelled") return false;
+    if(from && v.voucher_date<from) return false; if(to && v.voucher_date>to) return false;
+    if(type && accVType(v)!==type) return false; if(src && v.source!==src) return false;
+    if(ql){ const hay = (v.voucher_no+" "+(v.narration||"")+" "+(v.ref||"")+" "+(v._lines||[]).map(ln=>(C.lById[ln.ledger_id]||{}).name).join(" ")).toLowerCase(); if(!hay.includes(ql)) return false; }
+    return true; }).sort((a,b)=> day ? (a.voucher_date.localeCompare(b.voucher_date) || String(a.voucher_no).localeCompare(String(b.voucher_no))) : (b.voucher_date.localeCompare(a.voucher_date) || String(b.voucher_no).localeCompare(String(a.voucher_no)))),[C,from,to,type,src,ql,showCan,day]);
+  const total = rows.reduce((s,v)=>s+(v.status==="Cancelled"?0:accVAmt(v)),0);
+  const shown = rows.slice(page*25, page*25+25);
+  const lab = { fontSize:11, color:colors.muted, fontWeight:600, display:"block", marginBottom:3 };
+  const shift = n=>{ const dt = new Date(from+"T00:00:00"); dt.setDate(dt.getDate()+n); const s = toISODate(dt); setFrom(s); setTo(s); };
+  return accCard(day ? "Day Book" : "Voucher Register",
+    h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end",marginBottom:8}},
+      h("label",null,h("span",{style:lab},"From"),h("input",{type:"date",value:from,onChange:e=>setFrom(e.target.value),style:{...inputStyle,width:150}})),
+      h("label",null,h("span",{style:lab},"To"),h("input",{type:"date",value:to,onChange:e=>setTo(e.target.value),style:{...inputStyle,width:150}})),
+      day ? h("span",{style:{display:"inline-flex",gap:4}}, h("button",{style:btnSmall,onClick:()=>shift(-1)},"‹ Previous day"), h("button",{style:btnSmall,onClick:()=>shift(1)},"Next day ›")) : null,
+      h("label",null,h("span",{style:lab},"Type"),h("select",{value:type,onChange:e=>setType(e.target.value),style:{...inputStyle,width:170}}, h("option",{value:""},"All types"), types.map(t=>h("option",{key:t,value:t},t)))),
+      h("label",null,h("span",{style:lab},"Source"),h("select",{value:src,onChange:e=>setSrc(e.target.value),style:{...inputStyle,width:140}}, h("option",{value:""},"All"), h("option",{value:"FFS"},"FFS import"), h("option",{value:"App"},"Entered in app"), h("option",{value:"Invoice"},"From invoices"))),
+      h("label",{style:{flex:1,minWidth:180}},h("span",{style:lab},"Search number, narration, ledger"),h("input",{value:q,onChange:e=>setQ(e.target.value),style:inputStyle})),
+      h("label",{style:{fontSize:12.5,display:"flex",gap:5,alignItems:"center"}}, h("input",{type:"checkbox",checked:showCan,onChange:e=>setShowCan(e.target.checked)}),"Show cancelled")),
+    h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",margin:"4px 0 8px",flexWrap:"wrap",gap:8}},
+      h("span",{style:{fontSize:12.5}}, rows.length+" vouchers · total "+accInr(total)), accPager(page,setPage,rows.length,25)),
+    accTable(h("tr",null, ...["Date","Voucher","Type","Main ledger","Narration"].map(x=>h("th",{key:x,style:accTh},x)), h("th",{style:{...accTh,textAlign:"right"}},"Amount"), h("th",{style:accTh},"")),
+      shown.length ? shown.map(v=>h("tr",{key:v.id,className:"acc-click",onClick:()=>onOpen(v.id),style:{opacity:v.status==="Cancelled"?.5:1}},
+        h("td",{style:{...accTd,whiteSpace:"nowrap"}}, fmtDMY(v.voucher_date)), h("td",{style:{...accTd,whiteSpace:"nowrap"}}, v.voucher_no),
+        h("td",{style:accTd}, accVType(v)), h("td",{style:accTd}, accParty(C,v)),
+        h("td",{style:{...accTd,color:colors.muted,maxWidth:320,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}, v.narration||""),
+        h("td",{style:accNum}, accInr(accVAmt(v))),
+        h("td",{style:accTd}, v.status==="Cancelled" ? accBadge("Cancelled","red") : v.source==="FFS" ? accBadge("FFS","ffs") : v.source==="Invoice" ? accBadge("Invoice","") : accBadge("App","app"))))
+      : [h("tr",{key:"n"},h("td",{colSpan:7,style:{...accTd,color:colors.muted}},"No vouchers in this range."))]));
+}
+
+function AccLedgerView({ C, ledgerId, onPick, onOpen }){
+  const l = C.lById[ledgerId];
+  const opts = useMemo(()=>C.ledgers.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(accLedgerLabel),[C]);
+  const byLabel = useMemo(()=>{ const m={}; C.ledgers.forEach(x=>m[accLedgerLabel(x)]=x.id); return m; },[C]);
+  const lastDate = C.posted.reduce((m,v)=>v.voucher_date>m?v.voucher_date:m, C.fyStart);
+  const [from,setFrom] = useState(C.fyStart); const [to,setTo] = useState(lastDate);
+  const [page,setPage] = useState(0); useEffect(()=>setPage(0),[ledgerId,from,to]);
+  const lab = { fontSize:11, color:colors.muted, fontWeight:600, display:"block", marginBottom:3 };
+  const data = useMemo(()=>{
+    if(!l) return null;
+    let op = Number(l.opening)||0; const rows = [];
+    C.lines.filter(ln=>ln.ledger_id===l.id && ln._v && ln._v.status!=="Cancelled").sort((a,b)=>a._v.voucher_date.localeCompare(b._v.voucher_date) || String(a._v.voucher_no).localeCompare(String(b._v.voucher_no)))
+      .forEach(ln=>{ const v = ln._v; const a = Number(ln.dr)||0, b = Number(ln.cr)||0;
+        if(from && v.voucher_date<from){ op += a-b; return; } if(to && v.voucher_date>to) return;
+        const others = (v._lines||[]).filter(x=>x.ledger_id!==l.id); const big = others.sort((x,y)=>Math.max(y.dr,y.cr)-Math.max(x.dr,x.cr))[0];
+        rows.push({ v, dr:a, cr:b, part: big ? (C.lById[big.ledger_id]||{}).name + (others.length>1?" (+"+(others.length-1)+")":"") : "" }); });
+    let run = op; rows.forEach(r=>{ run += r.dr-r.cr; r.bal = run; });
+    return { op, rows, dr:rows.reduce((s,r)=>s+r.dr,0), cr:rows.reduce((s,r)=>s+r.cr,0), cl:run };
+  },[C,l,from,to]);
+  const excel = ()=>{ if(!data) return; const aoa = [[l.name+" ("+l.code+")"],["From "+fmtDMY(from)+" to "+fmtDMY(to)],[],["Date","Voucher","Type","Particulars","Narration","Debit","Credit","Balance"],["","","","Opening","","","",accDrCr(data.op)]];
+    data.rows.forEach(r=>aoa.push([fmtDMY(r.v.voucher_date), r.v.voucher_no, accVType(r.v), r.part, r.v.narration||"", r.dr||"", r.cr||"", accDrCr(r.bal)]));
+    aoa.push(["","","","Total","",accR2(data.dr),accR2(data.cr),accDrCr(data.cl)]);
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "Ledger"); XLSX.writeFile(wb, "Ledger_"+l.name.replace(/[^\w]+/g,"_").slice(0,40)+"_"+toISODate(new Date())+".xlsx"); };
+  const shown = data ? data.rows.slice(page*25, page*25+25) : [];
+  return accCard("Ledger",
+    h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end",marginBottom:8}},
+      h("label",{style:{flex:1,minWidth:260}},h("span",{style:lab},"Ledger"), h(LimitToListCombo,{ value:l?accLedgerLabel(l):"", options:opts, placeholder:"Type to find a ledger", style:inputStyle, onChange:v=>{ if(byLabel[v]) onPick(byLabel[v]); } })),
+      h("label",null,h("span",{style:lab},"From"),h("input",{type:"date",value:from,onChange:e=>setFrom(e.target.value),style:{...inputStyle,width:150}})),
+      h("label",null,h("span",{style:lab},"To"),h("input",{type:"date",value:to,onChange:e=>setTo(e.target.value),style:{...inputStyle,width:150}})),
+      l ? h("button",{style:btnSecondary,onClick:excel},"Download Excel") : null),
+    !l ? accNote("Pick a ledger. You can also click any ledger in the Trial Balance or a voucher.","") :
+    h("div",null,
+      h("div",{style:{fontSize:12.5,color:colors.muted,marginBottom:6}}, "Group: "+accPath(C,l.group_id)+" · code "+l.code+(l.gstin?" · GSTIN "+l.gstin:"")+(l.is_active===false?" · inactive":"")),
+      h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",margin:"4px 0 8px",flexWrap:"wrap",gap:8}},
+        h("span",{style:{fontSize:12.5}}, "Opening "+accDrCr(data.op)+" · Debit "+accInr(data.dr)+" · Credit "+accInr(data.cr)+" · Closing ", h("b",null,accDrCr(data.cl))), accPager(page,setPage,data.rows.length,25)),
+      accTable(h("tr",null, ...["Date","Voucher","Type","Particulars"].map(x=>h("th",{key:x,style:accTh},x)), ...["Debit","Credit","Balance"].map(x=>h("th",{key:x,style:{...accTh,textAlign:"right"}},x))),
+        [page===0 ? h("tr",{key:"op"}, h("td",{style:accTd,colSpan:3},fmtDMY(from)), h("td",{style:{...accTd,fontStyle:"italic"}},"Opening balance"), h("td",{style:accNum}), h("td",{style:accNum}), h("td",{style:accNum},accDrCr(data.op))) : null,
+         ...shown.map(r=>h("tr",{key:r.v.id+"-"+r.bal,className:"acc-click",onClick:()=>onOpen(r.v.id)},
+          h("td",{style:{...accTd,whiteSpace:"nowrap"}},fmtDMY(r.v.voucher_date)), h("td",{style:{...accTd,whiteSpace:"nowrap"}},r.v.voucher_no), h("td",{style:accTd},accVType(r.v)),
+          h("td",{style:accTd}, r.part, r.v.narration ? h("div",{style:{fontSize:11,color:colors.muted}}, r.v.narration.slice(0,120)) : null),
+          h("td",{style:accNum}, r.dr?accInr(r.dr):""), h("td",{style:accNum}, r.cr?accInr(r.cr):""), h("td",{style:accNum}, accDrCr(r.bal)))),
+         (page+1)*25>=data.rows.length ? h("tr",{key:"tot",className:"acc-tot"}, h("td",{style:{...accTd,fontWeight:700},colSpan:4},"Closing balance"), h("td",{style:{...accNum,fontWeight:700}},accInr(data.dr)), h("td",{style:{...accNum,fontWeight:700}},accInr(data.cr)), h("td",{style:{...accNum,fontWeight:700}},accDrCr(data.cl))) : null])));
+}
+
+// ---------------------------------------------------------------------------- statements: TB, P&L, BS, cash flow
+const accLastDate = C => C.posted.reduce((m,v)=>v.voucher_date>m?v.voucher_date:m, C.fyStart);
+const accIsPL = (C, l) => "IE".includes(accNature(C, l.group_id)||"");
+const accStockLedgerIds = C => { const s=new Set(); [ACC_STK.rm, ACC_STK.wip, ACC_STK.ppa].forEach(c=>{ if(C.lByCode[c]) s.add(C.lByCode[c].id); }); return s; };
+function accLsGet(k, d){ try{ const v = localStorage.getItem(k); return v===null ? d : v; }catch(e){ return d; } }
+function accLsSet(k, v){ try{ localStorage.setItem(k, v); }catch(e){} }
+const accMonthsTo = (C, toIso)=> C.months.filter(m=>m<=accMonthOf(toIso));
+
+function AccTrialBalance({ C, onLedger }){
+  const [asOn,setAsOn] = useState(accLastDate(C));
+  const [open,setOpen] = useState({}); const [hideZero,setHideZero] = useState(true);
+  const b = useMemo(()=>accBalances(C, C.fyStart, asOn),[C,asOn]);
+  const gs = useMemo(()=>{ const s={}; C.ledgers.forEach(l=>{ const v=[b.op[l.id]||0, b.dr[l.id]||0, b.cr[l.id]||0, b.cl(l.id)];
+    accAnc(C,l.group_id).forEach(a=>{ s[a]=s[a]||[0,0,0,0]; v.forEach((x,k)=>s[a][k]+=x); }); }); return s; },[C,b]);
+  const ledByG = useMemo(()=>{ const m={}; C.ledgers.forEach(l=>{ (m[l.group_id]=m[l.group_id]||[]).push(l); }); Object.values(m).forEach(a=>a.sort((x,y)=>x.name.localeCompare(y.name))); return m; },[C]);
+  const T = [0,0,0,0]; C.ledgers.forEach(l=>{ T[0]+=b.op[l.id]||0; T[1]+=b.dr[l.id]||0; T[2]+=b.cr[l.id]||0; T[3]+=b.cl(l.id); });
+  const rows = [];
+  const walk = (pid, depth)=> (C.kids[pid]||[]).forEach(gid=>{ const s = gs[gid]||[0,0,0,0]; const isOpen = !!open[gid];
+    if(hideZero && s.every(x=>Math.abs(x)<0.005) ) return;
+    rows.push(h("tr",{key:"g"+gid,className:"acc-click",onClick:()=>setOpen(o=>({ ...o, [gid]:!o[gid] }))},
+      h("td",{style:{...accTd,fontWeight:600,paddingLeft:8+depth*16}}, (isOpen?"▾ ":"▸ ")+C.gById[gid].name),
+      h("td",{style:{...accNum,fontWeight:600}},accDrCr(s[0])), h("td",{style:{...accNum,fontWeight:600}},accInr(s[1])), h("td",{style:{...accNum,fontWeight:600}},accInr(s[2])), h("td",{style:{...accNum,fontWeight:600}},accDrCr(s[3]))));
+    if(isOpen){ walk(gid, depth+1); (ledByG[gid]||[]).forEach(l=>{ const o=b.op[l.id]||0, d=b.dr[l.id]||0, c=b.cr[l.id]||0;
+      if(hideZero && Math.abs(o)<0.005 && !d && !c) return;
+      rows.push(h("tr",{key:"l"+l.id,className:"acc-click",onClick:()=>onLedger(l.id)},
+        h("td",{style:{...accTd,paddingLeft:26+depth*16}}, l.name, " ", h("span",{style:{color:colors.muted,fontSize:11}}, l.code)),
+        h("td",{style:accNum},accDrCr(o)), h("td",{style:accNum},accInr(d)), h("td",{style:accNum},accInr(c)), h("td",{style:accNum},accDrCr(b.cl(l.id))))); }); } });
+  walk(0,0);
+  const excel = ()=>{ const aoa=[["Trial Balance from "+fmtDMY(C.fyStart)+" to "+fmtDMY(asOn)],[],["Group","Ledger","Code","Opening","Debit","Credit","Closing"]];
+    const w = (pid, path)=> (C.kids[pid]||[]).forEach(gid=>{ const p = path ? path+" › "+C.gById[gid].name : C.gById[gid].name; w(gid, p);
+      (ledByG[gid]||[]).forEach(l=>{ const o=b.op[l.id]||0, d=b.dr[l.id]||0, c=b.cr[l.id]||0; if(Math.abs(o)<0.005 && !d && !c) return; aoa.push([p, l.name, l.code, accR2(o), accR2(d), accR2(c), accR2(b.cl(l.id))]); }); });
+    w(0,""); aoa.push(["Total","","",accR2(T[0]),accR2(T[1]),accR2(T[2]),accR2(T[3])]);
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "Trial Balance"); XLSX.writeFile(wb, "Trial_Balance_"+asOn+".xlsx"); };
+  const lab = { fontSize:11, color:colors.muted, fontWeight:600, display:"block", marginBottom:3 };
+  return accCard("Trial Balance",
+    h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end",marginBottom:8}},
+      h("label",null,h("span",{style:lab},"As on"),h("input",{type:"date",value:asOn,onChange:e=>setAsOn(e.target.value||accLastDate(C)),style:{...inputStyle,width:160}})),
+      h("button",{style:btnSecondary,onClick:()=>{ const o={}; C.groups.forEach(g=>o[g.id]=true); setOpen(o); }},"Expand all"),
+      h("button",{style:btnSecondary,onClick:()=>setOpen({})},"Collapse all"),
+      h("label",{style:{fontSize:12.5,display:"flex",gap:5,alignItems:"center"}}, h("input",{type:"checkbox",checked:hideZero,onChange:e=>setHideZero(e.target.checked)}),"Hide ledgers with nothing in them"),
+      h("button",{style:btnSecondary,onClick:excel},"Download Excel")),
+    accNote("From "+fmtDMY(C.fyStart)+". Opening includes Raw Material stock (Stock in Hand) and the WIP & FG opening with its prior-period line under Capital Account, so the two WIP lines cancel. Click a group to open it; click a ledger to see its entries.",""),
+    accTable(h("tr",null, h("th",{style:accTh},"Group / Ledger"), ...["Opening","Debit","Credit","Closing"].map(x=>h("th",{key:x,style:{...accTh,textAlign:"right"}},x))),
+      [...rows, h("tr",{key:"tot",className:"acc-tot"}, h("td",{style:{...accTd,fontWeight:700}},"Total (Dr − Cr)"), h("td",{style:{...accNum,fontWeight:700}},accDrCr(T[0])), h("td",{style:{...accNum,fontWeight:700}},accInr(T[1])), h("td",{style:{...accNum,fontWeight:700}},accInr(T[2])), h("td",{style:{...accNum,fontWeight:700}},accDrCr(T[3])))]),
+    Math.abs(T[3])>=0.005 ? h("div",{style:{fontSize:12,color:colors.muted,marginTop:6}}, "Total closing is "+accDrCr(T[3])+": this is the difference in the FFS opening balances (FFS shows it as \"Diff. in Opening Balances\").") : null);
+}
+
+// P&L month by month. Rows are built from the tree, so a new group shows up by itself.
+function accPLStructure(C){
+  const tops = (C.kids[0]||[]).map(id=>C.gById[id]);
+  const kind = g => g.pl_kind || "I";
+  return { dInc: tops.filter(g=>g.nature==="I" && kind(g)==="D"), dExp: tops.filter(g=>g.nature==="E" && kind(g)==="D"),
+           iInc: tops.filter(g=>g.nature==="I" && kind(g)!=="D"), iExp: tops.filter(g=>g.nature==="E" && kind(g)!=="D") };
+}
+function accPLData(C, toIso){
+  const months = accMonthsTo(C, toIso);
+  const idx = {}; months.forEach((m,i)=>idx[m]=i);
+  const mov = {};   // ledger id -> monthly (dr - cr)
+  C.lines.forEach(ln=>{ const v = ln._v; if(!v || v.status==="Cancelled") return; const d = v.voucher_date; if(d<C.fyStart || d>toIso) return;
+    const k = idx[accMonthOf(d)]; if(k===undefined) return; const l = C.lById[ln.ledger_id]; if(!l || !accIsPL(C,l)) return;
+    const a = mov[l.id] = mov[l.id] || new Array(months.length).fill(0); a[k] += (Number(ln.dr)||0)-(Number(ln.cr)||0); });
+  const sumSet = (set)=>{ const out = new Array(months.length).fill(0); C.ledgers.forEach(l=>{ if(set.has(l.group_id) && mov[l.id]) mov[l.id].forEach((x,k)=>out[k]+=x); }); return out; };
+  const rm = months.map(m=>({ op: accStockAt(C, accPrevMonth(m), "rm"), cl: accStockAt(C, m, "rm") }));
+  const wip = months.map(m=>({ op: accStockAt(C, accPrevMonth(m), "wip"), cl: accStockAt(C, m, "wip") }));
+  return { months, mov, sumSet, rm, wip };
+}
+function AccProfitLoss({ C, onLedger }){
+  const [asOn,setAsOn] = useState(accLastDate(C));
+  const [withWip,setWithWip] = useState(()=>accLsGet("acc_pl_wip","1")==="1");
+  const [open,setOpen] = useState({});
+  const S = useMemo(()=>accPLStructure(C),[C]);
+  const D = useMemo(()=>accPLData(C, asOn),[C,asOn]);
+  const n = D.months.length;
+  const neg = a=>a.map(x=>-x);
+  const sumA = arrs=>{ const o=new Array(n).fill(0); arrs.forEach(a=>a.forEach((x,k)=>o[k]+=x)); return o; };
+  // a row for a set of groups; income shown positive
+  const grpRow = (key, label, gid, sign, depth, onlyDirect)=>{
+    const set = onlyDirect ? new Set([gid]) : accDesc(C,gid); const vals = D.sumSet(set).map(x=>x*sign);
+    return { key, label, gid, set, vals, sign, depth, onlyDirect };
+  };
+  const expandRows = (top, sign)=>{   // a top group, with its sub-groups as rows when it has any
+    const kids = C.kids[top.id]||[];
+    if(!kids.length) return [grpRow("g"+top.id, top.name, top.id, sign, 0)];
+    const out = kids.map(k=>grpRow("g"+k, C.gById[k].name, k, sign, 1));
+    const direct = grpRow("d"+top.id, "Other "+top.name.toLowerCase(), top.id, sign, 1, true);
+    if(direct.vals.some(x=>Math.abs(x)>=0.005)) out.push(direct);
+    return out;
+  };
+  const dInc = S.dInc.flatMap(g=>expandRows(g,-1)), dExp = S.dExp.flatMap(g=>expandRows(g,1));
+  const iInc = S.iInc.flatMap(g=>expandRows(g,-1)), iExp = S.iExp.flatMap(g=>expandRows(g,1));
+  const tot = rows=>sumA(rows.map(r=>r.vals));
+  const op = D.rm.map(x=>x.op.value), cl = D.rm.map(x=>x.cl.value);
+  const gp = new Array(n).fill(0).map((_,k)=>tot(dInc)[k] + cl[k] - op[k] - tot(dExp)[k]);
+  const np = gp.map((x,k)=>x + tot(iInc)[k] - tot(iExp)[k]);
+  const wo = D.wip.map(x=>x.op.value), wc = D.wip.map(x=>x.cl.value);
+  const npw = np.map((x,k)=>x + wc[k] - wo[k]);
+  const cell = (v, mark)=> h("td",{style:{...accNum,color: v<-0.004?"#a3312a":undefined}}, Math.abs(v)<0.005 ? h("span",{style:{color:colors.mutedLight||"#aaa"}},"—") : accInr(v,0), mark ? h("sup",{style:{color:"#854f0b"}},"*") : null);
+  const line = (key, label, vals, opt)=>{ opt = opt||{}; const total = opt.total==="first" ? vals[0] : opt.total==="last" ? vals[n-1] : vals.reduce((s,x)=>s+x,0);
+    return h("tr",{key, className: (opt.cls||"")+(opt.click?" acc-click":""), onClick:opt.click, style: opt.bold ? { background:"#f7f6ef" } : undefined},
+      h("td",{style:{...accTd, fontWeight: opt.bold?700:400, paddingLeft: 8+(opt.depth||0)*16, whiteSpace:"nowrap"}}, label),
+      ...vals.map((v,k)=>cell(v, opt.marks && opt.marks[k])), h("td",{style:{...accNum,fontWeight:700}}, accInr(total,0))); };
+  const ledgerRows = (r)=> C.ledgers.filter(l=>r.set.has(l.group_id) && D.mov[l.id] && D.mov[l.id].some(x=>Math.abs(x)>=0.005)).sort((a,b)=>a.name.localeCompare(b.name))
+    .map(l=>line("l"+r.key+l.id, h("span",{style:{color:"#3d4a3a"}}, l.name), D.mov[l.id].map(x=>x*r.sign), { depth:(r.depth||0)+2, click:()=>onLedger(l.id) }));
+  const block = rows=> rows.flatMap(r=>[ line(r.key, (open[r.key]?"▾ ":"▸ ")+r.label, r.vals, { depth:r.depth, click:()=>setOpen(o=>({ ...o, [r.key]:!o[r.key] })) }), ...(open[r.key]?ledgerRows(r):[]) ]);
+  const head = h("tr",null, h("th",{style:accTh},"₹"), ...D.months.map(m=>h("th",{key:m,style:{...accTh,textAlign:"right"}},accMonthLabel(m))), h("th",{style:{...accTh,textAlign:"right"}},"Total"));
+  const rmMarks = D.rm.map(x=>!x.cl.exact), wipMarks = D.wip.map(x=>!x.cl.exact);
+  const lab = { fontSize:11, color:colors.muted, fontWeight:600, display:"block", marginBottom:3 };
+  return accCard("Profit & Loss — month by month",
+    h("div",{style:{display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-end",marginBottom:8}},
+      h("label",null,h("span",{style:lab},"Up to"),h("input",{type:"date",value:asOn,onChange:e=>setAsOn(e.target.value||accLastDate(C)),style:{...inputStyle,width:160}})),
+      h("label",{style:{fontSize:12.5,display:"flex",gap:5,alignItems:"center"}}, h("input",{type:"checkbox",checked:withWip,onChange:e=>{ setWithWip(e.target.checked); accLsSet("acc_pl_wip",e.target.checked?"1":"0"); }}),"Show WIP & FG adjustment")),
+    accNote("Worked out from the vouchers. Raw Material stock comes from Period Close. A month marked * has no closing stock entered yet, so the last figure entered is carried (no stock movement shown for it). Click a line to see its ledgers.",""),
+    accTable(head, [
+      ...block(dInc),
+      line("op","Opening stock — Raw Material",op,{ total:"first" }), ...block(dExp),
+      line("cl","Closing stock — Raw Material",cl,{ total:"last", marks:rmMarks }),
+      line("gp","Gross profit",gp,{ bold:true }),
+      ...block(iInc), ...block(iExp),
+      line("np","Net profit — FFS basis",np,{ bold:true, cls:"acc-tot" }),
+      ...(withWip ? [ line("wo","WIP & FG — opening",wo,{ total:"first" }), line("wc","WIP & FG — closing",wc,{ total:"last", marks:wipMarks }),
+        line("npw","Net profit — with WIP & FG",npw,{ bold:true, cls:"acc-tot" }) ] : []) ], "70vh"),
+    withWip ? h("div",{style:{fontSize:12,color:colors.muted,marginTop:6}}, "WIP & FG is at selling value, entered by a super admin each month in Period Close. It doesn't change the books; it shows the profit with work on the shop floor counted.") : null);
+}
+
+function accBSData(C, asOn, withWip){
+  const b = accBalances(C, null, asOn);
+  const skip = accStockLedgerIds(C);
+  const ppa = C.lByCode[ACC_STK.ppa];
+  const rm = accStockAt(C, accMonthOf(asOn), "rm"), wip = accStockAt(C, accMonthOf(asOn), "wip");
+  const rmOp = Number((C.lByCode[ACC_STK.rm]||{}).opening)||0, wipOp = Number((C.lByCode[ACC_STK.wip]||{}).opening)||0;
+  const gs = {}; let plSum = 0;
+  C.ledgers.forEach(l=>{ const v = b.cl(l.id); if(Math.abs(v)<0.005) return;
+    if(skip.has(l.id)){ if(withWip && ppa && l.id===ppa.id) accAnc(C,l.group_id).forEach(a=>gs[a]=(gs[a]||0)+v); return; }
+    if(accIsPL(C,l)){ plSum += v; return; }
+    accAnc(C,l.group_id).forEach(a=>gs[a]=(gs[a]||0)+v); });
+  const stockG = C.groups.find(g=>/^stock-in-hand$/i.test(g.name));
+  const stockAdd = rm.value + (withWip ? wip.value : 0);
+  if(stockG) accAnc(C, stockG.id).forEach(a=>gs[a]=(gs[a]||0)+stockAdd);
+  const profit = -plSum + (rm.value - rmOp) + (withWip ? (wip.value - wipOp) : 0);
+  return { gs, profit, rm, wip, rmOp, wipOp, stockG, ppa };
+}
+function AccBalanceSheet({ C }){
+  const [asOn,setAsOn] = useState(accLastDate(C));
+  const [withWip,setWithWip] = useState(()=>accLsGet("acc_bs_wip","1")==="1");
+  const [open,setOpen] = useState({});
+  const D = useMemo(()=>accBSData(C, asOn, withWip),[C,asOn,withWip]);
+  const tops = n => (C.kids[0]||[]).map(id=>C.gById[id]).filter(g=>g.nature===n);
+  const rowsFor = (nat)=>{ const sign = nat==="L" ? -1 : 1; const out = [];
+    const walk = (gid, depth)=>{ const v = (D.gs[gid]||0)*sign; if(Math.abs(v)<0.005 && depth>0) return;
+      const kids = (C.kids[gid]||[]).filter(k=>Math.abs(D.gs[k]||0)>=0.005);
+      const isOpen = open[gid] || depth===0;
+      let note = null;
+      if(D.stockG && gid===D.stockG.id) note = "Raw Material "+accInr(D.rm.value)+(withWip?" + WIP & FG "+accInr(D.wip.value):"")+(D.rm.exact?"":" (stock from "+accMonthLabel(D.rm.month)+")");
+      out.push(h("tr",{key:gid,className: kids.length && depth>0 ? "acc-click" : "",onClick: kids.length && depth>0 ? ()=>setOpen(o=>({ ...o, [gid]:!o[gid] })) : undefined, style: depth===0 ? { background:"#f7f6ef" } : undefined},
+        h("td",{style:{...accTd,fontWeight: depth===0?700:400, paddingLeft: 8+depth*16}}, (kids.length && depth>0 ? (isOpen?"▾ ":"▸ ") : "")+C.gById[gid].name, note ? h("div",{style:{fontSize:11,color:colors.muted}},note) : null),
+        h("td",{style:{...accNum,fontWeight: depth===0?700:400}}, accInr(v))));
+      if(isOpen) kids.forEach(k=>walk(k, depth+1)); };
+    tops(nat).forEach(g=>{ if(Math.abs(D.gs[g.id]||0)>=0.005) walk(g.id,0); });
+    return out; };
+  const lt = tops("L").reduce((s,g)=>s-(D.gs[g.id]||0),0) + D.profit;
+  const at = tops("A").reduce((s,g)=>s+(D.gs[g.id]||0),0);
+  const lab = { fontSize:11, color:colors.muted, fontWeight:600, display:"block", marginBottom:3 };
+  const side = (title, rows, total, extra)=> h("div",{style:{flex:1,minWidth:300}}, accTable(h("tr",null,h("th",{style:accTh},title),h("th",{style:{...accTh,textAlign:"right"}},"₹")),
+    [...rows, ...(extra||[]), h("tr",{key:"t",className:"acc-tot"},h("td",{style:{...accTd,fontWeight:700}},"Total"),h("td",{style:{...accNum,fontWeight:700}},accInr(total)))], "none"));
+  return accCard("Balance Sheet as on "+fmtDMY(asOn),
+    h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end",marginBottom:8}},
+      h("label",null,h("span",{style:lab},"As on"),h("input",{type:"date",value:asOn,onChange:e=>setAsOn(e.target.value||accLastDate(C)),style:{...inputStyle,width:160}})),
+      h("button",{style: withWip?btnSecondary:btnPrimary,onClick:()=>{ setWithWip(false); accLsSet("acc_bs_wip","0"); }},"FFS basis"),
+      h("button",{style: withWip?btnPrimary:btnSecondary,onClick:()=>{ setWithWip(true); accLsSet("acc_bs_wip","1"); }},"With WIP & FG")),
+    accNote(withWip ? "With WIP & FG: the 1 April WIP & FG ("+accInr(D.wipOp)+") sits against the prior-period line under Capital Account, and WIP is at selling value ("+accInr(D.wip.value)+(D.wip.exact?"":", from "+accMonthLabel(D.wip.month))+"). Profit = FFS-basis profit + the change in WIP & FG."
+      : "FFS basis: the same figures as the FFS Balance Sheet (no WIP & FG). Raw Material stock is the Period Close figure"+(D.rm.exact?"":" from "+accMonthLabel(D.rm.month)+" (none entered for this month yet)")+".",""),
+    h("div",{style:{display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-start"}},
+      side("Liabilities", rowsFor("L"), lt, [h("tr",{key:"p",style:{background:"#f7f6ef"}},h("td",{style:{...accTd,fontWeight:700}},"Profit & Loss A/c (this year"+(withWip?", with WIP & FG":"")+")"),h("td",{style:{...accNum,fontWeight:700}},accInr(D.profit)))]),
+      side("Assets", rowsFor("A"), at)),
+    h("div",{style:{fontSize:12,color:colors.muted,marginTop:6}}, Math.abs(lt-at)<0.005 ? "Both sides agree." : "Difference "+accInr(lt-at)+(Math.abs(lt-at)<1?" — the difference in the FFS opening balances (FFS shows it as \"Diff. in Opening Balances\").":" — check the opening balances and the closing stock.")));
+}
+
+// Cash flow (indirect): profit adjusted for each balance-sheet movement. Shows where cash came from and where it is locked.
+const ACC_CF_SECT = [["op","Operating — working capital"],["inv","Investing"],["fin","Financing"]];
+const ACC_CF_MAP = { "sundry debtors":["op","Customers (debtors)"], "sundry creditors":["op","Suppliers (sundry creditors)"], "other creditors":["op","Other creditors"],
+  "gst input tax credit":["op","GST input credit"], "goods & service tax":["op","GST payable / input ledgers"], "duties & taxes":["op","GST payable / input ledgers"],
+  "current assets":["op","Other current assets (TDS, GST ITC receivable…)"], "deposits (asset)":["op","Deposits & BG margins"], "salary & wages advance":["op","Staff advances"], "suspense a/c":["op","Suspense / tour advances"],
+  "tds payable":["op","TDS payable"], "credit cards":["op","Credit cards"], "other outstanding payable":["op","Salary, PF, ESI & other payables"], "telephone expenses payable":["op","Salary, PF, ESI & other payables"],
+  "salary arrears":["op","Salary, PF, ESI & other payables"], "current liabilities":["op","Salary, PF, ESI & other payables"],
+  "fixed assets":["inv","Fixed assets bought"], "loans & advances (asset)":["inv","Loans given"],
+  "secured loans":["fin","Bank term & secured loans"], "packing credit used":["fin","Packing credit"], "unsecured loans":["fin","Unsecured loans"], "bank od a/c":["fin","Bank OD"],
+  "loans (liability)":["fin","Directors' & related loans"], "capital account":["fin","Capital"] };
+const ACC_CF_LEDGER = { "manikandan constructions":["inv","Manikandan Constructions (advance)"] };
+function AccCashFlow({ C }){
+  const [asOn,setAsOn] = useState(accLastDate(C));
+  const [withWip,setWithWip] = useState(false);
+  const D = useMemo(()=>{
+    const months = accMonthsTo(C, asOn); const ends = months.map(m=>{ const e = accMonthEnd(m); return e>asOn ? asOn : e; });
+    const n = months.length; const idx = {}; months.forEach((m,i)=>idx[m]=i);
+    const skip = accStockLedgerIds(C);
+    const cashG = new Set(C.groups.filter(g=>/^(cash-in-hand|bank accounts)$/i.test(g.name)).flatMap(g=>[...accDesc(C,g.id)]));
+    const mapOf = (l)=>{ const byL = ACC_CF_LEDGER[String(l.name).trim().toLowerCase()]; if(byL) return byL;
+      for(const a of accAnc(C,l.group_id)){ const m = ACC_CF_MAP[String(C.gById[a].name).toLowerCase()]; if(m) return m; }
+      return ["op", C.gById[l.group_id].name]; };
+    const mv = {};   // ledger -> monthly movement
+    C.lines.forEach(ln=>{ const v = ln._v; if(!v || v.status==="Cancelled") return; const d = v.voucher_date; if(d<C.fyStart || d>asOn) return;
+      const k = idx[accMonthOf(d)]; if(k===undefined) return; const a = mv[ln.ledger_id] = mv[ln.ledger_id] || new Array(n).fill(0); a[k] += (Number(ln.dr)||0)-(Number(ln.cr)||0); });
+    const rows = {}, profit = new Array(n).fill(0), cash = new Array(n).fill(0);
+    const add = (sec, lab, k, v)=>{ const key = sec+"|"+lab; rows[key] = rows[key] || { sec, lab, v:new Array(n).fill(0) }; rows[key].v[k] += v; };
+    Object.entries(mv).forEach(([id, arr])=>{ const l = C.lById[id]; if(!l || skip.has(l.id)) return;
+      arr.forEach((d,k)=>{ if(Math.abs(d)<0.005) return;
+        if(accIsPL(C,l)){ profit[k] -= d; return; }
+        if(cashG.has(l.group_id)){ cash[k] += d; return; }
+        const m = mapOf(l); add(m[0], m[1], k, -d); }); });
+    months.forEach((m,k)=>{ const st = accStockAt(C, m, "rm").value - accStockAt(C, accPrevMonth(m), "rm").value; profit[k] += st; add("op","Raw Material stock",k,-st);
+      if(withWip){ const w = accStockAt(C, m, "wip").value - accStockAt(C, accPrevMonth(m), "wip").value; profit[k] += w; add("op","WIP & FG (at selling value)",k,-w); } });
+    return { months, ends, rows:Object.values(rows), profit, cash, n };
+  },[C,asOn,withWip]);
+  const sum = a=>a.reduce((s,x)=>s+x,0);
+  const cell = v=> h("td",{style:{...accNum,color:v<-0.004?"#a3312a":undefined}}, Math.abs(v)<0.5 ? h("span",{style:{color:"#aaa"}},"—") : accInr(v,0));
+  const line = (key,lab,v,bold)=> h("tr",{key,className:bold?"acc-tot":"",style:bold?{background:"#f7f6ef"}:undefined}, h("td",{style:{...accTd,fontWeight:bold?700:400,whiteSpace:"nowrap"}},lab), ...v.map((x,k)=>h(React.Fragment,{key:k},cell(x))), cell(sum(v)));
+  const secTot = {}; const body = [line("p","Net profit "+(withWip?"(with WIP & FG)":"(FFS basis)"),D.profit,true)];
+  ACC_CF_SECT.forEach(([s,lab])=>{ const rs = D.rows.filter(r=>r.sec===s).sort((a,b)=>sum(a.v)-sum(b.v)); if(!rs.length) return;
+    body.push(h("tr",{key:"h"+s},h("td",{colSpan:D.n+2,style:{...accTd,fontWeight:700,color:"#085041",paddingTop:10}},lab)));
+    rs.forEach(r=>body.push(line(s+r.lab,"   "+r.lab,r.v)));
+    secTot[s] = D.months.map((m,k)=>rs.reduce((t,r)=>t+r.v[k],0)); });
+  const z = D.months.map(()=>0);
+  const opTot = D.months.map((m,k)=>D.profit[k]+(secTot.op||z)[k]);
+  const net = D.months.map((m,k)=>opTot[k]+(secTot.inv||z)[k]+(secTot.fin||z)[k]);
+  body.push(line("co","Cash from operations (profit + working capital)",opTot,true), line("ci","Cash from investing",secTot.inv||z,true), line("cf","Cash from financing",secTot.fin||z,true),
+    line("nc","Net change in cash & bank",net,true), line("ck","Check: cash & bank ledgers moved by",D.cash));
+  const all = D.rows.map(r=>[r.lab,sum(r.v)]);
+  const uses = all.filter(x=>x[1]<-0.5).sort((a,b)=>a[1]-b[1]).slice(0,7), srcs = all.filter(x=>x[1]>0.5).sort((a,b)=>b[1]-a[1]).slice(0,7);
+  const mx = Math.max(1,...all.map(x=>Math.abs(x[1])));
+  const bar = (x,col)=> h("div",{key:x[0],style:{display:"flex",alignItems:"center",gap:8,margin:"3px 0"}}, h("div",{style:{width:220,fontSize:12.5}},x[0]),
+    h("div",{style:{flex:1,background:"#f0eee6",borderRadius:3,height:14}}, h("div",{style:{width:Math.min(100,Math.abs(x[1])/mx*100)+"%",background:col,height:14,borderRadius:3}})),
+    h("div",{style:{width:110,textAlign:"right",fontVariantNumeric:"tabular-nums",fontSize:12.5}}, accInr(Math.abs(x[1]),0)));
+  const ok = Math.abs(sum(net)-sum(D.cash))<1;
+  const lab = { fontSize:11, color:colors.muted, fontWeight:600, display:"block", marginBottom:3 };
+  return accCard("Cash Flow — where the cash came from and where it is locked",
+    h("div",{style:{display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-end",marginBottom:8}},
+      h("label",null,h("span",{style:lab},"Up to"),h("input",{type:"date",value:asOn,onChange:e=>setAsOn(e.target.value||accLastDate(C)),style:{...inputStyle,width:160}})),
+      h("label",{style:{fontSize:12.5,display:"flex",gap:5,alignItems:"center"}}, h("input",{type:"checkbox",checked:withWip,onChange:e=>setWithWip(e.target.checked)}),"Include WIP & FG")),
+    accNote("Profit is not cash. The profit is adjusted for every balance-sheet change: stock or debtors going up locks cash in (red); creditors or loans going up brings cash in. The last two lines must agree"+(ok?", and they do.":" — they don't, so check the closing stock figures.")+" WIP & FG adds the same amount to profit and to stock, so it never changes the cash; it only shows how much cash sits in work on the shop floor.", ok?"":"bad"),
+    h("div",{style:{display:"flex",gap:12,flexWrap:"wrap",marginBottom:12}},
+      h("div",{style:{flex:1,minWidth:300,border:"1px solid #eceae0",borderRadius:6,padding:10}}, h("div",{style:{fontWeight:700,fontSize:13,marginBottom:6}},"Where cash went / is locked (from "+fmtDMY(C.fyStart)+")"), ...uses.map(x=>bar(x,"#a3312a"))),
+      h("div",{style:{flex:1,minWidth:300,border:"1px solid #eceae0",borderRadius:6,padding:10}}, h("div",{style:{fontWeight:700,fontSize:13,marginBottom:6}},"Where cash came from"), ...srcs.map(x=>bar(x,"#0f6e56")))),
+    accTable(h("tr",null,h("th",{style:accTh},"₹"), ...D.months.map(m=>h("th",{key:m,style:{...accTh,textAlign:"right"}},accMonthLabel(m))), h("th",{style:{...accTh,textAlign:"right"}},"Total")), body, "60vh"),
+    h("div",{style:{fontSize:12,color:colors.muted,marginTop:6}}, "Manikandan Constructions is shown as Investing (a building advance). If it's a supplier advance it belongs in working capital — tell the developer and it will move."));
+}
+
+// ---------------------------------------------------------------------------- masters: chart of accounts (tree + kanban), ledgers
+const accIsTopG = (C, gid)=> !C.gById[gid].parent_id;
+const accSysLedger = l => l && (l.source==="System" || [ACC_STK.rm, ACC_STK.wip, ACC_STK.ppa].includes(l.code));
+function accLedgerUsed(C, l){ return (C.entryCount[l.id]||0)>0 || Math.abs(Number(l.opening)||0)>0.004; }
+function accGroupUsed(C, gid){ const d = accDesc(C,gid); return C.ledgers.some(l=>d.has(l.group_id) && accLedgerUsed(C,l)); }
+function accMoveCheck(C, kind, id, target){
+  if(!target || !C.gById[target]) return "Pick a group to move into.";
+  if(kind==="g"){
+    if(accIsTopG(C,id)) return "Top-level groups can't be moved.";
+    if(C.gById[id].parent_id===target) return "It's already there.";
+    if(accDesc(C,id).has(target)) return "A group can't move under itself or its own sub-group.";
+    if(accNature(C,target)!==accNature(C,id) && accGroupUsed(C,id)) return "This would change its nature ("+ACC_NAT[accNature(C,id)]+" → "+ACC_NAT[accNature(C,target)]+") and it has entries. Move the ledgers one by one, or open a new group.";
+  } else {
+    const l = C.lById[id];
+    if(accSysLedger(l)) return "\""+l.name+"\" is a system ledger (closing stock / WIP) and stays where it is.";
+    if(l.group_id===target) return "It's already there.";
+    if(accNature(C,target)!==accNature(C,l.group_id) && accLedgerUsed(C,l)) return "This ledger has entries, and the move would change its nature ("+ACC_NAT[accNature(C,l.group_id)]+" → "+ACC_NAT[accNature(C,target)]+"). Its past entries would jump between the Balance Sheet and the P&L.";
+  }
+  return "";
+}
+async function accDoMove(user, C, kind, id, target){
+  const e = accMoveCheck(C, kind, id, target); if(e){ alert(e); return false; }
+  const nm = kind==="g" ? C.gById[id].name : C.lById[id].name;
+  const fromId = kind==="g" ? C.gById[id].parent_id : C.lById[id].group_id;
+  if(!confirm("Move "+(kind==="g"?"group":"ledger")+" \""+nm+"\" from "+C.gById[fromId].name+" to "+C.gById[target].name+"?"+(kind==="g"?"\nEverything under it moves too.":""))) return false;
+  let r;
+  if(kind==="g"){
+    r = await sb.from("acc_group_tbl").update({ parent_id:target }).eq("id",id);
+    const nat = accNature(C,target);
+    if(!r.error && nat!==C.gById[id].nature){ const ids = [...accDesc(C,id)]; r = await sb.from("acc_group_tbl").update({ nature:nat, pl_kind:accTop(C,target).pl_kind||null }).in("id",ids); }
+  } else r = await sb.from("acc_ledger_tbl").update({ group_id:target, updated_at:new Date().toISOString() }).eq("id",id);
+  if(r.error){ alert(saveFailedText("The move", r.error)); return false; }
+  await accLog(user, kind==="g"?"group":"ledger", id, "move", "Moved "+(kind==="g"?"group":"ledger")+" \""+nm+"\": "+C.gById[fromId].name+" → "+C.gById[target].name);
+  accInvalidate(); return true;
+}
+async function accAddNode(user, C, parent, kind){
+  const nm = (prompt(kind==="g" ? "Name of the new sub-group under "+C.gById[parent].name+":" : "Name of the new ledger under "+C.gById[parent].name+":")||"").trim();
+  if(!nm) return false;
+  if(kind==="g"){
+    if(C.allGroups.some(g=>g.name.toLowerCase()===nm.toLowerCase())){ alert("There is already a group called \""+nm+"\". Group names must be different."); return false; }
+    const top = accTop(C,parent), par = C.gById[parent];
+    const r = await sb.from("acc_group_tbl").insert({ name:nm, parent_id:parent, nature:top.nature, pl_kind: par.pl_kind || top.pl_kind || null, sort_order:100, created_by:user.username });
+    if(r.error){ alert(saveFailedText("The group", r.error)); return false; }
+    await accLog(user,"group","","add","Added group \""+nm+"\" under "+par.name);
+  } else {
+    if(C.ledgers.some(l=>l.name.toLowerCase()===nm.toLowerCase()) && !confirm("A ledger called \""+nm+"\" already exists. Add another with the same name (it gets its own code)?")) return false;
+    let m = 0; C.ledgers.forEach(l=>{ const x = /^FIN(\d+)$/i.exec(l.code||""); if(x) m = Math.max(m, Number(x[1])); });
+    const code = "FIN"+String(m+1).padStart(3,"0");
+    const r = await sb.from("acc_ledger_tbl").insert({ code, name:nm, group_id:parent, opening:0, source:"App", created_by:user.username });
+    if(r.error){ alert(saveFailedText("The ledger", r.error)); return false; }
+    await accLog(user,"ledger",code,"add","Added ledger \""+nm+"\" ("+code+") under "+C.gById[parent].name);
+  }
+  accInvalidate(); return true;
+}
+async function accRename(user, C, kind, id){
+  const old = kind==="g" ? C.gById[id].name : C.lById[id].name;
+  const nm = (prompt("Rename \""+old+"\" to:", old)||"").trim(); if(!nm || nm===old) return false;
+  if(kind==="g" && C.allGroups.some(g=>g.id!==id && g.name.toLowerCase()===nm.toLowerCase())){ alert("There is already a group called \""+nm+"\"."); return false; }
+  const r = kind==="g" ? await sb.from("acc_group_tbl").update({ name:nm }).eq("id",id) : await sb.from("acc_ledger_tbl").update({ name:nm, updated_at:new Date().toISOString() }).eq("id",id);
+  if(r.error){ alert(saveFailedText("The new name", r.error)); return false; }
+  await accLog(user, kind==="g"?"group":"ledger", id, "rename", "Renamed \""+old+"\" to \""+nm+"\""+(kind==="l"?" (code "+C.lById[id].code+" unchanged)":""));
+  accInvalidate(); return true;
+}
+async function accDelete(user, C, kind, id){
+  if(kind==="g"){
+    const g = C.gById[id];
+    if(accIsTopG(C,id) || g.is_system) { alert("\""+g.name+"\" is a main group and can't be deleted."); return false; }
+    if((C.kids[id]||[]).length || C.ledgers.some(l=>l.group_id===id)){ alert("Only an empty group can be deleted. Move or delete what's under \""+g.name+"\" first."); return false; }
+    if(!confirm("Delete group \""+g.name+"\"?")) return false;
+    const r = await sb.from("acc_group_tbl").delete().eq("id",id); if(r.error){ alert(saveFailedText("The deletion", r.error)); return false; }
+    await accLog(user,"group",id,"delete","Deleted group \""+g.name+"\"");
+  } else {
+    const l = C.lById[id];
+    if(accSysLedger(l)){ alert("\""+l.name+"\" is a system ledger and can't be deleted."); return false; }
+    if(accLedgerUsed(C,l)){ alert("\""+l.name+"\" has "+(C.entryCount[l.id]||0)+" entries"+(Math.abs(Number(l.opening)||0)>0.004?" and an opening balance":"")+", so it can't be deleted. Mark it Inactive instead: it disappears from the pickers and its history stays."); return false; }
+    if(!confirm("Delete ledger \""+l.name+"\" ("+l.code+")?")) return false;
+    const r = await sb.from("acc_ledger_tbl").delete().eq("id",id); if(r.error){ alert(saveFailedText("The deletion", r.error)); return false; }
+    await accLog(user,"ledger",id,"delete","Deleted ledger \""+l.name+"\" ("+l.code+")");
+  }
+  accInvalidate(); return true;
+}
+async function accToggleActive(user, C, id){
+  const l = C.lById[id]; const nowActive = l.is_active===false;
+  if(accSysLedger(l)){ alert("\""+l.name+"\" is a system ledger and stays active."); return false; }
+  const r = await sb.from("acc_ledger_tbl").update({ is_active:nowActive, updated_at:new Date().toISOString() }).eq("id",id);
+  if(r.error){ alert(saveFailedText("The change", r.error)); return false; }
+  await accLog(user,"ledger",id,nowActive?"activate":"inactivate", nowActive ? "Made \""+l.name+"\" active" : "Made \""+l.name+"\" inactive (hidden from pickers, history kept)");
+  accInvalidate(); return true;
+}
+function AccMovePicker({ C, kind, id, onPick, onClose }){
+  const [q,setQ] = useState("");
+  const opts = C.groups.filter(g=>!accMoveCheck(C,kind,id,g.id)).map(g=>({ id:g.id, path:accPath(C,g.id) })).filter(o=>!q || o.path.toLowerCase().includes(q.toLowerCase())).sort((a,b)=>a.path.localeCompare(b.path));
+  const nm = kind==="g" ? C.gById[id].name : C.lById[id].name;
+  return h("div",{onClick:e=>{ if(e.target===e.currentTarget) onClose(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:2500,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"60px 16px"}},
+    h("div",{style:{background:"#fff",borderRadius:10,width:520,maxWidth:"100%",padding:"16px 18px"}},
+      h("b",{style:{fontSize:15}},"Move \""+nm+"\" to…"), h("div",{style:{fontSize:12,color:colors.muted,margin:"4px 0 8px"}},"Only groups that pass the checks are listed."),
+      h("input",{autoFocus:true,placeholder:"Search groups",value:q,onChange:e=>setQ(e.target.value),style:{...inputStyle,marginBottom:6}}),
+      h("div",{style:{maxHeight:340,overflow:"auto",border:"1px solid #eceae0",borderRadius:6}},
+        opts.length ? opts.map(o=>h("div",{key:o.id,className:"acc-click",onClick:()=>onPick(o.id),style:{padding:"6px 10px",fontSize:13,borderBottom:"1px solid #f0eee6",cursor:"pointer"}}, o.path))
+        : h("div",{style:{padding:10,color:colors.muted,fontSize:13}},"No group fits.")),
+      h("div",{style:{display:"flex",justifyContent:"flex-end",marginTop:10}}, h("button",{style:btnSecondary,onClick:onClose},"Close"))));
+}
+function AccChangeLog({ tick }){
+  const [rows,setRows] = useState(null); const [page,setPage] = useState(0);
+  useEffect(()=>{ sb.from("acc_change_log_tbl").select("*").order("id",{ascending:false}).limit(500).then(({data})=>setRows(data||[])); },[tick]);
+  if(!rows) return null;
+  return h("div",{style:{marginTop:14}},
+    h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,flexWrap:"wrap",gap:8}}, h("b",null,"Change log"), accPager(page,setPage,rows.length,25)),
+    accTable(h("tr",null, ...["When","Who","What","Change"].map(x=>h("th",{key:x,style:accTh},x))),
+      rows.length ? rows.slice(page*25,page*25+25).map(r=>h("tr",{key:r.id}, h("td",{style:{...accTd,whiteSpace:"nowrap"}},fmtDMYTime(r.at)), h("td",{style:accTd},r.by_user), h("td",{style:accTd},r.entity), h("td",{style:accTd},r.detail)))
+      : [h("tr",{key:"n"},h("td",{colSpan:4,style:{...accTd,color:colors.muted}},"No changes yet."))], "260px"));
+}
+function AccChartOfAccounts({ user, A, C, onChanged, onLedger }){
+  const [view,setView] = useState(()=>accLsGet("acc_coa_view","tree"));
+  const [open,setOpen] = useState({}); const [mv,setMv] = useState(null);
+  const [kbP,setKbP] = useState(0); const [kbQ,setKbQ] = useState(""); const [tick,setTick] = useState(0);
+  const cl = useMemo(()=>{ const b = accBalances(C, null, null); const o={}; C.ledgers.forEach(l=>o[l.id]=b.cl(l.id)); return o; },[C]);
+  const gBal = gid=>{ const d = accDesc(C,gid); let s=0; C.ledgers.forEach(l=>{ if(d.has(l.group_id)) s+=cl[l.id]; }); return s; };
+  const ledUnder = gid=> C.ledgers.filter(l=>l.group_id===gid).sort((a,b)=>a.name.localeCompare(b.name));
+  const guard = fn=> async(...a)=>{ if(!A.tree){ noPermission("change the chart of accounts", ACC_WHO.full); return; } const ok = await fn(user, C, ...a); if(ok){ setTick(t=>t+1); onChanged(); } };
+  const doMove = guard(accDoMove), addNode = guard(accAddNode), rename = guard(accRename), del = guard(accDelete), toggle = guard(accToggleActive);
+  const setV = v=>{ setView(v); accLsSet("acc_coa_view",v); };
+  const b = (lab, fn, tip)=> h("button",{style:permBtnStyle(A.tree,{...btnSmall,marginLeft:4}),title:tip||lab,onClick:e=>{ e.stopPropagation(); fn(); }}, lab);
+  let body;
+  if(view==="tree"){
+    const rows = [];
+    const walk = (pid, depth)=> (C.kids[pid]||[]).forEach(gid=>{ const g = C.gById[gid]; const isOpen = !!open[gid]; const nL = C.ledgers.filter(l=>l.group_id===gid).length, nG = (C.kids[gid]||[]).length;
+      rows.push(h("tr",{key:"g"+gid},
+        h("td",{style:{...accTd,paddingLeft:8+depth*18,cursor:"pointer",fontWeight:600},onClick:()=>setOpen(o=>({ ...o, [gid]:!o[gid] }))}, (isOpen?"▾ ":"▸ ")+"📁 "+g.name, h("span",{style:{fontWeight:400,fontSize:11.5,color:colors.muted}},"  "+(nG?nG+" groups · ":"")+nL+" ledgers")),
+        h("td",{style:accTd}, ACC_NAT[accNature(C,gid)]), h("td",{style:accNum}, accDrCr(gBal(gid))),
+        h("td",{style:{...accTd,whiteSpace:"nowrap"}}, b("Add Group",()=>addNode(gid,"g"),"Add a sub-group under "+g.name), b("Add Ledger",()=>addNode(gid,"l"),"Add a ledger under "+g.name), b("Rename",()=>rename("g",gid)),
+          accIsTopG(C,gid) ? null : b("Move",()=>{ if(!A.tree){ noPermission("change the chart of accounts", ACC_WHO.full); return; } setMv({ kind:"g", id:gid }); }), accIsTopG(C,gid) ? null : b("Delete",()=>del("g",gid)))));
+      if(isOpen){ walk(gid, depth+1); ledUnder(gid).forEach(l=>rows.push(h("tr",{key:"l"+l.id,style:{opacity:l.is_active===false?.5:1}},
+        h("td",{style:{...accTd,paddingLeft:30+depth*18}}, h("span",{style:{cursor:"pointer"},onClick:()=>onLedger(l.id)}, "📄 "+l.name), h("span",{style:{fontSize:11,color:colors.muted}},"  "+l.code+" · "+(C.entryCount[l.id]||0)+" entries"+(l.is_active===false?" · inactive":""))),
+        h("td",{style:accTd}), h("td",{style:accNum}, accDrCr(cl[l.id])),
+        h("td",{style:{...accTd,whiteSpace:"nowrap"}}, b("Rename",()=>rename("l",l.id)), b("Move",()=>{ if(!A.tree){ noPermission("change the chart of accounts", ACC_WHO.full); return; } setMv({ kind:"l", id:l.id }); }),
+          b(l.is_active===false?"Make Active":"Make Inactive",()=>toggle(l.id)), b("Delete",()=>del("l",l.id)))))); } });
+    walk(0,0);
+    body = h("div",null, h("div",{style:{display:"flex",gap:6,margin:"6px 0"}}, h("button",{style:btnSecondary,onClick:()=>{ const o={}; C.groups.forEach(g=>o[g.id]=true); setOpen(o); }},"Expand all"), h("button",{style:btnSecondary,onClick:()=>setOpen({})},"Collapse all")),
+      accTable(h("tr",null, h("th",{style:accTh},"Group / Ledger"), h("th",{style:accTh},"Nature"), h("th",{style:{...accTh,textAlign:"right"}},"Balance"), h("th",{style:accTh},"")), rows, "64vh"));
+  } else {
+    const cols = C.kids[kbP]||[]; const q = kbQ.trim().toLowerCase();
+    const crumbs = kbP ? accAnc(C,kbP).reverse() : [];
+    const drag = (e, k, id)=>{ try{ e.dataTransfer.setData("text/plain", k+":"+id); }catch(x){} };
+    const drop = (e, gid)=>{ e.preventDefault(); e.currentTarget.classList.remove("acc-over"); const s = (e.dataTransfer.getData("text/plain")||"").split(":"); if(s.length===2) doMove(s[0], Number(s[1]), gid); };
+    const card = (kind, id)=> kind==="g"
+      ? h("div",{key:"g"+id,draggable:!accIsTopG(C,id),onDragStart:e=>drag(e,"g",id),style:{background:"#fffaf0",border:"1px solid #ead9b5",borderRadius:6,padding:"6px 8px",marginBottom:6,cursor:"pointer"},onClick:()=>setKbP(id)},
+          h("div",{style:{fontWeight:700,fontSize:12.5}},"📁 "+C.gById[id].name+" ›"), h("div",{style:{fontSize:11,color:colors.muted}}, (C.kids[id]||[]).length+" groups · "+C.ledgers.filter(l=>l.group_id===id).length+" ledgers · "+accDrCr(gBal(id))))
+      : h("div",{key:"l"+id,draggable:true,onDragStart:e=>drag(e,"l",id),style:{background:"#fff",border:"1px solid #e2dfd2",borderRadius:6,padding:"6px 8px",marginBottom:6,opacity:C.lById[id].is_active===false?.5:1}},
+          h("div",{style:{fontSize:12.5}}, C.lById[id].name), h("div",{style:{fontSize:11,color:colors.muted}}, C.lById[id].code+" · "+accDrCr(cl[id])+((C.entryCount[id]||0)?" · "+C.entryCount[id]+" entries":"")),
+          h("select",{value:"",onChange:e=>{ const t = Number(e.target.value); if(t) doMove("l", id, t); },style:{...inputStyle,fontSize:11,padding:"2px 4px",marginTop:4}},
+            h("option",{value:""},"Move to…"), C.groups.filter(g=>!accMoveCheck(C,"l",id,g.id)).map(g=>h("option",{key:g.id,value:g.id},accPath(C,g.id)))));
+    const col = (gid, label, onlyLedgers)=>{ const subs = onlyLedgers ? [] : (C.kids[gid]||[]); const led = ledUnder(gid).filter(l=>!q || l.name.toLowerCase().includes(q) || String(l.code).toLowerCase().includes(q));
+      return h("div",{key:(onlyLedgers?"d":"c")+gid,className:"acc-kcol",onDragOver:e=>{ e.preventDefault(); e.currentTarget.classList.add("acc-over"); },onDragLeave:e=>e.currentTarget.classList.remove("acc-over"),onDrop:e=>drop(e,gid),
+        style:{flex:"0 0 250px",background:"#f4f3ee",borderRadius:8,padding:8,maxHeight:"62vh",display:"flex",flexDirection:"column"}},
+        h("div",{style:{cursor:onlyLedgers?"default":"pointer",marginBottom:6},onClick:onlyLedgers?undefined:()=>setKbP(gid)}, h("b",{style:{fontSize:13}},label), h("span",{style:{fontSize:11,color:colors.muted}}," "+(subs.length+led.length)),
+          h("div",{style:{fontSize:11,color:colors.muted}}, ACC_NAT[accNature(C,gid)]+" · "+accDrCr(gBal(gid)))),
+        h("div",{style:{overflow:"auto",flex:1}}, ...subs.map(s=>card("g",s)), ...led.slice(0,250).map(l=>card("l",l.id)), led.length>250 ? h("div",{style:{fontSize:11,color:colors.muted}},"+"+(led.length-250)+" more — use search") : null),
+        h("div",{style:{display:"flex",gap:4,marginTop:6}}, b("Add Ledger",()=>addNode(gid,"l")), b("Add Group",()=>addNode(gid,"g")))); };
+    body = h("div",null,
+      h("div",{style:{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",margin:"6px 0"}},
+        h("span",{style:{fontSize:13}}, h("a",{href:"#",onClick:e=>{ e.preventDefault(); setKbP(0); }},"All groups"), ...crumbs.map(a=>h("span",{key:a}," › ", h("a",{href:"#",onClick:e=>{ e.preventDefault(); setKbP(a); }}, C.gById[a].name)))),
+        h("input",{placeholder:"Search ledgers in these columns",value:kbQ,onChange:e=>setKbQ(e.target.value),style:{...inputStyle,width:260}})),
+      h("div",{style:{fontSize:12,color:colors.muted,marginBottom:6}},"Drag a card onto another column to move it, or use its Move to… list. Click a column heading or a folder card to go one level down."),
+      h("div",{style:{display:"flex",gap:10,overflowX:"auto",paddingBottom:6}}, kbP ? col(kbP, "Directly under "+C.gById[kbP].name, true) : null, ...cols.map(g=>col(g, C.gById[g].name, false))));
+  }
+  return accCard("Chart of Accounts",
+    h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},
+      h("button",{style:view==="tree"?btnPrimary:btnSecondary,onClick:()=>setV("tree")},"Tree"), h("button",{style:view==="kanban"?btnPrimary:btnSecondary,onClick:()=>setV("kanban")},"Kanban"),
+      h("span",{style:{fontSize:12,color:colors.muted}},"Groups nest to any depth. Both views change the same tree.")),
+    accNote("Safeguards: top-level groups can't be moved or deleted. Nothing can go under its own sub-group. A ledger or group with entries can't move to a different nature (e.g. Asset → Expense). Only empty groups and unused ledgers can be deleted; anything else is made Inactive. Every change is logged below. Changing the tree is for the Finance & Accounts Manager, Finance Director and super admins.",""),
+    body, mv ? h(AccMovePicker,{ C, kind:mv.kind, id:mv.id, onClose:()=>setMv(null), onPick:t=>{ const m = mv; setMv(null); doMove(m.kind, m.id, t); } }) : null,
+    h(AccChangeLog,{ tick }));
+}
+
+function AccLedgerEdit({ user, C, l, onClose, onSaved }){
+  const isNew = !l;
+  const [d,setD] = useState(()=> l ? { name:l.name, gstin:l.gstin||"", opening:String(Number(l.opening)||0), group_id:l.group_id } : { name:"", gstin:"", opening:"0", group_id:"" });
+  const [busy,setBusy] = useState(false);
+  const canOpening = isNew || (l.source!=="FFS" && !accSysLedger(l));
+  const groups = C.groups.map(g=>({ id:g.id, path:accPath(C,g.id) })).sort((a,b)=>a.path.localeCompare(b.path));
+  const lab = { fontSize:11, color:colors.muted, fontWeight:600, display:"block", marginBottom:3, marginTop:8 };
+  const save = async()=>{
+    const name = d.name.trim(); if(!name){ alert("Give the ledger a name."); return; }
+    if(!d.group_id){ alert("Pick the group it belongs to."); return; }
+    const gst = d.gstin.trim().toUpperCase(); if(gst && !/^\d{2}[A-Z0-9]{13}$/.test(gst)){ alert("A GSTIN is 15 characters, starting with the 2-digit state code."); return; }
+    const op = accR2(d.opening);
+    if(canOpening && Math.abs(op - (l?Number(l.opening)||0:0))>0.004 && Object.values(C.periods).some(p=>p.status==="Locked" && p.month>=C.fyStart.slice(0,7)) && !confirm("Some months are locked. Changing an opening balance changes every month after it, including locked ones. Go ahead?")) return;
+    setBusy(true);
+    let r;
+    if(isNew){ let m = 0; C.ledgers.forEach(x=>{ const z = /^FIN(\d+)$/i.exec(x.code||""); if(z) m = Math.max(m, Number(z[1])); });
+      const code = "FIN"+String(m+1).padStart(3,"0");
+      r = await sb.from("acc_ledger_tbl").insert({ code, name, group_id:Number(d.group_id), gstin:gst||null, opening:op, source:"App", created_by:user.username });
+      if(!r.error) await accLog(user,"ledger",code,"add","Added ledger \""+name+"\" ("+code+") under "+C.gById[d.group_id].name+(op?" opening "+accDrCr(op):""));
+    } else {
+      const patch = { name, gstin:gst||null, updated_at:new Date().toISOString() }; if(canOpening) patch.opening = op;
+      r = await sb.from("acc_ledger_tbl").update(patch).eq("id",l.id);
+      const ch = []; if(name!==l.name) ch.push("name \""+l.name+"\" → \""+name+"\""); if((gst||"")!==(l.gstin||"")) ch.push("GSTIN "+(l.gstin||"—")+" → "+(gst||"—")); if(canOpening && Math.abs(op-(Number(l.opening)||0))>0.004) ch.push("opening "+accDrCr(l.opening)+" → "+accDrCr(op));
+      if(!r.error && ch.length) await accLog(user,"ledger",l.id,"edit",l.code+": "+ch.join("; "));
+    }
+    setBusy(false);
+    if(r.error){ alert(saveFailedText("The ledger", r.error)); return; }
+    accInvalidate(); onSaved();
+  };
+  return h("div",{onClick:e=>{ if(e.target===e.currentTarget) onClose(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:2500,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"60px 16px"}},
+    h("div",{style:{background:"#fff",borderRadius:10,width:480,maxWidth:"100%",padding:"16px 18px"}},
+      h("b",{style:{fontSize:15}}, isNew ? "Add Ledger" : "Edit ledger "+l.code),
+      h("label",null,h("span",{style:lab},"Name"),h("input",{value:d.name,onChange:e=>setD({ ...d, name:e.target.value }),style:inputStyle})),
+      isNew ? h("label",null,h("span",{style:lab},"Group"),h("select",{value:d.group_id,onChange:e=>setD({ ...d, group_id:e.target.value }),style:inputStyle}, h("option",{value:""},"Pick a group"), groups.map(g=>h("option",{key:g.id,value:g.id},g.path))))
+        : h("div",{style:{fontSize:12,color:colors.muted,marginTop:8}},"Group: "+accPath(C,l.group_id)+" (move it from the Chart of Accounts)"),
+      h("label",null,h("span",{style:lab},"GSTIN (customers and suppliers)"),h("input",{value:d.gstin,onChange:e=>setD({ ...d, gstin:e.target.value }),style:inputStyle})),
+      h("label",null,h("span",{style:lab},"Opening on "+fmtDMY(C.fyStart)+" (debit +, credit −)"),h("input",{type:"number",step:"0.01",disabled:!canOpening,value:d.opening,onChange:e=>setD({ ...d, opening:e.target.value }),style:{...inputStyle,textAlign:"right"}})),
+      !canOpening ? h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:4}}, accSysLedger(l) ? "System ledger: its opening is set by the closing-stock figures." : "The opening came from FFS; it changes only by importing FFS again.") : null,
+      h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}, h("button",{style:btnPrimary,disabled:busy,onClick:save},busy?"Saving…":isNew?"Add Ledger":"Save"), h("button",{style:btnSecondary,onClick:onClose},"Close"))));
+}
+function AccLedgerList({ user, A, C, onChanged, onLedger }){
+  const [q,setQ] = useState(""); const [g,setG] = useState(""); const [act,setAct] = useState("active"); const [page,setPage] = useState(0); const [ed,setEd] = useState(undefined);
+  useEffect(()=>setPage(0),[q,g,act]);
+  const cl = useMemo(()=>{ const b = accBalances(C, null, null); const o={}; C.ledgers.forEach(l=>o[l.id]=b.cl(l.id)); return o; },[C]);
+  const gset = g ? accDesc(C, Number(g)) : null; const ql = q.trim().toLowerCase();
+  const rows = C.ledgers.filter(l=>(!gset || gset.has(l.group_id)) && (act==="all" || (act==="active") === (l.is_active!==false)) && (!ql || (l.name+" "+l.code+" "+(l.gstin||"")).toLowerCase().includes(ql))).sort((a,b)=>a.name.localeCompare(b.name));
+  const excel = ()=>{ const aoa = [["Code","Name","Group","Opening","Closing","Entries","GSTIN","Source","Active"]];
+    rows.forEach(l=>aoa.push([l.code,l.name,accPath(C,l.group_id),accR2(l.opening),accR2(cl[l.id]),C.entryCount[l.id]||0,l.gstin||"",l.source||"",l.is_active===false?"No":"Yes"]));
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "Ledgers"); XLSX.writeFile(wb, "Ledgers_"+toISODate(new Date())+".xlsx"); };
+  const lab = { fontSize:11, color:colors.muted, fontWeight:600, display:"block", marginBottom:3 };
+  return accCard("Ledgers",
+    h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end",marginBottom:8}},
+      h("label",{style:{flex:1,minWidth:200}},h("span",{style:lab},"Search name, code, GSTIN"),h("input",{value:q,onChange:e=>setQ(e.target.value),style:inputStyle})),
+      h("label",null,h("span",{style:lab},"Group"),h("select",{value:g,onChange:e=>setG(e.target.value),style:{...inputStyle,width:240}}, h("option",{value:""},"All groups"), C.groups.map(x=>({ id:x.id, p:accPath(C,x.id) })).sort((a,b)=>a.p.localeCompare(b.p)).map(x=>h("option",{key:x.id,value:x.id},x.p)))),
+      h("label",null,h("span",{style:lab},"Show"),h("select",{value:act,onChange:e=>setAct(e.target.value),style:{...inputStyle,width:130}}, h("option",{value:"active"},"Active"), h("option",{value:"inactive"},"Inactive"), h("option",{value:"all"},"All"))),
+      h("button",{style:btnSecondary,onClick:excel},"Download Excel"),
+      h("button",{style:permBtnStyle(A.tree,btnPrimary),onClick:()=>{ if(!A.tree){ noPermission("add ledgers", ACC_WHO.full); return; } setEd(null); }},"Add Ledger")),
+    h("div",{style:{display:"flex",justifyContent:"flex-end",marginBottom:6}}, accPager(page,setPage,rows.length,25)),
+    accTable(h("tr",null, ...["Code","Ledger","Group"].map(x=>h("th",{key:x,style:accTh},x)), ...["Opening","Balance now","Entries"].map(x=>h("th",{key:x,style:{...accTh,textAlign:"right"}},x)), h("th",{style:accTh},"GSTIN"), h("th",{style:accTh},"")),
+      rows.slice(page*25,page*25+25).map(l=>h("tr",{key:l.id,style:{opacity:l.is_active===false?.55:1}},
+        h("td",{style:accTd},l.code), h("td",{style:accTd}, h("span",{style:{cursor:"pointer",textDecoration:"underline dotted"},onClick:()=>onLedger(l.id)}, l.name)), h("td",{style:{...accTd,color:colors.muted}}, C.gById[l.group_id]?C.gById[l.group_id].name:"?"),
+        h("td",{style:accNum},accDrCr(l.opening)), h("td",{style:accNum},accDrCr(cl[l.id])), h("td",{style:accNum},C.entryCount[l.id]||0), h("td",{style:accTd},l.gstin||""),
+        h("td",{style:accTd}, h("button",{style:permBtnStyle(A.tree,btnSmall),onClick:()=>{ if(!A.tree){ noPermission("change ledgers", ACC_WHO.full); return; } setEd(l); }},"Edit"))))),
+    ed!==undefined ? h(AccLedgerEdit,{ user, C, l:ed, onClose:()=>setEd(undefined), onSaved:()=>{ setEd(undefined); onChanged(); } }) : null);
+}
+
+// ---------------------------------------------------------------------------- FFS import (in the app, re-runnable) with tie-out
+function accNumber(v){ if(v===null || v===undefined || v==="") return 0; if(typeof v==="number") return v; const s = String(v).replace(/,/g,"").trim(); const n = parseFloat(s); return isNaN(n) ? 0 : n; }
+function accSigned(v){ if(typeof v==="number") return v; const s = String(v||"").trim(); const n = accNumber(s.replace(/\s*(Dr|Cr)\.?\s*$/i,"")); return /Cr\.?\s*$/i.test(s) ? -n : n; }
+function accDate(v){
+  if(v===null || v===undefined || v==="") return "";
+  if(v instanceof Date) return toISODate(v);
+  if(typeof v==="number"){ const d = new Date(Math.round((v-25569)*86400000)); return d.toISOString().slice(0,10); }
+  const m = /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/.exec(String(v).trim()); if(m) return m[3]+"-"+m[2].padStart(2,"0")+"-"+m[1].padStart(2,"0");
+  const m2 = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(v).trim()); return m2 ? m2[0] : "";
+}
+const accNormName = s => String(s||"").toLowerCase().replace(/\.xlsx?$/,"").replace(/^\d+[-_ ]/,"").replace(/[^a-z]/g,"");
+function accFileGroup(C, fname){
+  const k = accNormName(fname);
+  const name = ACC_FILE_GROUP[k]; if(name){ const g = C.groups.find(x=>x.name.toLowerCase()===name.toLowerCase()); if(g) return g.id; }
+  const g = C.groups.find(x=>accNormName(x.name)===k); return g ? g.id : null;
+}
+async function accParseFiles(files){
+  const out = { ledgerFiles:[], tb:null, pl:null, bs:null, other:[] };
+  for(const f of files){
+    let wb; try{ wb = XLSX.read(await f.arrayBuffer(), { type:"array" }); }catch(e){ out.other.push({ name:f.name, why:"couldn't be read ("+(e.message||e)+")" }); continue; }
+    const sheets = wb.SheetNames.map(n=>XLSX.utils.sheet_to_json(wb.Sheets[n], { header:1, raw:true, defval:null }));
+    const top = (sheets[0]||[]).slice(0,4).map(r=>(r||[]).filter(x=>x!==null).join(" ")).join(" ").toUpperCase();
+    const toDate = (()=>{ const m = /TO DATE[:\s]*(\d{1,2}\/\d{1,2}\/\d{4})/i.exec(top) || /AS ON[:\s]*(\d{1,2}\/\d{1,2}\/\d{4})/i.exec(top); return m ? accDate(m[1]) : ""; })();
+    if(top.includes("TRIAL BALANCE")){
+      const rows = sheets[0]; const hi = rows.findIndex(r=>r && String(r[0]||"").trim()==="Ledger"); const tb = { name:f.name, toDate, rows:[], total:null };
+      rows.slice(hi+1).forEach(r=>{ if(!r || !r[0]) return; const nm = String(r[0]).trim();
+        if(nm==="Total"){ tb.total = { dr:accNumber(r[2]), cr:accNumber(r[3]) }; return; }
+        tb.rows.push({ name:nm, op:accSigned(r[1]), dr:accNumber(r[2]), cr:accNumber(r[3]), cl:accSigned(r[4]) }); });
+      out.tb = tb; continue;
+    }
+    if(top.includes("PROFIT & LOSS") || top.includes("PROFIT AND LOSS")){
+      const pl = { name:f.name, toDate, profit:null, open:null, close:null };
+      sheets[0].forEach(r=>{ if(!r) return; const a = String(r[0]||"").trim(), c = String(r[2]||"").trim();
+        if(/^net profit$/i.test(a)) pl.profit = accNumber(r[1]); if(/^net loss$/i.test(c)) pl.profit = -accNumber(r[3]);
+        if(/stock in hand - opening/i.test(a)) pl.open = accNumber(r[1]); if(/stock in hand - closing/i.test(c)) pl.close = accNumber(r[3]); });
+      out.pl = pl; continue;
+    }
+    if(top.includes("BALANCE SHEET")){
+      const bs = { name:f.name, toDate, total:null };
+      sheets[0].forEach(r=>{ if(r && /^total\s*:?$/i.test(String(r[0]||"").trim())) bs.total = accNumber(r[2]); });
+      out.bs = bs; continue;
+    }
+    const entries = [], ledgers = {};
+    sheets.forEach(rows=>{ const hi = rows.findIndex(r=>r && String(r[0]||"").trim()==="Ledger Name"); if(hi<0) return;
+      rows.slice(hi+1).forEach(r=>{ if(!r || !r[0]) return; const name = String(r[0]).trim(), code = r[10]!==null && r[10]!==undefined ? String(r[10]).trim() : "";
+        const key = code+"|"+name; const L = ledgers[key] = ledgers[key] || { code, name, op:0, n:0 };
+        const part = r[2]===null||r[2]===undefined ? "" : String(r[2]).trim();
+        if(part==="opening"){ L.op += accNumber(r[7]) - accNumber(r[8]); return; }
+        if(part==="Total" || part==="closing") return;
+        const d = accDate(r[1]); if(!d) return;
+        L.n++; entries.push({ key, date:d, part, type:r[3]?String(r[3]).trim():"", vch:r[4]!==null&&r[4]!==undefined?String(r[4]).trim():"", ref:r[5]?String(r[5]).trim():"", dr:accNumber(r[7]), cr:accNumber(r[8]), narr:r[9]?String(r[9]).trim():"" }); }); });
+    if(Object.keys(ledgers).length) out.ledgerFiles.push({ name:f.name, ledgers, entries });
+    else out.other.push({ name:f.name, why:"isn't an FFS ledger, Trial Balance, P&L or Balance Sheet export" });
+  }
+  return out;
+}
+// Build the import plan and every tie-out check. Nothing is written here.
+function accPlanImport(C, P, groupPick){
+  const checks = [], warn = [], block = [];
+  const ok = (t, pass, detail)=>checks.push({ t, pass, detail });
+  const fileOf = {}; const led = {}; const entries = [];
+  const unknown = P.ledgerFiles.filter(f=>!(groupPick[f.name] || accFileGroup(C, f.name)));
+  if(unknown.length) block.push("Pick the group for: "+unknown.map(f=>f.name).join(", "));
+  P.ledgerFiles.forEach(f=>{ const gid = Number(groupPick[f.name] || accFileGroup(C, f.name));
+    Object.entries(f.ledgers).forEach(([k,l])=>{ if(fileOf[k]){ block.push("\""+l.name+"\" is in two files ("+fileOf[k]+" and "+f.name+"). Was a file added twice?"); return; } fileOf[k] = f.name; led[k] = { ...l, group_id:gid }; });
+    f.entries.forEach(e=>entries.push(e)); });
+  // TB by name
+  const tbBy = {}; if(P.tb) P.tb.rows.forEach(r=>{ const k = r.name.toUpperCase(); (tbBy[k] = tbBy[k]||[]).push(r); });
+  const fills = [];
+  if(P.tb){ const byName = {}; Object.values(led).forEach(l=>{ (byName[l.name.toUpperCase()] = byName[l.name.toUpperCase()]||[]).push(l); });
+    Object.entries(byName).forEach(([nm, ls])=>{ if(ls.length!==1) return; const l = ls[0]; const t = tbBy[nm]; if(!t || t.length!==1) return;
+      if(Math.abs(l.op)<0.005 && Math.abs(t[0].op)>=0.005){ l.op = t[0].op; fills.push(l.name+" ("+l.code+") "+accDrCr(t[0].op)); } }); }
+  // vouchers
+  const V = {}; entries.forEach(e=>{ const k = e.vch+"|"+e.date; const v = V[k] = V[k] || { no:e.vch, date:e.date, type:e.type, narr:"", ref:"", lines:[] };
+    if(e.narr && !v.narr) v.narr = e.narr; if(e.ref && !v.ref) v.ref = e.ref; v.lines.push({ key:e.key, dr:accR2(e.dr), cr:accR2(e.cr) }); });
+  const vouchers = Object.values(V).sort((a,b)=>a.date.localeCompare(b.date) || a.no.localeCompare(b.no));
+  const noNo = vouchers.filter(v=>!v.no).length;
+  if(noNo) block.push(noNo+" entries have no voucher number.");
+  const off = vouchers.map(v=>({ v, d:accR2(v.lines.reduce((s,x)=>s+x.dr-x.cr,0)) })).filter(x=>Math.abs(x.d)>=0.005);
+  off.forEach(x=>{ if(Math.abs(x.d)>0.05) block.push("Voucher "+x.v.no+" ("+fmtDMY(x.v.date)+") is off by "+accInr(x.d)+". A file may be missing."); });
+  ok("Every voucher balances (debit = credit)", !off.some(x=>Math.abs(x.d)>0.05), off.length ? off.length+" voucher(s) off by up to 0.05 in FFS — the paisa goes to \"FFS paisa differences\" under Suspense A/c (FFS shows it in \"Diff. in Opening Balances\"), so the profit stays exactly as FFS" : vouchers.length+" vouchers, all balanced");
+  // totals
+  const sDr = accR2(entries.reduce((s,e)=>s+e.dr,0)), sCr = accR2(entries.reduce((s,e)=>s+e.cr,0));
+  if(P.tb && P.tb.total) ok("Period debit and credit agree with the FFS Trial Balance", Math.abs(sDr-P.tb.total.dr)<0.05 && Math.abs(sCr-P.tb.total.cr)<0.05, "Ledgers: Dr "+accInr(sDr)+" / Cr "+accInr(sCr)+" · Trial Balance: Dr "+accInr(P.tb.total.dr)+" / Cr "+accInr(P.tb.total.cr));
+  else warn.push("No Trial Balance file was added, so the totals can't be checked against FFS.");
+  const rmOpen = Number((C.lByCode[ACC_STK.rm]||{}).opening)||0;
+  const opSum = accR2(Object.values(led).reduce((s,l)=>s+l.op,0));
+  ok("Opening balances agree (ledgers + Raw Material stock "+accInr(rmOpen)+")", Math.abs(opSum+rmOpen)<0.10, "Difference "+accInr(opSum+rmOpen)+(Math.abs(opSum+rmOpen)>=0.005?" (FFS shows the same as \"Diff. in Opening Balances\")":""));
+  if(fills.length) warn.push("Opening taken from the Trial Balance because the ledger file shows none: "+fills.join("; "));
+  // per-ledger against the TB
+  if(P.tb){ const ours = {};
+    // FFS prints some ledgers in the Trial Balance without their "<place> - " prefix or " - <tag>" suffix: match on the part that is there
+    const tbName = nm=>{ if(tbBy[nm]) return nm; const parts = nm.split(" - "); for(let len=parts.length-1; len>=1; len--) for(let i=0;i+len<=parts.length;i++){ const c = parts.slice(i,i+len).join(" - "); if(tbBy[c]) return c; } return nm; };
+    const keyOf = {}; Object.entries(led).forEach(([k,l])=>{ keyOf[k] = tbName(l.name.toUpperCase()); const o = ours[keyOf[k]] = ours[keyOf[k]] || { op:0, dr:0, cr:0 }; o.op += l.op; });
+    entries.forEach(e=>{ const nm = keyOf[e.key]; ours[nm].dr += e.dr; ours[nm].cr += e.cr; });
+    const bad = [], missing = [];
+    Object.entries(ours).forEach(([nm,o])=>{ const t = tbBy[nm]; if(!t){ if(Math.abs(o.op)>=0.005 || o.dr || o.cr) missing.push(nm); return; }
+      const same = r=>Math.abs(r.op-o.op)<0.011 && Math.abs(r.dr-o.dr)<0.011 && Math.abs(r.cr-o.cr)<0.011;
+      const sum = t.reduce((a,r)=>({ op:a.op+r.op, dr:a.dr+r.dr, cr:a.cr+r.cr }),{ op:0, dr:0, cr:0 });
+      if(!t.some(same) && !same(sum)) bad.push(nm); });
+    ok("Each ledger agrees with the FFS Trial Balance", !bad.length && !missing.length, (Object.keys(ours).length-bad.length-missing.length)+" of "+Object.keys(ours).length+" ledger names agree"+(bad.length?" · differ: "+bad.slice(0,12).join(", ")+(bad.length>12?"…":""):"")+(missing.length?" · not in the Trial Balance: "+missing.slice(0,12).join(", "):""));
+  }
+  // profit and balance sheet against FFS
+  const natOf = l => accNature(C, l.group_id);
+  const cut = P.tb && P.tb.toDate || entries.reduce((m,e)=>e.date>m?e.date:m,"");
+  if(P.pl && P.pl.profit!==null){
+    const plMov = entries.reduce((s,e)=>{ const l = led[e.key]; return "IE".includes(natOf(l)) ? s + e.dr - e.cr : s; },0) + Object.values(led).reduce((s,l)=>"IE".includes(natOf(l))?s+l.op:s,0);
+    const profit = accR2(-plMov + (P.pl.close||0) - (P.pl.open!==null ? P.pl.open : rmOpen));
+    ok("Profit agrees with the FFS P&L", Math.abs(profit-P.pl.profit)<0.05, "Worked out "+accInr(profit)+" · FFS "+accInr(P.pl.profit)+" (stock: opening "+accInr(P.pl.open!==null?P.pl.open:rmOpen)+", closing "+accInr(P.pl.close||0)+")");
+    if(P.bs && P.bs.total!==null){
+      const cl = {}; Object.entries(led).forEach(([k,l])=>cl[k]=l.op); entries.forEach(e=>cl[e.key]+=e.dr-e.cr);
+      const liab = -Object.entries(cl).reduce((s,[k,v])=>natOf(led[k])==="L"?s+v:s,0) + profit;
+      ok("Balance Sheet total agrees with FFS", Math.abs(liab-P.bs.total)<0.10, "Worked out "+accInr(liab)+" · FFS "+accInr(P.bs.total));
+    }
+  } else warn.push("No P&L file was added, so the profit can't be checked against FFS.");
+  if(P.tb && P.pl && P.tb.toDate && P.pl.toDate && P.tb.toDate!==P.pl.toDate) warn.push("The Trial Balance is to "+fmtDMY(P.tb.toDate)+" but the P&L is to "+fmtDMY(P.pl.toDate)+". Export both to the same date.");
+  const lastEntry = entries.reduce((m,e)=>e.date>m?e.date:m,"");
+  if(cut && lastEntry>cut) warn.push("Some ledger entries are after the Trial Balance date ("+fmtDMY(lastEntry)+").");
+  if(lastEntry>=C.goLive) block.push("The files have entries on or after the go-live date "+fmtDMY(C.goLive)+". From go-live the books are kept in the app; export FFS only up to the day before.");
+  // locked months
+  const locked = new Set(Object.values(C.periods).filter(p=>p.status==="Locked").map(p=>p.month));
+  const skipV = vouchers.filter(v=>locked.has(accMonthOf(v.date)));
+  const keepV = vouchers.filter(v=>!locked.has(accMonthOf(v.date)));
+  const delV = C.vouchers.filter(v=>v.source==="FFS" && !locked.has(accMonthOf(v.voucher_date)));
+  // ledgers: new / changed opening
+  const exist = {}; C.ledgers.forEach(l=>exist[l.code+"|"+l.name]=l);
+  const newL = Object.entries(led).filter(([k])=>!exist[k]).map(([k,l])=>l);
+  const opChg = Object.entries(led).filter(([k,l])=>exist[k] && exist[k].source==="FFS" && Math.abs((Number(exist[k].opening)||0)-l.op)>=0.005).map(([k,l])=>({ l:exist[k], op:l.op }));
+  if(opChg.length && locked.size>1) warn.push(opChg.length+" opening balance(s) change, and some months are locked: those months' balances move too.");
+  if(skipV.length) warn.push(skipV.length+" voucher(s) fall in locked months and are left as they are in the app.");
+  return { checks, warn, block, led, vouchers, keepV, skipV, delV, newL, opChg, off, cut: cut || lastEntry, lastEntry, sDr, sCr, fills };
+}
+async function accRunImport(user, C, P, plan, saveStock, progress){
+  const say = t=>progress(t);
+  const imp = await sb.from("acc_import_tbl").insert({ by_user:user.username, cutoff:plan.cut||null, status:"Running", summary:{ files:P.ledgerFiles.length, vouchers:plan.keepV.length } }).select("id");
+  if(imp.error) throw imp.error;
+  const impId = imp.data[0].id;
+  try{
+    // 1. ledgers
+    say("Adding "+plan.newL.length+" new ledgers…");
+    const ids = {}; C.ledgers.forEach(l=>ids[l.code+"|"+l.name]=l.id);
+    for(let i=0;i<plan.newL.length;i+=500){ const chunk = plan.newL.slice(i,i+500).map(l=>({ code:l.code, name:l.name, group_id:l.group_id, opening:accR2(l.op), source:"FFS", created_by:"FFS import" }));
+      const r = await sb.from("acc_ledger_tbl").insert(chunk).select("id,code,name"); if(r.error) throw r.error; r.data.forEach(x=>ids[x.code+"|"+x.name]=x.id); }
+    for(const x of plan.opChg){ const r = await sb.from("acc_ledger_tbl").update({ opening:accR2(x.op), updated_at:new Date().toISOString() }).eq("id",x.l.id); if(r.error) throw r.error; }
+    const roundKey = "FFS-DIFF|FFS paisa differences";
+    if(plan.off.length && !ids[roundKey]){ const sg = C.groups.find(g=>/^suspense a\/c$/i.test(g.name)) || C.groups.find(g=>g.nature==="A");
+      const r = await sb.from("acc_ledger_tbl").insert({ code:"FFS-DIFF", name:"FFS paisa differences", group_id:sg.id, opening:0, source:"System", created_by:"FFS import" }).select("id,code,name"); if(r.error) throw r.error;
+      ids[roundKey] = r.data[0].id; }
+    // 2. remove the FFS vouchers of open months
+    say("Removing "+plan.delV.length+" FFS vouchers of open months (they come back from these files)…");
+    const del = plan.delV.map(v=>v.id);
+    for(let i=0;i<del.length;i+=200){ const r = await sb.from("acc_voucher_tbl").delete().in("id",del.slice(i,i+200)); if(r.error) throw r.error; say("Removing old FFS vouchers… "+Math.min(i+200,del.length)+" of "+del.length); }
+    // 3. vouchers and lines
+    const V = plan.keepV; let done = 0;
+    for(let i=0;i<V.length;i+=500){
+      const chunk = V.slice(i,i+500);
+      const r = await sb.from("acc_voucher_tbl").insert(chunk.map(v=>({ voucher_no:v.no, voucher_date:v.date, vtype:v.type||"Journal Voucher", narration:v.narr||null, ref:v.ref||null, source:"FFS", status:"Posted", import_id:impId, created_by:"FFS import" }))).select("id,voucher_no,voucher_date");
+      if(r.error) throw r.error;
+      const vid = {}; r.data.forEach(x=>vid[x.voucher_no+"|"+x.voucher_date]=x.id);
+      const lines = [];
+      chunk.forEach(v=>{ const id = vid[v.no+"|"+v.date]; let n = 0;
+        v.lines.forEach(ln=>lines.push({ voucher_id:id, ledger_id:ids[ln.key], dr:ln.dr, cr:ln.cr, line_no:++n }));
+        const d = accR2(v.lines.reduce((s,x)=>s+x.dr-x.cr,0));
+        if(Math.abs(d)>=0.005) lines.push({ voucher_id:id, ledger_id:ids[roundKey], dr: d<0 ? -d : 0, cr: d>0 ? d : 0, line_no:++n, note:"FFS voucher off by paisa" }); });
+      if(lines.some(x=>!x.voucher_id || !x.ledger_id)) throw new Error("A voucher line lost its ledger or voucher while saving. Nothing after voucher "+(chunk[0]||{}).no+" was saved; run the import again.");
+      for(let j=0;j<lines.length;j+=1000){ const r2 = await sb.from("acc_voucher_line_tbl").insert(lines.slice(j,j+1000)); if(r2.error) throw r2.error; }
+      done += chunk.length; say("Saving vouchers… "+done+" of "+V.length);
+    }
+    // 4. the FFS closing stock, as a provisional figure for its month
+    if(saveStock && P.pl && P.pl.close!==null && plan.cut){ const m = accMonthOf(plan.cut); const p = C.periods[m];
+      if(!(p && p.status==="Locked") && !(p && p.rm_closing!==null && p.rm_closing!==undefined && !String(p.rm_by||"").startsWith("FFS import"))){
+        const r = await sb.from("acc_period_tbl").upsert({ month:m, rm_closing:accR2(P.pl.close), rm_by:"FFS import (provisional, "+fmtDMY(plan.cut)+")", rm_at:new Date().toISOString() }, { onConflict:"month" }); if(r.error) throw r.error; } }
+    const summary = { files:P.ledgerFiles.length, ledgers_new:plan.newL.length, openings_changed:plan.opChg.length, vouchers:V.length, removed:del.length, skipped_locked:plan.skipV.length,
+      round_off:plan.off.length, debit:plan.sDr, credit:plan.sCr, checks:plan.checks.map(c=>({ t:c.t, pass:c.pass, detail:c.detail })), warnings:plan.warn };
+    await sb.from("acc_import_tbl").update({ status:"Done", summary }).eq("id",impId);
+    await accLog(user,"import",impId,"import","FFS import to "+fmtDMY(plan.cut)+": "+V.length+" vouchers, "+plan.newL.length+" new ledgers, "+del.length+" old FFS vouchers replaced");
+    return summary;
+  }catch(e){
+    await sb.from("acc_import_tbl").update({ status:"Failed", summary:{ error:String(e && (e.message||e.details) || e) } }).eq("id",impId);
+    throw e;
+  }
+}
+function AccImport({ user, A, C, onChanged }){
+  const [P,setP] = useState(null); const [busy,setBusy] = useState(""); const [pick,setPick] = useState({}); const [res,setRes] = useState(null); const [saveStock,setSaveStock] = useState(true);
+  const [hist,setHist] = useState([]);
+  useEffect(()=>{ sb.from("acc_import_tbl").select("*").order("id",{ascending:false}).limit(25).then(({data})=>setHist(data||[])); },[res]);
+  const plan = useMemo(()=> P && P.ledgerFiles.length ? accPlanImport(C, P, pick) : null,[C,P,pick]);
+  const choose = async(e)=>{ const fs = [...(e.target.files||[])]; e.target.value = ""; if(!fs.length) return; setRes(null); setBusy("Reading "+fs.length+" files…");
+    try{ setP(await accParseFiles(fs)); }catch(x){ alert("The files couldn't be read: "+(x.message||x)); } setBusy(""); };
+  const run = async()=>{
+    if(!A.tree){ noPermission("import from FFS", ACC_WHO.full); return; }
+    if(plan.block.length){ alert("The import can't run yet:\n\n• "+plan.block.join("\n• ")); return; }
+    const failed = plan.checks.filter(c=>!c.pass);
+    if(failed.length && !confirm("These checks don't agree:\n\n• "+failed.map(c=>c.t+": "+c.detail).join("\n• ")+"\n\nImport anyway?")) return;
+    if(!confirm("Import "+plan.keepV.length+" vouchers to "+fmtDMY(plan.cut)+"?\n\nThe "+plan.delV.length+" FFS vouchers already in open months are replaced. Vouchers entered in the app are not touched.")) return;
+    setBusy("Starting…");
+    try{ const s = await accRunImport(user, C, P, plan, saveStock, setBusy); setRes(s); setP(null); accInvalidate(); onChanged(); }
+    catch(e){ alert(saveFailedText("The import", e)+"\n\nNothing is half-done that a second run won't fix: run the import again with the same files."); }
+    setBusy("");
+  };
+  const unknown = P ? P.ledgerFiles.filter(f=>!accFileGroup(C, f.name)) : [];
+  return h("div",null,
+    accCard("FFS Import",
+      accNote("Export from FFS: every group's Ledger Report (Excel), plus the Trial Balance, P&L and Balance Sheet to the same date. Add all the files together. The app checks them against each other before anything is saved. You can run it again at any time: FFS vouchers in months that aren't locked are replaced; locked months and app vouchers are never touched.",""),
+      !A.tree ? accNote("Importing is for the Finance & Accounts Manager, Finance Director and super admins. You can still check files here.","warn") : null,
+      h("label",{style:{...btnPrimary,display:"inline-block",cursor:"pointer"}}, "Choose FFS files…", h("input",{type:"file",multiple:true,accept:".xlsx,.xls",onChange:choose,style:{display:"none"}})),
+      busy ? h("div",{style:{marginTop:10,fontSize:13,color:"#085041",fontWeight:600}}, "⏳ "+busy) : null,
+      res ? accNote("Imported: "+res.vouchers+" vouchers ("+res.removed+" old FFS vouchers replaced, "+res.ledgers_new+" new ledgers, "+res.openings_changed+" openings updated"+(res.skipped_locked?", "+res.skipped_locked+" left alone in locked months":"")+"). Open the Trial Balance to see it.","") : null),
+    P ? accCard("Files",
+      h("div",{style:{fontSize:13,marginBottom:6}}, P.ledgerFiles.length+" ledger files"+(P.tb?" · Trial Balance to "+fmtDMY(P.tb.toDate):"")+(P.pl?" · P&L to "+fmtDMY(P.pl.toDate):"")+(P.bs?" · Balance Sheet as on "+fmtDMY(P.bs.toDate):"")),
+      P.other.length ? accNote("Not used: "+P.other.map(o=>o.name+" "+o.why).join("; "),"warn") : null,
+      unknown.length ? h("div",null, accNote("The app doesn't know which group these files are. Pick one for each:","warn"),
+        unknown.map(f=>h("div",{key:f.name,style:{display:"flex",gap:8,alignItems:"center",marginBottom:6}}, h("span",{style:{fontSize:13,minWidth:220}},f.name),
+          h("select",{value:pick[f.name]||"",onChange:e=>setPick({ ...pick, [f.name]:e.target.value }),style:{...inputStyle,width:300}}, h("option",{value:""},"Pick a group"), C.groups.map(g=>({ id:g.id, p:accPath(C,g.id) })).sort((a,b)=>a.p.localeCompare(b.p)).map(g=>h("option",{key:g.id,value:g.id},g.p)))))) : null) : null,
+    plan ? accCard("Tie-out — to "+fmtDMY(plan.cut),
+      h("table",{style:{borderCollapse:"collapse",width:"100%"}}, h("tbody",null, plan.checks.map((c,i)=>h("tr",{key:i},
+        h("td",{style:{...accTd,width:28,fontSize:16,color:c.pass?"#0f6e56":"#a3312a"}}, c.pass?"✔":"✘"), h("td",{style:{...accTd,fontWeight:600}},c.t), h("td",{style:{...accTd,color:colors.muted}},c.detail))))),
+      plan.warn.map((w,i)=>h("div",{key:"w"+i},accNote(w,"warn"))), plan.block.map((w,i)=>h("div",{key:"b"+i},accNote(w,"bad"))),
+      h("div",{style:{fontSize:13,margin:"8px 0"}}, "Will save: "+plan.keepV.length+" vouchers · "+plan.newL.length+" new ledgers · "+plan.opChg.length+" opening changes · replaces "+plan.delV.length+" FFS vouchers now in the app."),
+      P.pl && P.pl.close!==null ? h("label",{style:{fontSize:12.5,display:"flex",gap:6,alignItems:"center",marginBottom:8}}, h("input",{type:"checkbox",checked:saveStock,onChange:e=>setSaveStock(e.target.checked)}),
+        "Use the FFS closing stock "+accInr(P.pl.close)+" as the provisional Raw Material closing for "+accMonthLabel(accMonthOf(plan.cut))+" (replaced when the month is closed)") : null,
+      h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end"}}, h("button",{style:btnSecondary,onClick:()=>{ setP(null); setPick({}); }},"Clear files"), h("button",{style:permBtnStyle(A.tree && !plan.block.length,btnPrimary),disabled:!!busy,onClick:run},"Import into the books"))) : null,
+    accCard("Earlier imports", accTable(h("tr",null, ...["When","Who","Up to","Status","What"].map(x=>h("th",{key:x,style:accTh},x))),
+      hist.length ? hist.map(x=>h("tr",{key:x.id}, h("td",{style:{...accTd,whiteSpace:"nowrap"}},fmtDMYTime(x.at)), h("td",{style:accTd},x.by_user), h("td",{style:accTd},x.cutoff?fmtDMY(x.cutoff):""),
+        h("td",{style:accTd}, accBadge(x.status, x.status==="Done"?"app":x.status==="Failed"?"red":"amb")),
+        h("td",{style:{...accTd,fontSize:12}}, x.summary ? (x.summary.error ? x.summary.error : (x.summary.vouchers||0)+" vouchers, "+(x.summary.ledgers_new||0)+" new ledgers"+(x.summary.removed?", "+x.summary.removed+" replaced":"")+(x.summary.checks?" · checks "+x.summary.checks.filter(c=>c.pass).length+"/"+x.summary.checks.length+" agree":"")) : "")))
+      : [h("tr",{key:"n"},h("td",{colSpan:5,style:{...accTd,color:colors.muted}},"None yet."))], "300px")));
+}
+
+// ---------------------------------------------------------------------------- period close
+function AccAmountDialog({ title, sub, value, note, withNote, onOk, onCancel }){
+  const [v,setV] = useState(value===null||value===undefined?"":String(value)); const [n,setN] = useState(note||"");
+  return h("div",{onClick:e=>{ if(e.target===e.currentTarget) onCancel(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:2500,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"70px 16px"}},
+    h("div",{style:{background:"#fff",borderRadius:10,width:440,maxWidth:"100%",padding:"16px 18px"}},
+      h("b",{style:{fontSize:14}},title), sub ? h("div",{style:{fontSize:12,color:colors.muted,margin:"3px 0 8px"}},sub) : null,
+      h("input",{autoFocus:true,type:"number",step:"0.01",value:v,onChange:e=>setV(e.target.value),style:{...inputStyle,textAlign:"right",fontSize:15}}),
+      v!=="" ? h("div",{style:{fontSize:12,color:colors.muted,marginTop:4,textAlign:"right"}},"₹ "+accInr(v)) : null,
+      withNote ? h("textarea",{rows:2,placeholder:"Note (how it was worked out, anything unusual)",value:n,onChange:e=>setN(e.target.value),style:{...inputStyle,fontSize:13,marginTop:8}}) : null,
+      h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}, h("button",{style:btnSecondary,onClick:onCancel},"Cancel"),
+        h("button",{style:btnPrimary,onClick:()=>{ if(v==="" || isNaN(Number(v)) || Number(v)<0){ alert("Give the closing stock value (0 or more)."); return; } onOk(accR2(v), n.trim()); }},"Save"))));
+}
+const accProvisional = p => !p || p.rm_closing===null || p.rm_closing===undefined || String(p.rm_by||"").startsWith("FFS import");
+function AccPeriodClose({ user, A, C, onChanged }){
+  const [dlg,setDlg] = useState(null); const [unl,setUnl] = useState(null);
+  const today = toISODate(new Date());
+  const first = accPrevMonth(C.fyStart.slice(0,7));
+  const lastM = [accMonthOf(today), accMonthOf(accLastDate(C))].sort().pop();
+  const months = [first, ...C.months.filter(m=>m<=lastM)];
+  const pl = useMemo(()=>accPLData(C, accMonthEnd(lastM)),[C,lastM]);
+  const profitOf = useMemo(()=>{ const out={}; pl.months.forEach((m,k)=>{ let s=0; Object.values(pl.mov).forEach(a=>s-=a[k]); out[m] = { ffs: s + pl.rm[k].cl.value - pl.rm[k].op.value, wip: pl.wip[k].cl.value - pl.wip[k].op.value, exact: pl.rm[k].cl.exact }; }); return out; },[pl]);
+  const save = async(m, patch, logText)=>{ const r = await sb.from("acc_period_tbl").upsert({ month:m, ...patch }, { onConflict:"month" });
+    if(r.error){ alert(saveFailedText("The period", r.error)); return; } await accLog(user,"period",m,"period",logText); accInvalidate(); onChanged(); };
+  const P = m => C.periods[m] || {};
+  const doLock = async(m)=>{
+    if(!A.lock){ noPermission("lock a month", ACC_WHO.full); return; }
+    const p = P(m), prev = accPrevMonth(m);
+    if(accMonthEnd(m)>=today){ alert(accMonthLabel(m)+" hasn't ended yet."); return; }
+    if(accProvisional(p)){ alert("Enter the Raw Material closing stock for "+accMonthLabel(m)+" first (the Finance & Accounts Manager's card)."); return; }
+    if(p.wip_closing===null || p.wip_closing===undefined){ alert("The WIP & FG closing for "+accMonthLabel(m)+" isn't in yet. A super admin enters it."); return; }
+    if(prev>=first && P(prev).status!=="Locked"){ alert("Lock "+accMonthLabel(prev)+" first. Months are locked in order."); return; }
+    if(!confirm("Lock "+accMonthLabel(m)+"?\n\nNo voucher can then be entered, changed or cancelled in it, and the FFS import leaves it alone. Only a super admin can unlock it, with a reason.")) return;
+    save(m, { status:"Locked", locked_by:user.username, locked_at:new Date().toISOString() }, "Locked "+accMonthLabel(m));
+  };
+  const doUnlock = async(m, reason)=>{ setUnl(null);
+    const later = months.filter(x=>x>m && P(x).status==="Locked"); if(later.length){ alert("Unlock "+accMonthLabel(later[later.length-1])+" first — the latest locked month comes off first."); return; }
+    save(m, { status:"Open", unlock_reason:reason, unlocked_by:user.username, unlocked_at:new Date().toISOString() }, "Unlocked "+accMonthLabel(m)+": "+reason);
+  };
+  const lab = { fontSize:11, color:colors.muted };
+  return h("div",null,
+    accCard("Period Close — closing stock and locking months",
+      accNote("Each month: the Finance & Accounts Manager enters the Raw Material closing stock; a super admin enters WIP & FG at selling value. When both are in, the month can be locked. A locked month can't take, change or lose a voucher. Unlocking is for super admins, with a reason.",""),
+      accTable(h("tr",null, h("th",{style:accTh},"Month"), h("th",{style:{...accTh,textAlign:"right"}},"Raw Material closing"), h("th",{style:{...accTh,textAlign:"right"}},"WIP & FG closing"),
+        h("th",{style:{...accTh,textAlign:"right"}},"Profit (FFS basis)"), h("th",{style:{...accTh,textAlign:"right"}},"Profit with WIP & FG"), h("th",{style:accTh},"Status"), h("th",{style:accTh},"")),
+        months.slice().reverse().map(m=>{ const p = P(m); const locked = p.status==="Locked"; const isFirst = m===first; const pr = profitOf[m];
+          return h("tr",{key:m},
+            h("td",{style:{...accTd,fontWeight:600}}, accMonthLabel(m), isFirst ? h("div",{style:lab},"opening (FFS)") : null),
+            h("td",{style:accNum}, p.rm_closing!==null && p.rm_closing!==undefined ? accInr(p.rm_closing) : h("span",{style:{color:"#a3312a"}},"not in"), p.rm_by ? h("div",{style:lab}, p.rm_by+(p.rm_at?" · "+fmtDMY(p.rm_at):"")) : null),
+            h("td",{style:accNum}, p.wip_closing!==null && p.wip_closing!==undefined ? accInr(p.wip_closing) : h("span",{style:{color:"#a3312a"}},"not in"), p.wip_note ? h("div",{style:{...lab,maxWidth:220,whiteSpace:"normal"}}, p.wip_note) : null, p.wip_by ? h("div",{style:lab}, p.wip_by) : null),
+            h("td",{style:accNum}, pr ? accInr(pr.ffs,0) : ""), h("td",{style:accNum}, pr ? accInr(pr.ffs+pr.wip,0) : ""),
+            h("td",{style:accTd}, locked ? accBadge("Locked"+(p.locked_by?" by "+p.locked_by:""),"amb") : accBadge("Open","app"), p.unlock_reason && !locked ? h("div",{style:lab},"Unlocked: "+p.unlock_reason) : null),
+            h("td",{style:{...accTd,whiteSpace:"nowrap"}}, isFirst ? null : [
+              !locked ? h("button",{key:"rm",style:permBtnStyle(A.close,btnSmall),onClick:()=>{ if(!A.close){ noPermission("enter the Raw Material closing stock", ACC_WHO.full); return; } setDlg({ m, kind:"rm" }); }}, accProvisional(p)?"Enter RM stock":"Change RM stock") : null,
+              !locked ? h("button",{key:"wip",style:permBtnStyle(A.wip,{...btnSmall,marginLeft:4}),onClick:()=>{ if(!A.wip){ noPermission("enter the WIP & FG closing", ACC_WHO.sa); return; } setDlg({ m, kind:"wip" }); }}, p.wip_closing===null||p.wip_closing===undefined?"Enter WIP & FG":"Change WIP & FG") : null,
+              !locked ? h("button",{key:"lk",style:permBtnStyle(A.lock,{...btnSmall,marginLeft:4}),onClick:()=>doLock(m)},"Lock month") : null,
+              locked ? h("button",{key:"ul",style:permBtnStyle(A.unlock,btnSmall),onClick:()=>{ if(!A.unlock){ noPermission("unlock a month", ACC_WHO.sa); return; } setUnl(m); }},"Unlock") : null ])); }), "none")),
+    h(AccSettingsCard,{ user, A, C, onChanged }),
+    dlg ? h(AccAmountDialog,{ title:(dlg.kind==="rm"?"Raw Material closing stock — ":"WIP & FG closing (selling value) — ")+accMonthLabel(dlg.m), withNote: dlg.kind==="wip",
+      sub: dlg.kind==="rm" ? "Value of raw material in stock on "+fmtDMY(accMonthEnd(dlg.m))+"." : "WIP and finished goods on "+fmtDMY(accMonthEnd(dlg.m))+", at selling value.",
+      value: dlg.kind==="rm" ? (accProvisional(P(dlg.m)) ? (P(dlg.m).rm_closing??"") : P(dlg.m).rm_closing) : P(dlg.m).wip_closing, note:P(dlg.m).wip_note,
+      onCancel:()=>setDlg(null),
+      onOk:(v,n)=>{ const d = dlg; setDlg(null); const now = new Date().toISOString();
+        if(d.kind==="rm") save(d.m, { rm_closing:v, rm_by:user.username, rm_at:now }, "Raw Material closing "+accMonthLabel(d.m)+": "+accInr(v)+(P(d.m).rm_closing!=null?" (was "+accInr(P(d.m).rm_closing)+")":""));
+        else save(d.m, { wip_closing:v, wip_by:user.username, wip_at:now, wip_note:n||null }, "WIP & FG closing "+accMonthLabel(d.m)+": "+accInr(v)+(P(d.m).wip_closing!=null?" (was "+accInr(P(d.m).wip_closing)+")":"")); } }) : null,
+    unl ? h(ReasonDialog,{ title:"Unlock "+accMonthLabel(unl), subtitle:"Vouchers in it can then be entered and changed again. The reason is kept.", placeholder:"Why is it being unlocked?", okLabel:"Unlock", onOk:r=>doUnlock(unl,r), onCancel:()=>setUnl(null) }) : null);
+}
+function AccSettingsCard({ user, A, C, onChanged }){
+  const [gl,setGl] = useState(C.goLive); const [fy,setFy] = useState(C.fyStart);
+  const save = async()=>{ if(!A.superAdmin){ noPermission("change the accounts settings", ACC_WHO.sa); return; }
+    if(!/^\d{4}-04-01$/.test(fy)){ alert("The financial year starts on 1 April."); return; }
+    const rows = [{ key:"go_live_date", value:gl, updated_by:user.username, updated_at:new Date().toISOString() }, { key:"fy_start", value:fy, updated_by:user.username, updated_at:new Date().toISOString() }];
+    const r = await sb.from("acc_settings_tbl").upsert(rows, { onConflict:"key" }); if(r.error){ alert(saveFailedText("The settings", r.error)); return; }
+    await accLog(user,"settings","","settings","Go-live "+fmtDMY(C.goLive)+" → "+fmtDMY(gl)+"; FY start "+fmtDMY(C.fyStart)+" → "+fmtDMY(fy)); accInvalidate(); onChanged(); };
+  const lab = { fontSize:11, color:colors.muted, fontWeight:600, display:"block", marginBottom:3 };
+  return accCard("Settings",
+    h("div",{style:{display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-end"}},
+      h("label",null,h("span",{style:lab},"Financial year starts"),h("input",{type:"date",value:fy,disabled:!A.superAdmin,onChange:e=>setFy(e.target.value),style:{...inputStyle,width:160}})),
+      h("label",null,h("span",{style:lab},"Vouchers in the app from (go-live)"),h("input",{type:"date",value:gl,disabled:!A.superAdmin,onChange:e=>setGl(e.target.value),style:{...inputStyle,width:160}})),
+      h("button",{style:permBtnStyle(A.superAdmin,btnSecondary),onClick:save},"Save settings")),
+    h("div",{style:{fontSize:12,color:colors.muted,marginTop:6}},"Before the go-live date the books come from FFS (FFS Import). From it, vouchers are entered here. Only super admins change these."));
+}
+
+// Pending Actions: closing stock and locking, owed by the post (never a named person)
+async function accPendingItems(P){
+  const out = [];
+  const { data: per, error } = await sb.from("acc_period_tbl").select("*"); if(error) return out;
+  let goLive = "2026-11-01"; try{ const { data: st } = await sb.from("acc_settings_tbl").select("key,value"); (st||[]).forEach(s=>{ if(s.key==="go_live_date" && s.value) goLive = s.value; }); }catch(e){}
+  const by = {}; (per||[]).forEach(p=>by[p.month]=p);
+  const today = toISODate(new Date());
+  const to = (people, base)=>{ (people.length ? people : [""]).forEach(p=>out.push({ ...base, owed_by_person:p, client_side:true })); };
+  let m = accPrevMonth(accMonthOf(goLive));
+  for(let i=0;i<24;i++, m = accMonthsFrom(m,2)[1]){
+    const end = accMonthEnd(m); if(end>=today) break;
+    const p = by[m]; const dw = Math.max(0, Math.floor((Date.now()-new Date(end+"T23:59:59").getTime())/86400000));
+    if(p && p.status==="Locked") continue;
+    const rmMissing = accProvisional(p), wipMissing = !p || p.wip_closing===null || p.wip_closing===undefined;
+    if(rmMissing) to(P.acc, { what:"Enter the Raw Material closing stock for "+accMonthLabel(m)+" (Accounts → Period Close)", entity_key:"ACC-"+m, detail_key:"acc-rm", owed_by_role:"accounts", days_waiting:dw||null, urgency: dw>=5?"overdue":"due", source:"accounts" });
+    if(wipMissing) to(P.supers, { what:"Enter the WIP & FG closing (selling value) for "+accMonthLabel(m)+" (Accounts → Period Close)", entity_key:"ACC-"+m, detail_key:"acc-wip", owed_by_role:"super_admin", days_waiting:dw||null, urgency: dw>=5?"overdue":"due", source:"accounts" });
+    if(!rmMissing && !wipMissing && dw>=7) to(P.acc, { what:"Both closing stocks for "+accMonthLabel(m)+" are in — check the books and lock the month (Accounts → Period Close)", entity_key:"ACC-"+m, detail_key:"acc-lock", owed_by_role:"accounts", days_waiting:dw, urgency: dw>=14?"overdue":"due", source:"accounts" });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------- the one entry point for every Accounts tab
+const ACC_TITLES = { acc_voucher_new:"Vouchers", acc_vouchers:"Voucher Register", acc_daybook:"Day Book", acc_ledger:"Ledger", acc_tb:"Trial Balance", acc_pl:"Profit & Loss",
+  acc_bs:"Balance Sheet", acc_cf:"Cash Flow", acc_period:"Period Close", acc_coa:"Chart of Accounts", acc_ledgers:"Ledgers", acc_import:"FFS Import" };
+const ACC_NAV = { ledger:null, edit:null };
+function AccountsScreen({ user, route, onGo }){
+  const { A, C, reload } = useAccData(user);
+  const [popup,setPopup] = useState(null); const [, force] = useState(0);
+  const go = (k)=>{ if(onGo) onGo(k); force(x=>x+1); };
+  const openLedger = id=>{ ACC_NAV.ledger = id; go("acc_ledger"); };
+  const title = ACC_TITLES[route] || "Accounts";
+  const shell = (kids)=> h(AccShell,{ user, route, onGo:go, title, A, C, onReload: C && !C.missing ? reload : null }, kids);
+  if(!A || !C) return shell(h("div",{style:{padding:20,color:colors.muted}},"Loading the books…"));
+  if(C.missing) return shell(h(AccMissing,{ C }));
+  if(!A.view) return shell(h(AccNoAccess,{ what:"the books" }));
+  const changed = ()=>reload();
+  let body;
+  if(route==="acc_voucher_new") body = h(AccVoucherEntry,{ key:"ve"+(ACC_NAV.edit||"new"), user, A, C, editId:ACC_NAV.edit,
+    onDone:(r,again)=>{ const wasEdit = !!ACC_NAV.edit; ACC_NAV.edit = null; reload(); if(wasEdit) go("acc_vouchers"); else if(r && r.id && !again) setPopup(r.id); },
+    onClose:()=>{ ACC_NAV.edit = null; go("acc_vouchers"); }, onOpenVoucher:id=>setPopup(id) });
+  else if(route==="acc_vouchers") body = h(AccVoucherList,{ key:"reg", C, onOpen:setPopup });
+  else if(route==="acc_daybook") body = h(AccVoucherList,{ key:"day", C, onOpen:setPopup, mode:"day" });
+  else if(route==="acc_ledger") body = h(AccLedgerView,{ C, ledgerId:ACC_NAV.ledger, onPick:id=>{ ACC_NAV.ledger = id; force(x=>x+1); }, onOpen:setPopup });
+  else if(route==="acc_tb") body = h(AccTrialBalance,{ C, onLedger:openLedger });
+  else if(route==="acc_pl") body = h(AccProfitLoss,{ C, onLedger:openLedger });
+  else if(route==="acc_bs") body = h(AccBalanceSheet,{ C });
+  else if(route==="acc_cf") body = h(AccCashFlow,{ C });
+  else if(route==="acc_period") body = h(AccPeriodClose,{ user, A, C, onChanged:changed });
+  else if(route==="acc_coa") body = h(AccChartOfAccounts,{ user, A, C, onChanged:changed, onLedger:openLedger });
+  else if(route==="acc_ledgers") body = h(AccLedgerList,{ user, A, C, onChanged:changed, onLedger:openLedger });
+  else if(route==="acc_import") body = h(AccImport,{ user, A, C, onChanged:changed });
+  else body = accNote("Pick a screen from the menu.","");
+  const pv = popup && C.vById[popup];
+  return shell(h(React.Fragment,null,
+    !C.vouchers.length && route!=="acc_import" && route!=="acc_coa" ? accNote("No vouchers yet. Start with Accounts → Masters → FFS Import to bring in the FFS books.","warn") : null,
+    body,
+    pv ? h(AccVoucherPopup,{ C, A, v:pv, user, onClose:()=>setPopup(null), onLedger:openLedger, onEdit:id=>{ ACC_NAV.edit = id; go("acc_voucher_new"); }, onChanged:changed }) : null));
+}
+
 // ---- Despatch Settings & LUT (replaces the single-LUT screen): LUT register + dated settings history ----
 function DespatchSettingsScreen({ user }){
   const [S,setS] = useState(null); const [f,setF] = useState(null); const [series,setSeries] = useState([]); const [can,setCan] = useState(false);
