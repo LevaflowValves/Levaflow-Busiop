@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-20T19:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-20T20:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -997,6 +997,23 @@ function normalizeItemName(s){ return (s||"").replace(/\s+/g," ").trim().toLower
 // Casting vs Fabricated classifier for a model, per Flometriq's naming convention.
 // Checked in order — first match wins. Item-based rules (always Fabricated regardless
 // of model prefix) come first, then model-prefix rules. Returns null if nothing matches,
+// 215: a customer's billing country by name — tolerant of duplicate rows (prefers one with a country), case,
+// extra spaces and punctuation, so a country saved in the master is always found.
+async function custCountryByName(name){
+  const nm = String(name||"").trim(); if(!nm) return "";
+  const pick = (rows)=>{ const r = (rows||[]).filter(x=>String(x.billing_country||"").trim()); const live = r.filter(x=>x.is_archived!==true); return ((live[0]||r[0])||{}).billing_country||""; };
+  try{
+    let { data } = await sb.from("companies").select("company_name,billing_country,is_archived").eq("company_name",nm).limit(10);
+    let c = pick(data); if(c) return c.trim();
+    ({ data } = await sb.from("companies").select("company_name,billing_country,is_archived").ilike("company_name",nm.replace(/[%_]/g,"\\$&")).limit(10));
+    c = pick(data); if(c) return c.trim();
+    const norm = (x)=> String(x||"").toLowerCase().replace(/&/g,"and").replace(/[^a-z0-9]/g,"");
+    const w = nm.split(/\s+/)[0].replace(/[%_]/g,"");
+    if(w.length>=3){ ({ data } = await sb.from("companies").select("company_name,billing_country,is_archived").ilike("company_name","%"+w+"%").limit(200));
+      c = pick((data||[]).filter(x=>norm(x.company_name)===norm(nm))); if(c) return c.trim(); }
+  }catch(e){ console.warn("Customer country lookup", e); }
+  return "";
+}
 // meaning it needs a manual look.
 function classifyModelCategory(item, model){
   const it = (item||"").toLowerCase();
@@ -1714,7 +1731,7 @@ async function resolveZoneForAddress(billingState, billingCountry){
 // Changeable on the allocation as before; blank only when nothing resolves.
 async function allocationDefaultOwner(companyName){
   try{
-    const { data: co } = await sb.from("companies").select("owner_employee_name,billing_state,billing_country").eq("company_name",companyName).maybeSingle();
+    const { data: co } = await sb.from("companies").select("owner_employee_name,billing_state,billing_country").eq("company_name",companyName).limit(1).maybeSingle();
     if(!co) return null;
     if(co.owner_employee_name && co.owner_employee_name.trim()) return co.owner_employee_name;
     return (await resolveOwnerForAddress(co.billing_state, co.billing_country)) || null;
@@ -8261,8 +8278,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
   // Quotes screen's own header editor already uses for this exact problem.
   const fetchCustomerCountry = async(name)=>{
     if(!name || !name.trim()) return "";
-    const { data } = await sb.from("companies").select("billing_country").eq("company_name",name.trim()).maybeSingle();
-    return (data && data.billing_country) || "";
+    return await custCountryByName(name);   // 215
   };
   const gatewaySlNoContinue = async()=>{
     const slNo = Number(gatewaySlNoInput);
@@ -8569,9 +8585,10 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     if(!enquiryNumber.trim()){fail("Enter an Enquiry number.");return;}
     if(descMasterLoading){fail("Still looking up the Description for this item — give it a moment and try Save again.");return;}
     if(!refDesc.trim()){fail("Description is required for every Sl No.");return;}
-    if(customerName.trim() && !customerCountry.trim()){fail("This customer has no country on file. Add one in CRM → Customers before continuing — currency and conversion rate depend on it.");return;}
+    let ccNow = customerCountry; if(customerName.trim() && !String(ccNow||"").trim()){ ccNow = await custCountryByName(customerName); if(ccNow) setCustomerCountry(ccNow); }   // 215: read again — it may have been added in CRM since this screen opened
+    if(customerName.trim() && !String(ccNow||"").trim()){fail("This customer has no country on file. Add one in CRM → Customers before continuing — currency and conversion rate depend on it.");return;}
     if(currency!=="INR" && !(Number(conversionRate)>10)){fail("Enter a valid conversion rate (1 "+currency+" = ? INR, must be greater than 10) before saving — required for any non-INR quote.");return;}
-    if(!(await confirmForeignInr(customerCountry, currency))) return;   // 172
+    if(!(await confirmForeignInr(ccNow||customerCountry, currency))) return;   // 172
     if(effectiveCart.length===0){fail("Add at least one model's lines to the estimate first.");return;}
     const ref=refNumber.trim();
     const slNo=Number(itemSlNo);
@@ -11783,6 +11800,10 @@ function docCategoryRow(cats, name){
   const k = String(name||"").trim().toLowerCase();
   return (cats||[]).find(c=>String(c.value||"").trim().toLowerCase()===k) || null;
 }
+// 216 (Build A): a hold set on the document wins over its category's. "No Hold" = set on the document as none.
+const DOC_HOLD_NONE = "No Hold";
+function docHoldSet(row){ const o = String((row && row.hold_level) || "").trim(); return o===DOC_HOLD_NONE || ["Full Hold","Inspection Hold","Final Hold"].includes(o) ? o : ""; }
+function docHoldOf(row, cats){ const o = docHoldSet(row); if(o) return o===DOC_HOLD_NONE ? "" : o; return (docCategoryRow(cats, row && row.category)||{}).hold_level || ""; }
 function docNumberPrefix(cats, name){
   const c = docCategoryRow(cats, name);
   return (c && String(c.number_prefix||"").trim()) || DOC_PREFIX_DEFAULT[name] || "DOC";
@@ -12559,7 +12580,7 @@ function WorkOrderDocsModal({ contractNumber, user, onClose }){
   useEffect(()=>{ load(); },[load]);
   const mayHand = canHandOverDocs(user, keys);
   const forProd = (d)=> d.for_production==null ? !!(docCategoryRow(cats,d.category)||{}).for_production_default : !!d.for_production;
-  const holdOf = (d)=> (docCategoryRow(cats,d.category)||{}).hold_level || "";
+  const holdOf = (d)=> docHoldOf(d, cats);   // 216
   const slOf = (woId)=> woSl.filter(r=>r.work_order_id===woId).map(r=>r.item_sl_no);
   const eligible = (wo)=>{ const sls = slOf(wo.id).map(String); return docs.filter(d=>forProd(d) && (d.revisions||[]).length && (d.item_sl_no==null || sls.includes(String(d.item_sl_no)))); };
   const activeRow = (woId, docId)=> hand.filter(r=>r.work_order_id===woId && r.document_id===docId && !r.reissued_at).slice(-1)[0] || null;
@@ -14331,7 +14352,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       safe(sb.from("quote_commercial_terms").select("*").eq("reference_number",quoteExportRef).maybeSingle()),
       safe(sb.from("gst_structure_tbl").select("*").order("structure_name")),
       safe(sb.from("gst_structure_component_tbl").select("*").order("sort_order")),
-      quoteHeaderRow?.customer_name ? safe(sb.from("companies").select("billing_state").eq("company_name",quoteHeaderRow.customer_name).maybeSingle()) : null,
+      quoteHeaderRow?.customer_name ? safe(sb.from("companies").select("billing_state").eq("company_name",quoteHeaderRow.customer_name).limit(1).maybeSingle()) : null,
       quoteHeaderRow?.company_id ? safe(sb.from("company_gstin_tbl").select("state,is_default").eq("company_id",quoteHeaderRow.company_id)) : null,
     ]);
     const opts=[];
@@ -14669,8 +14690,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   },[quoteHeaderRow]);
   useEffect(()=>{
     if(!quoteHeaderRow?.customer_name){ setHeaderCustomerCountry(""); return; }
-    sb.from("companies").select("billing_country").eq("company_name",quoteHeaderRow.customer_name).maybeSingle()
-      .then(({data})=>setHeaderCustomerCountry((data&&data.billing_country)||""));
+    custCountryByName(quoteHeaderRow.customer_name).then(c=>setHeaderCustomerCountry(c||""));   // 215
   },[quoteHeaderRow?.customer_name]);
   useEffect(()=>{
     if(!refFilter){ return; }
@@ -15581,8 +15601,10 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     const currencyChanged = (headerDraft.currency||"").trim()!=="" && headerDraft.currency!==(quoteHeaderRow?quoteHeaderRow.currency:"INR");
     const effConvRate = (headerDraft.conversion_rate||"").trim()!=="" ? Number(headerDraft.conversion_rate) : (currencyChanged ? 0 : (quoteHeaderRow?quoteHeaderRow.conversion_rate:1));
     if(effCurrency!=="INR" && !(Number(effConvRate)>10)){ alert("Enter a valid conversion rate (1 "+effCurrency+" = ? INR, must be greater than 10) before saving — required for any non-INR quote."); return; }
-    if(!(await confirmForeignInr(headerCustomerCountry, effCurrency))) return;   // 172
-    if(!headerCustomerCountry.trim() && (isRevisionRef?quoteHeaderRow?.customer_name:(headerDraft.customer_name||"").trim())){ alert("This customer has no country on file. Add one in CRM → Customers before continuing — currency and conversion rate depend on it."); return; }
+    const hcName = isRevisionRef ? quoteHeaderRow?.customer_name : (headerDraft.customer_name||"").trim();
+    let hcNow = headerCustomerCountry; if(hcName && !String(hcNow||"").trim()){ hcNow = await custCountryByName(hcName); if(hcNow) setHeaderCustomerCountry(hcNow); }   // 215
+    if(!(await confirmForeignInr(hcNow||headerCustomerCountry, effCurrency))) return;   // 172
+    if(!String(hcNow||"").trim() && hcName){ alert("This customer has no country on file. Add one in CRM → Customers before continuing — currency and conversion rate depend on it."); return; }
     setSavingHeader(true);
     try{
       let payload;
@@ -15671,7 +15693,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const loadCtSlGst = async(ref)=>{
     try{
       const cn = quoteHeaderRow?.customer_name || contractInfo?.customer_name;
-      if(cn){ const { data: co } = await sb.from("companies").select("billing_state,billing_country").eq("company_name",cn).maybeSingle(); setCtClientState(co ? (co.billing_state||co.billing_country||null) : null); }
+      if(cn){ const { data: co } = await sb.from("companies").select("billing_state,billing_country").eq("company_name",cn).limit(1).maybeSingle(); setCtClientState(co ? (co.billing_state||co.billing_country||null) : null); }
       const [{ data: es }, { data: its }, { data: ms }] = await Promise.all([ sb.from("estimates").select("*").eq("reference_number",ref).order("item_sl_no"), sb.from("item_tbl").select("*"), sb.from("model_tbl").select("model,item") ]);
       const mi = new Map((ms||[]).map(r=>[r.model,r.item])); const byItem = new Map((its||[]).map(r=>[String(r.item||"").trim().toLowerCase(), r]));
       const rows = (es||[]).map(e=>{ const itemName = mi.get(e.model)||e.model||""; const it = byItem.get(String(itemName).trim().toLowerCase());
@@ -23423,7 +23445,7 @@ async function updateQuoteStatusForQuote(referenceNumber, newStatus, changedBy, 
       const { data: est } = await sb.from("estimates").select("customer_name").eq("reference_number",referenceNumber).limit(1).maybeSingle();
       const customerName = est?.customer_name;
       if(customerName){
-        const { data: co } = await sb.from("companies").select("owner_employee_name,billing_state,billing_country").eq("company_name",customerName).maybeSingle();
+        const { data: co } = await sb.from("companies").select("owner_employee_name,billing_state,billing_country").eq("company_name",customerName).limit(1).maybeSingle();
         // 137: with Register Tabs & People in use, every FSE on the quote's tab is told, not just the owner
         let owners = co?.owner_employee_name ? [co.owner_employee_name] : [];
         try{ await regLoad(); if(regGridOn()){ const n = regNorm(referenceNumber).replace(/(REV|R)\d+$/,""); const { data: rl } = await sb.from("register_line_tbl").select("*").eq("quote_norm",n).limit(1).maybeSingle();
@@ -24111,7 +24133,7 @@ function SaleOrderHeaderModal({ contractRow, onCancel, onSaved }){
   useEffect(()=>{
     if(contractRow.billing_address) return; // already has a real value — don't clobber it with the customer's city/country
     (async()=>{
-      const { data } = await sb.from("companies").select("billing_city,billing_country").eq("company_name",contractRow.customer_name).maybeSingle();
+      const { data } = await sb.from("companies").select("billing_city,billing_country").eq("company_name",contractRow.customer_name).limit(1).maybeSingle();
       const addr = [data?.billing_city,data?.billing_country].filter(Boolean).join(", ");
       if(addr) setF(d=>({...d, billing_address:addr}));
     })();
@@ -29571,6 +29593,42 @@ const MANUAL_SECTIONS = [
             "text": "Sales → Registers → Contract Register, STAGE row: ✓ Ready for production lists in one click the contracts at stage 1 Documentation or 2 Engineering whose hold is Inspection Hold, Final Hold or No Hold – cleared, that is, nothing at Full Hold. These can go into production. The count follows the other filters. Contracts with No hold docs are not in it: their documents aren't logged, so check them by hand."
           }
         ]
+      },
+      {
+        "key": "doc_hold_change",
+        "title": "Document Control table: grouped by contract, and changing one document's hold",
+        "tag": "Order Status",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "Order Status → Document Control → ⊞ Table — whole board opens grouped by Contract (your choice of Group by is remembered on this computer). The customer's name is under each contract number, and each contract's header says how many Full Hold documents are open, or \"no Full Hold open — ready for go-ahead\"."
+          },
+          {
+            "type": "h3",
+            "text": "✎ Hold on a row"
+          },
+          {
+            "type": "steps",
+            "items": [
+              "Every document starts with its category's hold (Document Categories master).",
+              "Press ✎ Hold on the row and pick Full Hold, Inspection Hold, Final Hold or No Hold, or ↺ Back to the category's hold. The row then shows \"set on the document\".",
+              "Lowering a hold (e.g. Full Hold to Inspection Hold) needs a reason; raising it doesn't. Every change is kept with old and new hold, who, when and why, and listed in the same box.",
+              "Who: the Document Controller, the Technical Head, admins and super admins."
+            ]
+          },
+          {
+            "type": "p",
+            "text": "The new hold is used everywhere at once: board cards, tiles and filters, Report by Contract, Excel and PDF; the contract's hold dot and hover tag; the Contract Register Hold filter and ✓ Ready for production; Ready for go-ahead, the release warning and the Code 2 delivery clock; chase letters and the work-order hand-over."
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "If the last open Full Hold document of a contract is lowered, the contract is ready for the production go-ahead; the Sales Head and the Document Controller are told, and you are reminded to set the Code 2 date if delivery runs from it.",
+              "Raising a document to Full Hold holds production again until it reaches Code 2. If production is already released, the go-ahead stays and the Sales Head is told.",
+              "A required document with no number yet can have its hold set too; when it gets its number, the hold goes with it. The hold stays through every revision and list."
+            ]
+          }
+        ]
       }
     ]
   }
@@ -32200,6 +32258,7 @@ const MANUAL_TA = {
  "assign_board_212": {"title":"Task Assignment Board: Unassigned நிலையாக, Copy பொத்தான்கள், approvers-இன் சொந்த regrets","tag":"Tasks","blocks":[{"type":"bullets","items":["Task Assignment Board-இல் நபர்களைக் கடந்து பக்கவாட்டில் scroll செய்யும்போது Unassigned pile இடப்பக்கம் நிலையாக இருக்கும்; தூர வலப்பக்கம் உள்ள எவருக்கும் card-ஐ இழுத்துக் கொடுக்கலாம். (சிறிய திரையில் மற்றவற்றுடன் சேர்ந்து நகரும்.)","ஒவ்வொரு card-இலும் offer (Quote) எண், enquiry எண் அருகில் பச்சை ⧉ Copy no. பொத்தான் உண்டு. அழுத்தினால் எண் copy ஆகும் (✓ Copied சிறிது நேரம் தெரியும்); card திறக்காது. Ctrl+V கொண்டு எங்கும் paste செய்யலாம்.","Regret Quote: regret செய்பவர் அந்த board-இன் approver, Admin அல்லது super admin என்றால், regret உடனே approve ஆகும் — enquiry Regretted ஆக மூடும், Quote Register வரி அடிக்கப்படும். மற்றவர்களின் regret வழக்கம்போல் board approver-இடம் போகும் (Regret list → Waiting for approval → ✓ Approve)."]}],"en_sig":"be7e1fcf"},
  "bill_po_link": {"title":"Purchase bill-ஐ அதன் PO-வுடன் இணைத்தல், Bills ↔ POs, Purchase Register-இல் Billed","tag":"Accounts","blocks":[{"type":"p","text":"Accounts → Vouchers → Purchase-இல் பதியும் ஒவ்வொரு purchase bill-உம் அது எந்த PO-க்கு எதிரானதோ அந்த PO-வுடன் இணைக்கப்படும். PO-வில் எவ்வளவு bill ஆனது என்று தெரியும்; bill PO-வுடன் ஒத்துப்போகவில்லை என்றால் Accounts-க்குத் தெரியும்."},{"type":"h3","text":"Bill பதிதல்"},{"type":"steps","items":["Supplier-ஐத் தேர்வு செய்யுங்கள். Against PO கீழ் அந்த supplier-இன் திறந்த PO-க்கள் (approved அல்லது sent, முழுதாக bill ஆகாதவை) வரும்: PO value, received, billed so far, left to bill, GRN. Goods bill-க்கு PO-க்கள்; service bill-க்கு Service PO-க்களும் PO-க்களும்.","PO-வை (அல்லது பலவற்றை) tick செய்யுங்கள். Fill items from PO அழுத்தினால் ஒவ்வொரு வரியும் HSN, GST %, received ஆகி இன்னும் bill ஆகாத அளவுடன் வரும் (app-இல் received இல்லையென்றால், இன்னும் bill ஆகாத அளவு). Bill-இல் உள்ளபடி வரிகளை மாற்றுங்கள்; இந்த bill-இல் இல்லாத வரிகளை நீக்குங்கள்.","PO-விலிருந்து வந்த ஒவ்வொரு வரியும் PO line, PO rate, மீதம், PO GST % ஆகியவற்றைக் காட்டும். கையால் சேர்க்கும் வரிகள் (freight, packing…) முதலில் தேர்வு செய்த PO-வுக்குக் கணக்கிடப்படும்.","PO இல்லவே இல்லை என்றால் (petty purchase, freight, emergency buy): No PO tick செய்து காரணம் எழுதுங்கள். Purchase Manager-க்குத் தகவல் போகும்."]},{"type":"h3","text":"Save செய்வதற்கு முன் checks"},{"type":"bullets","items":["Rate PO rate-ஐ விட அதிகம்: வரியின் கீழ் காரணம் எழுதுங்கள் (அல்லது சரி செய்யுங்கள்). Purchase Manager-க்குத் தகவல் போகும்.","அளவு received ஆகி bill ஆகாததை விட (அல்லது PO-வில் மீதத்தை விட) அதிகம்: காரணம் எழுதுங்கள், உதா: \"balance delivered, GRN pending\".","GST % PO-விலிருந்து வேறுபட்டால்: காரணம்.","Bill (GST-க்கு முன்) PO-வில் bill செய்ய மீதமுள்ளதை விட அதிகம்: Against PO கீழ் உள்ள box-இல் காரணம். Purchase Manager-க்குத் தகவல் போகும்.","PO-வுடன் ஒத்துப்போகும் bill-க்கு கூடுதலாக எதுவும் தேவையில்லை. வெளிநாட்டு currency PO-க்களுக்கு rate, balance checks இல்லை."]},{"type":"p","text":"Save செய்ததும், அந்த PO-வின் GRN-களில் (காலியாக இருந்தால்) supplier-இன் bill எண் நிரப்பப்படும்."},{"type":"h3","text":"Purchase Register"},{"type":"bullets","items":["புதிய column Billed: ✓ Billed (voucher எண்களுடன்), Billed x of y (பகுதி), Not billed, அல்லது சிவப்பில் Not billed · n days since GRN — கடைசி GRN 21 நாளுக்கு மேல் ஆகியும் PO-க்கு எதிராக bill இல்லையென்றால்.","Bills வடிகட்டி: All, Billed, Part billed, Not billed, Not billed 21+ days since GRN. Excel-இலும் bills உண்டு.","PO-வின் சொந்தத் திரையில் Bills பகுதி: அதற்கு எதிரான ஒவ்வொரு bill-உம் அதன் GRN-களும்."]},{"type":"h3","text":"பழைய FFS bills: Accounts → Vouchers & Books → Bills ↔ POs"},{"type":"p","text":"FFS day book-இல் PO எண் இல்லை. எனவே ஒவ்வொரு பழைய FFS purchase bill-க்கும் app ஒரு PO-வைப் பரிந்துரைக்கும்: அதே supplier, அதே தொகை, bill தேதி அன்று அல்லது அதற்கு முன் தேதியிட்ட PO. Accounts (Finance & Accounts Manager, Finance Director, Accountant, super admins) confirm செய்யும் வரை எதுவும் இணைக்கப்படாது."},{"type":"bullets","items":["Same amount: Confirm all exact matches ஒரே முறையில், அல்லது ஒவ்வொன்றாக Confirm / Skip.","Within 2%: ஒவ்வொன்றையும் சரிபார்த்து Confirm அல்லது Skip.","No match (பகுதி bills, பல PO-க்களுக்கு ஒரு bill, PO இல்லாதவை): PO-வைக் கையால் தேர்வு செய்து Link, Skip, அல்லது அப்படியே விடலாம்.","Linked, Skipped செய்தவற்றைக் காட்டும்; Unlink / Undo skip பழைய bill-ஐத் திரும்பக் கொண்டு வரும்."]},{"type":"h3","text":"Document Control board"},{"type":"p","text":"Document Controller அல்லாத ஒருவர் Document Control board-இல் due date அல்லது next-chase date-ஐ மாற்றினால், Document Controller-க்கு card, பழைய, புதிய தேதி, காரணம் ஆகியவற்றுடன் bell வரும்."}],"en_sig":"b157bb9e"},
  "doc_code1_info": {"title":"Code 1 – submit for info, Contract Register-இல் Ready for production","tag":"Order Status","blocks":[{"type":"p","text":"சில clients ஒரு document-ஐ Code 1 என approve செய்து, அவர்களின் தகவலுக்காக ஒரு final copy கேட்பார்கள். இதற்காக Document Control board-இல் புதிய பட்டியல்: Code 1 — submit for info, Code 2-க்கும் All approved-க்கும் இடையில்."},{"type":"steps","items":["Client-இன் return \"Code 1 – approved, submit a copy for information\" என்று இருந்தால், Code 1 – Fully Approved – Submit for Info என்ற status-உடன் பதிவு செய்யுங்கள் (card-ஐ இழுக்கவும், அல்லது Log client reply).","Card Code 1 — submit for info-க்குச் செல்லும். உடனே approved எனக் கணக்கிடப்படும்: Full Hold check-ஐயோ Ready for go-ahead-ஐயோ நிறுத்தாது, Code 2 delivery clock தொடங்கலாம்.","Owner-க்கு \"send final copy for info (Code 1)\" task card வரும், 7 நாளில் due, பிறகு மற்ற document cards போல stale.","Copy-ஐ அனுப்பி ✓ Completed அழுத்துங்கள் (board-இலோ task card-இலோ). அடுத்த revision Out ஆக Code 1 – Fully Approved (submitted for info) status-உடன் பதிவாகி, card நேராக All approved-க்குச் செல்லும். எதுவும் திரும்பி வராது, எனவே chase இல்லை, chase letter-இலும் வராது."]},{"type":"p","text":"புதிய பட்டியலுக்குத் தனி tile, எண்ணிக்கை உண்டு; Due filters, By stage / By person, All (list), Excel, PDF-இலும் தெரியும். Work-order hand-over இதை Code 1, Code 2 போலவே முன்கூட்டியே tick செய்யும்."},{"type":"h3","text":"Contract Register: ✓ Ready for production"},{"type":"p","text":"Sales → Registers → Contract Register, STAGE வரிசை: ✓ Ready for production ஒரே click-இல் stage 1 Documentation அல்லது 2 Engineering-இல் உள்ள, hold Inspection Hold, Final Hold அல்லது No Hold – cleared ஆக உள்ள (Full Hold எதுவும் இல்லாத) contracts-ஐக் காட்டும். இவை production-க்குப் போகலாம். எண்ணிக்கை மற்ற filters-ஐப் பின்பற்றும். No hold docs உள்ள contracts இதில் வராது: அவற்றின் documents பதியப்படவில்லை, கையால் சரிபாருங்கள்."}],"en_sig":"82a23618"},
+ "doc_hold_change": {"title":"Document Control table: contract வாரியாக, ஒரு document-இன் hold-ஐ மாற்றுதல்","tag":"Order Status","blocks":[{"type":"p","text":"Order Status → Document Control → ⊞ Table — whole board இப்போது Contract வாரியாகத் திறக்கும் (நீங்கள் தேர்வு செய்யும் Group by இந்தக் கணினியில் நினைவில் இருக்கும்). ஒவ்வொரு contract எண்ணின் கீழும் வாடிக்கையாளர் பெயர்; ஒவ்வொரு contract-இன் தலைப்பிலும் எத்தனை Full Hold documents திறந்துள்ளன, அல்லது \"no Full Hold open — ready for go-ahead\"."},{"type":"h3","text":"வரியில் ✎ Hold"},{"type":"steps","items":["ஒவ்வொரு document-உம் அதன் category-இன் hold-உடன் தொடங்கும் (Document Categories master).","வரியில் ✎ Hold அழுத்தி Full Hold, Inspection Hold, Final Hold, No Hold அல்லது ↺ Back to the category's hold தேர்வு செய்யுங்கள். பிறகு வரியில் \"set on the document\" தெரியும்.","Hold-ஐக் குறைக்க (உதா: Full Hold → Inspection Hold) காரணம் தேவை; உயர்த்த தேவையில்லை. ஒவ்வொரு மாற்றமும் பழைய, புதிய hold, யார், எப்போது, ஏன் என்று பதிவாகி அதே box-இல் தெரியும்.","யார்: Document Controller, Technical Head, admins, super admins."]},{"type":"p","text":"புதிய hold எல்லா இடத்திலும் உடனே பயன்படும்: board cards, tiles, filters, Report by Contract, Excel, PDF; contract-இன் hold dot, hover tag; Contract Register Hold filter, ✓ Ready for production; Ready for go-ahead, release warning, Code 2 delivery clock; chase letters, work-order hand-over."},{"type":"bullets","items":["ஒரு contract-இன் கடைசி திறந்த Full Hold document குறைக்கப்பட்டால், contract production go-ahead-க்குத் தயார்; Sales Head-க்கும் Document Controller-க்கும் தகவல் போகும், delivery Code 2-இலிருந்து என்றால் Code 2 தேதியை அமைக்க நினைவூட்டல் வரும்.","ஒரு document-ஐ Full Hold-க்கு உயர்த்தினால் அது Code 2 அடையும் வரை production நிற்கும். Production ஏற்கனவே release ஆகியிருந்தால் go-ahead அப்படியே இருக்கும், Sales Head-க்குத் தகவல் போகும்.","எண் இன்னும் இல்லாத required document-க்கும் hold அமைக்கலாம்; எண் கிடைத்ததும் hold அதனுடன் செல்லும். ஒவ்வொரு revision, list-இலும் hold அப்படியே இருக்கும்."]}],"en_sig":"11ad963f"},
  "docs_requested": {
   "title": "Customer \u0b95\u0bc7\u0b9f\u0bcd\u0b9f Documents",
   "tag": "Documents",
@@ -32444,6 +32503,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"20 Oct 2026 (216)", summary:"Built on 2026-10-20T20:00:00Z, on top of 2026-10-20T19:30:00Z. NEEDS SQL: structure_document_hold_override_2026-10-20.sql (BOTH companies). BUILD A \u2014 DOCUMENT CONTROL TABLE: grouped by Contract by default (remembered), customer under the contract number, contract header with Full Hold open count / ready for go-ahead. \u270e HOLD on each row: Full / Inspection / Final / No Hold or back to the category's hold, set on that one document (or on a request, carried to the document when it is numbered, by trigger); lowering needs a reason; history kept (doc_hold_hist_tbl) and shown. Read everywhere: board, tiles, filters, reports, contract hold dot and tag, Contract Register Hold filter and Ready for production, v_full_hold_outstanding (Ready for go-ahead, release warning, Code 2 clock), chase letters, work-order hand-over. Last Full Hold lowered or a document raised to Full Hold: Sales Head and Document Controller told. Who: Document Controller, Technical Head, admins, super admins. Manual article doc_hold_change (English and Tamil)." },
+  { date:"20 Oct 2026 (215)", summary:"Built on 2026-10-20T19:30:00Z, on top of 2026-10-20T19:00:00Z. No SQL. FIX \u2014 'This customer has no country on file' although the country is in the customer master: the country is now looked up tolerantly (duplicate customer rows with the same name, the one with a country wins; case, extra spaces and punctuation ignored) and read again at Save, so a country added in CRM after the screen was opened is found without reopening. Applies to the Estimate (Save estimate) and the quote header. Other single-customer lookups by name no longer fail when two customer rows share a name." },
   { date:"20 Oct 2026 (214)", summary:"Built on 2026-10-20T19:00:00Z, on top of 2026-10-20T18:00:00Z. NEEDS SQL: data_doc_status_code1_submit_for_info_2026-10-20.sql (BOTH companies, Document Status Master). BUILD Y — CODE 1 SUBMIT FOR INFO: new status Code 1 – Fully Approved – Submit for Info and a new Document Control list Code 1 — submit for info (between Code 2 and All approved). It counts as approved (Full Hold check, Ready for go-ahead, Code 2 delivery clock), the owner gets a task card (send final copy for info, 7 days, stale as other document cards), never chased or on a chase letter; ✓ Completed logs the next revision Out as Code 1 – Fully Approved (submitted for info) and the card goes straight to All approved. BUILD X — CONTRACT REGISTER: ✓ Ready for production chip in the STAGE row (stage 1 or 2, hold Inspection / Final / No Hold – cleared). Manual article doc_code1_info (English and Tamil)." },
   { date:"20 Oct 2026 (213)", summary:"Built on 2026-10-20T18:00:00Z, on top of 2026-10-20T17:00:00Z. NEEDS SQL: structure_purchase_bill_po_link_2026-10-20.sql (BOTH companies). PURCHASE BILL AGAINST ITS PO (Accounts → Vouchers → Purchase): Against PO lists the supplier's open POs (value, received, billed, left, GRN); tick one or more, Fill items from PO brings the lines with HSN, GST % and the quantity received but not billed; or No PO with a reason (Purchase Manager told). Checks: rate above the PO rate (reason, Purchase Manager told), quantity above received-not-billed (reason), GST % different from the PO (reason), bill above the PO balance (reason, Purchase Manager told). The GRNs get the supplier's bill number. PURCHASE REGISTER: Billed column and Bills filter (red after 21 days since the GRN with no bill), Bills section on the PO, in the Excel too. BILLS ↔ POs (Accounts → Vouchers & Books): the old FFS bills matched to the FFS POs by supplier and amount (PO dated on or before the bill) — Confirm all exact matches, check the within-2% ones, link the rest by hand or skip; nothing linked until Accounts confirms. DOCUMENT CONTROL: the Document Controller gets a bell when someone else changes a date on the board. Manual article bill_po_link (English and Tamil)." },
   { date:"20 Oct 2026 (215)", summary:"Built on 2026-10-20T17:00:00Z, on top of 2026-10-20T16:00:00Z. No SQL. INVOICE & PI REGISTER: FFS invoices and proformas now also file on a contract that is only in the Contract Register (no Sale Order made — older, already invoiced orders), not only on Sale Orders, so all of them land in the contract's Documents the first time the register is opened. The status chip says Waiting for the contract." },
@@ -42226,7 +42287,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters, onOpenContract 
       const { data: emp } = await sb.from("employee_tbl").select("department").eq("app_user_id",user.id).limit(1).maybeSingle();
       if(emp && emp.department==="Sales") return true;
     }
-    const { data: co } = await sb.from("companies").select("owner_employee_name").eq("company_name",customerName).maybeSingle();
+    const { data: co } = await sb.from("companies").select("owner_employee_name").eq("company_name",customerName).limit(1).maybeSingle();
     const ownerName = co?.owner_employee_name;
     if(!ownerName) return false;
     const { data: myEmp } = await sb.from("employee_tbl").select("employee_name").eq("app_user_id",user.id).limit(1).maybeSingle();
@@ -53258,7 +53319,7 @@ async function ctHoldLoad(force){
       try{ const r = await sb.from("doc_board_list_tbl").select("*").order("id"); if(!r.error) DOC_CUSTOM = (r.data||[]).filter(c=>c.active!==false).map(docCustomNorm); }catch(e){}
       const safe = p => p.then(x=>x, ()=>[]);
       const [docs, hist, reqs, statuses, catsR, sos, plans] = await Promise.all([
-        safe(fetchAll("universal_documents_tbl","id,doc_number,doc_name,category,entity_type,entity_id,is_archived")),
+        safe(fetchAll("universal_documents_tbl","id,doc_number,doc_name,category,entity_type,entity_id,is_archived,hold_level").catch(()=>fetchAll("universal_documents_tbl","id,doc_number,doc_name,category,entity_type,entity_id,is_archived"))),   // 216
         safe(fetchAll("universal_document_history_tbl","id,document_id,rev_number,status,direction,changed_at")),
         safe(fetchAll("document_requests_tbl","*")),
         loadDocStatuses().then(x=>x||[], ()=>[]), sb.from("doc_category_tbl").select("*"),
@@ -53269,7 +53330,7 @@ async function ctHoldLoad(force){
         if(!p || rv>pv || (rv===pv && (String(r.changed_at||"")>String(p.changed_at||"") || (String(r.changed_at||"")===String(p.changed_at||"") && (Number(r.id)||0)>(Number(p.id)||0))))) last[k] = r; });
       const get = ct => by[ct] = by[ct] || { ct, open:{ "Full Hold":[], "Inspection Hold":[], "Final Hold":[] }, holdDocs:0, lastDoc:"", lastDocWhat:"" };
       (docs||[]).filter(d=>d.entity_type==="contract" && !d.is_archived && docOnBoard(d.category)).forEach(d=>{
-        const hl = (docCategoryRow(cats, d.category)||{}).hold_level||""; const L = last[String(d.id)];
+        const hl = docHoldOf(d, cats); const L = last[String(d.id)];   // 216
         const status = L ? (L.status||"") : ""; const st = stBy[status]; const skip = !!L && docSkips(st);
         const list = skip ? "confirm" : L ? docStatusListKey(st, status) : "our";
         const g = get(String(d.entity_id||"")); if(L && String(L.changed_at||"")>g.lastDoc){ g.lastDoc = String(L.changed_at||""); g.lastDocWhat = (d.doc_name||d.category||d.doc_number)+" — "+(status||"logged"); }
@@ -53278,7 +53339,7 @@ async function ctHoldLoad(force){
           since: L ? L.changed_at : null, ours: list==="our" || list==="confirm" });
       });
       (reqs||[]).filter(r=>r.entity_type==="contract" && !r.fulfilled_document_id && docOnBoard(r.category)).forEach(r=>{
-        const hl = (docCategoryRow(cats, r.category)||{}).hold_level||""; if(!HOLD_ORDER.includes(hl)) return;
+        const hl = docHoldOf(r, cats); if(!HOLD_ORDER.includes(hl)) return;   // 216
         const g = get(String(r.entity_id||"")); g.holdDocs++; g.open[hl].push({ name:r.category+(r.item_sl_no!=null?" · Sl "+r.item_sl_no:""), no:"", status:"Requested — no document yet", since:r.created_at||r.requested_at||null, ours:true }); });
       const planBy = {}; (plans||[]).forEach(p=>{ if(p.contract_number) planBy[String(p.contract_number)] = p; });
       (sos||[]).forEach(s=>{ if(!s || !s.contract_number) return; const g = get(String(s.contract_number)); g.so = s; });
@@ -53427,6 +53488,7 @@ async function docBoardLoad(){
   let customMissing = false, addReqs = null;   // 183
   try{ const r = await sb.from("doc_board_list_tbl").select("*").order("id"); if(r.error){ customMissing = true; DOC_CUSTOM = []; } else DOC_CUSTOM = (r.data||[]).filter(c=>c.active!==false).map(docCustomNorm); }catch(e){ customMissing = true; DOC_CUSTOM = []; }
   try{ const r = await sb.from("doc_add_request_tbl").select("*").order("id",{ascending:false}).limit(300); addReqs = r.error ? null : (r.data||[]); }catch(e){ addReqs = null; }
+  let holdHist = []; try{ const r = await sb.from("doc_hold_hist_tbl").select("*").order("id",{ascending:false}).limit(2000); holdHist = r.error ? [] : (r.data||[]); }catch(e){}   // 216
   const [docs, hist, reqs, statuses, catsR, sos, tasks, letters, empsR, dcR, ttR] = await Promise.all([
     fetchAll("universal_documents_tbl","*"),
     fetchAll("universal_document_history_tbl","*"),
@@ -53483,7 +53545,8 @@ async function docBoardLoad(){
     const so = soBy[it.ct]||{};
     it.so = so; it.customer = so.customer_name||ctClientOf(it.ct)||"";
     const c = docCategoryRow(cats, it.cat)||{};
-    it.hold = c.hold_level||""; it.dept = c.department||"";
+    const own = docHoldSet(it.doc) || docHoldSet(it.req);   // 216: set on the document (or on the request before it had a number)
+    it.holdCat = c.hold_level||""; it.holdOwn = own; it.hold = own ? (own===DOC_HOLD_NONE ? "" : own) : it.holdCat; it.dept = c.department||"";
     it.tasks = taskArr.filter(t=> (it.doc && String(t.doc_id)===String(it.doc.id)) || (it.req && String(t.doc_request_id)===String(it.req.id)));
     it.openTask = it.tasks.filter(t=>t.status!=="done").sort((a,b)=>String(b.created_at||"").localeCompare(String(a.created_at||"")))[0]||null;
     if(!it.owner && it.openTask && !taskIsPile(it.openTask)) it.owner = it.openTask.assignee;
@@ -53493,7 +53556,7 @@ async function docBoardLoad(){
   });
   const emps = (empsR.data||[]);
   const dcNames = (dcR.data||[]).map(r=>r.employee_name).filter(Boolean);
-  return { items, docs:liveDocs, reqs:reqs||[], statuses:statuses||[], cats, soBy, tasks:taskArr, letters:lettersArr, lettersMissing:!!letters.error,
+  return { items, holdHist, docs:liveDocs, reqs:reqs||[], statuses:statuses||[], cats, soBy, tasks:taskArr, letters:lettersArr, lettersMissing:!!letters.error,
     tasksMissing:!!tasks.error, emps, dcNames, taskTypes:ttR.data||[], today, addReqs, customMissing };
 }
 
@@ -53763,7 +53826,10 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
   const [drag,setDrag] = useState(null);
   const [over,setOver] = useState("");
   const [panel,setPanel] = useState(initialPanel||null);   // {kind:"table",key} | {kind:"hist",key} | {kind:"move",key,to} | "letters" | "report"
-  const [tbl,setTbl] = useState({ grp:"stage", sk:"due", pick:{}, to:"", due:"" });
+  const [tbl,setTblS] = useState(()=>{ let g = "ct"; try{ g = localStorage.getItem("doc_tbl_grp")||"ct"; }catch(e){} return { grp:g, sk:"due", pick:{}, to:"", due:"" }; });   // 216: Contract by default
+  const setTbl = (f)=> setTblS(t=>{ const n = typeof f==="function" ? f(t) : f; if(n.grp!==t.grp){ try{ localStorage.setItem("doc_tbl_grp", n.grp); }catch(e){} } return n; });
+  const [hd,setHd] = useState({});   // 216: the hold being changed
+  useEffect(()=>{ loadPostPeople(); },[]);
   const [mv,setMv] = useState({});
   const [lt,setLt] = useState({ sel:null, edit:null, sentOn:"" });
   const [rep,setRep] = useState({ ct:"all", ext:false });
@@ -53802,6 +53868,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
   const isDocCtl = data.dcNames.includes(me);
   const canAdmin = isAdmin || isDocCtl;
   const canTouch = (it)=> canAdmin || (!!it.owner && it.owner===me);
+  const canHold = canAdmin || postHolders("technical_head").includes(me);   // 216: Document Controller, Technical Head, admins, super admins
   const contracts = Array.from(new Set(data.items.map(it=>it.ct))).filter(Boolean).sort();
   const curCt = ct || contracts[contracts.length-1] || "";
   const people = Array.from(new Set([
@@ -54121,8 +54188,10 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     const picked = rows0.filter(it=>tbl.pick[it.key]);
     const tr = (it)=> h("tr",{key:it.key},
       h("td",{style:td},h("input",{type:"checkbox",checked:!!tbl.pick[it.key],onChange:e=>setTbl(t=>({...t,pick:{...t.pick,[it.key]:e.target.checked}}))})),
-      h("td",{style:td},h("b",{style:{color:"#2a6db0"}},it.ct)), h("td",{style:td},h("span",{style:{cursor:"pointer"},onClick:()=>setPanel({kind:"hist",key:it.key,back:{kind:"table",key}})},it.name)),
-      h("td",{style:td},it.no||"—",it.last?" / Rev "+it.last.rev_number:"", " ", latestLink(it)), h("td",{style:td},it.cat), h("td",{style:td},holdTag(it)),
+      h("td",{style:td},h("b",{style:{color:"#2a6db0"}},it.ct), it.customer ? h("div",{style:{fontSize:10.5,color:colors.muted,lineHeight:1.25,maxWidth:150}},it.customer) : null), h("td",{style:td},h("span",{style:{cursor:"pointer"},onClick:()=>setPanel({kind:"hist",key:it.key,back:{kind:"table",key}})},it.name)),
+      h("td",{style:td},it.no||"—",it.last?" / Rev "+it.last.rev_number:"", " ", latestLink(it)), h("td",{style:td},it.cat), h("td",{style:td},tag(holdLabel(it.hold), docHoldTag(it.hold), "h"),
+        it.holdOwn ? h("div",{style:{fontSize:9.5,color:"#8a5a00"}},"set on the document") : null,
+        canHold ? h("button",{style:{...btnSmall,fontSize:10.5,padding:"1px 7px",marginTop:3},onClick:()=>{ setHd({ key:it.key, v: it.holdOwn ? it.holdOwn : (it.hold||DOC_HOLD_NONE), why:"" }); setPanel({kind:"hold",key:it.key,back:{kind:"table",key}}); }},"✎ Hold") : null),
       h("td",{style:td},docListOf(it.list).short), h("td",{style:td},it.status),
       h("td",{style:td},it.owner||h("span",{style:{color:"#a06a00",fontWeight:700}},"Unassigned")),
       h("td",{style:{...td,...(it.late?{color:"#a3312a",fontWeight:700}:{})}}, it.due?fmtDMY(it.due):"—"), h("td",{style:tdn},it.days));
@@ -54145,11 +54214,76 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
         h("thead",null,h("tr",null,h("th",{style:th},h("input",{type:"checkbox",checked:rows.length>0&&rows.every(it=>tbl.pick[it.key]),onChange:e=>{ const v=e.target.checked; setTbl(t=>({...t,pick:Object.fromEntries(rows.map(it=>[it.key,v]))})); }})),
           TCOLS.map(([k,l])=>h("th",{key:k,style:{...th,cursor:"pointer",...(k==="days"?{textAlign:"right"}:{})},onClick:()=>setTbl(t=>({...t,sk:k}))},l+(tbl.sk===k?" ▾":""))))),
         h("tbody",null, groups.flatMap(G=>{ const ys = rows.filter(it=>tbl.grp==="none"||g(it)===G);
-          return [tbl.grp==="none"?null:h("tr",{key:"g"+G},h("td",{colSpan:11,style:{...td,background:"#eef3f1",fontWeight:700,color:"#0f7a5c"}},G+" — "+ys.length)), ...ys.map(tr)]; }),
+          const fhn = tbl.grp==="ct" ? fullHoldOpen(data.items.filter(x=>x.ct===(ys[0]||{}).ct)) : 0;   // 216
+          return [tbl.grp==="none"?null:h("tr",{key:"g"+G},h("td",{colSpan:11,style:{...td,background:"#eef3f1",fontWeight:700,color:"#0f7a5c"}},G+" — "+ys.length,
+            tbl.grp==="ct" ? h("span",{style:{fontWeight:400,marginLeft:8,color:fhn?"#a3312a":"#0f7a5c"}}, fhn ? "· "+fhn+" Full Hold open" : "· no Full Hold open — ready for go-ahead") : null)), ...ys.map(tr)]; }),
           !rows.length ? h("tr",null,h("td",{colSpan:11,style:{...td,color:colors.muted}},"Nothing here.")) : null)))
     ], ()=>setPanel(null));
   };
 
+  // ---- 216 (Build A): change the hold of one document ----
+  const HOLD_RANK = { "Full Hold":0, "Inspection Hold":1, "Final Hold":2, "":3 };
+  const holdModal = (key, back)=>{
+    const it = itemByKey(key); if(!it) return null;
+    const close = ()=> setPanel(back||null);
+    const nv = hd.v==="__cat" ? it.holdCat : (hd.v===DOC_HOLD_NONE ? "" : hd.v);
+    const lower = HOLD_RANK[nv] > HOLD_RANK[it.hold];
+    const cleared = ["code2","info","done"].includes(it.list);
+    const others = data.items.filter(x=>x.ct===it.ct && x.key!==it.key && x.hold==="Full Hold" && !["code2","info","done"].includes(x.list)).length;
+    const past = (data.holdHist||[]).filter(r=>(it.doc && String(r.document_id)===String(it.doc.id)) || (it.req && String(r.request_id)===String(it.req.id)));
+    const opts = [["Full Hold",holdLabel("Full Hold")],["Inspection Hold",holdLabel("Inspection Hold")],["Final Hold",holdLabel("Final Hold")],[DOC_HOLD_NONE,holdLabel("")]];
+    return modal(500, [
+      h("div",{key:"h",style:{display:"flex",gap:8}}, h("div",{style:{flex:1}}, h("b",{style:{fontSize:14}},"Change hold — "+it.name),
+        h("div",{style:{fontSize:11.5,color:colors.muted}}, it.ct+" – "+(it.customer||"")+" · "+(it.no||"no number yet")+" · category "+it.cat+" ("+holdLabel(it.holdCat)+")")), h("button",{style:btnSmall,onClick:close},"Close")),
+      h("div",{key:"n",style:{fontSize:12,margin:"10px 0 4px"}},"Now: ",tag(holdLabel(it.hold), docHoldTag(it.hold), "n"), it.holdOwn ? h("span",{style:{fontSize:11,color:"#8a5a00"}},"set on the document") : h("span",{style:{fontSize:11,color:colors.muted}},"from the category")),
+      h("label",{key:"s",style:{display:"block",fontSize:11.5,color:colors.muted,marginTop:8}},"Hold for this document",
+        h("select",{value:hd.v||"",onChange:e=>setHd(x=>({...x,v:e.target.value})),style:{...inputStyle,marginTop:2}},
+          opts.map(([v,l])=>h("option",{key:v,value:v},l)), it.holdOwn ? h("option",{value:"__cat"},"↺ Back to the category's hold ("+holdLabel(it.holdCat)+")") : null)),
+      h("label",{key:"w",style:{display:"block",fontSize:11.5,color:colors.muted,marginTop:8}},"Reason "+(lower?"(required: the hold is lowered)":"(optional)"),
+        h("input",{value:hd.why||"",onChange:e=>setHd(x=>({...x,why:e.target.value})),placeholder:"e.g. client letter 18/10: datasheet is for information, not a hold",style:{...inputStyle,marginTop:2}})),
+      it.hold==="Full Hold" && nv!=="Full Hold" && !cleared && !others ? h("div",{key:"x1",style:{background:"#fffaf0",border:"1px solid #efd59c",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:8}},
+        "This is the last open Full Hold document on "+it.ct+". After saving, the contract shows Ready for go-ahead and the Code 2 delivery clock can be started. The Sales Head is told.") : null,
+      nv==="Full Hold" && it.hold!=="Full Hold" ? h("div",{key:"x2",style:{background:"#fffaf0",border:"1px solid #efd59c",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:8}},
+        "Raising to Full Hold: the contract holds production again until this document reaches Code 2"+(it.so && /^Start Production/.test(it.so.go_ahead_state||"") ? ". Production is already released: the go-ahead stays, and the Sales Head is told." : ".")) : null,
+      past.length ? h("div",{key:"p",style:{fontSize:11,color:colors.muted,marginTop:10,borderTop:"1px dashed "+colors.border,paddingTop:6}}, h("b",null,"Hold changes"),
+        past.slice(0,8).map(r=>h("div",{key:r.id},fmtDMYTime(r.changed_at)+" · "+holdLabel(r.old_hold===DOC_HOLD_NONE?"":r.old_hold||"").split(" –")[0]+" → "+holdLabel(r.new_hold===DOC_HOLD_NONE?"":r.new_hold||"").split(" –")[0]+(r.set_on_doc?"":" (category)")+" · "+(r.changed_by||"")+(r.reason?" — "+r.reason:"")))) : null,
+      h("div",{key:"b",style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}, h("button",{style:btnSmall,onClick:close},"Cancel"),
+        h("button",{style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},disabled:busy,onClick:()=>saveHold(it, back)},busy?"Saving…":"Save hold"))
+    ], close);
+  };
+  const saveHold = async(it, back)=>{
+    if(!canHold){ noPermission("change a document's hold",{posts:["doc_controller","technical_head"],roles:["admin","super_admin"]}); return; }
+    const toCat = hd.v==="__cat";
+    const nv = toCat ? it.holdCat : (hd.v===DOC_HOLD_NONE ? "" : hd.v);
+    let store = toCat ? null : hd.v;                       // what goes on the document
+    if(!toCat && nv===it.holdCat) store = null;            // same as the category: nothing to keep on the document
+    const why = String(hd.why||"").trim();
+    if(nv===it.hold && (store||"")===(it.holdOwn||"")){ setPanel(back||null); return; }
+    if(HOLD_RANK[nv] > HOLD_RANK[it.hold] && why.length<3){ alert("Lowering a hold needs a reason — it is kept with the change."); return; }
+    setBusy(true);
+    try{
+      const now = new Date().toISOString(); const by = me||user?.username||"";
+      const patch = { hold_level:store, hold_set_by: store ? by : null, hold_set_at: store ? now : null, hold_reason: store ? (why||null) : null };
+      const tbn = it.doc ? "universal_documents_tbl" : "document_requests_tbl"; const id = it.doc ? it.doc.id : it.req.id;
+      let { error } = await sb.from(tbn).update(patch).eq("id",id);
+      if(!error && it.doc && it.req && it.req.hold_level) await sb.from("document_requests_tbl").update(patch).eq("id",it.req.id);   // keep the request in step
+      if(error){ if(/hold_level|hold_set/.test(error.message||"")) throw new Error("Run structure_document_hold_override_2026-10-20.sql first (both companies)."); throw error; }
+      const oldTxt = it.holdOwn || (it.hold||DOC_HOLD_NONE), newTxt = store || (nv||DOC_HOLD_NONE);
+      try{ await sb.from("doc_hold_hist_tbl").insert({ contract_number:it.ct, document_id: it.doc ? it.doc.id : null, request_id: it.req ? it.req.id : null, doc_label:(it.no||it.name),
+        old_hold:oldTxt, new_hold:newTxt, set_on_doc:!!store, reason:why||null, changed_by:by }); }catch(e){}
+      await logAudit("UPDATE", tbn, it.ct, (it.no||it.name)+": hold "+(holdLabel(it.hold)||"none")+" → "+(holdLabel(nv)||"none")+(store?" (set on the document)":" (category's hold)")+(why?" — "+why:""), user?.username||"unknown", {hold:it.hold}, {hold:nv});
+      // the people who care
+      const others = data.items.filter(x=>x.ct===it.ct && x.key!==it.key && x.hold==="Full Hold" && !["code2","info","done"].includes(x.list)).length;
+      const nowClear = it.hold==="Full Hold" && nv!=="Full Hold" && !["code2","info","done"].includes(it.list) && !others;
+      const raised = nv==="Full Hold" && it.hold!=="Full Hold";
+      if(nowClear || raised){ try{ await loadPostPeople(); const to = [...postHolders("sales_head"), ...postHolders("doc_controller")].filter(x=>x && x!==me);
+        await notifyPeople(to, it.ct+(it.customer?" – "+it.customer:"")+": "+(it.no||it.name)+" hold "+(holdLabel(it.hold)||"none").split(" –")[0]+" → "+(holdLabel(nv)||"none").split(" –")[0]+" by "+by+(why?" ("+why+")":"")+". "+
+          (nowClear ? "No Full Hold document is open now — the contract is ready for the production go-ahead." : (it.so && /^Start Production/.test(it.so.go_ahead_state||"") ? "Production is already released; the go-ahead stays." : "The contract holds production until it reaches Code 2.")), "info"); }catch(e){} }
+      if(nowClear) alert("No Full Hold document is open on "+it.ct+" now.\n\nIf its delivery runs from Code 2 approval, open the contract and set the Code 2 date to start the delivery clock (the app does not start it by itself).");
+      setPanel(back||null); await load(false);
+    }catch(e){ alert("Could not change the hold:\n\n"+(e&&e.message||e)); }
+    setBusy(false);
+  };
   // ---- history ----
   const histModal = (key, back)=>{
     const it = itemByKey(key); if(!it) return null;
@@ -54929,6 +55063,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     panel && panel.kind==="move" ? moveModal() : null,
     panel && panel.kind==="setst" ? setStatusModal() : null,   // 175
     panel && panel.kind==="due" ? dueModal() : null,   // 211
+    panel && panel.kind==="hold" ? holdModal(panel.key, panel.back) : null,   // 216
     panel==="letters" ? lettersModal() : null,
     panel==="report" ? reportModal() : null,
     panel==="add" ? addModal() : null,            // 183
