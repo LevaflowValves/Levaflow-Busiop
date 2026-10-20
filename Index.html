@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-20T20:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-20T21:15:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -11872,6 +11872,8 @@ async function uploadDocFile(entityRef, file){
 
 function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth, onChanged, onClose }){
   const isContract = mode==="contract";
+  const isPo = mode==="po";   // 217: the PO's documents (entity purchase_order)
+  const entType = isContract ? "contract" : isPo ? "purchase_order" : "quote";
   const [loading,setLoading] = useState(true);
   const [cats,setCats] = useState([]);
   const [statuses,setStatuses] = useState([]);
@@ -11895,7 +11897,8 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
       fetchDocumentHistory(entityRef),
       myPostKeys(user)
     ]);
-    setCats((c||[]).slice().sort((a,b)=>String(a.value||"").localeCompare(String(b.value||""))));
+    { const has = (c||[]).some(x=>"po_use" in x);   // 217: the PO's own document types; PO-only types are hidden from quotes and Sale Orders
+      setCats((c||[]).filter(x=> !has ? true : isPo ? x.po_use===true : x.so_use!==false).sort((a,b)=>String(a.value||"").localeCompare(String(b.value||"")))); }
     setStatuses(st||[]);
     setQuoteStatus(((sl||[]).find(x=>x.quote_status)||{}).quote_status || "Draft");
     const seen = new Set(); setSlNos((sl||[]).filter(x=>{ const k=String(x.item_sl_no); if(seen.has(k)) return false; seen.add(k); return true; }));
@@ -11997,8 +12000,8 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
         const targetSls = all ? slNos.map(s=>s.item_sl_no) : [whole ? null : Number(add.sl)];
         const have = new Set(reqs.map(r=>String(r.category||"").trim().toLowerCase()+"|"+(r.item_sl_no??"")));
         const reqRows = targetSls.filter(n=>!have.has(String(add.cat).trim().toLowerCase()+"|"+(n??""))).map(n=>({
-          entity_type: isContract?"contract":"quote", entity_id:entityRef, category:add.cat, item_sl_no:n,
-          is_mandatory: isContract && add.mand, source: isContract?"Sale Order":"Customer request", requested_by:user?.username||"unknown" }));
+          entity_type: entType, entity_id:entityRef, category:add.cat, item_sl_no:n,
+          is_mandatory: isContract && add.mand, source: isContract?"Sale Order":isPo?"PO":"Customer request", requested_by:user?.username||"unknown" }));
         if(add.how==="req" && !reqRows.length){ alert("That requirement is already on the list."); setBusy(false); return; }
         let reqId = null;
         if(add.how==="rev0"){
@@ -12019,7 +12022,7 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
           const docNumber = String(add.num).trim();
           const ins = await insertTolerant("universal_documents_tbl",{
             doc_number:docNumber, doc_name:String(add.title||"").trim(), category:add.cat,
-            entity_type: isContract?"contract":"quote", entity_id:entityRef, is_mandatory:false, is_archived:false,
+            entity_type: entType, entity_id:entityRef, is_mandatory:false, is_archived:false,
             item_sl_no: targetSls[0], for_production: prodDefault(add.cat), created_by:user?.username||"unknown"
           }, ["item_sl_no","for_production"], true);
           if(ins.error) throw ins.error;
@@ -12064,7 +12067,7 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
       const path = await uploadDocFile(entityRef, rq.file);
       const ins = await insertTolerant("universal_documents_tbl",{
         doc_number:docNumber, doc_name:String(rq.title||"").trim(), category:r.category,
-        entity_type: isContract?"contract":"quote", entity_id:entityRef, is_mandatory:false, is_archived:false,
+        entity_type: entType, entity_id:entityRef, is_mandatory:false, is_archived:false,
         item_sl_no: r.item_sl_no??null, for_production: prodDefault(r.category), created_by:user?.username||"unknown"
       }, ["item_sl_no","for_production"], true);
       if(ins.error) throw ins.error;
@@ -12110,10 +12113,10 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
   const [ed,setEd] = useState(null);   // {row, d, dir, link, what, notes, file, why}
   const rowLocked = (d, row)=>{
     if(unlockedDoc===d.id) return false;
-    if(isContract){ const revs = d.revisions||[]; return revs.length>0 && revs[0].id!==row.id; }
+    if(isContract || isPo){ const revs = d.revisions||[]; return revs.length>0 && revs[0].id!==row.id; }
     return !!quoteStatus && quoteStatus!=="Draft";
   };
-  const lockWhy = (d)=> isContract ? "A later entry has been logged on "+d.doc_number+"." : "Quote "+entityRef+" has left Draft ("+quoteStatus+").";
+  const lockWhy = (d)=> isContract || isPo ? "A later entry has been logged on "+d.doc_number+"." : "Quote "+entityRef+" has left Draft ("+quoteStatus+").";
   const unlockDoc = async(d)=>{
     if(user?.role!=="super_admin"){ alert("Locked — "+lockWhy(d)+"\n\nLog a new revision instead, or ask a Super Admin to unlock it with a code."); return false; }
     const code = prompt("Locked — "+lockWhy(d)+"\n\nEnter a Deletion Code to unlock the entries of "+d.doc_number+" (the document will be flagged):");
@@ -12278,8 +12281,8 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
       const rows = [];
       clPick.forEach(c=>{
         const targets = perSl(c) && slNos.length ? slNos.map(s=>s.item_sl_no) : [null];
-        targets.forEach(n=>{ if(!have.has(String(c).trim().toLowerCase()+"|"+(n??""))) rows.push({ entity_type:isContract?"contract":"quote", entity_id:entityRef, category:c, item_sl_no:n,
-          is_mandatory:false, source:isContract?"Sale Order":"Quote checklist", requested_by:user?.username||"unknown" }); });
+        targets.forEach(n=>{ if(!have.has(String(c).trim().toLowerCase()+"|"+(n??""))) rows.push({ entity_type:entType, entity_id:entityRef, category:c, item_sl_no:n,
+          is_mandatory:isPo, source:isContract?"Sale Order":isPo?"PO checklist":"Quote checklist", requested_by:user?.username||"unknown" }); });
       });
       for(const row of rows){ const res = await insertTolerant("document_requests_tbl", row, ["item_sl_no"], false); if(res.error) throw res.error; }
       setClOpen(false); setClPick([]);
@@ -12412,8 +12415,8 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
           "For production", d.for_production==null ? h("span",{style:{fontSize:10,color:colors.mutedLight}},"(category default)") : null),
         !isContract && (hasOut
           ? h("label",{style:{display:"flex",gap:6,alignItems:"center",fontSize:12,color:d.include_in_offer!==false?"#1f5c40":colors.muted,cursor:"pointer"}},
-              h("input",{type:"checkbox",checked:d.include_in_offer!==false,onChange:e=>setInOffer(d,e.target.checked),style:{accentColor:"#1f5c40"}}),"In offer PDF")
-          : h("span",{style:{fontSize:11,color:colors.mutedLight}},"Not in offer PDF (nothing sent Out)")),
+              h("input",{type:"checkbox",checked:d.include_in_offer!==false,onChange:e=>setInOffer(d,e.target.checked),style:{accentColor:"#1f5c40"}}),isPo?"In PO PDF":"In offer PDF")
+          : h("span",{style:{fontSize:11,color:colors.mutedLight}},isPo?"Not in the PO PDF (nothing sent Out)":"Not in offer PDF (nothing sent Out)")),
         linked.map(r=>h("span",{key:r.id,style:{fontSize:11,color:colors.muted}},
           "Fulfils: "+r.category+(r.item_sl_no!=null?" Sl "+r.item_sl_no:""),
           r.is_mandatory ? h("span",{style:{marginLeft:5,fontSize:10,padding:"1px 6px",borderRadius:9,background:"#fff4d6",color:"#854f0b",fontWeight:700}},"Mandatory") : null,
@@ -12484,13 +12487,13 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
     );
   };
 
-  return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
+  return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",zIndex:isPo?1700:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
     h("div",{style:{background:"#fff",borderRadius:12,width:"100%",maxWidth:1000,height:"90vh",display:"flex",flexDirection:"column"}},
       h("div",{style:{padding:"14px 20px 8px",borderBottom:"1px solid "+colors.border}},
         h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}},
           h("div",null,
             h("div",{style:{fontWeight:700,fontSize:15}},"Documents — "+entityRef),
-            h("div",{style:{fontSize:11,color:colors.mutedLight}},isContract
+            h("div",{style:{fontSize:11,color:colors.mutedLight}},isPo ? "One tab per document. In = from the vendor (it fulfils a required document); Out = what we send. An Out PDF ticked In PO PDF is enclosed in the PO." : isContract
               ? "One tab per document. The link is the permanent record; a PDF is optional."
               : "One tab per document. The link is the permanent record; a PDF is optional and is removed once this quote leaves Draft.")),
           h("div",{style:{display:"flex",gap:8,alignItems:"center"}},
@@ -29629,6 +29632,111 @@ const MANUAL_SECTIONS = [
             ]
           }
         ]
+      },
+      {
+        "key": "po_like_so",
+        "title": "Purchase Order like the Sale Order: terms, testing, documents, PDF and amendments",
+        "tag": "Purchase",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "Purchase → Purchase Register → a PO opens in tabs, as the Sale Order does: PO & lines, Tax (GST), Commercial Terms, NDE / Testing, Notes, Documents and Amendments. Old register and FFS POs stay view-only."
+          },
+          {
+            "type": "h3",
+            "text": "PO & lines"
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "Lines as before. + Charge adds packing & forwarding, freight, third party inspection or any extra charge, picked from the PO's Extra charge labels or typed. Basis: Flat or Lumpsum (the amount you type), Percentage (% of the basic value) or Included (printed as Included).",
+              "A foreign-currency PO: type 1 USD (or EUR, AED, GBP) = ? Rs in the header. The INR equivalent shows under the totals and in the register's Excel for reference only; it is never printed on the PO.",
+              "Subject on the cover letter is optional; left blank, the cover says Purchase Order against our contract …"
+            ]
+          },
+          {
+            "type": "h3",
+            "text": "Tax (GST)"
+          },
+          {
+            "type": "p",
+            "text": "Pick CGST + SGST, IGST, Import (no GST on the PO; customs duty and IGST come on the Bill of Entry) or No GST (unregistered / exempt / reverse charge). The app suggests one from the vendor's GSTIN or state and the currency, and warns when the pick does not match."
+          },
+          {
+            "type": "h3",
+            "text": "Commercial Terms"
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "Payment, delivery, price basis, Inco terms, insurance, freight, transport, tax, guarantee, warranty and late delivery: pick from the PO lists or type. The spelling check and the closest list entry work as on the Sale Order. Typed wording stays on that PO only.",
+              "Copy from the contract's Sale Order fills them as they are on the Sale Order. Force majeure always keeps the PO's own wording (we are the buyer): Restore default puts it back.",
+              "Order cancellation is free text and optional: left blank, it is not printed.",
+              "PO lists (button on the Purchase Register, for the Purchase Manager and admins) keeps the PO's dropdowns. They are separate from the Sale Order's lists."
+            ]
+          },
+          {
+            "type": "h3",
+            "text": "NDE / Testing and the material certificate"
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "Tick every test the PO needs (Test Types master), with who does it and who witnesses. The tests apply to the whole PO.",
+              "NDE exception note: only for a test that does not apply to some items, e.g. RT not applicable for Sl No 2. Hover on ⓘ for the explanation. It prints under the tests.",
+              "Documents tab → Material certificate: EN 10204 3.1, 3.2, Not required or Others (say which). For 3.2 give the number of inspection stages, then for each stage what inspection, by whom and the agency. A PO cannot be sent for approval until this is set (not for Service POs)."
+            ]
+          },
+          {
+            "type": "h3",
+            "text": "Notes and documents"
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "Notes: several notes in order (↑ moves one up). They print as Notes.",
+              "Documents: the same Documents box as the Sale Order, on the PO. In = from the vendor; Out = what we send. An Out document with its PDF and In PO PDF ticked is enclosed in the PO PDF.",
+              "At Send for approval the app asks which documents you need from the vendor (ITP, test reports, guarantee certificate, packing list…). They print as Documents required. The material certificate is added by itself."
+            ]
+          },
+          {
+            "type": "h3",
+            "text": "The PDF"
+          },
+          {
+            "type": "p",
+            "text": "Cover letter (vendor, PO no. and date, your quote no. and date, our contract, total, delivery, signature), Index, then the annexures: Price Summary, Commercial Terms, Inspection & Testing, Notes, Documents Required, Enclosures. The enclosed PDFs are merged in and numbered straight through. DRAFT until approved."
+          },
+          {
+            "type": "h3",
+            "text": "Sending"
+          },
+          {
+            "type": "p",
+            "text": "After approval, Mark as sent within 3 days: date, to whom, how and the link of the PO as sent (OneDrive / Drive). The link is required. Not sent in 3 days, the PO is a stale item: the owner's PDFs are blocked, the Purchase Manager is told and it escalates as usual."
+          },
+          {
+            "type": "h3",
+            "text": "Changes"
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "Approved but not sent: Reopen to edit puts it back to Draft with the same number; it needs approval again.",
+              "Sent: Amend PO, with the reason and what changes. The owner, the Purchase Manager or a super admin may amend. The PO becomes PO/…/26-27 Amd 1, goes back to Draft, needs approval by the Purchase Manager and QC and must be sent again.",
+              "The amended PDF has an Amendment cover, Annexure-A Amendment Sheet (each change: was → now) and then the full amended PO. The Index lists the amendment history.",
+              "A quantity cannot go below what is already received; a received or billed line cannot be removed. A rate change on a billed line tells Accounts when the amendment is approved."
+            ]
+          },
+          {
+            "type": "h3",
+            "text": "GRN"
+          },
+          {
+            "type": "p",
+            "text": "A GRN against a PO cannot be cleared until the vendor's required documents are in the PO's Documents. The Purchase Manager (or a super admin) may override with a reason; the PO owner and the Purchase Manager are then reminded every 2 days until each document is received."
+          }
+        ]
       }
     ]
   }
@@ -32259,6 +32367,7 @@ const MANUAL_TA = {
  "bill_po_link": {"title":"Purchase bill-ஐ அதன் PO-வுடன் இணைத்தல், Bills ↔ POs, Purchase Register-இல் Billed","tag":"Accounts","blocks":[{"type":"p","text":"Accounts → Vouchers → Purchase-இல் பதியும் ஒவ்வொரு purchase bill-உம் அது எந்த PO-க்கு எதிரானதோ அந்த PO-வுடன் இணைக்கப்படும். PO-வில் எவ்வளவு bill ஆனது என்று தெரியும்; bill PO-வுடன் ஒத்துப்போகவில்லை என்றால் Accounts-க்குத் தெரியும்."},{"type":"h3","text":"Bill பதிதல்"},{"type":"steps","items":["Supplier-ஐத் தேர்வு செய்யுங்கள். Against PO கீழ் அந்த supplier-இன் திறந்த PO-க்கள் (approved அல்லது sent, முழுதாக bill ஆகாதவை) வரும்: PO value, received, billed so far, left to bill, GRN. Goods bill-க்கு PO-க்கள்; service bill-க்கு Service PO-க்களும் PO-க்களும்.","PO-வை (அல்லது பலவற்றை) tick செய்யுங்கள். Fill items from PO அழுத்தினால் ஒவ்வொரு வரியும் HSN, GST %, received ஆகி இன்னும் bill ஆகாத அளவுடன் வரும் (app-இல் received இல்லையென்றால், இன்னும் bill ஆகாத அளவு). Bill-இல் உள்ளபடி வரிகளை மாற்றுங்கள்; இந்த bill-இல் இல்லாத வரிகளை நீக்குங்கள்.","PO-விலிருந்து வந்த ஒவ்வொரு வரியும் PO line, PO rate, மீதம், PO GST % ஆகியவற்றைக் காட்டும். கையால் சேர்க்கும் வரிகள் (freight, packing…) முதலில் தேர்வு செய்த PO-வுக்குக் கணக்கிடப்படும்.","PO இல்லவே இல்லை என்றால் (petty purchase, freight, emergency buy): No PO tick செய்து காரணம் எழுதுங்கள். Purchase Manager-க்குத் தகவல் போகும்."]},{"type":"h3","text":"Save செய்வதற்கு முன் checks"},{"type":"bullets","items":["Rate PO rate-ஐ விட அதிகம்: வரியின் கீழ் காரணம் எழுதுங்கள் (அல்லது சரி செய்யுங்கள்). Purchase Manager-க்குத் தகவல் போகும்.","அளவு received ஆகி bill ஆகாததை விட (அல்லது PO-வில் மீதத்தை விட) அதிகம்: காரணம் எழுதுங்கள், உதா: \"balance delivered, GRN pending\".","GST % PO-விலிருந்து வேறுபட்டால்: காரணம்.","Bill (GST-க்கு முன்) PO-வில் bill செய்ய மீதமுள்ளதை விட அதிகம்: Against PO கீழ் உள்ள box-இல் காரணம். Purchase Manager-க்குத் தகவல் போகும்.","PO-வுடன் ஒத்துப்போகும் bill-க்கு கூடுதலாக எதுவும் தேவையில்லை. வெளிநாட்டு currency PO-க்களுக்கு rate, balance checks இல்லை."]},{"type":"p","text":"Save செய்ததும், அந்த PO-வின் GRN-களில் (காலியாக இருந்தால்) supplier-இன் bill எண் நிரப்பப்படும்."},{"type":"h3","text":"Purchase Register"},{"type":"bullets","items":["புதிய column Billed: ✓ Billed (voucher எண்களுடன்), Billed x of y (பகுதி), Not billed, அல்லது சிவப்பில் Not billed · n days since GRN — கடைசி GRN 21 நாளுக்கு மேல் ஆகியும் PO-க்கு எதிராக bill இல்லையென்றால்.","Bills வடிகட்டி: All, Billed, Part billed, Not billed, Not billed 21+ days since GRN. Excel-இலும் bills உண்டு.","PO-வின் சொந்தத் திரையில் Bills பகுதி: அதற்கு எதிரான ஒவ்வொரு bill-உம் அதன் GRN-களும்."]},{"type":"h3","text":"பழைய FFS bills: Accounts → Vouchers & Books → Bills ↔ POs"},{"type":"p","text":"FFS day book-இல் PO எண் இல்லை. எனவே ஒவ்வொரு பழைய FFS purchase bill-க்கும் app ஒரு PO-வைப் பரிந்துரைக்கும்: அதே supplier, அதே தொகை, bill தேதி அன்று அல்லது அதற்கு முன் தேதியிட்ட PO. Accounts (Finance & Accounts Manager, Finance Director, Accountant, super admins) confirm செய்யும் வரை எதுவும் இணைக்கப்படாது."},{"type":"bullets","items":["Same amount: Confirm all exact matches ஒரே முறையில், அல்லது ஒவ்வொன்றாக Confirm / Skip.","Within 2%: ஒவ்வொன்றையும் சரிபார்த்து Confirm அல்லது Skip.","No match (பகுதி bills, பல PO-க்களுக்கு ஒரு bill, PO இல்லாதவை): PO-வைக் கையால் தேர்வு செய்து Link, Skip, அல்லது அப்படியே விடலாம்.","Linked, Skipped செய்தவற்றைக் காட்டும்; Unlink / Undo skip பழைய bill-ஐத் திரும்பக் கொண்டு வரும்."]},{"type":"h3","text":"Document Control board"},{"type":"p","text":"Document Controller அல்லாத ஒருவர் Document Control board-இல் due date அல்லது next-chase date-ஐ மாற்றினால், Document Controller-க்கு card, பழைய, புதிய தேதி, காரணம் ஆகியவற்றுடன் bell வரும்."}],"en_sig":"b157bb9e"},
  "doc_code1_info": {"title":"Code 1 – submit for info, Contract Register-இல் Ready for production","tag":"Order Status","blocks":[{"type":"p","text":"சில clients ஒரு document-ஐ Code 1 என approve செய்து, அவர்களின் தகவலுக்காக ஒரு final copy கேட்பார்கள். இதற்காக Document Control board-இல் புதிய பட்டியல்: Code 1 — submit for info, Code 2-க்கும் All approved-க்கும் இடையில்."},{"type":"steps","items":["Client-இன் return \"Code 1 – approved, submit a copy for information\" என்று இருந்தால், Code 1 – Fully Approved – Submit for Info என்ற status-உடன் பதிவு செய்யுங்கள் (card-ஐ இழுக்கவும், அல்லது Log client reply).","Card Code 1 — submit for info-க்குச் செல்லும். உடனே approved எனக் கணக்கிடப்படும்: Full Hold check-ஐயோ Ready for go-ahead-ஐயோ நிறுத்தாது, Code 2 delivery clock தொடங்கலாம்.","Owner-க்கு \"send final copy for info (Code 1)\" task card வரும், 7 நாளில் due, பிறகு மற்ற document cards போல stale.","Copy-ஐ அனுப்பி ✓ Completed அழுத்துங்கள் (board-இலோ task card-இலோ). அடுத்த revision Out ஆக Code 1 – Fully Approved (submitted for info) status-உடன் பதிவாகி, card நேராக All approved-க்குச் செல்லும். எதுவும் திரும்பி வராது, எனவே chase இல்லை, chase letter-இலும் வராது."]},{"type":"p","text":"புதிய பட்டியலுக்குத் தனி tile, எண்ணிக்கை உண்டு; Due filters, By stage / By person, All (list), Excel, PDF-இலும் தெரியும். Work-order hand-over இதை Code 1, Code 2 போலவே முன்கூட்டியே tick செய்யும்."},{"type":"h3","text":"Contract Register: ✓ Ready for production"},{"type":"p","text":"Sales → Registers → Contract Register, STAGE வரிசை: ✓ Ready for production ஒரே click-இல் stage 1 Documentation அல்லது 2 Engineering-இல் உள்ள, hold Inspection Hold, Final Hold அல்லது No Hold – cleared ஆக உள்ள (Full Hold எதுவும் இல்லாத) contracts-ஐக் காட்டும். இவை production-க்குப் போகலாம். எண்ணிக்கை மற்ற filters-ஐப் பின்பற்றும். No hold docs உள்ள contracts இதில் வராது: அவற்றின் documents பதியப்படவில்லை, கையால் சரிபாருங்கள்."}],"en_sig":"82a23618"},
  "doc_hold_change": {"title":"Document Control table: contract வாரியாக, ஒரு document-இன் hold-ஐ மாற்றுதல்","tag":"Order Status","blocks":[{"type":"p","text":"Order Status → Document Control → ⊞ Table — whole board இப்போது Contract வாரியாகத் திறக்கும் (நீங்கள் தேர்வு செய்யும் Group by இந்தக் கணினியில் நினைவில் இருக்கும்). ஒவ்வொரு contract எண்ணின் கீழும் வாடிக்கையாளர் பெயர்; ஒவ்வொரு contract-இன் தலைப்பிலும் எத்தனை Full Hold documents திறந்துள்ளன, அல்லது \"no Full Hold open — ready for go-ahead\"."},{"type":"h3","text":"வரியில் ✎ Hold"},{"type":"steps","items":["ஒவ்வொரு document-உம் அதன் category-இன் hold-உடன் தொடங்கும் (Document Categories master).","வரியில் ✎ Hold அழுத்தி Full Hold, Inspection Hold, Final Hold, No Hold அல்லது ↺ Back to the category's hold தேர்வு செய்யுங்கள். பிறகு வரியில் \"set on the document\" தெரியும்.","Hold-ஐக் குறைக்க (உதா: Full Hold → Inspection Hold) காரணம் தேவை; உயர்த்த தேவையில்லை. ஒவ்வொரு மாற்றமும் பழைய, புதிய hold, யார், எப்போது, ஏன் என்று பதிவாகி அதே box-இல் தெரியும்.","யார்: Document Controller, Technical Head, admins, super admins."]},{"type":"p","text":"புதிய hold எல்லா இடத்திலும் உடனே பயன்படும்: board cards, tiles, filters, Report by Contract, Excel, PDF; contract-இன் hold dot, hover tag; Contract Register Hold filter, ✓ Ready for production; Ready for go-ahead, release warning, Code 2 delivery clock; chase letters, work-order hand-over."},{"type":"bullets","items":["ஒரு contract-இன் கடைசி திறந்த Full Hold document குறைக்கப்பட்டால், contract production go-ahead-க்குத் தயார்; Sales Head-க்கும் Document Controller-க்கும் தகவல் போகும், delivery Code 2-இலிருந்து என்றால் Code 2 தேதியை அமைக்க நினைவூட்டல் வரும்.","ஒரு document-ஐ Full Hold-க்கு உயர்த்தினால் அது Code 2 அடையும் வரை production நிற்கும். Production ஏற்கனவே release ஆகியிருந்தால் go-ahead அப்படியே இருக்கும், Sales Head-க்குத் தகவல் போகும்.","எண் இன்னும் இல்லாத required document-க்கும் hold அமைக்கலாம்; எண் கிடைத்ததும் hold அதனுடன் செல்லும். ஒவ்வொரு revision, list-இலும் hold அப்படியே இருக்கும்."]}],"en_sig":"11ad963f"},
+ "po_like_so": {"title":"Sale Order போலவே Purchase Order: terms, testing, documents, PDF, amendments","tag":"Purchase","blocks":[{"type":"p","text":"Purchase → Purchase Register → ஒரு PO இப்போது Sale Order போல tabs-இல் திறக்கும்: PO & lines, Tax (GST), Commercial Terms, NDE / Testing, Notes, Documents, Amendments. பழைய register, FFS POs பார்வைக்கு மட்டும்."},{"type":"h3","text":"PO & lines"},{"type":"bullets","items":["Lines முன்பு போலவே. + Charge மூலம் packing & forwarding, freight, third party inspection அல்லது வேறு charge சேர்க்கலாம் — PO-இன் Extra charge labels பட்டியலிலிருந்து எடுக்கலாம் அல்லது type செய்யலாம். Basis: Flat அல்லது Lumpsum (நீங்கள் type செய்யும் தொகை), Percentage (basic value-இன் %), Included (Included என்று அச்சாகும்).","வெளிநாட்டு currency PO: header-இல் 1 USD (அல்லது EUR, AED, GBP) = ? Rs type செய்யுங்கள். INR equivalent totals கீழும் register Excel-இலும் reference-க்கு மட்டும்; PO-வில் அச்சாகாது.","Cover letter Subject விருப்பம்; காலியாக விட்டால் Purchase Order against our contract … என்று வரும்."]},{"type":"h3","text":"Tax (GST)"},{"type":"p","text":"CGST + SGST, IGST, Import (PO-வில் GST இல்லை; customs duty, IGST Bill of Entry-இல்) அல்லது No GST (unregistered / exempt / reverse charge) தேர்வு செய்யுங்கள். Vendor-இன் GSTIN அல்லது state, currency வைத்து app ஒன்றைப் பரிந்துரைக்கும்; பொருந்தாவிட்டால் எச்சரிக்கும்."},{"type":"h3","text":"Commercial Terms"},{"type":"bullets","items":["Payment, delivery, price basis, Inco terms, insurance, freight, transport, tax, guarantee, warranty, late delivery: PO lists-இலிருந்து எடுக்கலாம் அல்லது type செய்யலாம். Spelling check, அருகிலுள்ள list entry Sale Order போலவே. Type செய்த வார்த்தைகள் அந்த PO-வில் மட்டும்.","Copy from the contract's Sale Order — Sale Order-இல் உள்ளபடியே நிரப்பும். Force majeure எப்போதும் PO-வின் சொந்த வார்த்தைகள் (நாம் buyer): Restore default மீண்டும் கொண்டுவரும்.","Order cancellation free text, விருப்பம்: காலியாக இருந்தால் அச்சாகாது.","PO lists (Purchase Register-இல் பொத்தான், Purchase Manager, admins) PO dropdowns-ஐ வைத்திருக்கும். Sale Order பட்டியல்களிலிருந்து தனி."]},{"type":"h3","text":"NDE / Testing, material certificate"},{"type":"bullets","items":["PO-க்குத் தேவையான ஒவ்வொரு test-ஐயும் tick செய்யுங்கள் (Test Types master), யார் செய்வது, யார் witness. Tests முழு PO-க்கும்.","NDE exception note: சில items-க்கு ஒரு test பொருந்தாதபோது மட்டும், உதா: RT not applicable for Sl No 2. ⓘ மேல் hover செய்தால் விளக்கம். Tests கீழ் அச்சாகும்.","Documents tab → Material certificate: EN 10204 3.1, 3.2, Not required அல்லது Others (எது என்று சொல்லுங்கள்). 3.2-க்கு inspection stages எண்ணிக்கை, பிறகு ஒவ்வொரு stage-க்கும் என்ன inspection, யார், agency. இது இல்லாமல் PO-வை approval-க்கு அனுப்ப முடியாது (Service PO-க்கு இல்லை)."]},{"type":"h3","text":"Notes, documents"},{"type":"bullets","items":["Notes: வரிசையாகப் பல notes (↑ ஒன்றை மேலே நகர்த்தும்). Notes ஆக அச்சாகும்.","Documents: Sale Order-இன் அதே Documents box, PO-வில். In = vendor-இடமிருந்து; Out = நாம் அனுப்புவது. PDF உடன், In PO PDF tick செய்த Out document PO PDF-இல் enclosure ஆகச் சேரும்.","Send for approval அழுத்தும்போது vendor-இடமிருந்து எந்த documents வேண்டும் என்று app கேட்கும் (ITP, test reports, guarantee certificate, packing list…). அவை Documents required ஆக அச்சாகும். Material certificate தானாகச் சேரும்."]},{"type":"h3","text":"PDF"},{"type":"p","text":"Cover letter (vendor, PO எண், தேதி, உங்கள் quote எண், தேதி, our contract, total, delivery, கையொப்பம்), Index, பிறகு annexures: Price Summary, Commercial Terms, Inspection & Testing, Notes, Documents Required, Enclosures. Enclosed PDFs இணைக்கப்பட்டு page எண்கள் தொடர்ந்து வரும். Approval வரை DRAFT."},{"type":"h3","text":"அனுப்புதல்"},{"type":"p","text":"Approval-க்குப் பிறகு 3 நாட்களுக்குள் Mark as sent: தேதி, யாருக்கு, எப்படி, அனுப்பிய PO-வின் link (OneDrive / Drive). Link கட்டாயம். 3 நாட்களில் அனுப்பாவிட்டால் PO stale item: owner-இன் PDFs block, Purchase Manager-க்குத் தகவல், வழக்கம்போல் escalation."},{"type":"h3","text":"மாற்றங்கள்"},{"type":"bullets","items":["Approved, இன்னும் அனுப்பவில்லை: Reopen to edit — அதே எண்ணுடன் Draft-க்குத் திரும்பும்; மீண்டும் approval தேவை.","அனுப்பியது: Amend PO, காரணம், என்ன மாறுகிறது. Owner, Purchase Manager அல்லது super admin amend செய்யலாம். PO, PO/…/26-27 Amd 1 ஆகி Draft-க்குத் திரும்பும்; Purchase Manager, QC approval, மீண்டும் அனுப்ப வேண்டும்.","Amended PDF-இல் Amendment cover, Annexure-A Amendment Sheet (ஒவ்வொரு மாற்றமும்: was → now), பிறகு முழு amended PO. Index-இல் amendment history.","பெறப்பட்ட அளவுக்குக் கீழே quantity குறைக்க முடியாது; பெறப்பட்ட அல்லது bill ஆன line-ஐ நீக்க முடியாது. Bill ஆன line-இன் rate மாறினால் amendment approve ஆகும்போது Accounts-க்குத் தகவல்."]},{"type":"h3","text":"GRN"},{"type":"p","text":"Vendor-இன் required documents PO-வின் Documents-இல் வரும் வரை அந்த PO-வுக்கான GRN-ஐ clear செய்ய முடியாது. Purchase Manager (அல்லது super admin) காரணத்துடன் override செய்யலாம்; பிறகு ஒவ்வொரு document-உம் வரும் வரை 2 நாட்களுக்கு ஒருமுறை PO owner-க்கும் Purchase Manager-க்கும் நினைவூட்டல்."}],"en_sig":"403d8ec7"},
  "docs_requested": {
   "title": "Customer \u0b95\u0bc7\u0b9f\u0bcd\u0b9f Documents",
   "tag": "Documents",
@@ -32503,6 +32612,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"20 Oct 2026 (218)", summary:"Built on 2026-10-20T21:15:00Z, on top of 2026-10-20T21:00:00Z. Same SQL as 217 (structure_po_like_sale_order_2026-10-20.sql, corrected: a PO document type already in the Document Categories master under a near-same name, e.g. Hydro Test Reports, is shared instead of added again). The PO uses the master's own spelling for the material certificate and the documents asked from the vendor." },
+  { date:"20 Oct 2026 (217)", summary:"Built on 2026-10-20T21:00:00Z, on top of 2026-10-20T20:00:00Z. NEEDS SQL: structure_po_like_sale_order_2026-10-20.sql (BOTH companies). PURCHASE ORDER LIKE THE SALE ORDER: the PO opens in tabs (PO & lines, Tax (GST), Commercial Terms, NDE / Testing, Notes, Documents, Amendments). Commercial terms with the PO's own dropdown lists (PO lists button, separate from the Sale Order's), spelling check, Copy from the contract's Sale Order as is; force majeure in the buyer's wording; order cancellation free text, not printed when blank. Charges (P&F, freight, TPI, extra) with basis Flat / Lumpsum / Percentage / Included. GST panel with the suggested type and warnings. INR equivalent of a foreign-currency PO for reference (never printed; Excel column). NDE / Testing tick list with an exception note (ⓘ explains). Material certificate 3.1 / 3.2 (inspection stages, by, agency) / Not required / Others, needed before Send for approval. Several notes. The Sale Order's Documents box on the PO; at Send for approval the app asks which documents the vendor must send. New PO PDF: Cover (with your quote no.), Index, Price Summary, Commercial Terms, Inspection & Testing, Notes, Documents Required, Enclosures with the attached PDFs merged in. Mark as sent needs the link. Amend PO (owner, Purchase Manager, super admin): Amd n, reason and what changes, approval again, PDF with Amendment cover and was → now sheet; Reopen to edit for an approved PO not yet sent. GRN gate: a GRN can't be cleared until the vendor's documents are in; Purchase Manager override with a reason, then reminders every 2 days to the PO owner and the Purchase Manager. Manual article po_like_so (English and Tamil)." },
   { date:"20 Oct 2026 (216)", summary:"Built on 2026-10-20T20:00:00Z, on top of 2026-10-20T19:30:00Z. NEEDS SQL: structure_document_hold_override_2026-10-20.sql (BOTH companies). BUILD A \u2014 DOCUMENT CONTROL TABLE: grouped by Contract by default (remembered), customer under the contract number, contract header with Full Hold open count / ready for go-ahead. \u270e HOLD on each row: Full / Inspection / Final / No Hold or back to the category's hold, set on that one document (or on a request, carried to the document when it is numbered, by trigger); lowering needs a reason; history kept (doc_hold_hist_tbl) and shown. Read everywhere: board, tiles, filters, reports, contract hold dot and tag, Contract Register Hold filter and Ready for production, v_full_hold_outstanding (Ready for go-ahead, release warning, Code 2 clock), chase letters, work-order hand-over. Last Full Hold lowered or a document raised to Full Hold: Sales Head and Document Controller told. Who: Document Controller, Technical Head, admins, super admins. Manual article doc_hold_change (English and Tamil)." },
   { date:"20 Oct 2026 (215)", summary:"Built on 2026-10-20T19:30:00Z, on top of 2026-10-20T19:00:00Z. No SQL. FIX \u2014 'This customer has no country on file' although the country is in the customer master: the country is now looked up tolerantly (duplicate customer rows with the same name, the one with a country wins; case, extra spaces and punctuation ignored) and read again at Save, so a country added in CRM after the screen was opened is found without reopening. Applies to the Estimate (Save estimate) and the quote header. Other single-customer lookups by name no longer fail when two customer rows share a name." },
   { date:"20 Oct 2026 (214)", summary:"Built on 2026-10-20T19:00:00Z, on top of 2026-10-20T18:00:00Z. NEEDS SQL: data_doc_status_code1_submit_for_info_2026-10-20.sql (BOTH companies, Document Status Master). BUILD Y — CODE 1 SUBMIT FOR INFO: new status Code 1 – Fully Approved – Submit for Info and a new Document Control list Code 1 — submit for info (between Code 2 and All approved). It counts as approved (Full Hold check, Ready for go-ahead, Code 2 delivery clock), the owner gets a task card (send final copy for info, 7 days, stale as other document cards), never chased or on a chase letter; ✓ Completed logs the next revision Out as Code 1 – Fully Approved (submitted for info) and the card goes straight to All approved. BUILD X — CONTRACT REGISTER: ✓ Ready for production chip in the STAGE row (stage 1 or 2, hold Inspection / Final / No Hold – cleared). Manual article doc_code1_info (English and Tamil)." },
@@ -50742,12 +50853,18 @@ const STEP_MANAGER = { purchase:"purchase_manager", sales:"sales_head", accounts
 const STEP_MODULE_LABEL = { purchase:"Purchase", sales:"Sales", accounts:"Accounts" };
 const PUR_STAGES = ["Draft","Approved","Sent","Partly received","Received","Cancelled"];
 const PUR_TONE = { Draft:["#fff4d6","#854f0b"], Approved:["#e6f1fb","#0c447c"], Sent:["#eaf9f4","#085041"], "Partly received":["#efe8fb","#55308d"], Received:["#eef0f4","#4a5568"], Cancelled:["#fdeaea","#8a2d2d"] };
-const PUR_TERMS = [["payment","Payment"],["delivery","Delivery"],["price_basis","Price basis"],["freight","Freight"],["packing","Packing & forwarding"],["insurance","Insurance"],
-  ["guarantee","Guarantee"],["inspection","Inspection / TPI"],["test_cert","Test certificates"],["drawing","Drawing approval"],["marking","Packing & marking"],
-  ["ld","Late delivery (LD)"],["documents","Documents with supply"],["jurisdiction","Jurisdiction"],["other","Other terms"]];
-const PUR_TERMS_DEFAULT = { payment:"30 days from receipt of material and bill", delivery:"Door delivery to the address above", price_basis:"Firm, F.O.R. our works",
-  freight:"Vendor's account", test_cert:"EN 10204 3.1 mill test certificate", marking:"Heat no. hard-stamped; our PO no. on the tag",
-  documents:"Tax invoice, delivery challan, test certificates", jurisdiction:"Subject to Chennai jurisdiction" };
+// 217: the PO's commercial terms, like the Sale Order's: [key, label, PO list]. The old keys still print while they have text.
+const PUR_TERMS = [["payment","Payment term","payment"],["delivery","Delivery term","delivery"],["price_basis","Price basis","price_basis"],["incoterms","Inco terms","incoterms"],
+  ["insurance","Insurance","insurance"],["freight","Freight","freight"],["transport","Transport through","transport"],["tax","Tax","tax"],["guarantee","Guarantee","guarantee"],
+  ["warranty","Warranty coverage","warranty"],["ld","Late delivery (LD)","ld"]];
+const PUR_TERMS_OLD = [["packing","Packing & forwarding"],["inspection","Inspection / TPI"],["test_cert","Test certificates"],["drawing","Drawing approval"],["marking","Packing & marking"],["documents","Documents with supply"],["other","Other terms"]];
+// force majeure from our side as the buyer (the Sale Order's is the seller's)
+const PUR_FM_DEFAULT = "1. Neither party shall be liable for delay or failure in performance due to events beyond reasonable control such as natural disasters, war, government actions, strikes or transport disruptions. Shortage of raw material or labour at the Vendor's end is not force majeure.\n2. The Vendor shall notify us in writing within 7 days of the event, with evidence and its expected duration. A delay not so notified will not be accepted as force majeure.\n3. Delivery dates are extended only for the period we agree in writing.\n4. If the event continues beyond 30 days, we may cancel the pending portion of this order without liability and buy elsewhere; any advance paid against the cancelled portion shall be refunded by the Vendor.";
+const PUR_JUR_DEFAULT = "Any dispute arising out of or relating to this Purchase Order shall be subject to the exclusive jurisdiction of the competent courts in Chennai, Tamil Nadu, India only.";
+const PUR_TERMS_DEFAULT = { payment:"30 days from receipt of material and bill", delivery:"Material to reach us by the date above", price_basis:"Firm, F.O.R. our works",
+  freight:"Vendor's account", insurance:"By us", tax:"GST extra as applicable", guarantee:"12 months from the date of supply", warranty:"Against defects in material and workmanship",
+  force_majeure:PUR_FM_DEFAULT, jurisdiction:PUR_JUR_DEFAULT };
+const PUR_NOTES_DEFAULT = ["Heat number hard-stamped on every piece; our PO number on the tag.", "Quote our PO number on the invoice, delivery challan and every package. Material is accepted only after our inspection."];
 const PUR_HOW = ["Email","WhatsApp","By hand","Courier","Vendor portal"];
 const PUR_DELIVER_TO = ["Meppur Factory","Ramapuram Godown"];
 const PUR_CHARGES = ["Freight","Packing & forwarding","Testing / inspection","Loading / unloading","Other charges"];
@@ -50790,13 +50907,16 @@ function purBasisLabel(l){ return l.price_basis==="kg" ? "per Kg" : "per "+(l.co
 function purLineAmt(l){
   const q = Number(l.qty)||0, r = Number(l.rate)||0, w = Number(l.unit_wt)||0;
   if(l.source==="FFS" && l.amount!=null) return { wt:null, amt:r2(l.amount) };
+  if(l.line_kind==="charge" && (l.charge_basis==="Percentage" || l.charge_basis==="Included")) return { wt:null, amt: l.charge_basis==="Included" ? 0 : r2(Number(l.amount)||0) };   // 217: stored at save
   if(l.price_basis==="kg" && String(l.count_uom||"").toLowerCase()!=="kg"){ const tw = r2(q*w); return { wt:tw, amt:r2(tw*r) }; }
   return { wt: w ? r2(q*w) : null, amt:r2(q*r) };
 }
 function purCalc(po, lines){
   let basic = 0, add = 0, tax = 0;
   const mode = po.gst_mode || "intra";
-  (lines||[]).forEach(l=>{ const a = purLineAmt(l).amt; if(l.line_kind==="charge") add += a; else basic += a; if(mode==="intra" || mode==="inter") tax += a*(Number(l.gst_pct)||0)/100; });
+  (lines||[]).forEach(l=>{ if(l.line_kind!=="charge") basic += purLineAmt(l).amt; });
+  basic = r2(basic);   // 217: a charge may be a % of the basic value
+  (lines||[]).forEach(l=>{ const a = l.line_kind==="charge" ? purChargeAmt(l, basic) : purLineAmt(l).amt; if(l.line_kind==="charge") add += a; if(mode==="intra" || mode==="inter") tax += a*(Number(l.gst_pct)||0)/100; });
   tax = r2(tax);
   const cg = mode==="intra" ? r2(tax/2) : 0, sg = mode==="intra" ? r2(tax-r2(tax/2)) : 0, ig = mode==="inter" ? tax : 0;
   const gross = r2(basic+add+tax); const inr = String(po.currency||"INR").toUpperCase()==="INR";
@@ -50813,7 +50933,7 @@ function purGstMode(vendor, S, currency){
   if(vs) return vs===os ? "intra" : "inter";
   return "intra";
 }
-const PUR_GST_MODES = [["intra","CGST + SGST"],["inter","IGST"],["import","Import (no GST on the PO)"],["none","No GST (unregistered / exempt)"]];
+const PUR_GST_MODES = [["intra","CGST + SGST"],["inter","IGST"],["import","Import (no GST on the PO)"],["none","No GST (unregistered / exempt / reverse charge)"]];
 function purVendorAddr(v){
   if(!v) return "";
   return [v.billing_street, [v.billing_city, v.billing_pin].filter(Boolean).join(" - "), [v.billing_state, v.billing_country].filter(Boolean).join(", ")].filter(x=>String(x||"").trim()).join("\n");
@@ -51008,7 +51128,7 @@ function stepPdfAllowed(){
 function StaleWatch({ user }){
   useEffect(()=>{ if(!user) return; let dead = false;
     (async()=>{ const k = "staleSweep|"+user.username; let first = true; try{ if(sessionStorage.getItem(k)) first = false; else sessionStorage.setItem(k,"1"); }catch(e){}
-      if(first) await stepSweep(user.username); if(!dead) await stepLoadMine(user, true); if(!dead) billSweepOnce(user); })();   // 212: advance-PI cards, send steps
+      if(first) await stepSweep(user.username); if(!dead) await stepLoadMine(user, true); if(!dead) billSweepOnce(user); if(first && !dead) purDocsReminderSweep(); })();   // 217   // 212: advance-PI cards, send steps
     const t = setInterval(()=>{ stepLoadMine(user, true); }, 120000);
     return ()=>{ dead = true; clearInterval(t); }; },[user && user.username]);
   return null;
@@ -51146,7 +51266,9 @@ function StaleItemsScreen({ user }){
 // Approved POs print from the snapshot frozen at approval; a Draft prints from the screen with a DRAFT watermark.
 async function purSnapshot(po, lines, vendor){
   const S = await invSettingsAt(po.po_date || toISODate(new Date())).catch(()=>({}));
-  return { at:new Date().toISOString(), po:{ ...po, snapshot:undefined }, lines:(lines||[]).map(l=>({ ...l })), totals:purCalc(po, lines),
+  const D = po.po_no ? await purDocsLoad(po.po_no).catch(()=>({ reqs:[] })) : { reqs:[] };   // 217: what the vendor must send and what we enclose, frozen with the PO
+  const encl = po.po_no ? await fetchOfferEnclosures(po.po_no).catch(()=>[]) : [];
+  return { at:new Date().toISOString(), po:{ ...po, snapshot:undefined }, lines:(lines||[]).map(l=>({ ...l })), totals:purCalc(po, lines), reqs:(D.reqs||[]).map(r=>r.category).filter(Boolean), encl,
     vendor: vendor ? { vendor_name:vendor.vendor_name, addr:purVendorAddr(vendor), gstin:vendor.gst_tax_id||"", phone:vendor.phone||"" } : { vendor_name:po.vendor_name, addr:"", gstin:"", phone:"" },
     co:{ gstin:S.our_gstin||"", pan:S.our_pan||"", state:S.our_state||"", factory:S.factory_address||"" } };
 }
@@ -51177,7 +51299,7 @@ async function purPdf(poIn, linesIn, vendorIn){
   doc.setFontSize(13); doc.setFont(undefined,"bold"); doc.setTextColor(28,31,26);
   doc.text(po.po_kind==="SPO" ? "SERVICE PURCHASE ORDER" : "PURCHASE ORDER", W/2, 30.8, { align:"center" });
   doc.setFontSize(7.5); doc.setFont(undefined,"normal"); doc.setTextColor(90,90,90);
-  doc.text(legacy ? (po.source==="FFS" ? "Copy from the FFS records (the PO as made in FFS)" : "Old register entry — not the PO as sent") : (Number(po.rev)>0 ? "Revision "+po.rev : ""), W/2, 34.6, { align:"center" });
+  doc.text(legacy ? (po.source==="FFS" ? "Copy from the FFS records (the PO as made in FFS)" : "Old register entry — not the PO as sent") : (Number(po.rev)>0 ? "Amendment "+po.rev : ""), W/2, 34.6, { align:"center" });
   const wm = po.stage==="Cancelled" ? "CANCELLED" : (!legacy && po.stage==="Draft") ? "DRAFT — NOT APPROVED" : null;
   let y = 37;
   const left = [h0("Vendor"), [V.vendor_name, V.addr, V.gstin ? "GSTIN: "+V.gstin : "", po.vendor_contact ? "Kind attn: "+po.vendor_contact : "", V.phone ? "Phone: "+V.phone : ""].filter(Boolean).join("\n")];
@@ -51186,9 +51308,9 @@ async function purPdf(poIn, linesIn, vendorIn){
   doc.autoTable({ ...TB, startY:y, body:[[left[0],right[0]],[left[1],right[1]]], columnStyles:{ 0:{ cellWidth:(W-20)/2 }, 1:{ cellWidth:(W-20)/2 } } });
   y = doc.lastAutoTable.finalY + 1.5;
   doc.autoTable({ ...TB, startY:y, body:[
-    [ purKindLabel(po.po_kind)+" No", po.po_no+(Number(po.rev)>0?" Rev "+po.rev:""), "Date", fmtDMY(po.po_date) ],
+    [ purKindLabel(po.po_kind)+" No", po.po_no+purAmd(po), "Date", fmtDMY(po.po_date) ],
     [ "Contract No", po.contract_ref||"—", "Your quote", [po.vendor_quote_ref, po.vendor_quote_date?fmtDMY(po.vendor_quote_date):""].filter(Boolean).join(" / ")||"—" ],
-    [ "Delivery required by", po.delivery_by ? fmtDMY(po.delivery_by) : "As per terms", "Currency", cur+(cur!=="INR" && po.fx_rate ? " (Rs "+po.fx_rate+")" : "") ] ],
+    [ "Delivery required by", po.delivery_by ? fmtDMY(po.delivery_by) : "As per terms", "Currency", cur ] ],
     columnStyles:{ 0:{ fontStyle:"bold", cellWidth:32 }, 1:{ cellWidth:(W-20)/2-32 }, 2:{ fontStyle:"bold", cellWidth:26 } } });
   y = doc.lastAutoTable.finalY + 1.5;
   const items = lines.filter(l=>l.line_kind!=="charge"), charges = lines.filter(l=>l.line_kind==="charge");
@@ -51208,7 +51330,7 @@ async function purPdf(poIn, linesIn, vendorIn){
   if(!T.cgst && !T.sgst && !T.igst && T.tax) tot.push(["GST", purMoney(T.tax,cur)]);
   if(T.round) tot.push(["Round off", purMoney(T.round,cur)]);
   tot.push([{ content:"Total ("+(cur==="INR"?"Rs":cur)+")", styles:{ fontStyle:"bold" } }, { content:purMoney(T.net,cur), styles:{ fontStyle:"bold" } }]);
-  const terms = PUR_TERMS.map(([k,l])=>[l, (po.terms||{})[k]]).filter(t=>String(t[1]||"").trim());
+  const terms = [...PUR_TERMS, ...PUR_TERMS_OLD].map(([k,l])=>[l, (po.terms||{})[k]]).filter(t=>String(t[1]||"").trim());
   const yT = y;
   doc.autoTable({ ...TB, startY:y, body:[[{ content:"Terms and Conditions", styles:{ fontStyle:"bold" } }], ...(terms.length ? terms.map(t=>[t[0]+" : "+t[1]]) : [[legacy?"As per the PO issued from FFS.":"—"]])], margin:{ left:10, right:72 } });
   const yA = doc.lastAutoTable.finalY;
@@ -51228,7 +51350,439 @@ async function purPdf(poIn, linesIn, vendorIn){
   doc.text("Authorised Signatory", W-12, y+bh-2, { align:"right" });
   if(wm){ const n = doc.internal.getNumberOfPages(); for(let i=1;i<=n;i++){ doc.setPage(i); try{ doc.setGState(new doc.GState({ opacity:0.13 })); }catch(e){} doc.setFontSize(50); doc.setTextColor(180,40,40); doc.text(wm, W/2, H/2, { align:"center", angle:30 }); try{ doc.setGState(new doc.GState({ opacity:1 })); }catch(e){} doc.setTextColor(28,31,26); } }
   despPdfFooter(doc, co, purKindLabel(po.po_kind)+" "+po.po_no);
-  doc.save((po.po_kind+"_"+po.po_no+(Number(po.rev)>0?"_Rev"+po.rev:"")+(wm?"_"+wm.split(" ")[0]:"")).replace(/[^A-Za-z0-9_-]+/g,"_")+".pdf");
+  doc.save((po.po_kind+"_"+po.po_no+(Number(po.rev)>0?"_Amd"+po.rev:"")+(wm?"_"+wm.split(" ")[0]:"")).replace(/[^A-Za-z0-9_-]+/g,"_")+".pdf");
+}
+
+// ===== 20 Oct 2026 (217): THE PO LAID OUT LIKE THE SALE ORDER =====
+// Own dropdown lists (po_list_tbl), commercial terms with the buyer's force majeure, P&F / freight / extra charges with a
+// basis, GST panel with warnings, NDE / Testing tick list with an exception note, material certificate (3.1 / 3.2 with
+// inspection stages / Not required / Others), several notes, the Sale Order's Documents box on the PO, the PO PDF pack
+// (Cover, Index, Annexures, enclosures merged in), Mark as sent with the OneDrive link, Amend PO (Amd n, was → now
+// sheet), and the GRN gate: the vendor's documents must be in before a GRN is cleared (Purchase Manager can override;
+// the purchase team is then reminded every 2 days until they arrive).
+const PUR_LIST_KEYS = { payment:"Payment term", delivery:"Delivery term", price_basis:"Price basis", incoterms:"Inco terms", insurance:"Insurance", freight:"Freight",
+  transport:"Transport through", tax:"Tax", guarantee:"Guarantee", warranty:"Warranty coverage", ld:"Late delivery (LD)", charge:"Extra charge labels" };
+let PUR_LISTS = null;
+async function purListsLoad(force){
+  if(PUR_LISTS && !force) return PUR_LISTS;
+  const out = {};
+  try{ const { data, error } = await sb.from("po_list_tbl").select("id,list_key,value,sort_no").order("sort_no").order("value");
+    if(error) out.__missing = true; else (data||[]).forEach(r=>{ (out[r.list_key] = out[r.list_key]||[]).push(r.value); (out.__rows = out.__rows||[]).push(r); }); }
+  catch(e){ out.__missing = true; }
+  if(!out.charge || !out.charge.length) out.charge = PUR_CHARGES.slice();
+  PUR_LISTS = out; return out;
+}
+const PUR_TEST_DEFAULT = ["PMI","Hydro test","Pneumatic test","UT","RT","LPT / DPT","MPT","IGC","Hardness","Impact test","Visual & dimensional","Ferrite test"];
+const PUR_AMD_WHAT = ["Quantity","Rate","Add / remove a line","Delivery date","Commercial terms","NDE / Testing","Material certificate","Notes","Documents","Cancel a line"];
+// an amendment may not drop below what is received, nor remove a line that is received or billed
+async function purAmdGuard(po, lines){
+  try{
+    const { data: cur } = await sb.from("po_register_items").select("sl,qty,received_qty,line_kind").eq("po_no",po.po_no);
+    let links = []; try{ const r = await sb.from("acc_voucher_po_link_tbl").select("po_sl,voucher_no").eq("po_no",po.po_no); links = r.error ? [] : (r.data||[]); }catch(e){}
+    const bySl = {}; (lines||[]).forEach(l=>{ bySl[l.sl] = l; });
+    for(const o of (cur||[])){
+      const n = bySl[o.sl]; const rec = Number(o.received_qty)||0; const billed = Array.from(new Set(links.filter(x=>x.po_sl===o.sl).map(x=>x.voucher_no).filter(Boolean)));
+      if(!n && (rec>0 || billed.length)) return "Line "+o.sl+" can't be removed: "+[rec>0?rec+" already received":"", billed.length?"billed on "+billed.join(", "):""].filter(Boolean).join(" and ")+". Change its quantity instead.";
+      if(n && rec>0 && Number(n.qty) < rec) return "Line "+o.sl+": the quantity can't go below what is already received ("+rec+").";
+    }
+  }catch(e){ console.warn("Amendment check", e); }
+  return "";
+}
+const PUR_CHARGE_BASIS = ["Flat","Lumpsum","Percentage","Included"];
+function purChargeAmt(l, basic){
+  if(l.source==="FFS") return purLineAmt(l).amt;
+  const b = l.charge_basis || "Flat";
+  if(b==="Included") return 0;
+  if(b==="Percentage") return r2((Number(basic)||0)*(Number(l.rate)||0)/100);
+  return r2((Number(l.qty)||1)*(Number(l.rate)||0));
+}
+function purChargeBasisText(l, cur){
+  const b = l.charge_basis || "Flat";
+  if(b==="Included") return "Included";
+  if(b==="Percentage") return (Number(l.rate)||0)+"% of basic value";
+  return b==="Lumpsum" ? "Lumpsum" : "";
+}
+function purAmd(po){ return Number(po && po.rev)>0 ? " Amd "+po.rev : ""; }
+// GST type warnings from the vendor's GSTIN / state and the currency
+function purGstWarnings(po, vendor, S){
+  const cur = String(po.currency||"INR").toUpperCase(), mode = po.gst_mode||"intra", sug = purGstMode(vendor, S, cur);
+  const w = [];
+  const vState = vendor ? (String(vendor.gst_tax_id||"").trim().length>=2 ? "GSTIN "+String(vendor.gst_tax_id).trim().slice(0,2)+"…" : (vendor.billing_state||vendor.billing_country||"")) : "";
+  if((mode==="intra"||mode==="inter") && sug!==mode && sug!=="import") w.push("The vendor's "+(vState||"address")+" points to "+(sug==="intra"?"CGST + SGST (same state)":"IGST (other state)")+", not "+(mode==="intra"?"CGST + SGST":"IGST")+". Check the vendor's GSTIN / address in the Vendors master.");
+  if(cur!=="INR" && mode!=="import") w.push("The currency is "+cur+" but the GST type is not Import. A foreign vendor's PO is normally Import (duty and IGST on the Bill of Entry).");
+  if(mode==="import" && cur==="INR") w.push("Import is picked but the PO is in INR. Check the currency.");
+  if(vendor && !String(vendor.gst_tax_id||"").trim() && cur==="INR" && (mode==="intra"||mode==="inter")) w.push("The vendor has no GSTIN in the Vendors master. An unregistered vendor charges no GST: pick No GST (we pay under reverse charge where it applies).");
+  return { sug, w };
+}
+// ---- NDE / material certificate ----
+const PUR_NDE_BY = ["Vendor","Us","TPI agency"];
+const PUR_NDE_WIT = ["—","Us","TPI","Client","TPI + Client"];
+const PUR_MTC_TYPES = ["3.1","3.2","Not required","Others"];
+const PUR_STAGE_BY = ["TPI","Us","Client","TPI + Client"];
+const PUR_MTC_CAT = "Material Certificate";
+// document type names are matched as the master's unique rule does: letters and digits only, no trailing s
+function purNormCat(v){ return String(v||"").toLowerCase().replace(/[^a-z0-9]/g,"").replace(/s$/,""); }
+let PUR_MTC_NAME = null;   // the master's own spelling of Material Certificate
+async function purMtcCatName(){
+  if(PUR_MTC_NAME) return PUR_MTC_NAME;
+  try{ const { data } = await sb.from("doc_category_tbl").select("value"); const hit = (data||[]).find(c=>purNormCat(c.value)===purNormCat(PUR_MTC_CAT)); PUR_MTC_NAME = (hit && hit.value) || PUR_MTC_CAT; }
+  catch(e){ PUR_MTC_NAME = PUR_MTC_CAT; }
+  return PUR_MTC_NAME;
+}
+function purMtcLabel(m){
+  if(!m || !m.type || m.type==="Not required") return "";
+  if(m.type==="Others") return String(m.other||"").trim() || "Material certificate";
+  return "Material certificate — EN 10204 Type "+m.type;
+}
+const PUR_DOC_WHEN = { "itp":"Within 7 days of this PO, for our approval", "drawing":"Before manufacture, for our approval", "datasheet":"Before manufacture, for our approval",
+  "packing list":"With each consignment", "material certificate":"With each consignment" };
+function purDocWhen(cat){ const n = purNormCat(cat); const k = Object.keys(PUR_DOC_WHEN).find(x=>purNormCat(x)===n); return (k && PUR_DOC_WHEN[k]) || "With the supply"; }
+// a small ⓘ that explains a field on hover
+function PurTip({ text }){
+  const [o,setO] = useState(false);
+  return h("span",{style:{position:"relative",display:"inline-block",marginLeft:5,cursor:"help",color:"#1e528a",fontWeight:700},onMouseEnter:()=>setO(true),onMouseLeave:()=>setO(false),onClick:()=>setO(v=>!v)}, "ⓘ",
+    o ? h("span",{style:{position:"absolute",left:18,top:-4,width:300,maxWidth:"70vw",background:"#1c1f1a",color:"#fff",fontWeight:400,fontSize:11.5,lineHeight:1.45,borderRadius:6,padding:"8px 10px",zIndex:30}}, text) : null);
+}
+// ---- the vendor's documents (document_requests_tbl, entity purchase_order) ----
+async function purDocsLoad(po_no){
+  const [r, d] = await Promise.all([ fetchDocumentRequirements(po_no).catch(()=>[]), fetchDocumentHistory(po_no).catch(()=>[]) ]);
+  return { reqs:r||[], docs:(d||[]).filter(x=>!x.is_archived) };
+}
+async function purSyncMtcReq(po, by){
+  if(!po || !po.po_no || po.po_kind==="SPO") return;
+  const need = !!purMtcLabel(po.mtc);
+  const { data } = await sb.from("document_requests_tbl").select("id,category,fulfilled_document_id").eq("entity_id",po.po_no);
+  const mine = (data||[]).filter(r=>purNormCat(r.category)===purNormCat(PUR_MTC_CAT));
+  if(need && !mine.length) await sb.from("document_requests_tbl").insert({ entity_type:"purchase_order", entity_id:po.po_no, category:await purMtcCatName(), is_mandatory:true, source:"PO", requested_by:by||"App" });
+  if(!need){ const open = mine.filter(r=>!r.fulfilled_document_id); if(open.length) await sb.from("document_requests_tbl").delete().in("id",open.map(r=>r.id)); }
+}
+// what is still to come from the vendor (open requirements). SPOs and old / FFS POs have no gate.
+async function purDocsPending(po_no){
+  const { data: p } = await sb.from("po_register").select("id,po_no,po_kind,source,owner_name,docs_override,vendor_name").eq("po_no",po_no).limit(1).maybeSingle();
+  if(!p || p.po_kind==="SPO" || (p.source && p.source!=="App")) return { po:p, pending:[], override:null };
+  const { data } = await sb.from("document_requests_tbl").select("id,category,fulfilled_document_id").eq("entity_id",po_no);
+  const pending = Array.from(new Set((data||[]).filter(r=>!r.fulfilled_document_id).map(r=>r.category||"Document")));
+  return { po:p, pending, override:p.docs_override||null };
+}
+// The GRN gate: true = go ahead. The Purchase Manager (or a super admin) may override with a reason.
+async function purGrnDocsGate(po_no, user){
+  if(!po_no) return true;
+  let g; try{ g = await purDocsPending(po_no); }catch(e){ return true; }
+  if(!g.pending.length || (g.override && !g.override.cleared_at)) return true;
+  const w = await purWho(user);
+  if(!(w.pm || w.sa)){
+    alert("The vendor's documents for "+po_no+" are not in yet:\n\n• "+g.pending.join("\n• ")+"\n\nThe GRN can't be cleared until they are received (Purchase Register → "+po_no+" → Documents), or the Purchase Manager overrides.");
+    return false;
+  }
+  const why = prompt("The vendor's documents for "+po_no+" are not in yet:\n\n• "+g.pending.join("\n• ")+"\n\nAs Purchase Manager you may let this GRN be cleared without them. The purchase team is then reminded every 2 days until each one is received.\n\nReason for the override:");
+  if(!why || String(why).trim().length<4){ if(why!==null) alert("Write the reason (a few words)."); return false; }
+  const now = new Date().toISOString();
+  const ov = { by:w.name||user.username, at:now, reason:String(why).trim(), pending:g.pending, last_reminded:now };
+  const { error } = await sb.from("po_register").update({ docs_override:ov }).eq("po_no",po_no);
+  if(error){ alert(/docs_override/.test(error.message||"") ? "Run structure_po_like_sale_order_2026-10-20.sql first (both companies)." : "Could not save the override: "+error.message); return false; }
+  await logAudit("UPDATE","po_register",po_no,"GRN allowed without the vendor's documents ("+g.pending.join(", ")+"): "+ov.reason,user.username||"");
+  try{ await loadPostPeople(true); const to = Array.from(new Set([g.po && g.po.owner_name, ...postHolders("purchase_manager")].filter(Boolean)));
+    await notifyPeople(to, po_no+" ("+((g.po&&g.po.vendor_name)||"")+"): GRN allowed by "+ov.by+" without "+g.pending.join(", ")+" — "+ov.reason+". Get them from the vendor; you will be reminded every 2 days.", "warn"); }catch(e){}
+  return true;
+}
+// once per log-in: an override still waiting for documents reminds the PO owner and the Purchase Manager every 2 days
+const PUR_DOC_REMIND_DAYS = 2;
+async function purDocsReminderSweep(){
+  try{
+    const { data, error } = await sb.from("po_register").select("po_no,vendor_name,owner_name,docs_override").not("docs_override","is",null);
+    if(error || !data || !data.length) return;
+    await loadPostPeople(true);
+    for(const p of data){
+      const ov = p.docs_override||{}; if(ov.cleared_at) continue;
+      const g = await purDocsPending(p.po_no);
+      const now = new Date();
+      if(!g.pending.length){ await sb.from("po_register").update({ docs_override:{ ...ov, cleared_at:now.toISOString() } }).eq("po_no",p.po_no); continue; }
+      const last = new Date(ov.last_reminded||ov.at||0);
+      if(now - last < PUR_DOC_REMIND_DAYS*864e5) continue;
+      const to = Array.from(new Set([p.owner_name, ...postHolders("purchase_manager")].filter(Boolean)));
+      await notifyPeople(to, "Reminder: "+p.po_no+" ("+(p.vendor_name||"")+") — the vendor's "+g.pending.join(", ")+" still not received. The GRN was allowed on "+fmtDMY(ov.at)+" by "+(ov.by||"")+". Get them and log them in the PO's Documents.", "warn");
+      await sb.from("po_register").update({ docs_override:{ ...ov, last_reminded:now.toISOString(), pending:g.pending } }).eq("po_no",p.po_no);
+    }
+  }catch(e){ console.warn("PO documents reminder", e); }
+}
+// ---- the documents-required question (at Send for approval) ----
+function PurDocAsk({ po, cats, have, onSave, onCancel }){
+  const [pick,setPick] = useState([]);
+  const list = (cats||[]).filter(c=>purNormCat(c)!==purNormCat(PUR_MTC_CAT));
+  const had = new Set((have||[]).map(x=>purNormCat(x)));
+  const tog = (c)=> setPick(p=> p.includes(c) ? p.filter(x=>x!==c) : [...p, c]);
+  return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:2600,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"60px 16px"}},
+    h("div",{style:{background:"#fff",borderRadius:10,width:480,maxWidth:"100%",padding:"16px 18px",maxHeight:"85vh",overflow:"auto"}},
+      h("b",{style:{fontSize:14}},"Which documents do you need from the vendor?"),
+      h("div",{style:{fontSize:11.5,color:colors.muted,margin:"3px 0 10px"}},"Tick from the PO Document Types. They print on the PO (Documents required) and the GRN of "+(po.po_no||"this PO")+" can't be cleared until they are received."+(po.po_kind!=="SPO"?" The material certificate is set on the Documents tab.":"")),
+      list.map(c=>h("label",{key:c,style:{display:"flex",gap:8,alignItems:"center",fontSize:12.5,margin:"4px 0",cursor:"pointer"}},
+        h("input",{type:"checkbox",checked:had.has(purNormCat(c))||pick.includes(c),disabled:had.has(purNormCat(c)),onChange:()=>tog(c)}), c, had.has(purNormCat(c))?h("span",{style:{fontSize:10.5,color:colors.muted}}," (already required)"):null)),
+      h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12,flexWrap:"wrap"}},
+        h("button",{onClick:()=>onSave(pick),style:btnPrimary}, pick.length ? "Save and send for approval" : "None needed — send for approval"),
+        h("button",{onClick:onCancel,style:btnSmall},"Cancel"))));
+}
+// ---- PO lists (Purchase Manager, admins) ----
+function PurListsDialog({ user, onClose }){
+  const [L,setL] = useState(null); const [k,setK] = useState("payment"); const [v,setV] = useState(""); const [err,setErr] = useState("");
+  const load = async()=>{ const x = await purListsLoad(true); setL(x); };
+  useEffect(()=>{ load(); },[]);
+  const rows = ((L && L.__rows)||[]).filter(r=>r.list_key===k);
+  const add = async()=>{ const t = String(v).trim(); if(!t) return; setErr("");
+    const { error } = await sb.from("po_list_tbl").insert({ list_key:k, value:t, sort_no:(rows.length+1)*10, created_by:user.username||"" });
+    if(error){ setErr(/duplicate|unique/i.test(error.message||"") ? "Already in the list." : error.message); return; }
+    await logAudit("INSERT","po_list_tbl",k,"Added to the PO list "+PUR_LIST_KEYS[k]+": "+t,user.username||""); setV(""); load(); };
+  const del = async(r)=>{ if(!confirm("Remove \""+r.value+"\" from "+PUR_LIST_KEYS[k]+"? POs that already use it keep their wording.")) return;
+    await sb.from("po_list_tbl").delete().eq("id",r.id); await logAudit("DELETE","po_list_tbl",k,"Removed from the PO list "+PUR_LIST_KEYS[k]+": "+r.value,user.username||""); load(); };
+  return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:2600,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"60px 16px"}},
+    h("div",{style:{background:"#fff",borderRadius:10,width:560,maxWidth:"100%",padding:"16px 18px",maxHeight:"85vh",overflow:"auto"}},
+      h("div",{style:{display:"flex",alignItems:"center",gap:8}}, h("b",{style:{fontSize:14,flex:1}},"PO lists"), h("button",{onClick:onClose,style:btnSmall},"Close")),
+      h("div",{style:{fontSize:11.5,color:colors.muted,margin:"3px 0 10px"}},"The dropdowns on the PO's Commercial Terms and Extra charges. Separate from the Sale Order's lists. Typing on a PO never adds to them."),
+      !L ? "Reading…" : L.__missing ? h("div",{style:{color:colors.danger,fontSize:12}},"Run structure_po_like_sale_order_2026-10-20.sql first (both companies).") :
+      h("div",null,
+        h("select",{value:k,onChange:e=>setK(e.target.value),style:{...inputStyle,marginBottom:8}}, Object.keys(PUR_LIST_KEYS).map(x=>h("option",{key:x,value:x},PUR_LIST_KEYS[x]))),
+        rows.map(r=>h("div",{key:r.id,style:{display:"flex",gap:8,alignItems:"center",padding:"4px 0",borderBottom:"1px solid "+colors.border,fontSize:12.5}}, h("span",{style:{flex:1}},r.value), h("button",{onClick:()=>del(r),style:{...btnSmall,color:"#8a2d2d"}},"Remove"))),
+        h("div",{style:{display:"flex",gap:6,marginTop:8}}, h("input",{value:v,onChange:e=>setV(e.target.value),placeholder:"New entry",style:{...inputStyle,flex:1}}), h("button",{onClick:add,style:btnPrimary},"Add")),
+        err ? h("div",{style:{color:colors.danger,fontSize:12,marginTop:6}},err) : null)));
+}
+// ---- amendment: was → now ----
+async function purPrevRev(po_no, rev){
+  if(!(Number(rev)>0)) return null;
+  const { data } = await sb.from("po_rev_tbl").select("*").eq("po_no",po_no).eq("rev",Number(rev)-1).order("id",{ascending:false}).limit(1);
+  return (data && data[0]) || null;
+}
+function purLineText(l){ return [[l.shape,l.spec,l.grade].filter(Boolean).join(" "), l.size].filter(Boolean).join(" · ") || l.description || "—"; }
+function purAmdDiff(prevSnap, po, lines, T, cur){
+  const out = []; if(!prevSnap) return out;
+  const P = prevSnap.po||{}, PL = prevSnap.lines||[], PT = prevSnap.totals||{};
+  const m = (x)=> purMoney(x, cur);
+  const by = (arr)=>{ const o = {}; arr.forEach(l=>{ o[l.sl] = l; }); return o; };
+  const a = by(PL), b = by(lines||[]);
+  const sls = Array.from(new Set([...Object.keys(a), ...Object.keys(b)].map(Number))).sort((x,y)=>x-y);
+  const basicOf = (snapLines)=> (snapLines||[]).filter(l=>l.line_kind!=="charge").reduce((s,l)=>s+purLineAmt(l).amt,0);
+  const bA = basicOf(PL), bB = basicOf(lines);
+  sls.forEach(sl=>{ const o = a[sl], n = b[sl]; const amt = (l, bs)=> l.line_kind==="charge" ? purChargeAmt(l, bs) : purLineAmt(l).amt;
+    if(o && !n){ out.push([String(sl), (o.line_kind==="charge"?o.description:purLineText(o)), (Number(o.qty)||0)+" "+(o.count_uom||""), "Deleted"]); return; }
+    if(n && !o){ out.push([String(sl), "New line: "+(n.line_kind==="charge"?n.description:purLineText(n)), "—", (Number(n.qty)||0)+" "+(n.count_uom||"")+" @ "+m(n.rate)]); return; }
+    const t = o.line_kind==="charge" ? (n.description||"Charge") : purLineText(n);
+    if(purLineText(o)!==purLineText(n) && o.line_kind!=="charge") out.push([String(sl), "Item", purLineText(o), purLineText(n)]);
+    if(Number(o.qty)!==Number(n.qty) && o.line_kind!=="charge") out.push([String(sl), "Quantity — "+t, (Number(o.qty)||0)+" "+(o.count_uom||""), (Number(n.qty)||0)+" "+(n.count_uom||"")]);
+    if(Number(o.rate)!==Number(n.rate) || (o.charge_basis||"")!==(n.charge_basis||"")) out.push([String(sl), (o.line_kind==="charge"?"":"Rate — ")+t, o.line_kind==="charge" ? (purChargeBasisText(o)||m(o.rate)) : m(o.rate), n.line_kind==="charge" ? (purChargeBasisText(n)||m(n.rate)) : m(n.rate)]);
+    const ao = amt(o, bA), an = amt(n, bB); if(Math.abs(ao-an)>0.005) out.push([String(sl), "Amount — "+t, m(ao), m(an)]);
+  });
+  const hd = [["delivery_by","Delivery required by",fmtDMY],["deliver_to","Deliver to",x=>x||"—"],["vendor_quote_ref","Your quotation",x=>x||"—"],["currency","Currency",x=>x||"INR"],["gst_mode","GST",x=>(PUR_GST_MODES.find(g=>g[0]===x)||[0,x||"—"])[1]]];
+  hd.forEach(([k,l,f])=>{ if(String(P[k]||"")!==String(po[k]||"")) out.push(["—", l, f(P[k])||"—", f(po[k])||"—"]); });
+  const tP = P.terms||{}, tN = po.terms||{}; const cut = (s)=>{ s = String(s||"").replace(/\s+/g," ").trim(); return s ? (s.length>90 ? s.slice(0,88)+"…" : s) : "—"; };
+  [...PUR_TERMS.map(x=>[x[0],x[1]]), ["force_majeure","Force majeure"], ["order_cancellation","Order cancellation"], ["jurisdiction","Jurisdiction"]].forEach(([k,l])=>{ if(String(tP[k]||"").trim()!==String(tN[k]||"").trim()) out.push(["—", l, cut(tP[k]), cut(tN[k])]); });
+  const nt = (x)=> ((x&&x.tests)||[]).map(t=>t.test+" ("+(t.by||"")+(t.witness&&t.witness!=="—"?", witness "+t.witness:"")+")").join(", ");
+  if(nt(P.nde)!==nt(po.nde)) out.push(["—","Tests", nt(P.nde)||"—", nt(po.nde)||"—"]);
+  if(String((P.nde||{}).note||"")!==String((po.nde||{}).note||"")) out.push(["—","Test exceptions", cut((P.nde||{}).note), cut((po.nde||{}).note)]);
+  if(purMtcLabel(P.mtc)!==purMtcLabel(po.mtc) || JSON.stringify((P.mtc||{}).stages||[])!==JSON.stringify((po.mtc||{}).stages||[])) out.push(["—","Material certificate", purMtcLabel(P.mtc)||"Not required", purMtcLabel(po.mtc)||"Not required"]);
+  if(JSON.stringify(P.notes_list||[])!==JSON.stringify(po.notes_list||[])) out.push(["—","Notes", (P.notes_list||[]).length+" notes", (po.notes_list||[]).length+" notes (see Annexure-IV)"]);
+  if(Math.abs((Number(PT.net)||0)-(Number(T.net)||0))>0.005) out.push(["—","Total order value", m(PT.net), m(T.net)]);
+  return out;
+}
+// ================= PO PDF PACK (app POs) =================
+async function purPdfPack(poIn, linesIn, vendorIn){
+  const snap = poIn.snapshot && poIn.stage!=="Draft" ? poIn.snapshot : null;
+  const po = snap ? { ...snap.po, stage:poIn.stage, rev:poIn.rev, sent_on:poIn.sent_on, cancel_reason:poIn.cancel_reason, approved_pm_by:poIn.approved_pm_by, approved_qc_by:poIn.approved_qc_by, approved_pm_at:poIn.approved_pm_at, approved_qc_at:poIn.approved_qc_at } : poIn;
+  const lines = snap ? snap.lines : (linesIn||[]);
+  let V = snap ? snap.vendor : null, CO = snap ? snap.co : null;
+  if(!V){ let v = vendorIn; if(!v){ try{ const { data } = await sb.from("vendor_tbl").select("*").ilike("vendor_name",String(po.vendor_name||"").trim()).limit(1); v = data && data[0]; }catch(e){} }
+    V = v ? { vendor_name:v.vendor_name, addr:purVendorAddr(v), gstin:v.gst_tax_id||"", phone:v.phone||"" } : { vendor_name:po.vendor_name, addr:"", gstin:"", phone:"" }; }
+  if(!CO){ const S = await invSettingsAt(po.po_date || toISODate(new Date())).catch(()=>({})); CO = { gstin:S.our_gstin||"", pan:S.our_pan||"", state:S.our_state||"", factory:S.factory_address||"" }; }
+  const T = snap ? snap.totals : purCalc(po, lines);
+  const cur = String(po.currency||"INR").toUpperCase(), curL = cur==="INR" ? "Rs" : cur;
+  const reqs = snap && snap.reqs ? snap.reqs : (await purDocsLoad(po.po_no).catch(()=>({ reqs:[] }))).reqs.map(r=>r.category).filter(Boolean);
+  const encl = snap && snap.encl ? snap.encl : await fetchOfferEnclosures(po.po_no).catch(()=>[]);
+  const prev = Number(po.rev)>0 ? await purPrevRev(po.po_no, po.rev).catch(()=>null) : null;
+  const co = await pdfCompanyFor(null);
+  const svc = po.po_kind==="SPO";
+  const wmText = po.stage==="Cancelled" ? "CANCELLED" : po.stage==="Draft" ? "DRAFT" : null;
+  // the attached PDFs first, so every page number is known when the Index is drawn
+  const loaded = [];
+  for(const e of encl){ loaded.push(e.filePath ? await loadStoredPdf(e.filePath, "quote-documents") : { pdf:null, pages:0, error:"not stored in the app" }); }
+  window.__pdfAllow = po.po_no;
+  let doc;
+  try{ const { jsPDF } = window.jspdf; doc = new jsPDF({ orientation:"portrait", unit:"mm", format:"a4" }); }
+  finally{ window.__pdfAllow = null; }
+  const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight();
+  const dark = [28,31,26];
+  const TOP = CLASSIC_CONTENT_TOP+4, BOT = CLASSIC_CONTENT_BOTTOM+2;
+  const letterhead = (t)=> drawClassicPdfFrame(doc, W, H, co, t, { gstin:CO.gstin });
+  const head = { fillColor:PDF_GREEN, textColor:[255,255,255], fontStyle:"bold", fontSize:8.4, font:"times" };
+  const body = { font:"helvetica", fontSize:8, textColor:dark, cellPadding:1.8, lineColor:[26,26,26], lineWidth:0.2, valign:"top" };
+  const lab = { fontStyle:"bold", fillColor:PDF_PALE, textColor:PDF_GREEN, font:"times", fontSize:8.4 };
+  const tbl = (o, title)=> doc.autoTable({ theme:"grid", headStyles:head, bodyStyles:body, styles:{ overflow:"linebreak" }, margin:{ top:TOP, left:12, right:12, bottom:BOT }, didDrawPage:()=>letterhead(title), ...o });
+  const newPage = (title)=>{ doc.addPage(); letterhead(title); return TOP+2; };
+  const kindTitle = (svc ? "SERVICE PURCHASE ORDER" : "PURCHASE ORDER")+(Number(po.rev)>0 ? " — AMENDMENT "+po.rev : "");
+  const poRef = po.po_no+purAmd(po);
+  const ann = [];   // { code, desc, from, to }
+  // ---- 1. Cover ----
+  letterhead(kindTitle);
+  let y = TOP+2;
+  const addr = [V.addr, V.gstin ? "GSTIN: "+V.gstin : "", V.phone ? "Phone: "+V.phone : ""].filter(Boolean).join("\n");
+  doc.autoTable({ startY:y, theme:"grid", styles:{ font:"times", fontSize:8.4, textColor:dark, cellPadding:{top:2.2,bottom:2.2,left:2.5,right:2.5}, lineColor:[26,26,26], lineWidth:0.2, valign:"top" },
+    columnStyles:{ 0:{ cellWidth:24, ...lab }, 1:{ cellWidth:80 } }, margin:{ left:12, right:W-12-104 },
+    body:[["Vendor", { content:V.vendor_name+(addr?"\n"+addr:""), styles:{ fontStyle:"normal" } }]] });
+  const leftEnd = doc.lastAutoTable.finalY;
+  const rightRows = [[purKindLabel(po.po_kind)+" No.", { content:poRef, styles:{ textColor:[180,60,20], fontStyle:"bold" } }], ["PO Date", fmtDMY(po.po_date)]];
+  if(Number(po.rev)>0) rightRows.push(["Amendment", { content:"No. "+po.rev+" dated "+fmtDMY((snap && snap.at) || new Date().toISOString()), styles:{ textColor:[180,60,20] } }]);
+  rightRows.push(["Your Quote No.", po.vendor_quote_ref||"—"], ["Quote Date", po.vendor_quote_date ? fmtDMY(po.vendor_quote_date) : "—"], ["Our Contract", po.contract_ref||"Stock"]);
+  doc.autoTable({ startY:y, theme:"grid", styles:{ font:"times", fontSize:8.4, textColor:dark, cellPadding:{top:2.2,bottom:2.2,left:2.5,right:2.5}, lineColor:[26,26,26], lineWidth:0.2 },
+    columnStyles:{ 0:{ cellWidth:28, ...lab }, 1:{ cellWidth:46 } }, margin:{ left:W-12-74, right:12 }, body:rightRows });
+  y = Math.max(leftEnd, doc.lastAutoTable.finalY) + 8;
+  doc.setFont("times","normal"); doc.setFontSize(9.5); doc.setTextColor(...dark);
+  if(po.vendor_contact){ doc.text("Kind Attention", 12, y); doc.text(String(po.vendor_contact), 52, y); y += 8; }
+  doc.text("Dear Sir,", 12, y); y += 7;
+  const refTxt = (po.vendor_quote_ref ? "Your quotation "+po.vendor_quote_ref+(po.vendor_quote_date?" dated "+fmtDMY(po.vendor_quote_date):"") : "Your offer")+(Number(po.rev)>0 ? "; our "+po.po_no+" dated "+fmtDMY(po.po_date) : "");
+  const sub = Number(po.rev)>0 ? "Amendment "+po.rev+" to our "+(svc?"Service ":"")+"Purchase Order "+po.po_no : (String(po.subject||"").trim() || (svc ? "Service Purchase Order" : "Purchase Order")+(po.contract_ref?" against our contract "+po.contract_ref:""));
+  const lv = (k, v)=>{ doc.setFont("times","bold"); doc.text(k, 12, y); doc.setFont("times","normal"); const L = doc.splitTextToSize(v, W-12-26); L.forEach((ln,i)=>doc.text(ln, 26, y+i*4.6)); y += Math.max(6, L.length*4.6+1.5); };
+  lv("Ref:", refTxt); lv("Sub:", sub); y += 3;
+  const para = (t)=>{ const L = doc.splitTextToSize(t, W-24); L.forEach((ln,i)=>doc.text(ln, 12, y+i*4.6)); y += L.length*4.6+3.5; };
+  if(Number(po.rev)>0){
+    para("Please note the amendment to our above "+(svc?"Service ":"")+"Purchase Order, set out in the Amendment Sheet (Annexure-A). All other terms remain unchanged. This amended order supersedes the earlier issue in full.");
+    if(prev && prev.reason) para("Reason: "+prev.reason);
+  } else para("With reference to your above quotation and subsequent discussions, we are pleased to place our order on you for the "+(svc?"services":"supply of the items")+" listed in the Price Summary (Annexure-I), subject to the commercial terms, "+(svc?"":"inspection and testing requirements, ")+"notes and documents set out in the annexures to this order.");
+  para("Please quote our PO number on all correspondence, invoices, delivery challans, packing lists and material tags. Kindly acknowledge receipt of this order within 2 working days.");
+  const deliverTo = [po.deliver_to||"", po.deliver_to==="Meppur Factory" && CO.factory ? String(CO.factory).replace(/\s*\n\s*/g,", ") : ""].filter(Boolean).join(" — ");
+  doc.autoTable({ startY:y, theme:"grid", styles:{ font:"helvetica", fontSize:8.2, textColor:dark, cellPadding:2, lineColor:[26,26,26], lineWidth:0.2 }, columnStyles:{ 0:{ cellWidth:40, ...lab } }, margin:{ left:12, right:12 },
+    body:[["Total order value", { content:curL+" "+purMoney(T.net,cur)+"  ("+invAmountWords(T.net, cur)+")"+(po.gst_mode==="import"?" — excluding customs duty and IGST":""), styles:{ fontStyle:"bold" } }],
+      ["Delivery required by", po.delivery_by ? fmtDMY(po.delivery_by) : "As per the delivery term"], ["Deliver to", deliverTo||"—"]] });
+  y = doc.lastAutoTable.finalY + 10;
+  if(y > H-BOT-40){ y = newPage(kindTitle); }
+  doc.setFont("times","normal"); doc.setFontSize(9.5);
+  doc.text("Thanking you,", 12, y); doc.text("Yours faithfully,", 12, y+5); doc.setFont("times","bold"); doc.text("For "+pdfFooterCompanyName(co), 12, y+10);
+  doc.setFont("times","normal"); doc.text("Authorised Signatory", 12, y+28); doc.setFont("helvetica","normal"); doc.setFontSize(8); doc.text((po.owner_name||"")+(po.owner_name?" · Purchase":""), 12, y+32.5);
+  const appr = po.approved_pm_at && po.approved_qc_at ? "Approved: "+[po.approved_pm_by, po.approved_qc_by].filter(Boolean).join(" & ")+" on "+fmtDMY(po.approved_qc_at||po.approved_pm_at) : "Not yet approved";
+  doc.text(appr, W-12, y+32.5, { align:"right" });
+  // ---- 2. Index (filled at the end) ----
+  doc.addPage(); const indexPage = doc.internal.getNumberOfPages();
+  // ---- Annexure-A: amendment sheet ----
+  if(Number(po.rev)>0){
+    const p0 = doc.internal.getNumberOfPages()+1; doc.addPage(); letterhead("ANNEXURE-A — AMENDMENT SHEET");
+    tbl({ startY:TOP+2, body:[["Amendment No.", String(po.rev)], ["Date", fmtDMY((snap && snap.at) || new Date().toISOString())], ["Reason", (prev && prev.reason) || "—"], ["What changes", (prev && Array.isArray(prev.what) && prev.what.length) ? prev.what.join(", ") : "—"], ["Raised by", (prev && prev.created_by) || po.owner_name || "—"]],
+      columnStyles:{ 0:{ cellWidth:40, ...lab } } }, "ANNEXURE-A — AMENDMENT SHEET");
+    const diff = purAmdDiff(prev && prev.snapshot, po, lines, T, cur);
+    tbl({ startY:doc.lastAutoTable.finalY+6, head:[["Sl","What","Was","Now"]], body: diff.length ? diff.map(r=>[r[0], r[1], { content:r[2], styles:{ textColor:[163,49,42] } }, { content:r[3], styles:{ textColor:[15,110,86], fontStyle:"bold" } }]) : [["—","No line or term differs from the previous issue","—","—"]],
+      columnStyles:{ 0:{ cellWidth:12, halign:"center" }, 1:{ cellWidth:58 } } }, "ANNEXURE-A — AMENDMENT SHEET");
+    doc.setFont("helvetica","normal"); doc.setFontSize(8); doc.setTextColor(90,90,88);
+    doc.text("Everything else is as in the earlier issue. The full amended order follows.", 12, Math.min(doc.lastAutoTable.finalY+6, H-BOT-2));
+    doc.setTextColor(...dark);
+    ann.push({ code:"Annexure-A", desc:"Amendment Sheet", from:p0, to:doc.internal.getNumberOfPages() });
+  }
+  // ---- Annexure-I: price summary ----
+  { const t1 = "ANNEXURE-I — PRICE SUMMARY"; const p0 = doc.internal.getNumberOfPages()+1; doc.addPage(); letterhead(t1);
+    const withGst = po.gst_mode==="intra" || po.gst_mode==="inter";
+    const items = lines.filter(l=>l.line_kind!=="charge"), charges = lines.filter(l=>l.line_kind==="charge");
+    const B = [];
+    items.forEach(l=>{ const a = purLineAmt(l); const custom = l.description && l.description!==[l.shape,l.spec,l.grade].filter(Boolean).join(" ");
+      const title = l.shape ? (custom ? l.description : l.shape) : (l.description||"");
+      const spec = l.shape ? [custom ? [l.shape,l.spec,l.grade].filter(Boolean).join(" · ") : [l.spec,l.grade].filter(Boolean).join(" · "), l.size].filter(Boolean).join(" · ") : (l.size||"");
+      const qty = (Number(l.qty)||0)+(a.wt && l.price_basis==="kg" && String(l.count_uom||"").toLowerCase()!=="kg" ? "\n= "+a.wt+" kg" : "");
+      const row = [String(l.sl), { content:title+(spec && spec!==title ? "\n"+spec : "")+(l.hsn?"\n"+(svc?"SAC ":"HSN ")+l.hsn:"") }, qty, l.count_uom||"", purMoney(l.rate,cur)+"\n"+purBasisLabel(l)];
+      if(withGst) row.push(l.gst_pct!=null && l.gst_pct!=="" ? String(Number(l.gst_pct)) : "");
+      row.push(purMoney(a.amt,cur)); B.push(row); });
+    const nc = withGst ? 7 : 6;
+    const span = (txt, val, st)=>{ const r = [{ content:txt, colSpan:nc-1, styles:{ halign:"right", fontStyle:"bold", ...(st||{}) } }, { content:val, styles:{ halign:"right", fontStyle:"bold", ...(st||{}) } }]; B.push(r); };
+    span("Basic value", purMoney(T.basic,cur), { fillColor:[244,248,245] });
+    if(charges.length){ B.push([{ content:"Extra charges", colSpan:nc, styles:{ ...lab } }]);
+      charges.forEach(l=>{ const r = ["", { content:l.description||"Charges", colSpan:3 }, { content:purChargeBasisText(l,cur)||(Number(l.qty)>1?Number(l.qty)+" × "+purMoney(l.rate,cur):""), colSpan:withGst?1:1 }];
+        if(withGst) r.push(l.gst_pct!=null && l.gst_pct!=="" ? String(Number(l.gst_pct)) : "");
+        r.push((l.charge_basis==="Included") ? "Included" : purMoney(purChargeAmt(l, T.basic),cur)); B.push(r); });
+      span("Total before tax", purMoney(r2(T.basic+T.add),cur), { fillColor:[244,248,245] }); }
+    if(T.cgst || T.sgst){ span("CGST", purMoney(T.cgst,cur), { fontStyle:"normal" }); span("SGST", purMoney(T.sgst,cur), { fontStyle:"normal" }); }
+    if(T.igst) span("IGST", purMoney(T.igst,cur), { fontStyle:"normal" });
+    if(po.gst_mode==="import") span("GST — Import: customs duty and IGST paid by us on the Bill of Entry", "—", { fontStyle:"normal" });
+    if(po.gst_mode==="none") span("GST — not charged (unregistered / exempt; reverse charge by us where it applies)", "—", { fontStyle:"normal" });
+    if(T.round) span("Round off", purMoney(T.round,cur), { fontStyle:"normal" });
+    span("TOTAL ("+curL+")", purMoney(T.net,cur), { fillColor:PDF_GREEN, textColor:[255,255,255] });
+    const hd = ["Sl","Description & Specification","Qty","UOM","Unit Rate"]; if(withGst) hd.push("GST %"); hd.push("Amount ("+curL+")");
+    const cs = { 0:{ cellWidth:10, halign:"center" }, 2:{ cellWidth:18, halign:"right" }, 3:{ cellWidth:14 }, 4:{ cellWidth:26, halign:"right" } };
+    if(withGst){ cs[5] = { cellWidth:13, halign:"right" }; cs[6] = { cellWidth:28, halign:"right" }; } else cs[5] = { cellWidth:30, halign:"right" };
+    doc.setFont("helvetica","normal"); doc.setFontSize(8); doc.setTextColor(90,90,88);
+    doc.text("All prices in "+cur+(String((po.terms||{}).price_basis||"").trim()?". Price basis: "+String(po.terms.price_basis).trim():"")+".", 12, TOP+1); doc.setTextColor(...dark);
+    tbl({ startY:TOP+3, head:[hd], body:B, columnStyles:cs }, t1);
+    let yy = doc.lastAutoTable.finalY + 6; if(yy > H-BOT-6){ yy = newPage(t1); }
+    doc.setFont("times","bold"); doc.setFontSize(9); doc.text("Amount in words: ", 12, yy); doc.setFont("times","normal");
+    doc.splitTextToSize(invAmountWords(T.net, cur), W-50).forEach((ln,i)=>doc.text(ln, 40, yy+i*4.5));
+    ann.push({ code:"Annexure-I", desc:"Price Summary", from:p0, to:doc.internal.getNumberOfPages() }); }
+  // ---- Annexure-II: commercial terms ----
+  { const t2 = "ANNEXURE-II — COMMERCIAL TERMS"; const p0 = doc.internal.getNumberOfPages()+1; doc.addPage(); letterhead(t2);
+    const tm = po.terms||{};
+    const rows = [...PUR_TERMS, ...PUR_TERMS_OLD].map(([k,l])=>[l, tm[k]]).filter(t=>String(t[1]||"").trim());
+    if(String(tm.force_majeure||"").trim()) rows.push(["Force majeure", String(tm.force_majeure).trim()]);
+    if(String(tm.order_cancellation||"").trim()) rows.push(["Order cancellation", String(tm.order_cancellation).trim()]);
+    if(String(tm.jurisdiction||"").trim()) rows.push(["Jurisdiction", String(tm.jurisdiction).trim()]);
+    tbl({ startY:TOP+2, body: rows.length ? rows : [["Terms","—"]], columnStyles:{ 0:{ cellWidth:40, ...lab } } }, t2);
+    ann.push({ code:"Annexure-II", desc:"Commercial Terms", from:p0, to:doc.internal.getNumberOfPages() }); }
+  // ---- Annexure-III: inspection & testing ----
+  const nde = po.nde||{}, tests = (nde.tests||[]).filter(t=>t && t.test), mtc = po.mtc||{}, mtcL = svc ? "" : purMtcLabel(mtc);
+  let annNo = 3; const roman = ["","I","II","III","IV","V","VI","VII","VIII"];
+  if(tests.length || String(nde.note||"").trim() || mtcL){
+    const t3 = "ANNEXURE-"+roman[annNo]+" — INSPECTION & TESTING"; const p0 = doc.internal.getNumberOfPages()+1; doc.addPage(); letterhead(t3);
+    let yy = TOP+2;
+    if(tests.length){ doc.setFont("times","bold"); doc.setFontSize(9.5); doc.setTextColor(...PDF_GREEN); doc.text("Tests required (whole order)", 12, yy+2); doc.setTextColor(...dark);
+      tbl({ startY:yy+4, head:[["S.No","Test","Done by","Witness"]], body:tests.map((t,i)=>[String(i+1), t.test, t.by||"Vendor", t.witness||"—"]), columnStyles:{ 0:{ cellWidth:12, halign:"center" } } }, t3);
+      yy = doc.lastAutoTable.finalY + 4; }
+    if(String(nde.note||"").trim()){ tbl({ startY:yy, body:[["Exceptions", String(nde.note).trim()]], columnStyles:{ 0:{ cellWidth:40, ...lab } } }, t3); yy = doc.lastAutoTable.finalY + 6; }
+    if(mtcL){ if(yy > H-BOT-30) yy = newPage(t3);
+      doc.setFont("times","bold"); doc.setFontSize(9.5); doc.setTextColor(...PDF_GREEN); doc.text("Material certificate", 12, yy+2); doc.setTextColor(...dark);
+      tbl({ startY:yy+4, body:[["Certificate", mtcL+(mtc.type==="3.1"||mtc.type==="3.2" ? " — every heat / lot, with heat numbers traceable to the items supplied" : "")]], columnStyles:{ 0:{ cellWidth:40, ...lab } } }, t3);
+      yy = doc.lastAutoTable.finalY + 4;
+      const st = mtc.type==="3.2" ? (mtc.stages||[]).filter(s=>s && (s.label||s.what)) : [];
+      if(st.length){ tbl({ startY:yy, head:[["Stage","Inspection","By"]], body:st.map(s=>[s.label||"", s.what||"", [s.by, s.agency].filter(Boolean).join(" — ")]), columnStyles:{ 0:{ cellWidth:26 }, 2:{ cellWidth:46 } } }, t3);
+        yy = doc.lastAutoTable.finalY + 5; if(yy > H-BOT-8) yy = newPage(t3);
+        doc.setFont("times","normal"); doc.setFontSize(9); doc.splitTextToSize("Give us at least 7 days' notice before each inspection stage. Material shall not be despatched without our written release.", W-24).forEach((ln,i)=>doc.text(ln, 12, yy+i*4.5)); } }
+    ann.push({ code:"Annexure-"+roman[annNo], desc:"Inspection & Testing", from:p0, to:doc.internal.getNumberOfPages() }); annNo++;
+  }
+  // ---- notes ----
+  const notes = (po.notes_list && po.notes_list.length ? po.notes_list : (String(po.notes||"").trim() ? [po.notes] : [])).map(x=>String(x||"").trim()).filter(Boolean);
+  if(notes.length){ const tn = "ANNEXURE-"+roman[annNo]+" — NOTES"; const p0 = doc.internal.getNumberOfPages()+1; doc.addPage(); letterhead(tn);
+    tbl({ startY:TOP+2, head:[["S.No","Note"]], body:notes.map((n,i)=>[String(i+1), n]), columnStyles:{ 0:{ cellWidth:12, halign:"center" } } }, tn);
+    ann.push({ code:"Annexure-"+roman[annNo], desc:"Notes", from:p0, to:doc.internal.getNumberOfPages() }); annNo++; }
+  // ---- documents required from the vendor ----
+  const docRows = []; const seen = new Set();
+  if(mtcL){ docRows.push([mtcL, purDocWhen(PUR_MTC_CAT)]); seen.add(purNormCat(PUR_MTC_CAT)); }
+  (reqs||[]).forEach(c=>{ const k = purNormCat(c); if(!k || seen.has(k)) return; seen.add(k); docRows.push([c, purDocWhen(c)]); });
+  if(docRows.length){ const td = "ANNEXURE-"+roman[annNo]+" — DOCUMENTS REQUIRED"; const p0 = doc.internal.getNumberOfPages()+1; doc.addPage(); letterhead(td);
+    doc.setFont("times","normal"); doc.setFontSize(9.5); doc.text("The following documents are part of the "+(svc?"service":"supply")+". Material is not accepted into our stores until they are received.", 12, TOP+2);
+    tbl({ startY:TOP+5, head:[["S.No","Document","When"]], body:docRows.map((r,i)=>[String(i+1), r[0], r[1]]), columnStyles:{ 0:{ cellWidth:12, halign:"center" }, 2:{ cellWidth:62 } } }, td);
+    ann.push({ code:"Annexure-"+roman[annNo], desc:"Documents Required from the Vendor", from:p0, to:doc.internal.getNumberOfPages() }); annNo++; }
+  // ---- enclosures (their pages are spliced in after this annexure, so their page numbers are known now) ----
+  const ins = []; let enclAnn = null; const where = []; let total = 0;
+  if(encl.length){ const te = "ANNEXURE-"+roman[annNo]+" — ENCLOSURES"; const p0 = doc.internal.getNumberOfPages()+1;
+    const nativeGuess = p0 + Math.floor(encl.length/26);
+    let at = nativeGuess;
+    encl.forEach((e,i)=>{ const L = loaded[i]; if(L && L.pdf && L.pages){ where[i] = (at+1)+(L.pages>1?"-"+(at+L.pages):""); at += L.pages; } else where[i] = "sent separately"; });
+    doc.addPage(); letterhead(te);
+    doc.setFont("times","normal"); doc.setFontSize(9.5); doc.text("The following documents are enclosed and form part of this order. Work strictly to the revision listed.", 12, TOP+2);
+    tbl({ startY:TOP+5, head:[["S.No","Document No","Title","Rev","Page Nos"]], body:encl.map((e,i)=>[String(i+1), e.docNumber||"", e.title||e.category||"", String(e.rev), where[i]]),
+      columnStyles:{ 0:{ cellWidth:12, halign:"center" }, 1:{ cellWidth:48 }, 3:{ cellWidth:12, halign:"center" }, 4:{ cellWidth:28, halign:"center" } } }, te);
+    enclAnn = { code:"Annexure-"+roman[annNo], desc:"Enclosures", from:p0, to:null };
+    annNo++; }
+  const native = doc.internal.getNumberOfPages();
+  total = native;
+  encl.forEach((e,i)=>{ const L = loaded[i]; if(L && L.pdf && L.pages){ ins.push({ afterPage:native, loaded:L, seq:i }); total += L.pages; } });
+  if(enclAnn){ enclAnn.to = total; ann.push(enclAnn); }
+  // ---- fill the Index ----
+  doc.setPage(indexPage); letterhead("INDEX");
+  const idx = [["1","","Cover Page","1"],["2","","Index",String(indexPage)]];
+  ann.forEach((a,i)=>{ idx.push([String(i+3), a.code, a.desc, a.from===a.to ? String(a.from) : a.from+"-"+a.to]);
+    if(a===enclAnn) encl.forEach((e,j)=>idx.push(["","",{ content:"   "+(e.docNumber||"Document")+" Rev "+e.rev+(e.title?" — "+e.title:""), styles:{ fontSize:7.4, textColor:[90,90,88] } }, { content:where[j], styles:{ fontSize:7.4, textColor:[90,90,88] } }])); });
+  doc.autoTable({ startY:TOP+2, theme:"grid", head:[["S.No","Annexures","Description","Page Nos"]], body:idx, headStyles:head, bodyStyles:body,
+    columnStyles:{ 0:{ cellWidth:16, halign:"center" }, 1:{ cellWidth:32 }, 3:{ cellWidth:26, halign:"center" } }, margin:{ top:TOP, left:12, right:12, bottom:BOT } });
+  if(Number(po.rev)>0){ try{ const { data: rv } = await sb.from("po_rev_tbl").select("rev,reason,created_at").eq("po_no",po.po_no).order("rev");
+    const hrows = [["Original", fmtDMY(po.po_date), "—"], ...((rv||[]).filter(r=>Number(r.rev)<Number(po.rev)).map(r=>["Amendment "+(Number(r.rev)+1), fmtDMY(r.created_at), r.reason||""]))];
+    doc.setFont("times","bold"); doc.setFontSize(9.5); doc.setTextColor(...PDF_GREEN); doc.text("Amendment history", 12, doc.lastAutoTable.finalY+8); doc.setTextColor(...dark);
+    doc.autoTable({ startY:doc.lastAutoTable.finalY+10, theme:"grid", head:[["Issue","Date","Reason"]], body:hrows, headStyles:head, bodyStyles:body, columnStyles:{ 0:{ cellWidth:30 }, 1:{ cellWidth:26 } }, margin:{ left:12, right:12, bottom:BOT } }); }catch(e){} }
+  // footers and watermark on the native pages
+  for(let p=1;p<=native;p++){ doc.setPage(p); drawClassicPdfFooter(doc, W, H, co, p, total);
+    doc.setFont("helvetica","normal"); doc.setFontSize(6.8); doc.setTextColor(150,150,150); doc.text(poRef, W-CLASSIC_MARGIN-2, H-CLASSIC_FOOTER_TOP+12, { align:"right" }); doc.setTextColor(...dark);
+    if(wmText){ doc.setFont("helvetica","bold"); doc.setFontSize(60); doc.setTextColor(230,195,190); doc.text(wmText, W/2, H/2, { angle:35, align:"center" }); doc.setTextColor(...dark); } }
+  const bad = encl.filter((e,i)=>e.filePath && loaded[i] && loaded[i].error).map(e=>e.docNumber+" Rev "+e.rev);
+  if(bad.length) alert("The PO PDF is ready, but these enclosures could not be merged and are listed as sent separately:\n\n"+bad.join("\n")+"\n\nA password-protected or damaged PDF is the usual cause.");
+  const out = await mergeLoadedPdfPages(doc, ins, { footerText:poRef, watermark:!!wmText, watermarkText:wmText||"DRAFT" });
+  out.save((po.po_kind+"_"+po.po_no+(Number(po.rev)>0?"_Amd"+po.rev:"")+(wmText?"_"+wmText:"")).replace(/[^A-Za-z0-9_-]+/g,"_")+".pdf");
 }
 
 // ================= PURCHASE REGISTER =================
@@ -51239,6 +51793,7 @@ function PurchaseRegisterScreen({ user }){
   const [showItems,setShowItems] = useState(false); const [open,setOpen] = useState(null);   // { id } | { create:"PO"|"SPO" }
   const [limit,setLimit] = useState(300);
   const [PB,setPB] = useState(null); const [bill,setBill] = useState("All");   // 213: bills against each PO
+  const [lists,setLists] = useState(false);   // 217: PO lists
   const load = useCallback(async()=>{
     pbLoad().then(setPB).catch(()=>setPB(null));
     try{
@@ -51270,9 +51825,9 @@ function PurchaseRegisterScreen({ user }){
   const num = { ...td, textAlign:"right", fontFamily:"monospace", fontSize:12, whiteSpace:"nowrap" };
   const lineText = (l)=> [[l.shape,l.spec,l.grade].filter(Boolean).join(" "), l.size, l.shape?null:l.description].filter(Boolean).join(" · ") || l.description || "—";
   const exportXlsx = ()=>{
-    const hd = ["PO No","Kind","Rev","Source","PO date","Vendor","Contract","Basic value","Charges","GST","Net","Currency","Stage","Sent on","Sent to","How","Owner","Created by","Bills","Billed (before GST)","Bill vouchers"];
+    const hd = ["PO No","Kind","Amd","Source","PO date","Vendor","Contract","Basic value","Charges","GST","Net","Currency","Stage","Sent on","Sent to","How","Owner","Created by","Bills","Billed (before GST)","Bill vouchers","Net in INR (reference)","Sent link"];
     const rows = shown.map(p=>{ const x = pbSt[p.po_no]; return [p.po_no,purKindLabel(p.po_kind),p.rev||0,purSourceLabel(p.source),fmtDMY(p.po_date),p.vendor_name,p.contract_ref||"",r2(value(p)),Number(p.total_addition)||0,Number(p.total_tax)||0,Number(p.net_amt)||0,p.currency||"INR",p.stage,fmtDMY(p.sent_on),p.sent_to||"",p.sent_how||"",p.owner_name||"",p.created_by||"",
-      billOf(p)==="Late" ? "Not billed ("+(x&&x.days)+" days since GRN)" : billOf(p)==="?" ? "" : billOf(p), x ? x.billed : "", x ? x.vouchers.join(", ") : ""]; });
+      billOf(p)==="Late" ? "Not billed ("+(x&&x.days)+" days since GRN)" : billOf(p)==="?" ? "" : billOf(p), x ? x.billed : "", x ? x.vouchers.join(", ") : "", String(p.currency||"INR").toUpperCase()!=="INR" && Number(p.fx_rate) ? r2((Number(p.net_amt)||0)*Number(p.fx_rate)) : "", p.sent_link||""]; });
     const lh = ["PO No","#","Shape","Spec","Grade","Size","Description","Item code","Qty","Count","Price basis","Unit wt (kg)","Rate","Amount","Received qty","Kind"];
     const lrows = []; shown.forEach(p=>(L[p.po_no]||[]).forEach((l,i)=>lrows.push([p.po_no,l.sl||i+1,l.shape||"",l.spec||"",l.grade||"",l.size||"",l.description||"",l.item||"",Number(l.qty)||0,l.count_uom||"",l.source==="FFS"?"":purBasisLabel(l),l.unit_wt||"",Number(l.rate)||0,purLineAmt(l).amt,l.received_qty!=null?Number(l.received_qty):"",l.line_kind||"item"])));
     const wb = XLSX.utils.book_new();
@@ -51289,6 +51844,7 @@ function PurchaseRegisterScreen({ user }){
       h("div",{style:{marginLeft:"auto",display:"flex",gap:6}},
         who && who.make ? h("button",{onClick:()=>setOpen({ create:"PO" }),style:btnPrimary},"+ New PO") : null,
         who && who.make ? h("button",{onClick:()=>setOpen({ create:"SPO" }),style:{...btnPrimary,background:"#0c447c"}},"+ New Service PO") : null,
+        who && (who.pm || who.sa || who.admin) ? h("button",{onClick:()=>setLists(true),style:btnSmall,title:"The dropdowns of the PO's terms and extra charges"},"PO lists") : null,
         h("button",{onClick:exportXlsx,style:btnSmall},"Download Excel"), h("button",{onClick:load,style:btnSmall},"Refresh"))),
     who && !who.make ? h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:6}},"New POs are made by the Purchase department, the Stores In Charge, the Purchase Manager and admins.") : null,
     err ? h("div",{style:{color:colors.danger,fontSize:12,marginBottom:8}},"Could not read: "+err+" — has structure_purchase_phase1_2026-10-20.sql been run?") : null,
@@ -51307,7 +51863,7 @@ function PurchaseRegisterScreen({ user }){
         h("tbody",null, shown.slice(0,limit).map(p=>{ const ls = L[p.po_no]||[]; const tone = PUR_TONE[p.stage]||["#eee","#555"]; const cur = String(p.currency||"INR").toUpperCase();
           const show = showItems ? ls : ls.slice(0,1);
           return h("tr",{key:p.id,onClick:()=>setOpen({ id:p.id }),style:{cursor:"pointer"}},
-            h("td",{style:{...td,whiteSpace:"nowrap"}}, h("span",{style:{color:"#0c447c",fontFamily:"monospace",fontWeight:600}},p.po_no), Number(p.rev)>0?h("span",{style:{fontSize:10.5,color:colors.muted}}," Rev "+p.rev):null,
+            h("td",{style:{...td,whiteSpace:"nowrap"}}, h("span",{style:{color:"#0c447c",fontFamily:"monospace",fontWeight:600}},p.po_no), Number(p.rev)>0?h("span",{style:{fontSize:10.5,color:colors.muted}}," Amd "+p.rev):null,
               h("div",null, h("span",{style:{fontSize:10,borderRadius:6,padding:"0 6px",border:"1px solid "+colors.border,color:colors.muted}},purSourceLabel(p.source)), p.po_kind==="SPO"?h("span",{style:{fontSize:10,marginLeft:4,color:"#0c447c"}},"Service"):null)),
             h("td",{style:{...td,whiteSpace:"nowrap"}}, fmtDMY(p.po_date)),
             h("td",{style:td}, p.vendor_name),
@@ -51323,7 +51879,8 @@ function PurchaseRegisterScreen({ user }){
             h("td",{style:{...td,fontSize:11.5}}, p.owner_name||p.created_by||""));
         }))),
       shown.length>limit ? h("div",{style:{padding:10,textAlign:"center"}}, h("button",{onClick:()=>setLimit(n=>n+300),style:btnSmall},"Show more ("+(shown.length-limit)+" left)")) : null),
-    open ? h(PurchaseOrderEditor,{ user, who, poId:open.id||null, createKind:open.create||null, onClose:()=>setOpen(null), onChanged:load }) : null);
+    open ? h(PurchaseOrderEditor,{ user, who, poId:open.id||null, createKind:open.create||null, onClose:()=>setOpen(null), onChanged:load }) : null,
+    lists ? h(PurListsDialog,{ user, onClose:()=>setLists(false) }) : null);
 }
 
 // ================= PO / SERVICE PO SCREEN =================
@@ -51336,6 +51893,14 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
   const [M,setM] = useState({ shapes:[], specs:{}, grades:{}, uoms:[] }); const [contracts,setContracts] = useState([]);
   const [sug,setSug] = useState({}); const [busy,setBusy] = useState(false); const [msg,setMsg] = useState(""); const [revs,setRevs] = useState([]);
   const [sentDlg,setSentDlg] = useState(null); const [reasonDlg,setReasonDlg] = useState(null);
+  // 217: laid out like the Sale Order
+  const [tab,setTab] = useState("po"); const [PL,setPL] = useState(null); const [tests,setTests] = useState([]); const [docCats,setDocCats] = useState([]);
+  const [docsInfo,setDocsInfo] = useState(null); const [docsOpen,setDocsOpen] = useState(false); const [askDocs,setAskDocs] = useState(null); const [amdDlg,setAmdDlg] = useState(null);
+  useEffect(()=>{ purListsLoad().then(setPL);
+    sb.from("test_types_tbl").select("test_name").order("test_name").then(({data})=>setTests(Array.from(new Set((data||[]).map(r=>r.test_name).filter(Boolean)))));
+    sb.from("doc_category_tbl").select("*").then(({data})=>{ const all = data||[]; const has = all.some(c=>"po_use" in c); setDocCats(all.filter(c=> has ? c.po_use===true : true).map(c=>c.value).filter(Boolean).sort()); }); },[]);
+  const loadDocs = useCallback(async(no)=>{ if(!no) return; try{ setDocsInfo(await purDocsLoad(no)); }catch(e){ setDocsInfo({ reqs:[], docs:[] }); } },[]);
+  useEffect(()=>{ if(po && po.po_no) loadDocs(po.po_no); },[po && po.po_no]);
   useEffect(()=>{ if(!who) purWho(user).then(setWho); },[]);
   useEffect(()=>{ (async()=>{
     const [vs, sh, um, so, s] = await Promise.all([ fetchPaged(()=>sb.from("vendor_tbl").select("*")).catch(()=>[]), sb.from("materials_shape").select("shape").order("shape"), sb.from("uom_tbl").select("uom").order("uom"),
@@ -51355,7 +51920,8 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
     } else {
       const w = whoIn || await purWho(user);
       setPo({ po_no:"", po_kind:createKind||"PO", source:"App", stage:"Draft", status:"Draft", rev:0, po_date:toISODate(new Date()), vendor_name:"", currency:"INR", gst_mode:"intra",
-        deliver_to:PUR_DELIVER_TO[0], terms:{ ...PUR_TERMS_DEFAULT }, owner_name:w.name, created_by:user.username });
+        deliver_to:PUR_DELIVER_TO[0], terms:{ ...PUR_TERMS_DEFAULT }, notes_list:PUR_NOTES_DEFAULT.slice(), nde:{ tests:[], note:"" }, mtc:{ type:(createKind==="SPO"?"Not required":""), other:"", stages:[] },
+        owner_name:w.name, created_by:user.username });
       setLines([purBlankLine(createKind||"PO",1)]); setDirty(false);
     }
   })(); },[poId]);
@@ -51380,8 +51946,8 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
   const setH = (patch)=>{ setPo(p=>({ ...p, ...patch })); setDirty(true); };
   const setLine = (k, patch)=>{ setLines(ls=>ls.map(l=>l._k===k ? { ...l, ...patch } : l)); setDirty(true); };
   const pickVendor = (name)=>{ const v = vendors.find(x=>x.vendor_name===name)||null; setVendor(v); setH({ vendor_name:name, gst_mode:purGstMode(v, S, po.currency), vendor_contact: po.vendor_contact || "" }); };
-  const addLine = (kind)=>{ const sl = lines.length+1; setLines(ls=>[...ls, kind==="charge" ? { _k:Math.random().toString(36).slice(2), sl, line_kind:"charge", description:PUR_CHARGES[0], qty:1, count_uom:"Lot", price_basis:"count", rate:"", gst_pct:18 } : purBlankLine(po.po_kind, sl)]); setDirty(true); };
-  const delLine = (k)=>{ setLines(ls=>ls.filter(l=>l._k!==k).map((l,i)=>({ ...l, sl:i+1 }))); setDirty(true); };
+  const addLine = (kind)=>{ const sl = Number(po.rev)>0 ? Math.max(0, ...lines.map(l=>Number(l.sl)||0))+1 : lines.length+1; setLines(ls=>[...ls, kind==="charge" ? { _k:Math.random().toString(36).slice(2), sl, line_kind:"charge", description:((PL&&PL.charge)||PUR_CHARGES)[0], qty:1, count_uom:"Lot", price_basis:"count", charge_basis:"Flat", rate:"", gst_pct:18 } : purBlankLine(po.po_kind, sl)]); setDirty(true); };
+  const delLine = (k)=>{ setLines(ls=>{ const f = ls.filter(l=>l._k!==k); return Number(po.rev)>0 ? f : f.map((l,i)=>({ ...l, sl:i+1 })); }); setDirty(true); };   // 217: an amendment keeps the Sl Nos (bills point at them)
   const fromBom = async()=>{
     const qref = await purQuoteOf(po.contract_ref); if(!qref){ alert("Contract "+(po.contract_ref||"?")+" has no Sale Order with a quote in the app, so there is no BOM to read."); return; }
     const { data } = await sb.from("estimate_lines").select("material_shape,material_spec,grade,qty_required,uom,rate,cutting_plan_layout_size").eq("reference_number",qref);
@@ -51398,9 +51964,12 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
     if(!so){ alert("No Sale Order for contract "+po.contract_ref+" in the app."); return; }
     const { data: qt } = await sb.from("quote_commercial_terms").select("*").eq("reference_number",so.quote_reference_number).maybeSingle();
     const t = { ...(po.terms||{}) }; const set = (k,v)=>{ if(String(v||"").trim()) t[k] = String(v).trim(); };
-    if(qt){ set("payment", qt.payment_term); set("delivery", qt.delivery_term); set("packing", qt.packing_forwarding); set("insurance", qt.insurance); set("guarantee", qt.guarantee||qt.warranty_coverage); set("freight", qt.freight); set("price_basis", qt.price_basis); }
-    set("inspection", so.inspection_by); set("drawing", so.drawings_required); set("ld", so.late_delivery); set("other", so.qap_conditions ? "QAP: "+so.qap_conditions : "");
-    setH({ terms:t }); setMsg("Terms copied from the Sale Order of "+po.contract_ref+" — edit them for the vendor.");
+    if(qt){ set("payment", qt.payment_term); set("delivery", qt.delivery_term); set("insurance", qt.insurance); set("guarantee", qt.guarantee); set("warranty", qt.warranty_coverage);
+      set("freight", qt.freight); set("price_basis", qt.price_basis); set("incoterms", qt.incoterms); set("transport", qt.dispatch_through); set("tax", qt.tax); }
+    set("ld", so.late_delivery);
+    if(!String(t.force_majeure||"").trim()) t.force_majeure = PUR_FM_DEFAULT;   // 217: always the buyer's wording, never the Sale Order's
+    if(!String(t.jurisdiction||"").trim()) t.jurisdiction = PUR_JUR_DEFAULT;
+    setH({ terms:t }); setMsg("Terms copied from the Sale Order of "+po.contract_ref+" as they are — edit them for the vendor. Force majeure keeps the PO wording; order cancellation is left as it was.");
   };
   const addMaster = async(table, col, shape)=>{
     const v = prompt("New "+(table==="materials_shape"?"Shape":table==="material_spec"?"Spec for "+shape:"Grade for "+shape)+":"); if(!v || !v.trim()) return;
@@ -51426,12 +51995,14 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
   };
   const save = async(extra)=>{
     const e = validate(); if(e){ alert(e); return null; }
+    if(po.id && Number(po.rev)>0){ const g = await purAmdGuard(po, lines); if(g){ alert(g); return null; } }   // 217
     setBusy(true); setMsg("");
     try{
       const t = purCalc(po, lines); const now = new Date().toISOString();
       const head = { vendor_name:po.vendor_name, po_date:po.po_date, po_kind:po.po_kind, source:"App", stage:"Draft", status:"Draft", contract_ref:po.contract_ref||null, vendor_contact:po.vendor_contact||null,
         vendor_quote_ref:po.vendor_quote_ref||null, vendor_quote_date:po.vendor_quote_date||null, delivery_by:po.delivery_by||null, deliver_to:po.deliver_to||null, currency:cur, fx_rate:cur==="INR"?null:(Number(po.fx_rate)||null),
-        gst_mode:po.gst_mode||"intra", terms:po.terms||{}, notes:po.notes||null, total_qty:t.qty, total_amt:t.basic, total_addition:t.add, total_deduction:0, cgst_amt:t.cgst, sgst_amt:t.sgst, igst_amt:t.igst,
+        gst_mode:po.gst_mode||"intra", terms:po.terms||{}, notes:po.notes||null,
+        subject:po.subject||null, nde:po.nde||null, mtc:po.mtc||null, notes_list: po.notes_list ? po.notes_list.map(x=>String(x||"").trim()).filter(Boolean) : null,   // 217 total_qty:t.qty, total_amt:t.basic, total_addition:t.add, total_deduction:0, cgst_amt:t.cgst, sgst_amt:t.sgst, igst_amt:t.igst,
         total_tax:t.tax, round_off:t.round, net_amt:t.net, owner_name:po.owner_name||who.name, updated_by:user.username, updated_at:now,
         // any change to a Draft clears the approvals already given
         submitted_by:null, submitted_at:null, approved_pm_by:null, approved_pm_at:null, approved_qc_by:null, approved_qc_at:null, ...(extra||{}) };
@@ -51444,14 +52015,14 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
         if(!ins) throw new Error("Could not get a free PO number — try again.");
         p = ins; await logAudit("INSERT","po_register",ins.po_no,"New "+purKindLabel(ins.po_kind)+" for "+ins.vendor_name,user.username||"");
       } else {
-        const r = await sb.from("po_register").update(head).eq("id",po.id).select().single(); if(r.error) throw r.error; p = r.data;
+        const r = await sb.from("po_register").update(head).eq("id",po.id).select().single(); if(r.error){ if(/subject|nde|mtc|notes_list|charge_basis/.test(r.error.message||"")) throw new Error("Run structure_po_like_sale_order_2026-10-20.sql first (both companies)."); throw r.error; } p = r.data;
         await logAudit("UPDATE","po_register",p.po_no,"PO saved (Draft)",user.username||"");
       }
       await sb.from("po_register_items").delete().eq("po_no",p.po_no).or("source.is.null,source.neq.FFS");
       const rows = lines.map((l,i)=>{ const a = purLineAmt(l); const k = sugKey(l); const sg = sug[k]||null;
-        return { po_no:p.po_no, sl:i+1, line_kind:l.line_kind||"item", shape:l.shape||null, spec:l.spec||null, grade:l.grade||null, size:l.size||null,
+        return { po_no:p.po_no, sl: Number(po.rev)>0 ? (Number(l.sl)||i+1) : i+1, line_kind:l.line_kind||"item", shape:l.shape||null, spec:l.spec||null, grade:l.grade||null, size:l.size||null,
           description: l.description || [l.shape,l.spec,l.grade].filter(Boolean).join(" ") || null, hsn:l.hsn||null, qty:Number(l.qty)||0, uom:l.count_uom||null, count_uom:l.count_uom||null,
-          price_basis:l.price_basis||"count", unit_wt:Number(l.unit_wt)||null, total_wt:a.wt, rate:Number(l.rate)||0, amount:a.amt, gst_pct:l.gst_pct===""||l.gst_pct==null?null:Number(l.gst_pct),
+          price_basis:l.price_basis||"count", unit_wt:Number(l.unit_wt)||null, total_wt:a.wt, rate:Number(l.rate)||0, amount: l.line_kind==="charge" ? purChargeAmt(l, t.basic) : a.amt, charge_basis: l.line_kind==="charge" ? (l.charge_basis||"Flat") : null, received_qty: l.received_qty!=null ? l.received_qty : null, gst_pct:l.gst_pct===""||l.gst_pct==null?null:Number(l.gst_pct),
           master_rate: sg && sg.find(s=>s.src==="Master") ? sg.find(s=>s.src==="Master").rate : null,
           rate_overridden: !!(sg && sg.some(s=>Number(l.rate) > s.rate*(1+PUR_WARN))), suggest: sg, notes:l.notes||null }; });
       if(rows.length){ const r = await sb.from("po_register_items").insert(rows); if(r.error) throw r.error; }
@@ -51462,8 +52033,14 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
     }catch(e){ alert("Could not save: "+(e.message||e)); return null; }
     finally{ setBusy(false); }
   };
-  const submit = async()=>{
+  const submit = async(skipAsk)=>{
+    if(po.po_kind!=="SPO"){ const m = po.mtc||{};   // 217
+      if(!m.type){ alert("Set the material certificate first (Documents tab): 3.1, 3.2, Not required or Others."); setTab("docs"); return; }
+      if(m.type==="Others" && !String(m.other||"").trim()){ alert("Material certificate is Others: say which certificate (Documents tab)."); setTab("docs"); return; }
+      if(m.type==="3.2" && (!(m.stages||[]).length || (m.stages||[]).some(s=>!String(s.what||"").trim()))){ alert("Material certificate 3.2: say what inspection each stage is (Documents tab)."); setTab("docs"); return; } }
     const p = dirty || !po.id ? await save() : po; if(!p) return;
+    if(skipAsk!==true && !p.docs_asked_at && !po.docs_asked_at){ await loadDocs(p.po_no); setAskDocs("submit"); return; }
+    await purSyncMtcReq({ ...p, mtc:po.mtc }, who.name);
     const now = new Date().toISOString();
     await sb.from("po_register").update({ submitted_by:who.name, submitted_at:now }).eq("id",p.id);
     await loadPostPeople(true);
@@ -51484,36 +52061,50 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
     await logAudit("UPDATE","po_register",po.po_no,(which==="pm"?"Approved by the Purchase Manager":"Approved by QC")+(patch.stage?" — PO approved, snapshot frozen":""),user.username||"");
     setPo(p=>({ ...p, ...patch }));
     if(patch.stage==="Approved"){
+      if(Number(po.rev)>0){ try{ const pr = await purPrevRev(po.po_no, po.rev); const old = (pr && pr.snapshot && pr.snapshot.lines)||[];   // 217
+        const r = await sb.from("acc_voucher_po_link_tbl").select("po_sl,voucher_no").eq("po_no",po.po_no); const billed = new Set(((r && !r.error && r.data)||[]).map(x=>x.po_sl));
+        const ch = lines.filter(l=>billed.has(l.sl) && old.some(o=>o.sl===l.sl && Number(o.rate)!==Number(l.rate)));
+        if(ch.length){ await loadPostPeople(true); await notifyPeople(postHolders("accounts"), po.po_no+" Amd "+po.rev+" changes the rate of billed line"+(ch.length>1?"s ":" ")+ch.map(l=>l.sl).join(", ")+". Check the purchase bill against the PO (Accounts → Bills ↔ POs).", "warn"); } }catch(e){} }
       await stepOpen({ module:"purchase", doc_type:po.po_kind, doc_ref:po.po_no, step:"sent", owner:po.owner_name||null, manager_post:"purchase_manager", link_tab:"po_register",
-        title:"Send "+po.po_no+" to "+po.vendor_name, cardText:"Generate the PDF of "+po.po_no+", send it to "+po.vendor_name+", then press Mark as sent", cardNote:"Approved "+fmtDMY(now)+". Stale after "+STALE_DAYS+" days: no PDFs for the owner until it is sent or closed." }, who.name);
+        title:"Send "+po.po_no+purAmd(po)+" to "+po.vendor_name, cardText:"Generate the PDF of "+po.po_no+", send it to "+po.vendor_name+", then press Mark as sent", cardNote:"Approved "+fmtDMY(now)+". Stale after "+STALE_DAYS+" days: no PDFs for the owner until it is sent or closed." }, who.name);
       await notifyPeople([po.owner_name], purKindLabel(po.po_kind)+" "+po.po_no+" is approved. Generate the PDF, send it to "+po.vendor_name+" and press Mark as sent within "+STALE_DAYS+" days.", "info");
       setMsg("Approved. "+(po.owner_name||"The owner")+" has a card to send it; it goes stale in "+STALE_DAYS+" days.");
     } else setMsg("Approval saved — waiting for "+(which==="pm"?"QC":"the Purchase Manager")+".");
     onChanged && onChanged();
   };
   const pdf = async()=>{
-    try{ await purPdf(po, lines, vendor); }catch(e){ if(!/stale items/i.test(e.message||"")) alert("PDF failed: "+(e.message||e)); return; }
-    if(po.stage==="Approved" && isOwner) setSentDlg({ on:toISODate(new Date()), to:po.vendor_contact||"", how:"Email", note:"", ask:true });
+    try{ if(po.source==="App") await purPdfPack(po, lines, vendor); else await purPdf(po, lines, vendor); }catch(e){ if(!/stale items/i.test(e.message||"")) alert("PDF failed: "+(e.message||e)); return; }
+    if(po.stage==="Approved" && isOwner) setSentDlg({ on:toISODate(new Date()), to:po.vendor_contact||"", how:"Email", note:"", link:"", ask:true });
   };
   const markSent = async()=>{
     const d = sentDlg; if(!d.on){ alert("Give the date it was sent."); return; } if(!String(d.to||"").trim()){ alert("Say to whom it was sent."); return; }
+    if(!confirmDocumentLink(d.link, "Link of the PO as sent (OneDrive / Drive)")) return;   // 217: required
     const now = new Date().toISOString();
-    const patch = { stage:"Sent", status:"Open", sent_on:d.on, sent_to:d.to.trim(), sent_how:d.how, sent_by:who.name, sent_at:now };
-    const { error } = await sb.from("po_register").update(patch).eq("id",po.id); if(error){ alert("Could not save: "+error.message); return; }
+    const patch = { stage:"Sent", status:"Open", sent_on:d.on, sent_to:d.to.trim(), sent_how:d.how, sent_by:who.name, sent_at:now, sent_link:String(d.link||"").trim() };
+    const { error } = await sb.from("po_register").update(patch).eq("id",po.id); if(error){ alert(/sent_link/.test(error.message||"") ? "Run structure_po_like_sale_order_2026-10-20.sql first (both companies)." : "Could not save: "+error.message); return; }
     await stepDone(po.po_kind, po.po_no, "sent", who.name, "Sent to "+d.to.trim()+" by "+d.how+" on "+fmtDMY(d.on)+(d.note?" — "+d.note:""));
     await logAudit("UPDATE","po_register",po.po_no,"Marked as sent: "+d.to+" · "+d.how+" · "+fmtDMY(d.on),user.username||"");
     setPo(p=>({ ...p, ...patch })); setSentDlg(null); setMsg("Marked as sent."); stepRefresh(user); onChanged && onChanged();
   };
-  const revise = async(reason)=>{
+  const revise = async(reason, what)=>{   // 217: Amend PO
     const now = new Date().toISOString();
-    await sb.from("po_rev_tbl").insert({ po_no:po.po_no, rev:Number(po.rev)||0, reason, snapshot:po.snapshot||await purSnapshot(po, lines, vendor), created_by:who.name });
+    const rrow = { po_no:po.po_no, rev:Number(po.rev)||0, reason, snapshot:po.snapshot||await purSnapshot(po, lines, vendor), created_by:who.name, what:what||[] };
+    let ri = await sb.from("po_rev_tbl").insert(rrow); if(ri.error && /what/.test(ri.error.message||"")){ delete rrow.what; ri = await sb.from("po_rev_tbl").insert(rrow); }
     const patch = { rev:(Number(po.rev)||0)+1, stage:"Draft", status:"Draft", snapshot:null, snapshot_at:null, submitted_by:null, submitted_at:null, approved_pm_by:null, approved_pm_at:null, approved_qc_by:null, approved_qc_at:null,
       sent_on:null, sent_to:null, sent_how:null, sent_by:null, sent_at:null, updated_by:user.username, updated_at:now };
     const { error } = await sb.from("po_register").update(patch).eq("id",po.id); if(error){ alert("Could not revise: "+error.message); return; }
-    await stepCloseFor(po.po_kind, po.po_no, "Revised to Rev "+patch.rev+": "+reason, who.name);
-    await logAudit("UPDATE","po_register",po.po_no,"Revision "+patch.rev+" started: "+reason,user.username||"");
-    setPo(p=>({ ...p, ...patch })); setRevs(r=>[...r, { rev:Number(po.rev)||0, reason, created_by:who.name, created_at:now }]); setReasonDlg(null);
-    setMsg("Rev "+patch.rev+" is a Draft: change it, save, and send for approval again. The PDF will show the revision."); stepRefresh(user); onChanged && onChanged();
+    await stepCloseFor(po.po_kind, po.po_no, "Amendment "+patch.rev+": "+reason, who.name);
+    await logAudit("UPDATE","po_register",po.po_no,"Amendment "+patch.rev+" started: "+reason+((what||[]).length?" ("+what.join(", ")+")":""),user.username||"");
+    setPo(p=>({ ...p, ...patch })); setRevs(r=>[...r, { rev:Number(po.rev)||0, reason, what:what||[], created_by:who.name, created_at:now }]); setReasonDlg(null); setAmdDlg(null); setTab("po");
+    setMsg("Amendment "+patch.rev+" is a Draft: change it, save, and send for approval again. The PDF carries an Amendment cover and the was → now sheet."); stepRefresh(user); onChanged && onChanged();
+  };
+  const reopen = async(reason)=>{   // 217: approved, not yet sent — back to Draft, same number
+    const now = new Date().toISOString();
+    const patch = { stage:"Draft", status:"Draft", snapshot:null, snapshot_at:null, submitted_by:null, submitted_at:null, approved_pm_by:null, approved_pm_at:null, approved_qc_by:null, approved_qc_at:null, updated_by:user.username, updated_at:now };
+    const { error } = await sb.from("po_register").update(patch).eq("id",po.id); if(error){ alert("Could not reopen: "+error.message); return; }
+    await stepCloseFor(po.po_kind, po.po_no, "Reopened to edit before sending: "+reason, who.name);
+    await logAudit("UPDATE","po_register",po.po_no,"Reopened to edit (not yet sent): "+reason,user.username||"");
+    setPo(p=>({ ...p, ...patch })); setReasonDlg(null); setMsg("Back to Draft: change it, save and send for approval again."); stepRefresh(user); onChanged && onChanged();
   };
   const cancelPo = async(reason)=>{
     const now = new Date().toISOString();
@@ -51544,20 +52135,160 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
     h("select",{value:l.grade||"",disabled:ro||!l.shape,onChange:async e=>{ let v = e.target.value; if(v==="__new"){ v = await addMaster("grade_tbl","material_grade",l.shape); if(!v) return; needShape(l.shape); } setLine(l._k,{ grade:v }); },style:{...inp,width:120}},
       h("option",{value:""},"Grade"), (M.grades[l.shape]||[]).concat(l.grade && !(M.grades[l.shape]||[]).includes(l.grade)?[l.grade]:[]).map(s=>h("option",{key:s,value:s},s)), who.addMaster&&l.shape?h("option",{value:"__new"},"+ new grade…"):null));
   const ffsLine = (l)=> h("div",null, l.description||"", l.item && l.item!==l.description ? h("div",{style:{fontSize:10.5,color:colors.muted}},l.item) : null);
+  // ---- 217: the tabs, laid out like the Sale Order ----
+  const TABS = legacy ? [["po","PO & lines"],["terms","Commercial Terms"],["docs","Documents"]]
+    : [["po","PO & lines"],["tax","Tax (GST)"],["terms","Commercial Terms"],["nde","NDE / Testing"],["notes","Notes"],["docs","Documents"],["amd","Amendments"]];
+  const openReqN = ((docsInfo&&docsInfo.reqs)||[]).filter(r=>!r.fulfilled_document_id).length;
+  const tabBar = ()=> h("div",{style:{display:"flex",gap:2,flexWrap:"wrap",borderBottom:"1px solid "+colors.border,margin:"0 0 12px",background:"#faf9f4",borderRadius:"6px 6px 0 0",padding:"0 6px"}},
+    TABS.map(([k,l])=>h("button",{key:k,onClick:()=>setTab(k),style:{font:"inherit",fontSize:12.5,border:"none",background:"none",padding:"9px 11px",cursor:"pointer",borderBottom:"2px solid "+(tab===k?"#0f7a5c":"transparent"),color:tab===k?colors.text:colors.muted,fontWeight:tab===k?700:400}},
+      l, k==="docs" && openReqN ? h("span",{style:{fontSize:10,marginLeft:5,borderRadius:8,padding:"0 6px",background:"#fff4d6",color:"#854f0b"}},openReqN) : null,
+      k==="amd" && Number(po.rev)>0 ? h("span",{style:{fontSize:10,marginLeft:5,color:"#8a5200"}},"Amd "+po.rev) : null)));
+  const totalsBox = ()=> h("div",{style:{flex:"0 0 320px",background:"#faf9f4",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px",fontSize:12.5}},
+    [["Basic value",T.basic],["Charges",T.add],...(T.cgst||T.sgst?[["CGST",T.cgst],["SGST",T.sgst]]:[]),...(T.igst?[["IGST",T.igst]]:[]),...(!T.cgst&&!T.sgst&&!T.igst&&T.tax?[["GST",T.tax]]:[]),...(T.round?[["Round off",T.round]]:[])].map(([k,v])=>
+      h("div",{key:k,style:{display:"flex",justifyContent:"space-between",padding:"2px 0"}}, h("span",null,k), h("span",{style:{fontFamily:"monospace"}},purMoney(v,cur)))),
+    h("div",{style:{display:"flex",justifyContent:"space-between",padding:"6px 0 0",marginTop:4,borderTop:"1px solid "+colors.border,fontWeight:700}}, h("span",null,"Total ("+cur+")"), h("span",{style:{fontFamily:"monospace"}},purMoney(T.net,cur))),
+    h("div",{style:{fontSize:11,color:colors.muted,marginTop:4}}, invAmountWords(T.net, cur)),
+    po.gst_mode==="import" ? h("div",{style:{fontSize:11,color:"#854f0b",marginTop:4}},"Import: customs duty and IGST come on the Bill of Entry (Accounts → Purchase).") : null,
+    cur!=="INR" ? (Number(po.fx_rate)>0
+      ? h("div",{style:{borderTop:"1px dashed "+colors.border,marginTop:6,paddingTop:4,fontSize:11.5,color:"#1e528a"}},
+          h("div",{style:{display:"flex",justifyContent:"space-between"}}, h("span",null,"INR equivalent @ "+po.fx_rate), h("span",{style:{fontFamily:"monospace"}},"Rs "+purMoney(r2(T.net*Number(po.fx_rate)),"INR"))),
+          h("div",{style:{fontSize:10.5}},"for reference only · not printed on the PO"))
+      : h("div",{style:{fontSize:11,color:"#854f0b",marginTop:6}},"Type 1 "+cur+" = ? Rs in the header to see the INR equivalent (reference only).")) : null);
+  const taxTab = ()=>{ const G = purGstWarnings(po, vendor, S); const mode = po.gst_mode||"intra";
+    return h("div",{style:{maxWidth:660}},
+      h("div",{style:{fontSize:12,color:colors.muted,marginBottom:6}}, "Vendor: ", h("b",null,po.vendor_name||"—"),
+        vendor ? " · "+[vendor.gst_tax_id ? "GSTIN "+vendor.gst_tax_id : "no GSTIN", vendor.billing_state||vendor.billing_country||""].filter(Boolean).join(" · ") : "",
+        " · currency "+cur+" · suggested: ", h("b",null,(PUR_GST_MODES.find(g=>g[0]===G.sug)||[0,""])[1])),
+      PUR_GST_MODES.map(([k,l])=>h("label",{key:k,style:{display:"flex",gap:8,alignItems:"center",border:"1px solid "+(mode===k?colors.dark:colors.border),background:mode===k?"#f5f9fd":"#fff",borderRadius:6,padding:"7px 10px",margin:"5px 0",cursor:ro?"default":"pointer",fontSize:12.5}},
+        h("input",{type:"radio",checked:mode===k,disabled:ro||legacy,onChange:()=>setH({ gst_mode:k })}), l, k===G.sug ? h("span",{style:{fontSize:10.5,color:"#0f7a5c",marginLeft:6}},"suggested") : null)),
+      G.w.map((x,i)=>h("div",{key:i,style:{background:"#fffaf0",border:"1px solid #efd59c",borderRadius:6,padding:"7px 10px",fontSize:12,marginTop:6,color:"#5a3a00"}},"⚠ "+x)),
+      h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:8}},"GST % is set per line on PO & lines (charges too). CGST + SGST or IGST is worked out from it; Import and No GST print without GST."),
+      h("div",{style:{display:"flex",justifyContent:"flex-end",marginTop:10}}, totalsBox()));
+  };
+  const longBox = (title,k,rows,def,ph)=>{ const v = (po.terms||{})[k]||"";
+    return h("div",{key:k,style:{border:"1px solid "+colors.border,borderRadius:8,padding:"8px 10px",marginTop:10,background:k==="force_majeure"?"#fff8e8":"#fff"}},
+      h("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:4,flexWrap:"wrap"}}, h("b",{style:{fontSize:12.5}},title),
+        def && canEdit ? h("button",{onClick:()=>setH({ terms:{ ...(po.terms||{}), [k]:def } }),style:{...btnSmall,fontSize:11}},"Restore default") : null,
+        k==="order_cancellation" ? h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:9,padding:"1px 8px",background:String(v).trim()?"#e1f5ee":"#f1efe8",color:String(v).trim()?"#0f6e56":"#6b6f60"}}, String(v).trim()?"printed":"blank — not printed") : null),
+      h("textarea",{rows,value:v,disabled:ro,placeholder:ph||"",onChange:e=>setH({ terms:{ ...(po.terms||{}), [k]:e.target.value } }),style:{...inp,resize:"vertical"}})); };
+  const termsTab = ()=>{ const tm = po.terms||{}; const setT = (k,v)=>setH({ terms:{ ...(po.terms||{}), [k]:v } });
+    const old = PUR_TERMS_OLD.filter(([k])=>String(tm[k]||"").trim());
+    return h("div",null,
+      h("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap"}}, h("b",{style:{fontSize:13}},"Commercial terms"),
+        canEdit ? h("button",{onClick:cloneTerms,style:btnSmall},"Copy from the contract's Sale Order") : null,
+        h("span",{style:{fontSize:11.5,color:colors.muted}},"Pick from the PO lists or type. Typed wording stays on this PO only."),
+        PL && PL.__missing ? h("span",{style:{fontSize:11.5,color:colors.danger}},"(PO lists missing — run structure_po_like_sale_order_2026-10-20.sql)") : null),
+      legacy ? h("div",{style:{fontSize:12,color:colors.muted}},"As per the PO issued from "+(po.source==="FFS"?"FFS":"outside the app")+".") :
+      h("div",null,
+        h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:"8px 14px"}},
+          PUR_TERMS.map(([k,l,lk])=>h("label",{key:k,style:{display:"block"}}, h("span",{style:lab},l), h(SoTermField,{value:tm[k]||"",onChange:v=>setT(k,v),options:(PL&&PL[lk])||[],disabled:ro})))),
+        old.length ? h("div",{style:{marginTop:10}}, h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:4}},"Terms from the earlier PO screen (printed while they have text; clear them to drop them)"),
+          h("div",{style:{display:"grid",gridTemplateColumns:"170px 1fr",gap:"4px 8px",alignItems:"center"}}, old.map(([k,l])=>[h("span",{key:k+"l",style:{fontSize:12,color:colors.muted}},l), h("input",{key:k+"v",value:tm[k]||"",disabled:ro,onChange:e=>setT(k,e.target.value),style:inp})]))) : null,
+        longBox("Jurisdiction","jurisdiction",2,PUR_JUR_DEFAULT),
+        longBox("Force majeure — vendor PO wording (we are the buyer)","force_majeure",6,PUR_FM_DEFAULT),
+        longBox("Order cancellation (optional)","order_cancellation",2,null,"Free text. Leave it blank and it is not printed on the PO.")));
+  };
+  const ndeTab = ()=>{ const N = po.nde||{ tests:[], note:"" }; const T0 = (N.tests||[]).filter(t=>t && t.test);
+    const names = Array.from(new Set([...(tests.length?tests:PUR_TEST_DEFAULT), ...T0.map(t=>t.test)]));
+    const setN = (patch)=>setH({ nde:{ tests:T0, note:N.note||"", ...patch } });
+    const tog = (nm,on)=> setN({ tests: on ? [...T0, { test:nm, by:"Vendor", witness:"—" }] : T0.filter(t=>t.test!==nm) });
+    const upd = (nm,patch)=> setN({ tests: T0.map(t=>t.test===nm ? { ...t, ...patch } : t) });
+    const th = { textAlign:"left", padding:"6px 8px", fontSize:11, color:"#4c6a61", background:"#eef6f3", borderBottom:"2px solid #0f7a5c" };
+    const tdc = { padding:"5px 8px", borderBottom:"1px solid "+colors.border };
+    return h("div",{style:{maxWidth:780}},
+      h("div",{style:{fontSize:12,color:colors.muted,marginBottom:6}},"Tick every test this "+purKindLabel(po.po_kind)+" needs; they apply to the whole order. The list is the Test Types master. "+T0.length+" ticked."),
+      h("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:12.5}}, h("thead",null,h("tr",null,["Test","Done by","Witness"].map(x=>h("th",{key:x,style:th},x)))),
+        h("tbody",null, names.map(nm=>{ const t = T0.find(x=>x.test===nm); return h("tr",{key:nm,style:{background:t?"#f3faf7":"#fff"}},
+          h("td",{style:tdc}, h("label",{style:{display:"flex",gap:8,alignItems:"center",cursor:ro?"default":"pointer"}}, h("input",{type:"checkbox",checked:!!t,disabled:ro,onChange:e=>tog(nm,e.target.checked)}), nm)),
+          h("td",{style:tdc}, t ? h("select",{value:t.by||"Vendor",disabled:ro,onChange:e=>upd(nm,{ by:e.target.value }),style:{...inp,width:150}}, PUR_NDE_BY.map(x=>h("option",{key:x,value:x},x))) : null),
+          h("td",{style:tdc}, t ? h("select",{value:t.witness||"—",disabled:ro,onChange:e=>upd(nm,{ witness:e.target.value }),style:{...inp,width:150}}, PUR_NDE_WIT.map(x=>h("option",{key:x,value:x},x))) : null)); }))),
+      h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,padding:"8px 10px",marginTop:10}},
+        h("b",{style:{fontSize:12.5}},"NDE exception note"),
+        h(PurTip,{text:"The ticked tests apply to every item on this PO. Use this note only when a test does not apply to some items, e.g. \"RT not applicable for Sl No 2 (plate)\" or \"Hydro test only for Sl No 1\". It prints right under the test list so the vendor knows the exception. Leave it blank when there are no exceptions."}),
+        h("textarea",{rows:2,value:N.note||"",disabled:ro,placeholder:"e.g. RT not applicable for Sl No 2",onChange:e=>setN({ note:e.target.value }),style:{...inp,marginTop:4,resize:"vertical"}})));
+  };
+  const notesTab = ()=>{ const NL = po.notes_list ? po.notes_list : (String(po.notes||"").trim() ? [po.notes] : []);
+    const setNL = (arr)=> setH({ notes_list:arr });
+    return h("div",{style:{maxWidth:840}},
+      h("div",{style:{fontSize:12,color:colors.muted,marginBottom:6}},"Several notes, in order, as on the Sale Order. They print on the PO as Notes."),
+      NL.map((n,i)=>h("div",{key:i,style:{display:"flex",gap:6,marginBottom:6,alignItems:"flex-start"}}, h("b",{style:{width:20,paddingTop:6}},i+1),
+        h("textarea",{rows:2,value:n,disabled:ro,onChange:e=>setNL(NL.map((x,j)=>j===i?e.target.value:x)),style:{...inp,flex:1,resize:"vertical"}}),
+        canEdit ? h("div",{style:{display:"flex",flexDirection:"column",gap:2}},
+          i>0 ? h("button",{title:"Move up",onClick:()=>{ const a = NL.slice(); const x = a[i-1]; a[i-1] = a[i]; a[i] = x; setNL(a); },style:{...btnSmall,padding:"1px 6px"}},"↑") : null,
+          h("button",{title:"Remove",onClick:()=>setNL(NL.filter((x,j)=>j!==i)),style:{...btnSmall,padding:"1px 6px"}},"✕")) : null)),
+      !NL.length ? h("div",{style:{fontSize:12,color:colors.muted,marginBottom:6}},"No notes.") : null,
+      canEdit ? h("button",{onClick:()=>setNL([...NL,""]),style:btnSmall},"+ Note") : null);
+  };
+  const docsTab = ()=>{ const M = po.mtc||{ type:"", other:"", stages:[] };
+    const setM2 = (patch)=> setH({ mtc:{ type:M.type||"", other:M.other||"", stages:M.stages||[], ...patch } });
+    const setStages = (n)=>{ n = Math.max(1, Math.min(9, Number(n)||1)); const s = (M.stages||[]).slice(); while(s.length<n) s.push({ label:"Stage "+(s.length+1), what:"", by:"TPI", agency:"" }); s.length = n; setM2({ stages:s }); };
+    const updS = (i,patch)=> setM2({ stages:(M.stages||[]).map((x,j)=>j===i ? { ...x, ...patch } : x) });
+    const D = docsInfo || { reqs:[], docs:[] };
+    const open = D.reqs.filter(r=>!r.fulfilled_document_id);
+    const outDocs = D.docs.filter(d=>(d.revisions||[]).some(x=>x.direction==="Out"));
+    const th = { textAlign:"left", padding:"5px 6px", fontSize:11, color:"#4c6a61", background:"#eef6f3" };
+    const box = { border:"1px solid "+colors.border, borderRadius:8, padding:"8px 10px" };
+    const chip = (ok,t)=> h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:9,padding:"1px 8px",background:ok?"#e1f5ee":"#fff4d6",color:ok?"#0f6e56":"#854f0b"}},t);
+    return h("div",null,
+      po.po_kind!=="SPO" && !legacy ? h("div",{style:{...box,background:"#faf9f4",marginBottom:12,padding:"10px 12px"}},
+        h("div",{style:{display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-end"}},
+          h("label",{style:{display:"block",width:220}}, h("span",{style:lab},"Material certificate"),
+            h("select",{value:M.type||"",disabled:ro,onChange:e=>{ const v = e.target.value; setM2({ type:v, stages: v==="3.2" && !(M.stages||[]).length ? [{ label:"Stage 1", what:"", by:"TPI", agency:"" }] : (M.stages||[]) }); },style:inp},
+              h("option",{value:""},"— pick —"), PUR_MTC_TYPES.map(x=>h("option",{key:x,value:x}, x==="3.1"||x==="3.2" ? "EN 10204 "+x : x)))),
+          M.type==="Others" ? h("label",{style:{display:"block",flex:"1 1 240px"}}, h("span",{style:lab},"Which certificate? (required)"), h("input",{value:M.other||"",disabled:ro,onChange:e=>setM2({ other:e.target.value }),placeholder:"e.g. Manufacturer's test certificate (2.2)",style:inp})) : null,
+          M.type==="3.2" ? h("label",{style:{display:"block",width:200}}, h("span",{style:lab},"Number of inspection stages"), h("input",{type:"number",min:1,max:9,value:(M.stages||[]).length||1,disabled:ro,onChange:e=>setStages(e.target.value),style:inp})) : null,
+          h("span",{style:{fontSize:11.5,color:!M.type?"#854f0b":colors.muted,paddingBottom:6}}, !M.type ? "Needed before Send for approval." : M.type==="Not required" ? "Not printed on the PO." : "Prints on the PO and becomes a required document from the vendor.")),
+        M.type==="3.2" ? h("table",{style:{width:"100%",borderCollapse:"collapse",marginTop:8,fontSize:12.5}}, h("thead",null,h("tr",null,["Stage","What inspection","By","Agency (optional)"].map(x=>h("th",{key:x,style:th},x)))),
+          h("tbody",null,(M.stages||[]).map((s,i)=>h("tr",{key:i},
+            h("td",{style:{padding:4,width:120}}, h("input",{value:s.label||"",disabled:ro,onChange:e=>updS(i,{ label:e.target.value }),style:inp})),
+            h("td",{style:{padding:4}}, h("input",{value:s.what||"",disabled:ro,placeholder:"e.g. Raw material — chemical & mechanical test witness",onChange:e=>updS(i,{ what:e.target.value }),style:inp})),
+            h("td",{style:{padding:4,width:150}}, h("select",{value:s.by||"TPI",disabled:ro,onChange:e=>updS(i,{ by:e.target.value }),style:inp}, PUR_STAGE_BY.map(x=>h("option",{key:x,value:x},x)))),
+            h("td",{style:{padding:4,width:190}}, h("input",{value:s.agency||"",disabled:ro,placeholder:"TPI agency name",onChange:e=>updS(i,{ agency:e.target.value }),style:inp})))))) : null) : null,
+      !po.id ? h("div",{style:{fontSize:12,color:colors.muted}},"Save the PO first; then documents can be added.") :
+      h("div",null,
+        h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:8}}, h("b",{style:{fontSize:13}},"Documents"),
+          h("button",{onClick:()=>setDocsOpen(true),style:btnPrimary},"Open Documents"),
+          !legacy ? h("button",{onClick:async()=>{ await loadDocs(po.po_no); setAskDocs("tab"); },style:btnSmall},"☑ Required from the vendor…") : null,
+          h("span",{style:{fontSize:11.5,color:colors.muted}},"The same Documents box as the Sale Order. In = from the vendor; Out = what we send (tick In PO PDF to enclose it).")),
+        h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))",gap:12}},
+          h("div",{style:box}, h("b",{style:{fontSize:12.5}},"Required from the vendor"),
+            !D.reqs.length ? h("div",{style:{fontSize:12,color:colors.muted,marginTop:4}},"None yet. You are asked at Send for approval.") :
+            D.reqs.map(r=>h("div",{key:r.id,style:{display:"flex",gap:8,alignItems:"center",fontSize:12.5,padding:"4px 0",borderBottom:"1px solid "+colors.border}}, h("span",{style:{flex:1}},r.category), chip(!!r.fulfilled_document_id, r.fulfilled_document_id?"Received":"Awaited"))),
+            open.length && po.po_kind!=="SPO" && !legacy ? h("div",{style:{fontSize:11,color:"#854f0b",marginTop:6}},"A GRN against this PO can't be cleared until these are in, unless the Purchase Manager overrides.") : null,
+            po.docs_override && !po.docs_override.cleared_at ? h("div",{style:{fontSize:11,color:"#8a2d2d",marginTop:6}},"GRN allowed without them by "+(po.docs_override.by||"")+" on "+fmtDMY(po.docs_override.at)+": "+(po.docs_override.reason||"")+". Reminders every "+PUR_DOC_REMIND_DAYS+" days until received.") : null),
+          h("div",{style:box}, h("b",{style:{fontSize:12.5}},"What we send the vendor"),
+            !outDocs.length ? h("div",{style:{fontSize:12,color:colors.muted,marginTop:4}},"None. Add drawings / datasheets as Out in Documents (with the PDF); they go into the PO PDF as enclosures.") :
+            outDocs.map(d=>{ const r0 = (d.revisions||[]).find(x=>x.direction==="Out")||{}; const inPdf = d.include_in_offer!==false && r0.lives_in_supabase && r0.file_path;
+              return h("div",{key:d.id,style:{fontSize:12.5,padding:"4px 0",borderBottom:"1px solid "+colors.border}}, (d.doc_number||"")+" Rev "+(r0.rev_number??0)+(d.doc_name?" — "+d.doc_name:""),
+                h("span",{style:{fontSize:10.5,color:inPdf?"#0f6e56":colors.muted,marginLeft:6}}, d.include_in_offer===false ? "not in the PO PDF" : inPdf ? "📎 enclosed in the PO PDF" : "link only — listed as sent separately")); })))));
+  };
+  const amdTab = ()=>{ const td = { padding:"6px 8px", borderBottom:"1px solid "+colors.border, verticalAlign:"top", fontSize:12.5 };
+    const th = { textAlign:"left", padding:"6px 8px", fontSize:11, color:"#4c6a61", background:"#eef6f3", borderBottom:"2px solid #0f7a5c" };
+    const rows = [{ no:"Original", at:po.po_date, why:"—", what:[] , by:po.owner_name }].concat(revs.map(r=>({ no:"Amd "+(Number(r.rev)+1), at:r.created_at, why:r.reason||"", what:r.what||[], by:r.created_by||"" })));
+    return h("div",null,
+      h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:8}}, h("b",{style:{fontSize:13}},"Amendments"),
+        ["Sent","Partly received","Received"].includes(po.stage) && !legacy && (isOwner||who.pm||who.sa) ? h("button",{onClick:()=>setAmdDlg({ why:"", what:[] }),style:{...btnSmall,color:"#8a5200",borderColor:"#c47a00",fontWeight:700}},"Amend PO…")
+          : h("span",{style:{fontSize:11.5,color:colors.muted}}, legacy ? "Old / FFS PO: view only." : "Amend PO opens once the PO is sent. Before that, Reopen to edit puts it back to Draft with the same number.")),
+      h("table",{style:{width:"100%",borderCollapse:"collapse",maxWidth:900}}, h("thead",null,h("tr",null,["Issue","Date","Reason","What changes","By"].map(x=>h("th",{key:x,style:th},x)))),
+        h("tbody",null, rows.map((r,i)=>h("tr",{key:i}, h("td",{style:{...td,whiteSpace:"nowrap",fontWeight:700}},r.no), h("td",{style:{...td,whiteSpace:"nowrap"}},fmtDMY(r.at)), h("td",{style:td},r.why), h("td",{style:td},(r.what||[]).join(", ")||"—"), h("td",{style:td},r.by||""))))),
+      h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:8}},"Every amendment keeps the version before it. An amended PO prints with an Amendment cover and a was → now sheet (Annexure-A), then the full amended PO."));
+  };
+
   return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,.35)",zIndex:1500,overflow:"auto",padding:"20px 12px"}},
     h("div",{id:"pur-editor",style:{background:"#fff",borderRadius:10,maxWidth:1180,margin:"0 auto",padding:"14px 18px 18px",boxShadow:"0 8px 30px rgba(0,0,0,.25)"}},
       h("div",{style:{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:8}},
-        h("div",{style:{fontSize:17,fontWeight:700}}, (po.po_no||"New "+purKindLabel(po.po_kind))+(Number(po.rev)>0?" Rev "+po.rev:"")),
+        h("div",{style:{fontSize:17,fontWeight:700}}, (po.po_no||"New "+purKindLabel(po.po_kind))+purAmd(po)),
         h("span",{style:{fontSize:11,fontWeight:700,borderRadius:9,padding:"2px 9px",background:tone[0],color:tone[1]}},po.stage),
         h("span",{style:{fontSize:11,color:colors.muted}}, purKindLabel(po.po_kind)+" · "+purSourceLabel(po.source)+(po.owner_name?" · "+po.owner_name:"")),
         h("div",{style:{marginLeft:"auto",display:"flex",gap:6,flexWrap:"wrap"}},
           canEdit ? h("button",{onClick:()=>save(),disabled:busy,style:btnPrimary},busy?"Saving…":"Save") : null,
-          canEdit && po.id && !po.submitted_at ? h("button",{onClick:submit,disabled:busy,style:{...btnPrimary,background:"#0c447c"}},"Send for approval") : null,
+          canEdit && po.id && !po.submitted_at ? h("button",{onClick:()=>submit(false),disabled:busy,style:{...btnPrimary,background:"#0c447c"}},"Send for approval") : null,
           po.id && po.stage==="Draft" && po.submitted_at && who.approvePM && !po.approved_pm_at ? h("button",{onClick:()=>approve("pm"),style:{...btnPrimary,background:"#0f7a5c"}},"Approve (Purchase Manager)") : null,
           po.id && po.stage==="Draft" && po.submitted_at && who.approveQC && !po.approved_qc_at ? h("button",{onClick:()=>approve("qc"),style:{...btnPrimary,background:"#0f7a5c"}},"Approve (QC)") : null,
           po.id ? h("button",{onClick:pdf,style:btnSmall}, po.stage==="Draft"&&!legacy ? "PDF (Draft)" : "PDF") : null,
-          po.id && po.stage==="Approved" && (isOwner || who.pm || who.sa) ? h("button",{onClick:()=>setSentDlg({ on:toISODate(new Date()), to:po.vendor_contact||"", how:"Email", note:"" }),style:{...btnPrimary,background:"#085041"}},"Mark as sent…") : null,
-          !legacy && po.id && (po.stage==="Approved"||po.stage==="Sent") && (who.make||isOwner) ? h("button",{onClick:()=>setReasonDlg("revise"),style:btnSmall},"Revise…") : null,
+          po.id && po.stage==="Approved" && (isOwner || who.pm || who.sa) ? h("button",{onClick:()=>setSentDlg({ on:toISODate(new Date()), to:po.vendor_contact||"", how:"Email", note:"", link:"" }),style:{...btnPrimary,background:"#085041"}},"Mark as sent…") : null,
+          !legacy && po.id && po.stage==="Approved" && (who.make||isOwner) ? h("button",{onClick:()=>setReasonDlg("reopen"),style:btnSmall},"Reopen to edit…") : null,
+          !legacy && po.id && ["Sent","Partly received","Received"].includes(po.stage) && (isOwner||who.pm||who.sa) ? h("button",{onClick:()=>setAmdDlg({ why:"", what:[] }),style:{...btnSmall,color:"#8a5200",borderColor:"#c47a00",fontWeight:700}},"Amend PO…") : null,
           !legacy && po.id && po.stage!=="Cancelled" && po.stage!=="Received" && who.cancel ? h("button",{onClick:()=>setReasonDlg("cancel"),style:{...btnSmall,color:"#8a2d2d"}},"Cancel PO…") : null,
           h("button",{onClick:close,style:btnSmall},"Close"))),
       legacy ? h("div",{style:{fontSize:12,background:"#faf9f4",border:"1px solid "+colors.border,borderRadius:6,padding:"7px 10px",marginBottom:10}},
@@ -51567,9 +52298,11 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
           : "Draft: type the rates from the vendor's quote (the chips are suggestions — red means more than 5% above), save, then Send for approval: one Purchase-side approval (Purchase Manager or a super admin) and one QC-side approval (QC or Technical Head). The PDF prints DRAFT until both sides approve.") : null,
       po.stage==="Approved" ? h("div",{style:{fontSize:12,background:"#e6f1fb",color:"#0c447c",borderRadius:6,padding:"7px 10px",marginBottom:8}},
         "Approved by "+[po.approved_pm_by,po.approved_qc_by].filter(Boolean).join(" and ")+" on "+fmtDMY(po.approved_qc_at||po.approved_pm_at)+". Generate the PDF, send it to the vendor and press Mark as sent — within "+STALE_DAYS+" days, or it goes stale and "+(po.owner_name||"the owner")+"'s PDFs are blocked.") : null,
-      po.stage==="Sent" ? h("div",{style:{fontSize:12,color:"#085041",marginBottom:8}},"Sent on "+fmtDMY(po.sent_on)+" to "+(po.sent_to||"")+" by "+(po.sent_how||"")+(po.sent_by?" ("+po.sent_by+")":"")+". To change it now: Revise.") : null,
+      po.stage==="Sent" ? h("div",{style:{fontSize:12,color:"#085041",marginBottom:8}},"Sent on "+fmtDMY(po.sent_on)+" to "+(po.sent_to||"")+" by "+(po.sent_how||"")+(po.sent_by?" ("+po.sent_by+")":"")+". ", po.sent_link ? h("a",{href:po.sent_link,target:"_blank",rel:"noreferrer",style:{color:"#0c447c"}},"🔗 As sent") : null, " To change it now: Amend PO.") : null,
       po.stage==="Cancelled" ? h("div",{style:{fontSize:12,color:"#8a2d2d",marginBottom:8}},"Cancelled by "+(po.cancelled_by||"")+" on "+fmtDMY(po.cancelled_at)+": "+(po.cancel_reason||"")) : null,
       msg ? h("div",{style:{fontSize:12,color:"#0f7a5c",marginBottom:8}},msg) : null,
+      tabBar(),
+      tab==="po" ? h("div",{key:"tpo"},
       // header
       h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",marginBottom:10}},
         fld("PO date", h("input",{type:"date",value:toISODate(po.po_date)||"",disabled:ro||!!po.po_no,onChange:e=>setH({ po_date:e.target.value }),style:inp}), 150),
@@ -51584,7 +52317,7 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
         fld("Delivery required by", h("input",{type:"date",value:toISODate(po.delivery_by)||"",disabled:ro,onChange:e=>setH({ delivery_by:e.target.value||null }),style:inp}), 150),
         fld("Deliver to", h("select",{value:po.deliver_to||"",disabled:ro,onChange:e=>setH({ deliver_to:e.target.value }),style:inp}, PUR_DELIVER_TO.concat(po.deliver_to&&!PUR_DELIVER_TO.includes(po.deliver_to)?[po.deliver_to]:[]).map(x=>h("option",{key:x,value:x},x))), 160),
         fld("Currency", h("select",{value:cur,disabled:ro,onChange:e=>setH({ currency:e.target.value, gst_mode:purGstMode(vendor,S,e.target.value) }),style:inp}, ["INR","USD","EUR","AED","GBP"].map(x=>h("option",{key:x,value:x},x))), 90),
-        cur!=="INR" ? fld("Rate (Rs)", h("input",{value:po.fx_rate||"",disabled:ro,onChange:e=>setH({ fx_rate:e.target.value }),style:inp}), 90) : null,
+        cur!=="INR" ? fld("1 "+cur+" = ? Rs (reference)", h("input",{value:po.fx_rate||"",disabled:ro,onChange:e=>setH({ fx_rate:e.target.value }),style:inp}), 90) : null,
         fld("GST", h("select",{value:po.gst_mode||"intra",disabled:ro||legacy,onChange:e=>setH({ gst_mode:e.target.value }),style:inp}, PUR_GST_MODES.map(([k,l])=>h("option",{key:k,value:k},l))), 190)),
       // lines
       h("div",{style:{overflow:"auto",border:"1px solid "+colors.border,borderRadius:6,marginBottom:8}},
@@ -51595,11 +52328,12 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
             return h("tr",{key:l._k,style:{background:chg?"#fbfaf6":"#fff"}},
               h("td",{style:lineCell}, l.sl),
               h("td",{style:{...lineCell,minWidth:260}},
-                l.source==="FFS" ? ffsLine(l) : chg ? h("select",{value:PUR_CHARGES.includes(l.description)?l.description:"Other charges",disabled:ro,onChange:e=>setLine(l._k,{ description:e.target.value }),style:{...inp,width:200}}, PUR_CHARGES.map(c=>h("option",{key:c,value:c},c)))
+                l.source==="FFS" ? ffsLine(l) : chg ? h("div",{style:{maxWidth:300}}, h(SoTermField,{value:l.description||"",onChange:v=>setLine(l._k,{ description:v }),options:(PL&&PL.charge)||PUR_CHARGES,disabled:ro,placeholder:"Charge — pick from the list or type"}))
                 : svc ? h("input",{value:l.description||"",disabled:ro,onChange:e=>setLine(l._k,{ description:e.target.value }),placeholder:"e.g. Radiography, 24 joints",style:inp})
                 : h("div",null, shapeSel(l), (l.shape||l.spec) ? null : h("input",{value:l.description||"",disabled:ro,onChange:e=>setLine(l._k,{ description:e.target.value }),placeholder:"…or type the item (for items not in the masters)",style:{...inp,marginTop:3}})),
                 chg||l.source==="FFS" ? null : chips(l)),
-              h("td",{style:{...lineCell,minWidth:140}}, l.source==="FFS" ? null : svc||chg ? h("input",{value:l.hsn||"",disabled:ro,onChange:e=>setLine(l._k,{ hsn:e.target.value }),placeholder:svc?"SAC":"HSN/SAC",style:{...inp,width:90}})
+              h("td",{style:{...lineCell,minWidth:140}}, l.source==="FFS" ? null : chg ? h("div",null, h("select",{value:l.charge_basis||"Flat",disabled:ro,title:"Flat / Lumpsum: the amount you type. Percentage: % of the basic value. Included: in the price, printed as Included.",onChange:e=>setLine(l._k,{ charge_basis:e.target.value }),style:{...inp,width:118}}, PUR_CHARGE_BASIS.map(x=>h("option",{key:x,value:x},x))),
+                    h("input",{value:l.hsn||"",disabled:ro,onChange:e=>setLine(l._k,{ hsn:e.target.value }),placeholder:"HSN/SAC",style:{...inp,marginTop:3,width:90}})) : svc ? h("input",{value:l.hsn||"",disabled:ro,onChange:e=>setLine(l._k,{ hsn:e.target.value }),placeholder:svc?"SAC":"HSN/SAC",style:{...inp,width:90}})
                 : h("div",null, h("input",{value:l.size||"",disabled:ro,onChange:e=>setLine(l._k,{ size:e.target.value }),placeholder:"e.g. 50NB Sch 40 · 6 m",style:inp}),
                     (l.shape||l.spec) ? h("input",{value:l.description && l.description!==[l.shape,l.spec,l.grade].filter(Boolean).join(" ") ? l.description : "",disabled:ro,onChange:e=>setLine(l._k,{ description:e.target.value }),placeholder:"Note / description (optional)",style:{...inp,marginTop:3}}) : null,
                     h("input",{value:l.hsn||"",disabled:ro,onChange:e=>setLine(l._k,{ hsn:e.target.value }),placeholder:"HSN",style:{...inp,marginTop:3,width:90}}))),
@@ -51611,31 +52345,24 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
                 a.wt ? h("div",{style:{fontSize:10.5,color:colors.muted}}, (Number(l.qty)||0)+" × "+(Number(l.unit_wt)||0)+" = "+a.wt+" kg") : null)),
               h("td",{style:{...lineCell,textAlign:"right"}}, h("input",{value:l.rate??"",disabled:ro,onChange:e=>setLine(l._k,{ rate:e.target.value }),style:{...inp,width:90,textAlign:"right"}})),
               h("td",{style:{...lineCell,textAlign:"right"}}, h("input",{value:l.gst_pct??"",disabled:ro,onChange:e=>setLine(l._k,{ gst_pct:e.target.value }),style:{...inp,width:48,textAlign:"right"}})),
-              h("td",{style:{...lineCell,textAlign:"right",fontFamily:"monospace",whiteSpace:"nowrap"}}, purMoney(a.amt,cur)),
+              h("td",{style:{...lineCell,textAlign:"right",fontFamily:"monospace",whiteSpace:"nowrap"}}, chg && l.charge_basis==="Included" ? "Included" : purMoney(chg ? purChargeAmt(l, T.basic) : a.amt,cur), chg && l.charge_basis==="Percentage" ? h("div",{style:{fontSize:10,color:colors.muted,fontFamily:"inherit"}},(Number(l.rate)||0)+"% of basic") : null),
               h("td",{style:{...lineCell,textAlign:"right"}}, legacy ? (l.received_qty!=null ? String(Number(l.received_qty)) : "") : canEdit ? h("button",{onClick:()=>delLine(l._k),title:"Remove the line",style:{...btnSmall,padding:"2px 7px"}},"✕") : null));
           })))),
       canEdit ? h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}},
         h("button",{onClick:()=>addLine("item"),style:btnSmall}, po.po_kind==="SPO"?"+ Service":"+ Item"),
         h("button",{onClick:()=>addLine("charge"),style:btnSmall},"+ Charge (freight, P&F, testing)"),
         po.po_kind!=="SPO" ? h("button",{onClick:fromBom,style:btnSmall},"+ Items from the contract's BOM") : null) : null,
-      // totals + terms
-      h("div",{style:{display:"flex",gap:14,flexWrap:"wrap",alignItems:"flex-start"}},
-        h("div",{style:{flex:"1 1 520px"}},
-          h("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:6}}, h("b",{style:{fontSize:13}},"Commercial terms"),
-            canEdit ? h("button",{onClick:cloneTerms,style:btnSmall},"Copy from the contract's Sale Order") : null),
-          legacy ? h("div",{style:{fontSize:12,color:colors.muted}},"As per the PO issued from "+(po.source==="FFS"?"FFS":"outside the app")+".") :
-          h("div",{style:{display:"grid",gridTemplateColumns:"170px 1fr",gap:"4px 8px",alignItems:"center"}},
-            PUR_TERMS.map(([k,l])=>[h("span",{key:k+"l",style:{fontSize:12,color:colors.muted}},l), h("input",{key:k+"v",value:(po.terms||{})[k]||"",disabled:ro,onChange:e=>setH({ terms:{ ...(po.terms||{}), [k]:e.target.value } }),style:inp})])),
-          h("label",{style:{display:"block",marginTop:8}}, h("span",{style:lab},"Note on the PO"), h("textarea",{rows:2,value:po.notes||"",disabled:ro,onChange:e=>setH({ notes:e.target.value }),style:{...inp,resize:"vertical"}}))),
-        h("div",{style:{flex:"0 0 300px",background:"#faf9f4",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px",fontSize:12.5}},
-          [["Basic value",T.basic],["Charges",T.add],...(T.cgst||T.sgst?[["CGST",T.cgst],["SGST",T.sgst]]:[]),...(T.igst?[["IGST",T.igst]]:[]),...(!T.cgst&&!T.sgst&&!T.igst&&T.tax?[["GST",T.tax]]:[]),...(T.round?[["Round off",T.round]]:[])].map(([k,v])=>
-            h("div",{key:k,style:{display:"flex",justifyContent:"space-between",padding:"2px 0"}}, h("span",null,k), h("span",{style:{fontFamily:"monospace"}},purMoney(v,cur)))),
-          h("div",{style:{display:"flex",justifyContent:"space-between",padding:"6px 0 0",marginTop:4,borderTop:"1px solid "+colors.border,fontWeight:700}}, h("span",null,"Total ("+cur+")"), h("span",{style:{fontFamily:"monospace"}},purMoney(T.net,cur))),
-          h("div",{style:{fontSize:11,color:colors.muted,marginTop:4}}, invAmountWords(T.net, cur)),
-          po.gst_mode==="import" ? h("div",{style:{fontSize:11,color:"#854f0b",marginTop:4}},"Import: customs duty and IGST come on the Bill of Entry (Accounts → Purchase).") : null)),
+      h("div",{style:{display:"flex",gap:14,flexWrap:"wrap",alignItems:"flex-start",justifyContent:"space-between"}},
+        h("label",{style:{display:"block",flex:"1 1 320px",maxWidth:560}}, h("span",{style:lab},"Subject on the cover letter (optional)"), h("input",{value:po.subject||"",disabled:ro,onChange:e=>setH({ subject:e.target.value }),placeholder:"e.g. Purchase Order for SS pipe, plate and flanges",style:inp})),
+        totalsBox())) : null,
+      tab==="tax" ? taxTab() : null,
+      tab==="terms" ? termsTab() : null,
+      tab==="nde" ? ndeTab() : null,
+      tab==="notes" ? notesTab() : null,
+      tab==="docs" ? docsTab() : null,
+      tab==="amd" ? amdTab() : null,
       po && po.po_no && po.id ? h(PoBillsSection,{ po_no:po.po_no }) : null,
-      revs.length ? h("div",{style:{marginTop:12,fontSize:12}}, h("b",null,"Revisions"),
-        revs.map((r,i)=>h("div",{key:i,style:{color:colors.muted}},"Rev "+r.rev+" → Rev "+(Number(r.rev)+1)+" on "+fmtDMY(r.created_at)+" by "+(r.created_by||"")+": "+(r.reason||"")))) : null),
+      null),
     sentDlg ? h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:2600,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"80px 16px"}},
       h("div",{style:{background:"#fff",borderRadius:10,width:460,maxWidth:"100%",padding:"16px 18px"}},
         h("b",{style:{fontSize:14}}, sentDlg.ask ? "Did you send "+po.po_no+" to the vendor?" : "Mark "+po.po_no+" as sent"),
@@ -51644,15 +52371,37 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
           h("span",{style:{fontSize:12}},"Sent on"), h("input",{type:"date",value:sentDlg.on,onChange:e=>setSentDlg(d=>({ ...d, on:e.target.value })),style:inp}),
           h("span",{style:{fontSize:12}},"Sent to"), h("input",{value:sentDlg.to,onChange:e=>setSentDlg(d=>({ ...d, to:e.target.value })),placeholder:"Name / email / number at the vendor",style:inp}),
           h("span",{style:{fontSize:12}},"How"), h("select",{value:sentDlg.how,onChange:e=>setSentDlg(d=>({ ...d, how:e.target.value })),style:inp}, PUR_HOW.map(x=>h("option",{key:x,value:x},x))),
-          h("span",{style:{fontSize:12}},"Note"), h("input",{value:sentDlg.note,onChange:e=>setSentDlg(d=>({ ...d, note:e.target.value })),placeholder:"optional",style:inp})),
+          h("span",{style:{fontSize:12}},"Note"), h("input",{value:sentDlg.note,onChange:e=>setSentDlg(d=>({ ...d, note:e.target.value })),placeholder:"optional",style:inp}),
+          h("span",{style:{fontSize:12,fontWeight:700}},"Link (required)"), h("input",{value:sentDlg.link||"",onChange:e=>setSentDlg(d=>({ ...d, link:e.target.value })),placeholder:"OneDrive / Drive link of the PDF as sent",style:inp})),
         h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}},
           h("button",{onClick:markSent,style:{...btnPrimary,background:"#085041"}},"Mark as sent"),
           h("button",{onClick:()=>setSentDlg(null),style:btnSmall}, sentDlg.ask?"Not yet":"Cancel")))) : null,
-    reasonDlg ? h(ReasonDialog,{ title: reasonDlg==="revise" ? "Revise "+po.po_no+" (Rev "+((Number(po.rev)||0)+1)+")" : "Cancel "+po.po_no,
-      subtitle: reasonDlg==="revise" ? "The approved version is kept. The PO goes back to Draft, needs approval again, and must be sent again (the PDF shows the revision)." : "The PO stays in the register as Cancelled, with this reason. Tell the vendor.",
-      placeholder: reasonDlg==="revise" ? "What changes and why (e.g. quantity 10 → 12 per client revision)" : "Why it is cancelled",
-      okLabel: reasonDlg==="revise" ? "Start the revision" : "Cancel the PO", okStyle: reasonDlg==="cancel" ? { ...btnPrimary, background:"#8a2d2d" } : undefined,
-      onOk:(v)=>{ const r = String(v||"").trim(); if(r.length<5){ alert("Write the reason."); return; } reasonDlg==="revise" ? revise(r) : cancelPo(r); }, onCancel:()=>setReasonDlg(null) }) : null);
+    reasonDlg ? h(ReasonDialog,{ title: reasonDlg==="reopen" ? "Reopen "+po.po_no+" to edit" : "Cancel "+po.po_no,
+      subtitle: reasonDlg==="reopen" ? "It has not been sent yet: it goes back to Draft with the same number, the approvals are cleared and the send card closes. It needs approval again." : "The PO stays in the register as Cancelled, with this reason. Tell the vendor.",
+      placeholder: reasonDlg==="reopen" ? "What needs changing (e.g. vendor revised the rate before we sent it)" : "Why it is cancelled",
+      okLabel: reasonDlg==="reopen" ? "Reopen" : "Cancel the PO", okStyle: reasonDlg==="cancel" ? { ...btnPrimary, background:"#8a2d2d" } : undefined,
+      onOk:(v)=>{ const r = String(v||"").trim(); if(r.length<5){ alert("Write the reason."); return; } reasonDlg==="reopen" ? reopen(r) : cancelPo(r); }, onCancel:()=>setReasonDlg(null) }) : null,
+    amdDlg ? h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:2600,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"60px 16px"}},
+      h("div",{style:{background:"#fff",borderRadius:10,width:500,maxWidth:"100%",padding:"16px 18px",maxHeight:"85vh",overflow:"auto"}},
+        h("b",{style:{fontSize:14}},"Amend "+po.po_no+" — Amendment "+((Number(po.rev)||0)+1)),
+        h("div",{style:{fontSize:11.5,color:colors.muted,margin:"3px 0 10px"}},"The sent version is kept. The PO opens for editing, goes back for approval (Purchase Manager and QC), and is sent again with an Amendment cover and a was → now sheet. Mark as sent again with the new link; the same "+STALE_DAYS+"-day rule applies."),
+        h("label",{style:{display:"block"}}, h("span",{style:lab},"Reason (required)"), h("textarea",{rows:2,autoFocus:true,value:amdDlg.why,onChange:e=>setAmdDlg(d=>({ ...d, why:e.target.value })),placeholder:"e.g. Vendor revised delivery; quantity of Sl 2 reduced to 380 kg",style:{...inp,resize:"vertical"}})),
+        h("div",{style:{fontSize:11.5,color:colors.muted,margin:"8px 0 2px"}},"What changes"),
+        PUR_AMD_WHAT.map(w=>h("label",{key:w,style:{display:"flex",gap:8,alignItems:"center",fontSize:12.5,margin:"3px 0",cursor:"pointer"}}, h("input",{type:"checkbox",checked:amdDlg.what.includes(w),onChange:e=>setAmdDlg(d=>({ ...d, what: e.target.checked ? [...d.what, w] : d.what.filter(x=>x!==w) }))}), w)),
+        h("div",{style:{fontSize:11.5,background:"#fffaf0",border:"1px solid #efd59c",borderRadius:6,padding:"6px 9px",marginTop:8,color:"#5a3a00"}},"Quantity can't go below what is already received, and a received or billed line can't be removed. A rate change on a billed line tells Accounts when the amendment is approved."),
+        h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}},
+          h("button",{onClick:()=>{ const r = String(amdDlg.why||"").trim(); if(r.length<5){ alert("Write the reason."); return; } revise(r, amdDlg.what); },style:{...btnPrimary,background:"#8a5200"}},"Start Amendment "+((Number(po.rev)||0)+1)),
+          h("button",{onClick:()=>setAmdDlg(null),style:btnSmall},"Cancel")))) : null,
+    askDocs ? h(PurDocAsk,{ po, cats:docCats, have:((docsInfo&&docsInfo.reqs)||[]).map(r=>r.category), onCancel:()=>setAskDocs(null), onSave:async(pick)=>{
+      const mode = askDocs; setAskDocs(null); if(!po.id) return;
+      const have = new Set(((docsInfo&&docsInfo.reqs)||[]).map(r=>purNormCat(r.category)));
+      const rows = pick.filter(c=>!have.has(purNormCat(c))).map(c=>({ entity_type:"purchase_order", entity_id:po.po_no, category:c, is_mandatory:true, source:"PO", requested_by:user.username||"" }));
+      if(rows.length){ const { error } = await sb.from("document_requests_tbl").insert(rows); if(error){ alert("Could not save the documents: "+error.message); return; }
+        await logAudit("INSERT","document_requests_tbl",po.po_no,"Documents required from the vendor: "+pick.join(", "),user.username||""); }
+      const now = new Date().toISOString(); try{ await sb.from("po_register").update({ docs_asked_at:now }).eq("id",po.id); }catch(e){} setPo(p=>({ ...p, docs_asked_at:now }));
+      await loadDocs(po.po_no);
+      if(mode==="submit") await submit(true); } }) : null,
+    docsOpen ? h(DocumentsBox,{ mode:"po", entityRef:po.po_no, user, isAdminOrAbove:!!(who.admin||who.sa), withMandatoryAuth:(f)=>f(), onChanged:()=>loadDocs(po.po_no), onClose:()=>{ setDocsOpen(false); loadDocs(po.po_no); } }) : null);
 }
 
 
@@ -52112,6 +52861,7 @@ function MaterialInwardScreen({ user, sessionCompany }){
     const computed = computeGrnDisplayStatus(draft, lineItems, relaxRackBin);
     if(computed.status!=="Open"){ alert("This GRN isn't ready to clear yet: "+computed.reason); return; }
     if(!draft.stores_incharge_signature.trim()){ alert("Type your name to sign off and clear this GRN."); return; }
+    if(!(await purGrnDocsGate(draft.po_no, user))) return;   // 217: the vendor's documents first
     if(!confirm("Clearing this GRN will lock all its line items from further edits. Continue?")) return;
     const payload = {status:"Cleared", stores_incharge_signature:draft.stores_incharge_signature.trim(), cleared_at:new Date().toISOString(), updated_at:new Date().toISOString()};
     await sb.from("grn_header").update(payload).eq("id",draft.id);
@@ -52213,6 +52963,7 @@ function MaterialInwardScreen({ user, sessionCompany }){
         onMove: async(g,newStatus)=>{
           const c = computeGrnDisplayStatus(g,grnsItemsMap[g.grn_no]||[],relaxRackBin);
           if(newStatus!==c.status){ alert("Can't move this GRN to "+newStatus+" yet — "+(c.reason||"conditions not met")+"."); return; }
+          if(newStatus==="Cleared" && !(await purGrnDocsGate(g.po_no, user))) return;   // 217
           if(newStatus==="Cleared" && !confirm("Clearing this GRN will lock all its line items from further edits. Continue?")) return;
           if(newStatus==="Cleared"){
             await sb.from("grn_header").update({status:"Cleared",cleared_at:new Date().toISOString(),updated_at:new Date().toISOString()}).eq("id",g.id);
