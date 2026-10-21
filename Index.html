@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-21T11:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-21T14:45:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -2171,7 +2171,7 @@ function VersionLine({ onOpen }){
     "Version "+ver+(isNew?" · new today":""));
 }
 
-function TopBar({ user, sessionCompanyId, sessionCompany, onChangeCompany, onLogout, flags, onOpenVersions }) {
+function TopBar({ user, sessionCompanyId, sessionCompany, onChangeCompany, onLogout, flags, onOpenVersions, onFull, inFull }) {
   const [sessionCompanyName,setSessionCompanyName] = useState("");
   useEffect(()=>{
     if(!sessionCompanyId){ setSessionCompanyName(""); return; }
@@ -2199,6 +2199,7 @@ function TopBar({ user, sessionCompanyId, sessionCompany, onChangeCompany, onLog
       flags || null,   // 146: My day flags
       h("span",{style:{fontSize:12,color:"#9a9d8f"}},user.username+" ("+user.role+")"),
       h(NotificationBell,{user}),
+      onFull ? h("button",{onClick:onFull,title:inFull?"Leave full screen (Esc)":"Full screen: hide the Windows taskbar, the browser bars and this ribbon for more room (Esc to leave)",style:{background:"none",border:"1px solid #3a3f33",color:"#fff",padding:"6px 12px",fontSize:12,cursor:"pointer",borderRadius:6}},inFull?"✕ Exit full screen":"⛶ Full screen") : null,   // 225
       h("button",{onClick:()=>window.open(window.location.href,"_blank"),style:{background:"none",border:"1px solid #3a3f33",color:"#fff",padding:"6px 12px",fontSize:12,cursor:"pointer",borderRadius:6}},"⧉ New tab"),
       h("button",{onClick:onLogout,style:{background:"none",border:"1px solid #3a3f33",color:"#fff",padding:"6px 12px",fontSize:12,cursor:"pointer",borderRadius:6}},"Sign out")
     )
@@ -5231,6 +5232,7 @@ function MasterEditor({ tableKey, user }) {
         tableKey==="material_rates"&&mrFilteredRows.length>0&&h("button",{onClick:()=>setMrZoomOpen(true),style:btnSecondary},"⤢ Zoom"),
         tableKey==="material_rates"&&h("button",{onClick:()=>openMrExportPreview("excel"),disabled:exportPreviewLoading,style:btnSecondary},"Export Excel"),
         tableKey==="material_rates"&&h("button",{onClick:()=>openMrExportPreview("pdf"),disabled:exportPreviewLoading,style:btnSecondary},"Export PDF"),
+        (tableKey==="item_tbl"||tableKey==="materials_shape")&&h("button",{onClick:(ev)=>hsnSheetDownload(ev.currentTarget),title:"One Excel file for Accounts: every item and every raw-material shape, with the HSN column blank to fill",style:{...btnSecondary,border:"1px solid #0f6e56",color:"#0f6e56",fontWeight:600}},"⬇ HSN sheet for Accounts"),
         tableDef.exportEnabled&&h("button",{onClick:()=>openGenericExportPreview("excel"),disabled:exportPreviewLoading,style:btnSecondary},"Export Excel"),
         tableDef.exportEnabled&&h("button",{onClick:()=>openGenericExportPreview("pdf"),disabled:exportPreviewLoading,style:btnSecondary},"Export PDF"),
         tableDef.editAllEnabled&&!genericEditAllMode&&sortedFilteredRows.length>0&&h("button",{onClick:startGenericEditAll,style:btnSecondary},"Edit all lines"),
@@ -23926,6 +23928,61 @@ function remapEstimateIds(lineRows, oldEst, newEst){
 }
 // 185d: the same, shaped like a single read ({ data, error }) so it drops into Promise.all / destructuring
 async function pagedRead(build){ try{ return { data: await fetchPaged(build), error: null }; }catch(e){ return { data: [], error: e }; } }
+// 2026-10-21T13:00 — HSN sheet for Accounts: Items + raw-material Shapes, HSN left blank to fill.
+async function hsnSheetDownload(btn){
+  const old = btn ? btn.textContent : "";
+  if(btn){ btn.disabled = true; btn.textContent = "Preparing…"; }
+  try{
+    const norm = s=>String(s==null?"":s).trim();
+    const items = await fetchPaged(()=>sb.from("item_tbl").select("*"));
+    const shapes = await fetchPaged(()=>sb.from("materials_shape").select("*"));
+    let specs = [], poLines = [], saleItems = [];
+    try{ specs = await fetchPaged(()=>sb.from("material_spec").select("id,material_shape")); }catch(e){}
+    try{ poLines = await fetchPaged(()=>sb.from("po_register_items").select("id,shape,hsn,description")); }catch(e){}
+    try{ saleItems = await fetchPaged(()=>sb.from("acc_voucher_item_tbl").select("id,hsn,description,kind")); }catch(e){}
+    const specCount = new Map(); (specs||[]).forEach(s=>{ const k = norm(s.material_shape).toLowerCase(); if(k) specCount.set(k,(specCount.get(k)||0)+1); });
+    // Sheet 1 — Items
+    const it = (items||[]).filter(r=>norm(r.item)).sort((a,b)=>(norm(a.family)+"|"+norm(a.item)).localeCompare(norm(b.family)+"|"+norm(b.item)));
+    const s1 = [["Sl No","Family","Item  (do not change)","HSN now in app","HSN code  (fill)","GST % now in app","GST %  (fill, optional)","Goods / Service","Row id  (do not change)"]];
+    it.forEach((r,i)=>s1.push([i+1, norm(r.family), norm(r.item), norm(r.hsn_code), "", r.gst_rate==null?"":r.gst_rate, "", norm(r.supply_kind)||"Goods", r.id==null?"":String(r.id)]));
+    // Sheet 2 — Raw material shapes
+    const sh = (shapes||[]).filter(r=>norm(r.shape)).sort((a,b)=>norm(a.shape).localeCompare(norm(b.shape)));
+    const s2 = [["Sl No","Shape  (do not change)","Specs under this shape","HSN code  (fill)","GST %  (fill, optional)","Row id  (do not change)"]];
+    sh.forEach((r,i)=>s2.push([i+1, norm(r.shape), specCount.get(norm(r.shape).toLowerCase())||0, "", "", r.id==null?"":String(r.id)]));
+    // Sheet 3 — what was used before (reference only)
+    const s3 = [["For reference only — HSN codes already used on past documents. Nothing here is loaded back."],[],
+                ["A. Purchase orders — by raw material shape"],["Shape","HSN used","PO lines","Sample description"]];
+    const byShape = new Map();
+    (poLines||[]).forEach(l=>{ const hs = norm(l.hsn); if(!hs) return; const shp = norm(l.shape)||"(no shape on line)"; const k = shp.toLowerCase()+"|"+hs;
+      const a = byShape.get(k)||{ shp, hs, n:0, d:norm(l.description) }; a.n++; byShape.set(k,a); });
+    Array.from(byShape.values()).sort((a,b)=>a.shp.localeCompare(b.shp)||b.n-a.n).forEach(a=>s3.push([a.shp,a.hs,a.n,a.d.slice(0,90)]));
+    if(byShape.size===0) s3.push(["(no PO lines with HSN yet)"]);
+    s3.push([],["B. Sales invoices (accounts) — by HSN"],["HSN used","Goods / Service","Invoice lines","Sample description"]);
+    const byHsn = new Map();
+    (saleItems||[]).forEach(l=>{ const hs = norm(l.hsn); if(!hs) return; const a = byHsn.get(hs)||{ hs, k:norm(l.kind), n:0, d:norm(l.description).split("\n")[0] }; a.n++; byHsn.set(hs,a); });
+    Array.from(byHsn.values()).sort((a,b)=>b.n-a.n).forEach(a=>s3.push([a.hs,a.k==="service"?"Service":"Goods",a.n,a.d.slice(0,90)]));
+    if(byHsn.size===0) s3.push(["(no invoice lines with HSN yet)"]);
+    // Read me
+    const s0 = [["HSN codes — sheet for Accounts"],[],
+      ["Company", (typeof APP_SETTINGS!=="undefined" && APP_SETTINGS && (APP_SETTINGS.companyName||APP_SETTINGS.company)) || ""],
+      ["Made on", new Date().toLocaleString("en-IN")],[],
+      ["1. Items: type the HSN code in the column \"HSN code (fill)\". GST % is optional — fill only if it is wrong or blank."],
+      ["2. Raw material shapes: for raw material the HSN depends on the shape only (pipe, flange, plate…). One HSN per shape."],
+      ["3. Do not change the Item, Shape or Row id columns, and do not add or delete rows — they are how the codes go back into the app."],
+      ["4. Leave a cell blank if you are not sure; blank means \"no change\"."],
+      ["5. The \"Past HSN used\" sheet shows codes already used on our POs and invoices — for reference only."],[],
+      ["Items", it.length],["Shapes", sh.length]];
+    const wb = XLSX.utils.book_new();
+    const add = (aoa, name, cols)=>{ const ws = XLSX.utils.aoa_to_sheet(aoa); ws["!cols"] = cols.map(w=>({wch:w})); XLSX.utils.book_append_sheet(wb, ws, name); return ws; };
+    add(s0,"Read me",[22,110]);
+    const w1 = add(s1,"Items",[7,22,40,14,16,14,16,14,38]); w1["!autofilter"] = { ref:"A1:I"+Math.max(1,s1.length) };
+    const w2 = add(s2,"Raw material shapes",[7,34,20,16,16,38]); w2["!autofilter"] = { ref:"A1:F"+Math.max(1,s2.length) };
+    add(s3,"Past HSN used",[28,14,12,90]);
+    const d = new Date(), p = n=>String(n).padStart(2,"0");
+    XLSX.writeFile(wb, "HSN_Items_and_Shapes_"+d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+".xlsx");
+  }catch(e){ console.error(e); try{ window.alert("Could not make the HSN sheet: "+(e && e.message || e)); }catch(_){} }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = old; } }
+}
 async function fetchPaged(build, pageSize){
   const size = pageSize||1000;
   let all = [], from = 0, tie = true;   // 185d: id as the last sort key
@@ -30080,6 +30137,53 @@ const MANUAL_SECTIONS = [
             ]
           }
         ]
+      },
+      {
+        "key": "full_screen",
+        "title": "Full screen: more room on any screen",
+        "tag": "General",
+        "blocks": [
+          {
+            "type": "bullets",
+            "items": [
+              "Press ⛶ Full screen in the dark top bar (next to New tab). The browser goes full screen — the Windows taskbar and the browser's own bars are hidden — and the app's top bar, menu and notice chips fold away, so the screen (the task boards, the Gantt, the BOM) gets the whole window.",
+              "Two small buttons stay at the bottom left: ☰ Menu shows the ribbon again while you stay full screen (▴ Hide menu folds it back), and ✕ Exit full screen leaves.",
+              "Esc also leaves full screen; the ribbon comes back by itself.",
+              "Screens that have their own full screen (BOM, Gantt) still work inside it."
+            ]
+          }
+        ]
+      },
+      {
+        "key": "hsn_sheet",
+        "title": "HSN sheet for Accounts: items and raw-material shapes",
+        "tag": "Setup",
+        "blocks": [
+          {
+            "type": "bullets",
+            "items": [
+              "Setup → Items → Items (or Material shapes): press ⬇ HSN sheet for Accounts. One Excel file downloads with every item and every raw-material shape, and the HSN column left blank to fill.",
+              "Sheet Items: family, item, the HSN and GST % now in the app, and blank columns HSN code (fill) and GST % (fill, optional).",
+              "Sheet Raw material shapes: one row per shape (pipe, flange, plate…). For raw material the HSN depends on the shape only.",
+              "Sheet Past HSN used: codes already used on our POs (by shape) and sales invoices — for reference only.",
+              "Do not change the Item, Shape or Row id columns and do not add or delete rows. Blank means no change. Send the filled file back to the MD; the codes are loaded into the app from it."
+            ]
+          }
+        ]
+      },
+      {
+        "key": "all_boards_pile",
+        "title": "All boards: Unassigned stays in view",
+        "tag": "Tasks",
+        "blocks": [
+          {
+            "type": "bullets",
+            "items": [
+              "Tasks → All boards: in every department band, the 📥 Unassigned pile stays fixed on the left while you scroll across the people, so a card can be dragged to anyone at the far right.",
+              "Same as the Task Assignment Board. On a narrow screen (phone) it scrolls with the rest."
+            ]
+          }
+        ]
       }
     ]
   }
@@ -30110,6 +30214,9 @@ const MANUAL_TA = {
  "acc_preview_pl_total": {"title":"Accounts: முதலில் PDF preview, P&L Total column","tag":"Accounts","blocks":[{"type":"bullets","items":["Accounts module-இல் ஒவ்வொரு PDF-உம் (statements, ledgers, vouchers, balance confirmation கடிதம், bank stock statement, மற்ற reports) முதலில் preview-ஆகத் திறக்கும். அதிலிருந்து Download, Print அல்லது Close. Excel முன்பு போலவே நேராக download ஆகும்.","Phone-இல் preview வெறுமையாக இருந்தால் Download அழுத்தவும்.","Profit & Loss-இல் Total column இரண்டு மாதங்களுக்கு மேல் இருந்தால் மட்டும் வரும்."]}],"en_sig":"db0560fd"},
  "so_bom_edit": {"title":"வெளியிட்ட Sale Order-இன் BOM-ஐத் திருத்துதல்","tag":"Sales","blocks":[{"type":"p","text":"Quote Sale Order ஆனதும் அதன் BOM read-only; எல்லா செய்திகளும் Sale Order என்று சொல்லும் (offer அல்ல). Admins, super admins மட்டும் திருத்தலாம் — code தேவையில்லை. Users மாற்ற முடியாது."},{"type":"steps","items":["Sale Order BOM-ஐத் திறந்து ✎ Edit BOM (எல்லா வரிகளும்) அல்லது ஒரு வரியின் கடைசியில் ✎.","காரணத்தை ஒருமுறை கொடுங்கள்; ஒவ்வொரு மாற்றத்துடனும் சேமிக்கப்படும்.","ஒவ்வொரு வரியும் வழக்கம்போல் Save ஆகும்.","✓ Done editing அழுத்தவும்: Procurement Gantt BOM-ஐப் பின்தொடரும்; புதிய shape-க்கு வரிசை, அளவுகள் மாறும், BOM வரி இல்லாத form Purchase-க்குக் குறிக்கப்படும்."]},{"type":"bullets","items":["Production BOM ஏற்கனவே approve ஆகியிருந்தால் Technical Head-இடம் மீண்டும் re-approval-க்குப் போகும்.","PO ஏற்கனவே போட்ட form-இல் அளவு கூடினால் PO owner, Purchase Manager-க்குத் தகவல்.","ஒவ்வொரு மாற்றமும் audit log, Activity & Risk Report-இல்."]}],"en_sig":"967d1bf2"},
  "activity_report": {"title":"Activity & Risk Report (super admins)","tag":"Admin","blocks":[{"type":"p","text":"Admin → Logs → Activity & Risk Report: இரண்டு தேதிகளுக்கு இடையிலான audit log மாற்றங்கள் அனைத்தும், Drastic / Check / Normal என வகைப்படுத்தி."},{"type":"bullets","items":["Drastic: நீக்கங்கள், codes / overrides, lock செய்த மாதத் திருத்தம், அனுமதி மாற்றங்கள்.","Check: approval / அனுப்பிய பின் மாற்றம், master data, 10-க்கு மேல் மொத்த மாற்றம், Rs 1 லட்சம்+, காலை 8-க்கு முன், இரவு 8-க்குப் பின், ஞாயிறு.","வரியை click செய்தால் முன் / பின் விவரம். PDF, Excel.","Login-இல் நேற்றைய Drastic மாற்றங்களின் சுருக்கம் super admin-க்கு."]}],"en_sig":"749edb4e"},
+ "full_screen": {"title":"Full screen: எந்தத் திரையிலும் கூடுதல் இடம்","tag":"General","blocks":[{"type":"bullets","items":["மேலே உள்ள கருப்புப் பட்டையில் ⛶ Full screen அழுத்தவும் (New tab அருகில்). Browser full screen ஆகும் — Windows taskbar, browser பட்டைகள் மறையும் — app-இன் மேல் பட்டை, menu, அறிவிப்புகள் மடங்கும்.","கீழ் இடது மூலையில் இரண்டு பொத்தான்கள்: ☰ Menu — full screen-இல் இருந்தபடியே ribbon-ஐக் காட்டும்; ✕ Exit full screen — வெளியேறும்.","Esc அழுத்தினாலும் வெளியேறும்; ribbon தானாகத் திரும்பும்."]}],"en_sig":"58884cfc"},
+ "hsn_sheet": {"title":"Accounts-க்கான HSN sheet: items மற்றும் raw material shapes","tag":"Setup","blocks":[{"type":"bullets","items":["Setup → Items → Items (அல்லது Material shapes): ⬇ HSN sheet for Accounts அழுத்தவும். எல்லா items, எல்லா raw material shapes உள்ள ஒரு Excel file வரும்; HSN column காலியாக இருக்கும்.","Raw material-க்கு HSN shape-ஐப் பொறுத்தது மட்டுமே (pipe, flange, plate…) — ஒரு shape-க்கு ஒரு HSN.","Item, Shape, Row id columns-ஐ மாற்ற வேண்டாம்; rows சேர்க்கவோ நீக்கவோ வேண்டாம். தெரியாவிட்டால் காலியாக விடவும்."]}],"en_sig":"f6557a59"},
+ "all_boards_pile": {"title":"All boards: Unassigned எப்போதும் தெரியும்","tag":"Tasks","blocks":[{"type":"bullets","items":["Tasks → All boards: ஒவ்வொரு department band-இலும் 📥 Unassigned pile இடது பக்கம் நிலையாக இருக்கும்; வலது பக்கம் scroll செய்தாலும் தெரியும். அதனால் card-ஐ கடைசியில் உள்ள எவருக்கும் இழுத்து விடலாம்.","Phone போன்ற சிறிய திரையில் மற்றவற்றுடன் சேர்ந்து scroll ஆகும்."]}],"en_sig":"dc7dec76"},
  "acc_period": {"title":"Period Close: closing stock, மாதத்தை lock செய்தல்","tag":"கணக்குகள்","blocks":[{"type":"steps","items":["மாதம் முடிந்ததும் Finance & Accounts Manager, Raw Material closing stock-ஐ பதிவு செய்கிறார் (Enter RM stock).","Super admin, WIP & FG closing-ஐ விற்பனை மதிப்பில், குறிப்புடன் பதிவு செய்கிறார் (Enter WIP & FG).","புத்தகங்களைச் சரிபார்த்து Lock month. மாதங்கள் வரிசைப்படி lock ஆகும்."]},{"type":"bullets","items":["Lock ஆன மாதத்தில் voucher சேர்க்கவோ, மாற்றவோ, நீக்கவோ முடியாது; FFS import அதைத் தொடாது.","Super admin மட்டுமே காரணத்துடன் unlock செய்யலாம்; கடைசியாக lock ஆன மாதம் முதலில்.","இல்லாத closing stock-உம் lock செய்யத் தயாரான மாதங்களும், அதற்குப் பொறுப்பான post-க்கு Pending Actions-இல் வரும்."]},{"type":"p","text":"இந்த இரண்டு closing தொகைகளும் Current Assets → Stocks கீழ் உள்ள Raw Material, WIP & FG ledgers-இன் மாத இறுதி closing ஆகும். ஒவ்வொன்றுக்கும் 1 ஏப்ரல் opening-உம் உண்டு."},{"type":"p","text":"Settings (super admins): நிதியாண்டு தொடக்கம், go-live தேதி."}],"en_sig":"5c21aefa"},
  "acc_export": {"title":"Auditor-க்கான Export (Tally, Excel)","tag":"கணக்குகள்","blocks":[{"type":"p","text":"Accounts → Close & Masters → Export for Auditor, 1 ஏப்ரல் முதல் நீங்கள் தேர்வு செய்யும் தேதி வரை, auditor-க்குத் தேவையான அனைத்தையும் ஒரு zip கோப்பாகத் தரும்."},{"type":"steps","items":["Super admin-இடம் Accounts Export code கேளுங்கள் (Admin → Authorization Codes → Generate Accounts Export code). அது ஒரு முறை, 15 நிமிடங்களுக்கு மட்டும் வேலை செய்யும்.","Export எந்தத் தேதி வரை என்று தேர்வு செய்யுங்கள் (அல்லது Quick மாத இறுதிப் பொத்தான்), code-ஐ type செய்து Export for Auditor அழுத்துங்கள்.","Zip-ஐ auditor-இடம் கொடுங்கள்."]},{"type":"bullets","items":["Tally_Masters.xml, Tally_Vouchers.xml: Tally Prime-இல் 1 ஏப்ரல் முதல் books கொண்ட வெற்று company உருவாக்கி, Import → Masters (Tally_Masters.xml) முதலில், பிறகு Import → Transactions (Tally_Vouchers.xml). Trial Balance, Books.xlsx-இல் உள்ளதுடன் ஒத்துப்போக வேண்டும்.","Books.xlsx: Read Me, Trial Balance, Profit & Loss, Balance Sheet, Cash Flow, Stock (மாத இறுதித் தொகைகள், பதிவு செய்தவர்), Day Book, ஒவ்வொரு ledger-இன் entries, ledger பட்டியல் (Tally-இல் பயன்படும் பெயருடன்), cancel ஆன vouchers.","ஒரே பெயருள்ள ledgers, அல்லது group-இன் பெயருள்ள ledger, Tally-க்கு அடைப்புக்குறிக்குள் code-உடன் செல்லும்; Tally-இல் ஒவ்வொரு பெயரும் வேறுபட வேண்டும்.","Lock ஆகாத மாதங்கள் Provisional எனக் குறிக்கப்படும். ஒவ்வொரு export-உம் யார், எப்போது, காலம், code-உடன் பதிவாகும்."]},{"type":"warn","text":"Finance & Accounts Manager, Finance Director, super admins மட்டுமே export செய்யலாம், எப்போதும் புதிய super admin code-உடன்: export என்பது நிறுவனத்தின் முழுக் கணக்குப் புத்தகங்கள்."}],"en_sig":"71bda284"},
  "acc_pay_purchase": {"title":"Payment, Receipt, Contra, Purchase பதிவுகள்","tag":"கணக்குகள்","blocks":[{"type":"p","text":"Payment, Receipt, Contra ஆகியவற்றில் bank (அல்லது cash அல்லது card) மேலே ஒரே வரியில்; மற்ற accounts கீழே, ஒவ்வொன்றுக்கும் ledger, தொகை மட்டும் — Debit அல்லது Credit தேர்வு தேவையில்லை. Purchase என்பது Sales voucher போன்ற supplier bill."},{"type":"steps","items":["Payment: எந்த account-இலிருந்து செலுத்தப்படுகிறது, தேதி, mode (NEFT, RTGS, IMPS, Cheque, UPI…), UTR அல்லது cheque எண் தேர்வு செய்யுங்கள். யாருக்குச் செலுத்தப்படுகிறது என்பதைச் சேர்க்கவும். Supplier என்றால் Against bill-இல் இன்னும் நிலுவையில் உள்ள bills வரும்; Oldest first-இலேயே விடுங்கள், அல்லது ஒன்றைத் தேர்வு செய்யுங்கள்.","Receipt: அதே போல — பணம் வரும் account, யாரிடமிருந்து வருகிறது (customer-இன் invoices வரும்).","Contra: நம் சொந்த bank, cash accounts இடையே மட்டும் — cash கட்டியது, cash எடுத்தது, banks இடையே மாற்றம்.","Purchase: supplier (அதன் state CGST + SGST அல்லது IGST என்று முடிவு செய்யும்), supplier bill எண், தேதி, நம் தேதி, PO எண்; Goods அல்லது Service; items, charges, GST rate; TDS பிடித்தால் (bill பதியும்போதே பிடிக்கப்படும்); bill-இல் அச்சிட்ட மொத்தத்தை type செய்யுங்கள் — அது ஒத்துப்போக வேண்டும்."]},{"type":"bullets","items":["Purchase-இல் GST தேர்வுகள்: அதே state, வேறு state, unregistered (GST இல்லை), import (bill-இல் GST இல்லை; Bill of Entry — customs duty, IGST, யார் செலுத்தினார் — அதே திரையில்), reverse charge (GST-ஐ நாமே செலுத்துகிறோம்: GST RCM Payable-க்குச் செல்லும்). Input credit not eligible என்றால் GST cost-இல் சேரும்.","Supplier bill link: bill PDF-இன் OneDrive link-ஐ ஒட்டுங்கள். பிறகு சேர்க்கலாம், ஆனால் பதிந்து 3 நாட்கள் ஆகியும் இல்லையென்றால், பதிந்தவர் link சேர்க்கும் வரை Accounts-ஐப் பயன்படுத்த முடியாது; Finance & Accounts Manager-க்குத் தெரிவிக்கப்படும், 2 நாட்கள் கழித்து super admins-க்கு. FFS bills-க்குத் தேவையில்லை.","Supplier அல்லது customer ledger-இல் Bills to pay / Invoices to collect: ஒவ்வொரு bill-உம் இன்னும் நிலுவை எவ்வளவு; ஒரு payment குறிப்பிட்ட bill-க்கு எனக் குறிக்கப்படாவிட்டால் பழையது முதலில் கழியும்.","ஒரே voucher-இல் பல bank வரிகள், அல்லது மறு பக்க வரி (இரு parties தொடர்புடைய refund): Journal பயன்படுத்துங்கள். அப்படிப்பட்ட பழைய FFS voucher Debit / Credit view-இல் திறக்கும்."]}],"en_sig":"84730282"},
@@ -32963,6 +33070,9 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"21 Oct 2026 (227)", summary:"Built on 2026-10-21T14:45:00Z, on top of 2026-10-21T13:00:00Z. No SQL. TASKS → ALL BOARDS: in every department band the 📥 Unassigned pile stays fixed on the left while scrolling across the people (wide screens), as on the Task Assignment Board. Manual article all_boards_pile (English and Tamil)." },
+  { date:"21 Oct 2026 (226)", summary:"Built on 2026-10-21T13:00:00Z, on top of 2026-10-21T12:00:00Z. No SQL. HSN SHEET FOR ACCOUNTS: Setup → Items → Items (and Material shapes) has ⬇ HSN sheet for Accounts. It downloads one Excel file: Read me; Items (family, item, HSN and GST % now in the app, blank HSN code (fill) and GST % (fill) columns, row id); Raw material shapes (one row per shape, specs under it, blank HSN and GST % columns, row id) — for raw material the HSN depends on the shape only; Past HSN used (codes already on POs by shape and on sales invoices, reference only). The filled sheet comes back for a one-time SQL." },
+  { date:"21 Oct 2026 (225)", summary:"Built on 2026-10-21T12:00:00Z, on top of 2026-10-21T11:00:00Z. No SQL. FULL SCREEN on every screen: ⛶ Full screen in the top bar puts the browser in full screen (Windows taskbar and browser bars hidden) and folds away the app's top bar, menu and notice chips; ☰ Menu shows the ribbon while staying full screen, ✕ Exit full screen or Esc leaves and the ribbon comes back. Manual article full_screen (English and Tamil)." },
   { date:"21 Oct 2026 (224)", summary:"Built on 2026-10-21T11:00:00Z, on top of 2026-10-21T09:30:00Z. NEEDS SQL: structure_so_bom_edit_2026-10-21.sql (BOTH companies). SALE ORDER BOM: read-only once it is a Sale Order; messages say Sale Order, not offer; users can't change it (no code route); admins and super admins edit without a code — ✎ Edit BOM (all lines, add / delete / refresh price / refresh from master / fresh BOM) or ✎ on one line, reason asked once and kept with every change; ✓ Done editing makes the Procurement Gantt follow the BOM (new shape → new row, added-on-Gantt form merged, quantities follow, a form with no BOM lines flagged for Purchase); an approved Production BOM goes back to the Technical Head (⚠ Production BOM changed — Re-approve on the Sale Order, Pending Actions item, banner on the Gantt); a quantity increase on a form with a PO tells the PO owner and the Purchase Manager. GANTT + Add material form now lists the shape master too. ACTIVITY & RISK REPORT (Admin → Logs, super admins): every audit line in a date range graded Drastic / Check / Normal with lenses (deletions, changed after approval / sent, codes & overrides, locked month edited, bulk change, master data, permission changed, odd hours before 8:00 / after 20:00 / Sunday, amounts of Rs 1 lakh or more), person / module / search filters, before / after, PDF and Excel; morning summary at login of yesterday's drastic changes to super admins. Manual articles so_bom_edit and activity_report (English and Tamil)." },
   { date:"21 Oct 2026 (223)", summary:"Built on 2026-10-21T09:30:00Z, on top of 2026-10-21T08:30:00Z. No SQL. PROFIT & LOSS: the Total column only when the range covers more than two months (screen, PDF, Excel). ACCOUNTS PDFs OPEN A PREVIEW FIRST: every Accounts PDF (reports and statements, vouchers, balance confirmation letter, bank stock statement, legacy PI list) opens in a preview with Download, Print and Close; Excel unchanged. PROCUREMENT GANTT — + ADD MATERIAL FORM: a shape the BOM missed (legacy FFS / app link errors): form or Other, certification (3.2 adds RFI), spec / grade, size note, sub-task owner, reason, planned PO Draft and At our factory (steps between spread); full row and sub-task, tagged added on the Gantt; the BOM is not changed — the Technical Head gets a bell and a Pending Actions item to correct it; Update forms from BOM merges the same shape into the added row (dates kept) and closes the item. HIDE FORM… (Table view) with a reason when no actual date is filled; kept in the record, bring back from the line under the banner. Who: Purchase (Gantt editors), Production and the Technical Head; not Stores. Manual articles pg_add_form and acc_preview_pl_total (English and Tamil)." },
   { date:"21 Oct 2026 (222)", summary:"Built on 2026-10-21T08:30:00Z, on top of 2026-10-21T00:15:00Z. NEEDS SQL: structure_doc_info_only_2026-10-21.sql (BOTH companies). INFO-ONLY DOCUMENTS (no approval route; different from Code 1 – Submit for Info, which ends the approval route): Info only on Document Categories (default) and on one document (Documents box tick on the Sale Order, or ✎ Hold / route in Document Control → Table), reason required, history kept with the hold changes (doc_hold_hist_tbl.what), request's setting carried to its document. Before sending: Not submitted with the strip INFO ONLY – TO SEND and the usual task card. Sent (board, task card or Documents box, status Info only – Sent for information): straight to All approved, INFO ONLY – SENT, task card closes, never chased or on a chase letter, no code, holds nothing (board, contract hold, v_full_hold_outstanding, work-order hand-over). Client reply still loggable. Board filter Approval documents only / Info only; Report by Contract marks (for information). Manual article doc_info_only (English and Tamil)." },
@@ -50740,6 +50850,13 @@ function App() {
     try{ const raw=sessionStorage.getItem("flometriq_user"); return raw?JSON.parse(raw):null; } catch(e){ return null; }
   });
   const [tab,setTab]=useState("home");
+  // 225: Full screen — the browser goes full screen (Windows taskbar and browser bars hidden) and the app's top bar and menu fold away
+  const [focusMode,setFocusMode]=useState(false); const [focusMenu,setFocusMenu]=useState(false);
+  const enterFocus = ()=>{ setFocusMode(true); setFocusMenu(false); try{ const el = document.documentElement; const p = el.requestFullscreen ? el.requestFullscreen() : el.webkitRequestFullscreen ? el.webkitRequestFullscreen() : null; if(p && p.catch) p.catch(()=>{}); }catch(e){} };
+  const exitFocus = ()=>{ setFocusMode(false); setFocusMenu(false); try{ if(document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(()=>{}); else if(document.webkitFullscreenElement && document.webkitExitFullscreen) document.webkitExitFullscreen(); }catch(e){} };
+  useEffect(()=>{ const f = ()=>{ if(!document.fullscreenElement && !document.webkitFullscreenElement) { setFocusMode(false); setFocusMenu(false); } };
+    document.addEventListener("fullscreenchange", f); document.addEventListener("webkitfullscreenchange", f);
+    return ()=>{ document.removeEventListener("fullscreenchange", f); document.removeEventListener("webkitfullscreenchange", f); }; },[]);
   // Reporting an issue must NOT navigate anywhere. If picking it changed the
   // tab, the screen captured on the report would be the report screen itself,
   // which is the one piece of context nobody needs.
@@ -51115,8 +51232,11 @@ function App() {
       onCancel: ()=>{ const c=pendingHeaderPromptFor; setPendingHeaderPromptFor(null); finishOpenContract(c); },
       onSaved: (updated)=>{ setPendingHeaderPromptFor(null); finishOpenContract(updated); }
     }),
-    h("div",{id:"app-sticky-header",style:{position:"sticky",top:0,zIndex:60}},
-      h(TopBar,{user,sessionCompanyId,sessionCompany,onOpenVersions:user.role==="super_admin"?(()=>pickTab("version_history")):null,flags:h(MyDayFlags,{data:myDay,isSales:isFseOrTelecaller,hasEmp:myDayHasEmp,onOpen:openMyDay}),onChangeCompany:user.role==="super_admin"?(()=>setSessionCompanyIdPersisted(null)):null,onLogout:()=>{setUserPersisted(null);setSessionCompanyIdPersisted(null);setMasterData({models:[],gradesBySpec:new Map(),rateBySpecGrade:new Map(),allSpecs:[],loadingMaster:true});}}),
+    focusMode ? h("div",{style:{position:"fixed",bottom:12,left:12,zIndex:2000,display:"flex",gap:6,opacity:.92}},   // 225: full screen — the ribbon folds away
+      h("button",{onClick:()=>setFocusMenu(m=>!m),title:focusMenu?"Hide the ribbon again":"Show the ribbon (menus) while staying full screen",style:{background:colors.dark,color:"#fff",border:"1px solid #3a3f33",borderRadius:16,padding:"5px 12px",fontSize:12,cursor:"pointer",boxShadow:"0 2px 6px rgba(0,0,0,.25)"}},focusMenu?"▴ Hide menu":"☰ Menu"),
+      h("button",{onClick:exitFocus,title:"Leave full screen (Esc)",style:{background:colors.dark,color:"#fff",border:"1px solid #3a3f33",borderRadius:16,padding:"5px 12px",fontSize:12,cursor:"pointer",boxShadow:"0 2px 6px rgba(0,0,0,.25)"}},"✕ Exit full screen")) : null,
+    (focusMode && !focusMenu) ? null : h("div",{id:"app-sticky-header",style:{position:"sticky",top:0,zIndex:60}},
+      h(TopBar,{user,onFull:focusMode?exitFocus:enterFocus,inFull:focusMode,sessionCompanyId,sessionCompany,onOpenVersions:user.role==="super_admin"?(()=>pickTab("version_history")):null,flags:h(MyDayFlags,{data:myDay,isSales:isFseOrTelecaller,hasEmp:myDayHasEmp,onOpen:openMyDay}),onChangeCompany:user.role==="super_admin"?(()=>setSessionCompanyIdPersisted(null)):null,onLogout:()=>{setUserPersisted(null);setSessionCompanyIdPersisted(null);setMasterData({models:[],gradesBySpec:new Map(),rateBySpecGrade:new Map(),allSpecs:[],loadingMaster:true});}}),
       h(MenuTabs,{user,active:tab,onChange:pickTab,
         onRefresh: ["estimator","saved","sale_order","home","tour","user_manual","faq","change_password","version_history"].includes(tab) ? null
           : ()=>{ if(!confirmLeaveIfDirty()) return; setUnsavedGuard(false); setScreenKey(k=>k+1); }})
@@ -51149,7 +51269,7 @@ function App() {
         label:"\u26a0 "+abandonedCount+" abandoned incomplete quote"+(abandonedCount===1?"":"s"),
         title:"Click to review",
         onClick:function(){ setTab("abandoned_quotes_cleanup"); }});
-      if(notices.length===0) return null;
+      if(notices.length===0 || focusMode) return null;   // 225: hidden in full screen
       var hasDanger = notices.some(function(n){ return n.tone==="danger"; });
       return h("div",{style:{display:"flex",flexWrap:"wrap",alignItems:"center",gap:8,
         background: hasDanger?"#fdecea":"#fff4d6",
@@ -58666,7 +58786,8 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
       const open = isOpen(d);
       const col = (p, list, isPile)=> h("div",{key:p,onDragOver:e=>{ e.preventDefault(); if(dragOver!==d+"|"+p) setDragOver(d+"|"+p); },onDragLeave:()=>setDragOver(""),
           onDrop:e=>{ e.preventDefault(); const id = e.dataTransfer.getData("text/plain"); if(id) allDrop(id, p, d); },
-          style:{minWidth:235,width:235,flexShrink:0,background:isPile?"#f6efe2":"#eef3f1",border:isPile?"2px dashed #c9a04a":"none",borderRadius:8,padding:7,minHeight:120,outline:dragOver===d+"|"+p?"2px dashed #0f7a5c":"none"}},
+          style:{minWidth:235,width:235,flexShrink:0,background:isPile?"#f6efe2":"#eef3f1",border:isPile?"2px dashed #c9a04a":"none",borderRadius:8,padding:7,minHeight:120,outline:dragOver===d+"|"+p?"2px dashed #0f7a5c":"none",
+            ...(isPile && window.innerWidth>760 ? { position:"sticky", left:0, zIndex:3, boxShadow:"-10px 0 0 0 #fff, 8px 0 12px -8px rgba(0,0,0,.35)" } : {})}},   // 227: All boards — the Unassigned pile stays in view
         h("div",{style:{display:"flex",alignItems:"center",gap:6,fontWeight:700,fontSize:12,marginBottom:6}},
           isPile ? h("span",null,"📥 Unassigned") : h("span",{onDoubleClick:()=>openBoard(p),title:"Double-click to open "+p+"'s board",style:{cursor:"pointer"}},p),
           h("span",{style:{marginLeft:"auto",fontWeight:400,fontSize:11,background:"#fff",borderRadius:9,padding:"0 7px",color:colors.muted}},list.length)),
