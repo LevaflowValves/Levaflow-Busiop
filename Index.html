@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-21T08:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-21T11:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -2410,6 +2410,7 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
       { label:"Logs", tabs:[
         {key:"login_history",label:"Login History"},
         {key:"audit_log",label:"Audit Log"},
+        ...(isSuperAdmin?[{key:"activity_report",label:"Activity & Risk Report"}]:[]),   // 224
         ...(isSuperAdmin?[{key:"delete_activity_report",label:"Delete Activity Report"}]:[]),
       ]},
       { label:"Data", tabs:[
@@ -14786,7 +14787,12 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   },[isRevisionRef,quoteHeaderRow?.customer_name]);
   const logRevisionChange = (revisionRef, area, fieldName, oldVal, newVal, slNo)=>
     sb.from("revision_changes").insert({ revision_ref:revisionRef, area, item_sl_no:slNo??null, field_name:fieldName, old_value:oldVal==null?"":String(oldVal), new_value:newVal==null?"":String(newVal), changed_by:user?.username||"unknown" });
-  const [authGate,setAuthGate]=useState(null); // {requiredType, action} — shared by every gated save/delete in this screen
+  const [authGate,setAuthGateRaw]=useState(null); // {requiredType, action} — shared by every gated save/delete in this screen
+  // 224: on a Sale Order a user can't change anything (no code route); admins edit without a code
+  const soCt = ()=> (contractInfo && contractInfo.contract_number) || refFilter || "";
+  const setAuthGate = (cfg)=>{ if(cfg && mode==="contract" && !(user?.role==="admin" || user?.role==="super_admin")){ alert("Sale Order "+soCt()+" is issued — it can't be changed here. Only an admin can correct it."); return; } setAuthGateRaw(cfg); };
+  const [soEd,setSoEd]=useState(null);   // 224: {all, lines:{key:true}, why, saved, changes:[]}
+  const [soBusy,setSoBusy]=useState(false);
 
   // Quote Amendment / Revisions — each revision is a full independent clone
   // named "{base}-Rev-{n}", grouped back to its family purely by that naming
@@ -17013,7 +17019,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   // Model everywhere, not just here.
   const [showBomExemptions,setShowBomExemptions]=useState(false);
   const openBomFix = ()=>{
-    if(quoteAnyNonDraft()){ alert("This quote has already left Draft — correcting the master BOM here isn't available. Start an amendment instead if this still needs fixing."); return; }
+    if(quoteAnyNonDraft()){ alert(mode==="contract" ? "Sale Order "+soCt()+" is issued — the master BOM can't be corrected from here. Correct this Sale Order's BOM with ✎ Edit BOM (admins), and the model master in the BOM master." : "This quote has already left Draft — correcting the master BOM here isn't available. Start an amendment instead if this still needs fixing."); return; }
     if(isAdmin) setShowBomFixPrompt(true);
     else { setBomFixCode(""); setBomFixCodeError(""); setShowBomFixCodeEntry(true); }
   };
@@ -17071,7 +17077,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const [bomRefreshBusy,setBomRefreshBusy]=useState(false);
   const lineKey = (l)=> (l.component||"")+"‖"+(l.sub_assembly||"");
   const openBomRefreshPreview = async(estRow)=>{
-    if(quoteAnyNonDraft()){ alert("This quote has already left Draft — refreshing the BOM here isn't available. Start an amendment instead if this still needs fixing."); return; }
+    if(quoteAnyNonDraft() && !(mode==="contract" && soEd && soEd.all)){ alert(mode==="contract" ? soMsg() : "This quote has already left Draft — refreshing the BOM here isn't available. Start an amendment instead if this still needs fixing."); return; }
     const itemName = modelItemMap.get(estRow.model)||estRow.model;
     const [{data:masterRows},{data:currentLines}] = await Promise.all([
       sb.from("bom").select("*").eq("model",estRow.model),
@@ -17172,6 +17178,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     const key=line.reference_number+"-"+line.sl_no;
     const edits=lineEdits[key];
     if(!edits||Object.keys(edits).length===0) return;
+    if(mode==="contract" && !soOpenLine(key)) return;   // 224: a Sale Order BOM line is read-only until ✎
     setSavingLine(s=>({...s,[key]:true}));
     try {
       // Always recompute cost and sales from current values (edited or stored)
@@ -17197,6 +17204,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         payload.validated_at=null;
       }
       await sb.from("estimate_lines").update(payload).eq("reference_number",line.reference_number).eq("item_sl_no",line.item_sl_no).eq("sl_no",line.sl_no);
+      if(mode==="contract") soNote("line "+line.sl_no+" ("+(line.component||"")+"): "+Object.keys(edits).filter(f=>f!=="cost"&&f!=="sales_price").map(f=>f+" "+(line[f]??"—")+" → "+(edits[f]??"—")).join(", "));   // 224
       if(payload.validation_status==="Pending"){
         await logAudit("UPDATE","estimate_lines",line.reference_number+"-"+line.item_sl_no,"Direct Price line \""+(line.component||"")+"\" reverted from Validated to Pending — price changed from "+line.sales_price+" to "+sales_price+" on a revision, needs re-validation",user?.username||"unknown",{validation_status:"Validated",sales_price:line.sales_price},{validation_status:"Pending",sales_price});
       }
@@ -17247,7 +17255,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   };
   const refreshAllLinePrices = async()=>{
     setShowRefreshPriceConfirm(false);
-    if(quoteAnyNonDraft()){ alert("This offer's already been sent to the customer — price can't change now. Make an amended offer if this needs updating."); return; }
+    if(quoteAnyNonDraft() && !(mode==="contract" && soEd)){ alert(mode==="contract" ? soMsg() : "This offer's already been sent to the customer — price can't change now. Make an amended offer if this needs updating."); return; }
     if(!openLines.length) return;
     setRefreshingPrice(true);
     try{
@@ -17268,7 +17276,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     finally { setRefreshingPrice(false); }
   };
   const refreshLinePrice = async(line)=>{
-    if(quoteAnyNonDraft()){ alert("This offer's already been sent to the customer — price can't change now. Make an amended offer if this needs updating."); return; }
+    if(quoteAnyNonDraft() && !(mode==="contract" && soEd)){ alert(mode==="contract" ? soMsg() : "This offer's already been sent to the customer — price can't change now. Make an amended offer if this needs updating."); return; }
     const spec = getLineVal(line,"material_spec"); const grade = getLineVal(line,"grade");
     if(!spec||!grade) return;
     const key = line.reference_number+"-"+line.sl_no;
@@ -17533,7 +17541,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     finally{ setFixingModel(false); }
   };
 
-  const openAddLine = ()=>{ setAddSubAssembly(""); setAddComponent(""); setAddSpec(""); setAddGrade(""); setAddQty(""); setAddUom(""); setAddSf(3.1); setAddCuttingPlan(""); setAddCutPlanQty(""); setAddCuttingUom(""); setAddMsg(""); setShowAddLine(true); };
+  const openAddLine = ()=>{ if(mode==="contract" && !(soEd && soEd.all)){ alert(soMsg()); return; } setAddSubAssembly(""); setAddComponent(""); setAddSpec(""); setAddGrade(""); setAddQty(""); setAddUom(""); setAddSf(3.1); setAddCuttingPlan(""); setAddCutPlanQty(""); setAddCuttingUom(""); setAddMsg(""); setShowAddLine(true); };
 
   // Cascading options derived from BOM for model
   const subAssemblyOptions = useMemo(()=>Array.from(new Set(bomForModel.map(r=>r.sub_assembly).filter(Boolean))).sort(),[bomForModel]);
@@ -17633,6 +17641,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         added_by:user.username
       };
       const{data,error:err}=await sb.from("estimate_lines").insert(payload).select().single();
+      if(!err && mode==="contract") soNote("line added: "+(payload.component||payload.sub_assembly||""));   // 224
       if(err) throw err;
       if(openRef.reference_number && openRef.reference_number.includes("-Rev-")){
         await logRevisionChange(openRef.reference_number,"bom","Direct price line added",null,dpDescription.trim());
@@ -17663,6 +17672,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         sales_price:computeSalesPrice(computeCost(addQty, 1, rate), Number(addSf)||3.1)
       };
       const{data,error:err}=await sb.from("estimate_lines").insert(payload).select().single();
+      if(!err && mode==="contract") soNote("line added: "+(payload.component||payload.sub_assembly||""));   // 224
       if(err) throw err;
       setOpenLines(l=>{ const updated=[...l,data]; autoRefreshDescriptionFromLines(updated); return updated; });
       setAddSubAssembly(""); setAddComponent(""); setAddSpec(""); setAddGrade(""); setAddQty(""); setAddUom(""); setAddSf(3.1); setAddCuttingPlan(""); setAddCutPlanQty(""); setAddCuttingUom("");
@@ -17670,10 +17680,41 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     } catch(e){setAddMsg("Failed: "+e.message);} finally{setSavingAdd(false);}
   };
 
+  // 224: Sale Order BOM — read-only until an admin presses ✎ Edit BOM (all lines) or ✎ on one line; reason asked once
+  const soOpenLine = (key)=> mode!=="contract" || !!(soEd && (soEd.all || soEd.lines[key]));
+  const soMsg = ()=> "Sale Order "+soCt()+" is issued — this BOM is read-only. "+(isAdmin ? "Press ✎ Edit BOM (or ✎ on a line) to correct it; no code is needed." : "Only an admin can correct it.");
+  const soBlock = ()=>{ if(mode==="contract" && !(soEd && soEd.all)){ alert(soMsg()); return true; } return false; };
+  const soStart = (lineKey)=>{
+    if(!isAdmin){ noPermission("change the BOM of an issued Sale Order",{roles:["admin","super_admin"]}); return; }
+    if(soEd){ setSoEd(e=>({ ...e, all: e.all || !lineKey, lines: lineKey ? { ...e.lines, [lineKey]:true } : e.lines })); return; }
+    const w = prompt("Why is the BOM of Sale Order "+soCt()+" being changed?\n\n1 = "+SO_BOM_WHY[0]+"\n2 = "+SO_BOM_WHY[1]+"\n3 = "+SO_BOM_WHY[2]+"\n\nType 1, 2 or 3, or write the reason:");
+    if(w===null) return; const t = String(w).trim();
+    const why = /^[123]$/.test(t) ? SO_BOM_WHY[Number(t)-1] : t;
+    if(why.length<3){ alert("A reason is needed — it is kept with every change."); return; }
+    setSoEd({ all:!lineKey, lines: lineKey ? { [lineKey]:true } : {}, why, saved:0, changes:[] });
+  };
+  const soNote = (txt)=> setSoEd(e=> e ? { ...e, saved:e.saved+1, changes:[...e.changes, txt] } : e);
+  const soFinish = async()=>{
+    const e = soEd; if(!e) return;
+    if(Object.keys(lineEdits).some(k=>lineEdits[k] && Object.keys(lineEdits[k]).length) && !confirm("Some lines have changes not saved yet (press Save on the line). Finish anyway? Those are dropped.")) return;
+    if(!e.saved){ setSoEd(null); setLineEdits({}); return; }
+    setSoBusy(true);
+    try{
+      const me = user?.employee_name || user?.username || "";
+      const r = await soBomAfterEdit(soCt(), openRef ? openRef.item_sl_no : "", e.why, me, e.saved, user);
+      await logAudit("UPDATE","estimate_lines",soCt()+"-"+(openRef?openRef.item_sl_no:""),"Sale Order BOM changed after the Sale Order was issued — "+e.saved+" change(s) by an admin (no code) · "+e.why+(e.changes.length?" · "+e.changes.slice(0,15).join("; "):""),user?.username||"",null,null);
+      setSoEd(null); setLineEdits({});
+      alert("Saved — "+e.saved+" change(s) to the BOM of Sale Order "+soCt()+".\n\n"+(r.plan ? "Procurement Gantt updated"+(r.added.length?": new row(s) "+r.added.join(", "):"")+(r.merged.length?"; merged "+r.merged.join(", "):"")+(r.gone.length?"; no BOM lines now on "+r.gone.join(", ")+" (flagged for Purchase)":"")+"." : "No Procurement Gantt yet for this contract.")
+        +(r.reapprove ? "\nThe Production BOM goes back to the Technical Head for re-approval." : "\nThe Technical Head is told.")+(r.poTold.length ? "\nPO owner(s) told — quantity up after "+r.poTold.join(", ")+"." : "")+(r.sqlMissing ? "\n\n(Run structure_so_bom_edit_2026-10-21.sql to keep the re-approval on the plan.)" : ""));
+    }catch(err){ alert("The BOM is saved, but the follow-up could not finish:\n\n"+(err.message||err)); }
+    setSoBusy(false);
+  };
   const deleteEstimateLine=async(refNumber,itemSlNo,slNo)=>{
+    if(mode==="contract" && !soOpenLine(refNumber+"-"+slNo)){ alert(soMsg()); return; }   // 224
     if(!confirm("Delete Sl No "+slNo+"?")) return;
     const{data:rowData}=await sb.from("estimate_lines").select("*").eq("reference_number",refNumber).eq("item_sl_no",itemSlNo).eq("sl_no",slNo).single();
     await sb.from("estimate_lines").delete().eq("reference_number",refNumber).eq("item_sl_no",itemSlNo).eq("sl_no",slNo);
+    if(mode==="contract") soNote("line "+slNo+" deleted"+(rowData?.component?" ("+rowData.component+")":""));   // 224
     await logAudit("DELETE","estimate_lines",refNumber+"-"+itemSlNo+"-"+slNo,"Quote#: "+refNumber+" Sl: "+itemSlNo+" Line: "+slNo+(rowData?.component?" — "+rowData.component:""),user?.username||"unknown",rowData,null);
     setOpenLines(l=>{ const updated=l.filter(x=>!(x.reference_number===refNumber&&x.item_sl_no===itemSlNo&&x.sl_no===slNo)); autoRefreshDescriptionFromLines(updated); return updated; });
   };
@@ -21106,32 +21147,38 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}},
                 h("div",{style:{fontSize:13,fontWeight:700}}, fullScreenBOM?("BOM — "+(openRef?openRef.reference_number+" · Sl No "+openRef.item_sl_no:"")):""),
                 h("div",{style:{display:"flex",gap:8}},
+                  mode==="contract" ? (soEd
+                    ? h("button",{onClick:soFinish,disabled:soBusy,title:"Finish editing: the Procurement Gantt follows the BOM and the Technical Head is told",style:{...btnPrimary,background:"#0f7a5c"}},soBusy?"Updating the Gantt…":"✓ Done editing"+(soEd.saved?" ("+soEd.saved+")":""))
+                    : h("button",{onClick:()=>soStart(null),title:isAdmin?"Correct this Sale Order's BOM (no code needed)":"Only an admin can correct an issued Sale Order's BOM",style:{...btnSecondary,fontWeight:700,opacity:isAdmin?1:0.5}},"✎ Edit BOM")) : null,   // 224
                   h("button",{onClick:openAddLine,style:btnPrimary},"+ Add line"),
                   h("button",{
-                    onClick:()=>{ if(quoteAnyNonDraft()){ alert("This offer's already been sent to the customer — price can't change now. Make an amended offer if this needs updating."); return; } setShowRefreshPriceConfirm(true); },
+                    onClick:()=>{ if(quoteAnyNonDraft() && !(mode==="contract" && soEd)){ alert(mode==="contract" ? soMsg() : "This offer's already been sent to the customer — price can't change now. Make an amended offer if this needs updating."); return; } setShowRefreshPriceConfirm(true); },
                     disabled:refreshingPrice,
                     style: quoteAnyNonDraft()
                       ? {...btnSmall,border:"1px solid "+colors.border,color:colors.mutedLight,background:"#f4f2ea"}
                       : {...btnSmall,border:"1px solid #0f6e56",color:"#0f6e56",opacity:refreshingPrice?0.6:1}
                   }, refreshingPrice?"Refreshing…":"Refresh price"),
-                  h("button",{onClick:()=>setShowBomRefreshConfirm(true),style:{...btnSmall,border:"1px solid #a3312a",color:"#a3312a"}},"Refresh BOM from master"),
+                  h("button",{onClick:()=>{ if(soBlock()) return; setShowBomRefreshConfirm(true); },style:{...btnSmall,border:"1px solid #a3312a",color:"#a3312a"}},"Refresh BOM from master"),
                   // Same Fresh BOM / Restore pair as the Cart screen. Put here
                   // too because this is where you are standing when you decide
                   // the BOM is wrong -- having to go back out to the Cart to
                   // act on that is the kind of detour nobody takes twice.
-                  mode==="contract" && h("button",{onClick:()=>startFreshBom(openRef),disabled:busyBom===openRef.item_sl_no,
+                  mode==="contract" && h("button",{onClick:()=>{ if(soBlock()) return; startFreshBom(openRef).then(()=>soNote("Fresh BOM started")); },disabled:busyBom===openRef.item_sl_no,
                     title:"Rebuild this Sl No's BOM from scratch. The current BOM is saved first and can be restored.",
                     style:{...btnSmall,border:"1px solid #7a5000",color:"#7a5000",opacity:busyBom===openRef.item_sl_no?0.5:1}},
                     busyBom===openRef.item_sl_no?"…":"Fresh BOM"),
-                  mode==="contract" && baselineBySl[openRef.item_sl_no] && h("button",{onClick:()=>restoreBom(openRef),disabled:busyBom===openRef.item_sl_no,
+                  mode==="contract" && baselineBySl[openRef.item_sl_no] && h("button",{onClick:()=>{ if(soBlock()) return; restoreBom(openRef).then(()=>soNote("BOM restored")); },disabled:busyBom===openRef.item_sl_no,
                     title:"Put back the BOM that was here before the fresh BOM was started",
                     style:{...btnSmall,border:"1px solid "+colors.border,opacity:busyBom===openRef.item_sl_no?0.5:1}},
                     "Restore BOM"),
                   h("button",{onClick:refreshMasterData,title:"Pull the latest Shapes, Specs, Grades, Rates, UOM and Item options — useful if you (or someone else, in another tab) just added or fixed one",style:{...btnSmall,border:"1px solid "+colors.border,color:colors.text}},"↻ Refresh master data"),
-                  h("button",{onClick:()=>isAdmin ? deleteSlNo(openRef) : noPermission("delete a Sl No"),disabled:deletingSlNo===openRef.id,style:{...(isAdmin?{}:{opacity:0.5,cursor:"help"}),...btnSmall,border:"1px solid "+colors.danger,color:colors.danger,opacity:deletingSlNo===openRef.id?0.5:1}},deletingSlNo===openRef.id?"Deleting…":"Delete this Sl No"),
+                  h("button",{onClick:()=>soBlock() ? null : isAdmin ? deleteSlNo(openRef) : noPermission("delete a Sl No"),disabled:deletingSlNo===openRef.id,style:{...(isAdmin?{}:{opacity:0.5,cursor:"help"}),...btnSmall,border:"1px solid "+colors.danger,color:colors.danger,opacity:deletingSlNo===openRef.id?0.5:1}},deletingSlNo===openRef.id?"Deleting…":"Delete this Sl No"),
                   h("button",{onClick:()=>setFullScreenBOM(f=>!f),style:{...btnSecondary,fontSize:11,padding:"4px 10px"}}, fullScreenBOM?"Esc · Close full screen":"⛶ Full screen BOM")
                 )
               ),
+              mode==="contract" ? h("div",{style:{background:soEd?"#fff4d6":"#eef3f8",border:"1px solid "+(soEd?"#efd59c":"#c8d8e8"),color:soEd?"#5a3a00":"#20456b",borderRadius:7,padding:"7px 11px",margin:"4px 0 6px",fontSize:12}},   // 224
+                soEd ? "✎ Editing "+(soEd.all?"all lines":Object.keys(soEd.lines).length+" line(s)")+" of Sale Order "+soCt()+" — reason: "+soEd.why+". Each line saves on Save (or when you leave the box); press ✓ Done editing when finished so the Procurement Gantt follows and the Technical Head is told."
+                  : "🔒 "+soMsg()) : null,
               h("div",{ref:quoteTopScrollRef,onScroll:syncQuoteScrollFromTop,style:{overflowX:"auto",overflowY:"hidden",height:14}},
                 h("div",{style:{height:1,width:quoteMeasuredWidth||quoteColWidths.reduce((a,b)=>a+b,0)}})
               ),
@@ -21168,7 +21215,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
                   const inStyle=(changed)=>({...inBase,border:bdr(changed),background:changed?"#f0faf6":"#fff",color:colors.text});
                   const selStyle=(changed)=>({...inBase,border:bdr(changed),background:changed?"#f0faf6":"#fff",color:colors.text});
 
-                  return h("tr",{key:key,style:{borderBottom:"1px solid #eceae0",background:rowBg}},
+                  return h("tr",{key:key,style:{borderBottom:"1px solid #eceae0",background:rowBg,pointerEvents:soOpenLine(key)?undefined:"none"}},   // 224
                     h("td",{style:{padding:"7px 9px",color:colors.mutedLight,fontSize:11,width:30,position:"sticky",left:0,zIndex:1,background:stickyBg}},l.sl_no),
                     h("td",{style:{padding:"7px 9px",minWidth:110,position:"sticky",left:30,zIndex:1,background:stickyBg}},
                       h("div",{style:{fontWeight:600,fontSize:12}},l.component||""),
@@ -21219,8 +21266,9 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
                     h("td",{style:{padding:"7px 9px",textAlign:"right",fontWeight:700,whiteSpace:"nowrap",color:isZero?colors.danger:colors.accent}},
                       isSaving?"":fmtR(sales)
                     ),
-                    h("td",{style:{padding:"5px 6px",whiteSpace:"nowrap"}},
+                    h("td",{style:{padding:"5px 6px",whiteSpace:"nowrap",pointerEvents:"auto"}},
                       h("div",{style:{display:"flex",gap:4}},
+                        mode==="contract" && !soOpenLine(key) ? h("button",{onClick:()=>soStart(key),title:isAdmin?"Edit this line (no code needed)":"Only an admin can correct an issued Sale Order's BOM",style:{background:"#fff",border:"0.5px solid "+colors.border,borderRadius:4,padding:"4px 8px",fontSize:11,cursor:"pointer",opacity:isAdmin?1:0.5}},"✎") : null,   // 224
                         isDirty&&!isSaving&&h("button",{onClick:()=>saveLineEdit(l),style:{background:"#e1f5ee",color:"#0f6e56",border:"0.5px solid #9fe1cb",borderRadius:4,padding:"4px 8px",fontSize:11,cursor:"pointer"}},"Save"),
                         h("button",{
                           title:"Refresh this line's price to the current rate",
@@ -22319,7 +22367,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8}},
           h("button",{onClick:()=>setShowBomRefreshConfirm(false),style:btnSecondary},"Cancel"),
           h("button",{onClick:()=>setShowBomRefreshConfirm(false),style:btnSecondary},"No"),
-          h("button",{onClick:()=>{ setShowBomRefreshConfirm(false); openBomRefreshPreview(openRef); },style:btnPrimary},"Yes")
+          h("button",{onClick:()=>{ setShowBomRefreshConfirm(false); openBomRefreshPreview(openRef); if(mode==="contract") soNote("Refresh BOM from master"); },style:btnPrimary},"Yes")
         )
       )
     ),
@@ -29935,6 +29983,103 @@ const MANUAL_SECTIONS = [
             ]
           }
         ]
+      },
+      {
+        "key": "pg_add_form",
+        "title": "Procurement Gantt: add a material form the BOM missed, or hide one",
+        "tag": "Purchase",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "Legacy BOMs carry small errors from the FFS / app link, so a shape can be missing from a contract's Procurement Gantt, or be there by mistake."
+          },
+          {
+            "type": "h3",
+            "text": "+ Add material form"
+          },
+          {
+            "type": "steps",
+            "items": [
+              "Open the contract on the Procurement Gantt and press + Add material form (next to Insert Step).",
+              "Pick the form (shape) — or Other… with its name — the certification (3.2 adds RFI Stamping and Test), spec / grade and a size or quantity note if known, the owner of its sub-task, and why it is added.",
+              "Give the planned PO Draft and At our factory dates if you have them; the steps in between are spread evenly. Leave them empty to fill everything in Edit dates.",
+              "It gets a full row with the usual steps and a sub-task on the procurement card, tagged \"added on the Gantt\"."
+            ]
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "The BOM itself is not changed. The Technical Head gets a bell and a Pending Actions item to correct the Production BOM.",
+              "When the BOM is corrected and Update forms from BOM brings the same shape in, it merges into the added row: the dates are kept, the BOM lines come in, the tag goes and the Pending Actions item closes.",
+              "Hide form… (Table view, on the form's heading) takes a form off the Gantt with a reason — only if no actual date is filled. It stays in the record; bring back from the line under the banner.",
+              "Who: Purchase (the Gantt editors), Production and the Technical Head. Not Stores."
+            ]
+          }
+        ]
+      },
+      {
+        "key": "acc_preview_pl_total",
+        "title": "Accounts: PDF preview first, and the P&L Total column",
+        "tag": "Accounts",
+        "blocks": [
+          {
+            "type": "bullets",
+            "items": [
+              "Every PDF in the Accounts module — statements, ledgers, vouchers, the balance confirmation letter, the bank stock statement and the other reports — opens a preview first. From the preview: Download, Print, or Close (Esc). Excel downloads straight away as before.",
+              "If the preview stays blank on a phone, press Download: the file opens in the phone's PDF viewer.",
+              "Profit & Loss shows the Total column only when the range covers more than two months. For one or two months the month columns are the whole picture, so there is no Total column on screen, in the PDF or in Excel."
+            ]
+          }
+        ]
+      },
+      {
+        "key": "so_bom_edit",
+        "title": "Correcting the BOM of an issued Sale Order",
+        "tag": "Sales",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "Once a quote is a Sale Order, its BOM is read-only and every message says Sale Order (not offer). Only admins and super admins can correct it — no code is needed. Users can't change it; they see that only an admin can."
+          },
+          {
+            "type": "steps",
+            "items": [
+              "Open the Sale Order's BOM and press ✎ Edit BOM to edit every line (and add, delete, refresh price, refresh from master, fresh BOM), or ✎ at the end of one line to edit just that line.",
+              "Give the reason once: legacy BOM error (FFS / app link), design change after the Sale Order, customer change, or your own words. It is kept with every change.",
+              "Each line saves as usual (Save on the line, or when you leave the box).",
+              "Press ✓ Done editing. The Procurement Gantt follows the BOM: a new shape gets a row with its usual steps, a form added on the Gantt is merged, quantities follow, and a form left with no BOM lines is flagged for Purchase (not removed)."
+            ]
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "If the Technical Head had approved the Production BOM, it goes back to him: the Sale Order shows ⚠ Production BOM changed — Re-approve, and he gets a Pending Actions item.",
+              "If a quantity goes up on a form that already has a PO, the PO owner and the Purchase Manager are told the PO may need an amendment.",
+              "Every edit is in the audit log and in the Activity & Risk Report as a change after the Sale Order."
+            ]
+          }
+        ]
+      },
+      {
+        "key": "activity_report",
+        "title": "Activity & Risk Report (super admins)",
+        "tag": "Admin",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "Admin → Logs → Activity & Risk Report reads every change in the audit log between two dates (the Audit Log screen shows only the last 300) and grades each one."
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "Drastic: deletions, codes and overrides used, locked accounts months edited, permission changes, and a large change after approval.",
+              "Check: changes after approval / sending, master data, bulk changes of 10 or more, amounts of Rs 1 lakh or more, work before 8:00, after 20:00 or on a Sunday.",
+              "Normal: everything else.",
+              "Filter by grade (tiles), lens, person, module or search; click a line for its before / after. Download PDF (preview first) or Excel.",
+              "At login, a super admin sees a summary of yesterday's drastic changes (once a day, only when there were any)."
+            ]
+          }
+        ]
       }
     ]
   }
@@ -29961,6 +30106,10 @@ const MANUAL_TA = {
  "acc_statements": {"title":"Trial Balance, Profit & Loss, Balance Sheet, Cash Flow","tag":"கணக்குகள்","blocks":[{"type":"bullets","items":["Trial Balance: ஒரு தேதியில், group வாரியாக; group-ஐ click செய்தால் திறக்கும், ledger-ஐ click செய்தால் அதன் entries. Download Excel.","Profit & Loss: ஒரு காலத்துக்கு, From முதல் To வரை (தொடக்கத்தில் 1 ஏப்ரல் முதல் கடைசி entry வரை), மாதம் மாதமாக. Raw Material-க்கும் WIP & FG-க்கும் (விற்பனை மதிப்பில்) opening, closing stock காட்டப்படும், இரண்டும் Period Close-இலிருந்து; * குறியிட்ட மாதத்துக்கு closing stock இன்னும் இல்லை, கடைசித் தொகை தொடரும். வரியை click செய்தால் அதன் ledgers; Show all ledgers எல்லா வரிகளையும் திறக்கும்.","Balance Sheet: ஒரு தேதியில். Stocks, Raw Material, WIP & FG-ஐ அவற்றின் மாத இறுதித் தொகைகளில் காட்டும். 1 ஏப்ரல் WIP & FG, Capital Account கீழ் தனி prior-period வரிக்கு எதிராக உள்ளது, ஏனெனில் FFS அதை ஒருபோதும் கொண்டிருக்கவில்லை.","Cash Flow: Profit & Loss போலவே From முதல் To வரை ஒரு காலத்துக்கு: ஒவ்வொரு balance-sheet மாற்றத்துக்கும் சரிசெய்த profit, மாதம் மாதமாக; பணம் அதிகம் சென்ற (முடங்கிய) இடங்களும் வந்த இடங்களும். கடைசி இரண்டு வரிகள் ஒத்துப்போக வேண்டும்."]},{"type":"p","text":"ஒவ்வொரு statement-க்கும் Download PDF, Download Excel உண்டு. திரையில் உள்ளதே download ஆகும்: அதே தேதி, நீங்கள் திறந்த groups. Lock ஆகாத மாதங்கள் Provisional எனக் குறிக்கப்படும். Excel-இல் எண்கள் எண்களாகவே (debit +, credit −)."},{"type":"tip","text":"Cash Flow, Manikandan Constructions-ஐ Investing-இல் (கட்டட advance) காட்டுகிறது. அது supplier advance என்றால் developer-இடம் சொல்லுங்கள்; working capital-க்கு நகரும்."}],"en_sig":"adb55318"},
  "acc_bs_views_ageing": {"title":"Balance Sheet views மற்றும் debtors / creditors statement","tag":"Accounts","blocks":[{"type":"h3","text":"Balance Sheet: Summary, Detailed, Full details"},{"type":"bullets","items":["Summary முன்பு போலவே: main groups; ஒரு group-ஐத் திறந்தால் அதன் sub-groups.","Detailed: ஒவ்வொரு group, sub-group-உம் ledgers வரை திறந்து, Ledger, Sub-group, Total என மூன்று தொகை columns. Customers, suppliers ஒவ்வொரு group-க்கும் ஒரு வரியாக எண்ணிக்கையுடன்.","Full details: ஒவ்வொரு customer, supplier-உம் Ageing column-உடன் (மிகப் பழைய open bill-இன் வயது: பச்சை 0–30, மஞ்சள் 31–60, ஆரஞ்சு 61–90, சிவப்பு 90-க்கு மேல்). Party-ஐ click செய்தால் open bills.","Layout: Liabilities, Assets பக்கம் பக்கமாக அல்லது ஒன்றின் கீழ் ஒன்று. PDF, Excel திரையில் உள்ளதை அச்சிடும்."]},{"type":"h3","text":"Debtors / Creditors statement"},{"type":"bullets","items":["Outstanding & ageing இப்போது Statement-ஆகத் திறக்கும்: ஒவ்வொரு party-க்கும் ஒரு வரி — open bills, due, மிகப் பழைய bill-க்கு Ageing badge, advance, net. Ageing buckets பழைய table-ஐக் காட்டும்.","ஒரு tile-ஐ click செய்தால் அந்த வயதுப் பிரிவு parties மட்டும்; மீண்டும் click செய்தால் எல்லாம். Largest due, oldest bill, name என sort செய்யலாம்.","Party-ஐ click செய்தால் அதன் open bills, ஒவ்வொன்றின் வயதுடன்."]}],"en_sig":"4612ede2"},
  "doc_info_only": {"title":"Info-only documents (approval இல்லாதவை)","tag":"Order Status","blocks":[{"type":"p","text":"சில documents client-க்குத் தகவலுக்காக மட்டும் அனுப்பப்படும் — catalogue, certificate நகல், பதிவுக்கான datasheet. அவற்றுக்கு review அல்லது code இல்லை. இவை INFO ONLY documents. இது Code 1 – Submit for Info-இலிருந்து வேறு; அது approval முறையின் கடைசிப் படி (client approve செய்து final நகல் கேட்கிறார்)."},{"type":"h3","text":"Info-only document எப்படி நடக்கும்"},{"type":"steps","items":["மற்ற documents போலவே requirement, task card: Not submitted — our action-இல் INFO ONLY – TO SEND strip-உடன்.","அனுப்புங்கள் (Send to client ▸, task card-இல் ✓ Completed, அல்லது Sale Order-இல் Log the next entry — Info only – Sent for information status தானாக வரும்).","நேராக All approved-க்கு INFO ONLY – SENT strip-உடன் போகும். Task card மூடும். Chase இல்லை, chase letter இல்லை, Code 1/2/3 இல்லை, எதையும் hold செய்யாது.","Client பதில் அனுப்பினால் வழக்கம்போல் பதிவு செய்யுங்கள்; comments இருந்தால் our action-க்குத் திரும்பும்."]},{"type":"h3","text":"எங்கே அமைப்பது"},{"type":"bullets","items":["Setup → Document Categories: Info only — அந்த category-இன் எல்லா documents-க்கும் default.","ஒரு document: Sale Order Documents box-இல் அதன் tab-இல் Info only (no approval) tick, அல்லது Document Control → Table வரியில் ✎ Hold / route.","Route மாற்ற காரணம் தேவை; ஒவ்வொரு மாற்றமும் யார், எப்போது, ஏன் என்று பதிவாகும். யார்: Document Controller, Technical Head, admins, super admins.","Board filter: Approval documents only / Info only (no approval). Report by Contract-இல் (for information) எனக் குறிக்கப்படும்."]}],"en_sig":"a271b6ff"},
+ "pg_add_form": {"title":"Procurement Gantt: BOM-இல் விடுபட்ட material form-ஐச் சேர்த்தல், தவறானதை மறைத்தல்","tag":"Purchase","blocks":[{"type":"p","text":"பழைய BOM-களில் FFS / app இணைப்பால் சிறு பிழைகள் உள்ளன; ஒரு shape Gantt-இல் விடுபட்டிருக்கலாம் அல்லது தவறாக இருக்கலாம்."},{"type":"h3","text":"+ Add material form"},{"type":"steps","items":["Procurement Gantt-இல் contract-ஐத் திறந்து + Add material form அழுத்தவும் (Insert Step அருகில்).","Form (shape), certification (3.2 என்றால் RFI Stamping, Test சேரும்), spec / grade, அளவு, sub-task owner, ஏன் சேர்க்கப்படுகிறது — தேர்வு செய்யவும்.","PO Draft, At our factory திட்டத் தேதிகள் தெரிந்தால் கொடுங்கள்; இடையிலான படிகள் சமமாகப் பரவும்.","வழக்கமான படிகளுடன் முழு வரிசை, procurement card-இல் sub-task, \"added on the Gantt\" குறியுடன்."]},{"type":"bullets","items":["BOM மாறாது. Production BOM-ஐத் திருத்த Technical Head-க்கு bell, Pending Actions.","BOM திருத்தப்பட்டு Update forms from BOM அதே shape-ஐக் கொண்டு வந்தால், அது இந்த வரிசையுடன் இணையும்; தேதிகள் மாறாது.","Hide form… (Table view) — காரணத்துடன் Gantt-இலிருந்து மறைக்கும் (actual தேதி இல்லையெனில் மட்டும்); bring back மூலம் மீட்கலாம்.","யார்: Purchase, Production, Technical Head. Stores இல்லை."]}],"en_sig":"184f985e"},
+ "acc_preview_pl_total": {"title":"Accounts: முதலில் PDF preview, P&L Total column","tag":"Accounts","blocks":[{"type":"bullets","items":["Accounts module-இல் ஒவ்வொரு PDF-உம் (statements, ledgers, vouchers, balance confirmation கடிதம், bank stock statement, மற்ற reports) முதலில் preview-ஆகத் திறக்கும். அதிலிருந்து Download, Print அல்லது Close. Excel முன்பு போலவே நேராக download ஆகும்.","Phone-இல் preview வெறுமையாக இருந்தால் Download அழுத்தவும்.","Profit & Loss-இல் Total column இரண்டு மாதங்களுக்கு மேல் இருந்தால் மட்டும் வரும்."]}],"en_sig":"db0560fd"},
+ "so_bom_edit": {"title":"வெளியிட்ட Sale Order-இன் BOM-ஐத் திருத்துதல்","tag":"Sales","blocks":[{"type":"p","text":"Quote Sale Order ஆனதும் அதன் BOM read-only; எல்லா செய்திகளும் Sale Order என்று சொல்லும் (offer அல்ல). Admins, super admins மட்டும் திருத்தலாம் — code தேவையில்லை. Users மாற்ற முடியாது."},{"type":"steps","items":["Sale Order BOM-ஐத் திறந்து ✎ Edit BOM (எல்லா வரிகளும்) அல்லது ஒரு வரியின் கடைசியில் ✎.","காரணத்தை ஒருமுறை கொடுங்கள்; ஒவ்வொரு மாற்றத்துடனும் சேமிக்கப்படும்.","ஒவ்வொரு வரியும் வழக்கம்போல் Save ஆகும்.","✓ Done editing அழுத்தவும்: Procurement Gantt BOM-ஐப் பின்தொடரும்; புதிய shape-க்கு வரிசை, அளவுகள் மாறும், BOM வரி இல்லாத form Purchase-க்குக் குறிக்கப்படும்."]},{"type":"bullets","items":["Production BOM ஏற்கனவே approve ஆகியிருந்தால் Technical Head-இடம் மீண்டும் re-approval-க்குப் போகும்.","PO ஏற்கனவே போட்ட form-இல் அளவு கூடினால் PO owner, Purchase Manager-க்குத் தகவல்.","ஒவ்வொரு மாற்றமும் audit log, Activity & Risk Report-இல்."]}],"en_sig":"967d1bf2"},
+ "activity_report": {"title":"Activity & Risk Report (super admins)","tag":"Admin","blocks":[{"type":"p","text":"Admin → Logs → Activity & Risk Report: இரண்டு தேதிகளுக்கு இடையிலான audit log மாற்றங்கள் அனைத்தும், Drastic / Check / Normal என வகைப்படுத்தி."},{"type":"bullets","items":["Drastic: நீக்கங்கள், codes / overrides, lock செய்த மாதத் திருத்தம், அனுமதி மாற்றங்கள்.","Check: approval / அனுப்பிய பின் மாற்றம், master data, 10-க்கு மேல் மொத்த மாற்றம், Rs 1 லட்சம்+, காலை 8-க்கு முன், இரவு 8-க்குப் பின், ஞாயிறு.","வரியை click செய்தால் முன் / பின் விவரம். PDF, Excel.","Login-இல் நேற்றைய Drastic மாற்றங்களின் சுருக்கம் super admin-க்கு."]}],"en_sig":"749edb4e"},
  "acc_period": {"title":"Period Close: closing stock, மாதத்தை lock செய்தல்","tag":"கணக்குகள்","blocks":[{"type":"steps","items":["மாதம் முடிந்ததும் Finance & Accounts Manager, Raw Material closing stock-ஐ பதிவு செய்கிறார் (Enter RM stock).","Super admin, WIP & FG closing-ஐ விற்பனை மதிப்பில், குறிப்புடன் பதிவு செய்கிறார் (Enter WIP & FG).","புத்தகங்களைச் சரிபார்த்து Lock month. மாதங்கள் வரிசைப்படி lock ஆகும்."]},{"type":"bullets","items":["Lock ஆன மாதத்தில் voucher சேர்க்கவோ, மாற்றவோ, நீக்கவோ முடியாது; FFS import அதைத் தொடாது.","Super admin மட்டுமே காரணத்துடன் unlock செய்யலாம்; கடைசியாக lock ஆன மாதம் முதலில்.","இல்லாத closing stock-உம் lock செய்யத் தயாரான மாதங்களும், அதற்குப் பொறுப்பான post-க்கு Pending Actions-இல் வரும்."]},{"type":"p","text":"இந்த இரண்டு closing தொகைகளும் Current Assets → Stocks கீழ் உள்ள Raw Material, WIP & FG ledgers-இன் மாத இறுதி closing ஆகும். ஒவ்வொன்றுக்கும் 1 ஏப்ரல் opening-உம் உண்டு."},{"type":"p","text":"Settings (super admins): நிதியாண்டு தொடக்கம், go-live தேதி."}],"en_sig":"5c21aefa"},
  "acc_export": {"title":"Auditor-க்கான Export (Tally, Excel)","tag":"கணக்குகள்","blocks":[{"type":"p","text":"Accounts → Close & Masters → Export for Auditor, 1 ஏப்ரல் முதல் நீங்கள் தேர்வு செய்யும் தேதி வரை, auditor-க்குத் தேவையான அனைத்தையும் ஒரு zip கோப்பாகத் தரும்."},{"type":"steps","items":["Super admin-இடம் Accounts Export code கேளுங்கள் (Admin → Authorization Codes → Generate Accounts Export code). அது ஒரு முறை, 15 நிமிடங்களுக்கு மட்டும் வேலை செய்யும்.","Export எந்தத் தேதி வரை என்று தேர்வு செய்யுங்கள் (அல்லது Quick மாத இறுதிப் பொத்தான்), code-ஐ type செய்து Export for Auditor அழுத்துங்கள்.","Zip-ஐ auditor-இடம் கொடுங்கள்."]},{"type":"bullets","items":["Tally_Masters.xml, Tally_Vouchers.xml: Tally Prime-இல் 1 ஏப்ரல் முதல் books கொண்ட வெற்று company உருவாக்கி, Import → Masters (Tally_Masters.xml) முதலில், பிறகு Import → Transactions (Tally_Vouchers.xml). Trial Balance, Books.xlsx-இல் உள்ளதுடன் ஒத்துப்போக வேண்டும்.","Books.xlsx: Read Me, Trial Balance, Profit & Loss, Balance Sheet, Cash Flow, Stock (மாத இறுதித் தொகைகள், பதிவு செய்தவர்), Day Book, ஒவ்வொரு ledger-இன் entries, ledger பட்டியல் (Tally-இல் பயன்படும் பெயருடன்), cancel ஆன vouchers.","ஒரே பெயருள்ள ledgers, அல்லது group-இன் பெயருள்ள ledger, Tally-க்கு அடைப்புக்குறிக்குள் code-உடன் செல்லும்; Tally-இல் ஒவ்வொரு பெயரும் வேறுபட வேண்டும்.","Lock ஆகாத மாதங்கள் Provisional எனக் குறிக்கப்படும். ஒவ்வொரு export-உம் யார், எப்போது, காலம், code-உடன் பதிவாகும்."]},{"type":"warn","text":"Finance & Accounts Manager, Finance Director, super admins மட்டுமே export செய்யலாம், எப்போதும் புதிய super admin code-உடன்: export என்பது நிறுவனத்தின் முழுக் கணக்குப் புத்தகங்கள்."}],"en_sig":"71bda284"},
  "acc_pay_purchase": {"title":"Payment, Receipt, Contra, Purchase பதிவுகள்","tag":"கணக்குகள்","blocks":[{"type":"p","text":"Payment, Receipt, Contra ஆகியவற்றில் bank (அல்லது cash அல்லது card) மேலே ஒரே வரியில்; மற்ற accounts கீழே, ஒவ்வொன்றுக்கும் ledger, தொகை மட்டும் — Debit அல்லது Credit தேர்வு தேவையில்லை. Purchase என்பது Sales voucher போன்ற supplier bill."},{"type":"steps","items":["Payment: எந்த account-இலிருந்து செலுத்தப்படுகிறது, தேதி, mode (NEFT, RTGS, IMPS, Cheque, UPI…), UTR அல்லது cheque எண் தேர்வு செய்யுங்கள். யாருக்குச் செலுத்தப்படுகிறது என்பதைச் சேர்க்கவும். Supplier என்றால் Against bill-இல் இன்னும் நிலுவையில் உள்ள bills வரும்; Oldest first-இலேயே விடுங்கள், அல்லது ஒன்றைத் தேர்வு செய்யுங்கள்.","Receipt: அதே போல — பணம் வரும் account, யாரிடமிருந்து வருகிறது (customer-இன் invoices வரும்).","Contra: நம் சொந்த bank, cash accounts இடையே மட்டும் — cash கட்டியது, cash எடுத்தது, banks இடையே மாற்றம்.","Purchase: supplier (அதன் state CGST + SGST அல்லது IGST என்று முடிவு செய்யும்), supplier bill எண், தேதி, நம் தேதி, PO எண்; Goods அல்லது Service; items, charges, GST rate; TDS பிடித்தால் (bill பதியும்போதே பிடிக்கப்படும்); bill-இல் அச்சிட்ட மொத்தத்தை type செய்யுங்கள் — அது ஒத்துப்போக வேண்டும்."]},{"type":"bullets","items":["Purchase-இல் GST தேர்வுகள்: அதே state, வேறு state, unregistered (GST இல்லை), import (bill-இல் GST இல்லை; Bill of Entry — customs duty, IGST, யார் செலுத்தினார் — அதே திரையில்), reverse charge (GST-ஐ நாமே செலுத்துகிறோம்: GST RCM Payable-க்குச் செல்லும்). Input credit not eligible என்றால் GST cost-இல் சேரும்.","Supplier bill link: bill PDF-இன் OneDrive link-ஐ ஒட்டுங்கள். பிறகு சேர்க்கலாம், ஆனால் பதிந்து 3 நாட்கள் ஆகியும் இல்லையென்றால், பதிந்தவர் link சேர்க்கும் வரை Accounts-ஐப் பயன்படுத்த முடியாது; Finance & Accounts Manager-க்குத் தெரிவிக்கப்படும், 2 நாட்கள் கழித்து super admins-க்கு. FFS bills-க்குத் தேவையில்லை.","Supplier அல்லது customer ledger-இல் Bills to pay / Invoices to collect: ஒவ்வொரு bill-உம் இன்னும் நிலுவை எவ்வளவு; ஒரு payment குறிப்பிட்ட bill-க்கு எனக் குறிக்கப்படாவிட்டால் பழையது முதலில் கழியும்.","ஒரே voucher-இல் பல bank வரிகள், அல்லது மறு பக்க வரி (இரு parties தொடர்புடைய refund): Journal பயன்படுத்துங்கள். அப்படிப்பட்ட பழைய FFS voucher Debit / Credit view-இல் திறக்கும்."]}],"en_sig":"84730282"},
@@ -32814,6 +32963,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"21 Oct 2026 (224)", summary:"Built on 2026-10-21T11:00:00Z, on top of 2026-10-21T09:30:00Z. NEEDS SQL: structure_so_bom_edit_2026-10-21.sql (BOTH companies). SALE ORDER BOM: read-only once it is a Sale Order; messages say Sale Order, not offer; users can't change it (no code route); admins and super admins edit without a code — ✎ Edit BOM (all lines, add / delete / refresh price / refresh from master / fresh BOM) or ✎ on one line, reason asked once and kept with every change; ✓ Done editing makes the Procurement Gantt follow the BOM (new shape → new row, added-on-Gantt form merged, quantities follow, a form with no BOM lines flagged for Purchase); an approved Production BOM goes back to the Technical Head (⚠ Production BOM changed — Re-approve on the Sale Order, Pending Actions item, banner on the Gantt); a quantity increase on a form with a PO tells the PO owner and the Purchase Manager. GANTT + Add material form now lists the shape master too. ACTIVITY & RISK REPORT (Admin → Logs, super admins): every audit line in a date range graded Drastic / Check / Normal with lenses (deletions, changed after approval / sent, codes & overrides, locked month edited, bulk change, master data, permission changed, odd hours before 8:00 / after 20:00 / Sunday, amounts of Rs 1 lakh or more), person / module / search filters, before / after, PDF and Excel; morning summary at login of yesterday's drastic changes to super admins. Manual articles so_bom_edit and activity_report (English and Tamil)." },
+  { date:"21 Oct 2026 (223)", summary:"Built on 2026-10-21T09:30:00Z, on top of 2026-10-21T08:30:00Z. No SQL. PROFIT & LOSS: the Total column only when the range covers more than two months (screen, PDF, Excel). ACCOUNTS PDFs OPEN A PREVIEW FIRST: every Accounts PDF (reports and statements, vouchers, balance confirmation letter, bank stock statement, legacy PI list) opens in a preview with Download, Print and Close; Excel unchanged. PROCUREMENT GANTT — + ADD MATERIAL FORM: a shape the BOM missed (legacy FFS / app link errors): form or Other, certification (3.2 adds RFI), spec / grade, size note, sub-task owner, reason, planned PO Draft and At our factory (steps between spread); full row and sub-task, tagged added on the Gantt; the BOM is not changed — the Technical Head gets a bell and a Pending Actions item to correct it; Update forms from BOM merges the same shape into the added row (dates kept) and closes the item. HIDE FORM… (Table view) with a reason when no actual date is filled; kept in the record, bring back from the line under the banner. Who: Purchase (Gantt editors), Production and the Technical Head; not Stores. Manual articles pg_add_form and acc_preview_pl_total (English and Tamil)." },
   { date:"21 Oct 2026 (222)", summary:"Built on 2026-10-21T08:30:00Z, on top of 2026-10-21T00:15:00Z. NEEDS SQL: structure_doc_info_only_2026-10-21.sql (BOTH companies). INFO-ONLY DOCUMENTS (no approval route; different from Code 1 – Submit for Info, which ends the approval route): Info only on Document Categories (default) and on one document (Documents box tick on the Sale Order, or ✎ Hold / route in Document Control → Table), reason required, history kept with the hold changes (doc_hold_hist_tbl.what), request's setting carried to its document. Before sending: Not submitted with the strip INFO ONLY – TO SEND and the usual task card. Sent (board, task card or Documents box, status Info only – Sent for information): straight to All approved, INFO ONLY – SENT, task card closes, never chased or on a chase letter, no code, holds nothing (board, contract hold, v_full_hold_outstanding, work-order hand-over). Client reply still loggable. Board filter Approval documents only / Info only; Report by Contract marks (for information). Manual article doc_info_only (English and Tamil)." },
   { date:"21 Oct 2026 (221)", summary:"Built on 2026-10-21T00:15:00Z, on top of 2026-10-20T23:30:00Z. No SQL. BALANCE SHEET VIEWS: Summary (as before), Detailed (every group and sub-group down to the ledgers, amount columns Ledger / Sub-group / Total, customers and suppliers as one line per group with the count) and Full details (every customer and supplier with an Ageing column for the oldest open bill, click a party for its open bills, Open every party's bills); layout side by side or one below the other; Open all / Close all; ledger opens the ledger, bill opens the voucher; PDF / Excel follow the view. DEBTORS / CREDITORS STATEMENT: Outstanding & ageing opens as a neat statement — open bills, due, Ageing badge (green 0–30, amber 31–60, orange 61–90, red 90+), advance, net; tiles filter by bucket or advance; sort by due, oldest or name; Ageing buckets keeps the old table; the Ageing column prints coloured in the PDF. Manual article acc_bs_views_ageing (English and Tamil)." },
   { date:"20 Oct 2026 (220)", summary:"Built on 2026-10-20T23:30:00Z, on top of 2026-10-20T22:00:00Z. NEEDS SQL: structure_accounts_statements_2026-10-20.sql (BOTH companies). ACCOUNTS → STATEMENTS: Cash Book (day totals, cash below nil flagged); Bank Book & Reconciliation (book vs bank, tick cleared with the bank date, upload the bank statement Excel / CSV and auto-match by amount within 15 days, bank-only lines listed, type the statement balance to check); Debtors and Creditors (ageing 0–30 / 31–60 / 61–90 / 90+ with advances, open bills per party, statement of account PDF / Excel, balance confirmation letter PDF); Creditors payments due from credit days, MSME 45-day flag and the 43B(h) year-end list, vendor MSME type / Udyam / credit days; GST Statements (GSTR-1 summary and B2B list, GSTR-3B summary, HSN summary, ITC vs uploaded GSTR-2B); TDS Register (by section and deductee, month by month against the 7th / 30 April, by quarter for 26Q, TDS by customers for 26AS); Sales & Purchase Registers (monthly totals, by GST rate); Fixed Asset Register (IT depreciation with the 180-day half rate, Companies Act time-proportionate, booked vs to book, rates per ledger); Contract Profitability (material view: invoiced vs bills booked to the contract's POs). Voucher rows in statements open the voucher. Manual article acc_statements (English and Tamil)." },
@@ -40156,8 +40307,18 @@ const pgShow = (x)=> !x || !x.v ? "" : x.t==="w" ? "Wk "+pgWk(x.v)+" ("+pgDmy(pg
 const PG_NONE = { t:"d", v:"" };
 const pgToday = ()=> toISODate(new Date());
 // forms: [{form, cert:"3.1"|"3.2"|"3.1 + 3.2", rfi:bool, lines:[{sheet,part,desc,qty,uom,cert}]}]; plans from build 138 had {form,detail} + plan.cert
-function pgForms(plan){ return (Array.isArray(plan && plan.forms) ? plan.forms : []).map(f=> typeof f==="string" ? {form:f} : f).filter(f=>f && f.form)
+function pgFormsAll(plan){ return (Array.isArray(plan && plan.forms) ? plan.forms : []).map(f=> typeof f==="string" ? {form:f} : f).filter(f=>f && f.form)
   .map(f=>({ ...f, rfi: f.rfi!==undefined ? !!f.rfi : (plan.cert==="3.2" && !PG_NO_RFI.includes(f.form)), cert: f.cert || plan.cert || "3.1" })); }
+function pgForms(plan){ return pgFormsAll(plan).filter(f=>!f.hidden); }   // 223: a hidden form stays in the plan's record, off the Gantt
+const pgFormsHidden = (plan)=> pgFormsAll(plan).filter(f=>f.hidden);
+const pgAddedTag = (f)=> f && f.added && !f.added.in_bom;   // 223: added on the Gantt, not yet in the BOM
+// 223: who may add or hide a material form — Purchase (the Gantt editors), Production, the Technical Head; not Stores
+async function pgFormCan(user, editor){
+  if(editor) return true;
+  const emp = await pgEmp(user); if(!emp) return false;
+  if(/production/i.test(emp.department||"")) return true;
+  try{ const { data } = await sb.from("post_holder_tbl").select("post_key").eq("employee_name",emp.employee_name).in("post_key",["technical_head","production_manager"]).limit(1); return !!(data && data.length); }catch(e){ return false; }
+}
 function pgFormNames(plan){ return pgForms(plan).map(f=>f.form); }
 // The rows of the Gantt: General + one per form, each with its steps (inserted steps placed after the step they follow).
 function pgRows(plan, d, extra){
@@ -40165,7 +40326,7 @@ function pgRows(plan, d, extra){
   const place = (steps, group)=>{ (extra||[]).filter(x=>(x.form||"")===group).forEach(x=>{ const i = steps.findIndex(s=>s.key===x.pred); const st = mk(x.key,x.label,PG_CUSTOM_COLOR,group,x.pred,true); if(i>=0) steps.splice(i+1,0,st); else steps.push(st); }); return steps; };
   const rows = [{ form:"", title:"Contract-wide steps", gen:true, steps: place(PG_GEN.map(([k,l,c],i)=>mk(k,l,c,"",i?PG_GEN[i-1][0]:null)), "") }];
   pgForms(plan).forEach(f=>{ const S = PG_STEPS.filter(s=>f.rfi || (s[0]!=="rs" && s[0]!=="rt"));
-    rows.push({ form:f.form, title:f.form, f, steps: place(S.map(([k,l,c],i)=>mk(k+"|"+f.form,l,c,f.form,i ? S[i-1][0]+"|"+f.form : "pbom")), f.form) }); });
+    rows.push({ form:f.form, title:f.form+(pgAddedTag(f)?" · added on the Gantt":""), f, steps: place(S.map(([k,l,c],i)=>mk(k+"|"+f.form,l,c,f.form,i ? S[i-1][0]+"|"+f.form : "pbom")), f.form) }); });
   return rows;
 }
 function pgStat(st, today){ const ps = pgDue(st.plan.s), pe = pgDue(st.plan.e), ae = pgDue(st.act.e); let as = pgDue(st.act.s); if(as && !ae && as>today) as = "";   // 157: an actual start after today does not count
@@ -40563,6 +40724,17 @@ function ProdBomApproveChip({ contractInfo, user }){
   const load = async()=>{ if(!cn){ setPlan(null); return; } const { data, error } = await sb.from("proc_plan_tbl").select("*").eq("contract_number",cn).maybeSingle(); setPlan(error ? "nosql" : (data||null)); };
   useEffect(()=>{ load(); },[cn]);
   if(plan===undefined || plan==="nosql") return null;
+  if(plan && plan.bom_changed_at && !plan.bom_reapproved_at){   // 224: the BOM changed after approval — back to the Technical Head
+    const reapprove = async()=>{ if(!can){ noPermission("re-approve the Production BOM",{posts:["technical_head"],roles:["admin","super_admin"]}); return; }
+      if(!confirm("Re-approve the Production BOM of "+cn+"?\n\nChanged "+fmtDMY(plan.bom_changed_at)+" by "+(plan.bom_changed_by||"")+": "+(plan.bom_change_reason||""))) return;
+      const emp = await pgEmp(user); const me = (emp && emp.employee_name) || user.username || "";
+      const { error } = await sb.from("proc_plan_tbl").update({ bom_reapproved_at:new Date().toISOString(), bom_reapproved_by:me }).eq("id",plan.id); if(error){ alert(error.message); return; }
+      try{ await stepDone("pbom_reapprove", cn, "reapprove", me, "Re-approved"); }catch(e){}
+      await logAudit("UPDATE","proc_plan_tbl",cn,"Production BOM re-approved after the change of "+fmtDMY(plan.bom_changed_at)+" ("+(plan.bom_change_reason||"")+")",user?.username||""); await load(); };
+    return h("span",{style:{display:"inline-flex",gap:6,alignItems:"center",fontSize:11,padding:"2px 9px",borderRadius:9,background:"#fff4d6",color:"#7a5200",whiteSpace:"nowrap"}},
+      "⚠ Production BOM changed "+fmtDMY(plan.bom_changed_at)+(plan.bom_changed_by?" by "+plan.bom_changed_by:"")+" — needs re-approval",
+      h("button",{onClick:reapprove,style:{...btnSmall,fontSize:11,padding:"2px 8px",background:can?"#0f7a5c":"#fff",color:can?"#fff":colors.muted,borderColor:can?"#0f7a5c":colors.border,fontWeight:700}},"Re-approve"));
+  }
   if(plan) return h("span",{title:"Purchase → Procurement Gantt",style:{fontSize:11,padding:"2px 9px",borderRadius:9,background:"#eaf9f4",color:"#085041",whiteSpace:"nowrap"}},
     plan.prod_bom_approved_at ? "✓ Production BOM approved "+fmtDMY(plan.prod_bom_approved_at)+(plan.prod_bom_approved_by?" · "+plan.prod_bom_approved_by:"")+" · Procurement Gantt made" : "✓ Procurement Gantt made from an uploaded BOM");
   const approve = async()=>{
@@ -41375,6 +41547,8 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
   const [me,setMe] = useState("");
   const [ed,setEd] = useState(null);       // {d, extra, forms, removed:[keys], o, focus}
   const [ins,setIns] = useState(null);
+  const [af,setAf] = useState(null);           // 223: add a material form
+  const [canForm,setCanForm] = useState(false); // 223: Purchase, Production, Technical Head
   const [up,setUp] = useState(null);       // upload: {stage:"pick"|"review", file, read, po, client, contract, ...}
   const [ask,setAsk] = useState(null);
   const [busy,setBusy] = useState(false);
@@ -41398,7 +41572,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
   useEffect(()=>{ const t = setTimeout(jumpToday,60); return ()=>clearTimeout(t); },[cur, chartScale, chartMode, tplLvl, fullScreen, view]);
   useEffect(()=>{ if(!fullScreen) return; const k = (e)=>{ if(e.key==="Escape") setFullScreen(false); }; window.addEventListener("keydown",k); return ()=>window.removeEventListener("keydown",k); },[fullScreen]);
 
-  useEffect(()=>{ (async()=>{ const emp = await pgEmp(user); setMe((emp&&emp.employee_name)||user?.username||""); const ce = await pgCanEdit(user); setCanEdit(ce); setStoresOnly(!ce && await pgStoresCan(user)); })(); },[user && user.id]);
+  useEffect(()=>{ (async()=>{ const emp = await pgEmp(user); setMe((emp&&emp.employee_name)||user?.username||""); const ce = await pgCanEdit(user); setCanEdit(ce); pgFormCan(user, ce).then(setCanForm).catch(()=>{}); setStoresOnly(!ce && await pgStoresCan(user)); })(); },[user && user.id]);
   const load = async()=>{
     setLoading(true);
     const { data: ps, error } = await sb.from("proc_plan_tbl").select("*").order("contract_number",{ascending:false});
@@ -41490,7 +41664,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
       const formsChanged = JSON.stringify(ed.forms)!==JSON.stringify(pgForms(plan));
       const cs = [...new Set(ed.forms.map(f=>f.cert))];
       const info = ed.info ? { po_no:String(ed.info.po||"").trim()||null, delivery_date:ed.info.deliv||null } : {};   // 142
-      await sb.from("proc_plan_tbl").update({ ...(formsChanged?{ forms:ed.forms, cert: cs.length===1 ? cs[0] : "Mixed" }:{}), ...info, updated_by:me, updated_at:now }).eq("id",plan.id);
+      await sb.from("proc_plan_tbl").update({ ...(formsChanged?{ forms:[...ed.forms, ...pgFormsHidden(plan)], cert: cs.length===1 ? cs[0] : "Mixed" }:{}), ...info, updated_by:me, updated_at:now }).eq("id",plan.id);
       await logAudit("UPDATE","proc_line_tbl",plan.contract_number,"Procurement Gantt dates saved ("+ups.length+" steps"+(ed.removed.length?", "+ed.removed.length+" inserted step(s) removed":"")+(formsChanged?", RFI / certification changed":"")+")",user?.username||"");
       // 154: the moves, logged with their reason (the first one of a step keeps the original plan)
       if(opts && opts.reason && (opts.moves||[]).length){
@@ -41537,6 +41711,78 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
     setIns(null); await pgSyncTasks(plan.id, me); await load(); return true;
   };
 
+  // ---- 223: add a material form the BOM missed / hide one that should not be there ----
+  const openAf = async()=>{ if(!plan) return;
+    let emps = []; try{ const { data } = await sb.from("employee_tbl").select("employee_name,department").order("employee_name"); emps = (data||[]).filter(e=>e.employee_name); }catch(e){}
+    let shapes = []; try{ const { data } = await sb.from("materials_shape").select("shape").order("shape"); shapes = (data||[]).map(r=>r.shape).filter(Boolean); }catch(e){}
+    const opts = Array.from(new Set(plan.source==="Uploaded BOM" ? [...PG_FORMS, ...shapes] : [...shapes, ...PG_FORMS]));
+    const free = opts.filter(f=>!pgFormsAll(plan).some(x=>x.form===f));
+    setAf({ opts, form:free[0]||"", other:"", spec:"", note:"", cert: plan.cert==="3.2" ? "3.2" : "3.1", owner:"", why:"Missing in the legacy BOM (FFS / app link)", whyNote:"", draft:"", fac:"", emps }); };
+  const saveAf = async()=>{
+    const a = af; const form = (a.form==="__other" ? String(a.other||"").trim() : a.form);
+    if(!form){ alert("Pick the material form (shape)."); return; }
+    const all = pgFormsAll(plan); const ex = all.find(f=>f.form.toLowerCase()===form.toLowerCase());
+    if(ex && !ex.hidden){ alert(form+" is already on this Gantt."); return; }
+    if(a.why==="Other" && String(a.whyNote||"").trim().length<3){ alert("Say why it is added."); return; }
+    if(a.draft && a.fac && a.fac<a.draft){ alert("At our factory is before the PO Draft date."); return; }
+    setBusy(true);
+    try{
+      const now = new Date().toISOString(); const why = a.why==="Other" ? String(a.whyNote).trim() : a.why+(String(a.whyNote||"").trim() ? " — "+String(a.whyNote).trim() : "");
+      const nf = { form, cert:a.cert, rfi: a.cert!=="3.1" && !PG_NO_RFI.includes(form), lines:[], spec:String(a.spec||"").trim()||null, note:String(a.note||"").trim()||null,
+        added:{ by:me, at:now, why, owner:a.owner||null } };
+      const forms = ex ? all.map(f=>f===ex ? { ...nf, hidden_before:ex.hidden } : f) : [...all, nf];
+      const { error } = await sb.from("proc_plan_tbl").update({ forms, updated_by:me, updated_at:now }).eq("id",plan.id);
+      if(error){ alert("Could not add the form:\n\n"+error.message); return; }
+      // planned dates: PO Draft and At our factory given, the steps between spread evenly
+      if(a.draft || a.fac){ const S = PG_STEPS.filter(s=>nf.rfi || (s[0]!=="rs" && s[0]!=="rt")); const d0 = a.draft || a.fac, d1 = a.fac || a.draft; const span = Math.max(0, pgDd(d0, d1)); const ups = [];
+        S.forEach(([k,l],i)=>{ const isFac = k==="fac"; const pe = isFac ? d1 : pgAdd(d0, Math.round(span*0.4*i/Math.max(1,S.length-2)));
+          const ps = isFac ? (S.length>1 ? pgAdd(pgAdd(d0, Math.round(span*0.4)),1) : pe) : pe; const psx = ps>pe ? pe : ps;
+          ups.push({ plan_id:plan.id, line_key:k+"|"+form, label:l, stage:l, form, pred_key:i ? S[i-1][0]+"|"+form : "pbom", is_custom:false, plan_start_type:"d", plan_start:psx, plan_type:"d", plan_date:pe, act_start_type:"d", act_start:null, act_type:"d", act_date:null, updated_by:me, updated_at:now }); });
+        const r = await sb.from("proc_line_tbl").upsert(ups,{onConflict:"plan_id,line_key"}); if(r.error) alert("The form is added, but its dates could not be saved:\n\n"+r.error.message+"\n\nFill them in Edit dates."); }
+      await logAudit("UPDATE","proc_plan_tbl",plan.contract_number,"Procurement Gantt: material form added on the Gantt — "+form+(nf.spec?" ("+nf.spec+")":"")+" · "+why,user?.username||"");
+      await pgSyncTasks(plan.id, me);
+      if(a.owner){ try{ await sb.from("task_tbl").update({ assignee:a.owner }).eq("proc_plan_id",plan.id).eq("proc_form",form).not("parent_id","is",null); }catch(e){} }
+      // the BOM is not changed: the Technical Head is asked to correct it (bell + Pending Actions)
+      try{ await loadPostPeople(); const th = postHolders("technical_head").filter(Boolean);
+        const msg = plan.contract_number+(plan.client?" – "+plan.client:"")+": "+form+" was added on the Procurement Gantt by "+me+" ("+why+"). Please correct the Production BOM.";
+        if(th.length) await notifyPeople(th, msg, "info");
+        await stepOpen({ module:"purchase", doc_type:"proc_form_added", doc_ref:plan.contract_number+"|"+form, step:"bom_fix", title:"Correct the BOM of "+plan.contract_number+": add "+form+" (added on the Procurement Gantt)",
+          owner: th[0]||null, manager_post:"technical_head", link_tab:"proc_gantt", cardText:"Add "+form+(nf.spec?" ("+nf.spec+")":"")+" to the Production BOM of "+plan.contract_number+". Reason: "+why }, me); }catch(e){ console.warn("estimator notice", e); }
+      setAf(null); await load();
+    } finally { setBusy(false); }
+  };
+  const hideForm = async(form)=>{
+    const R = rowsOf(plan); const row = R.find(r=>r.form===form); if(!row) return;
+    if(row.steps.some(s=>pgDue(s.act.s) || pgDue(s.act.e))){ alert(form+" already has actual dates (work has started). It can't be hidden — put the dates right in Edit dates instead."); return; }
+    const why = prompt("Hide "+form+" from this Gantt?\n\nIt is kept in the record and can be brought back. Why should it not be here?");
+    if(why===null) return; if(String(why).trim().length<3){ alert("A reason is needed."); return; }
+    const now = new Date().toISOString();
+    const forms = pgFormsAll(plan).map(f=>f.form===form ? { ...f, hidden:{ by:me, at:now, why:String(why).trim() } } : f);
+    const { error } = await sb.from("proc_plan_tbl").update({ forms, updated_by:me, updated_at:now }).eq("id",plan.id);
+    if(error){ alert("Could not hide it:\n\n"+error.message); return; }
+    try{ await sb.from("task_tbl").update({ status:"done" }).eq("proc_plan_id",plan.id).eq("proc_form",form).not("parent_id","is",null).neq("status","done"); }catch(e){}
+    try{ await stepCloseFor("proc_form_added", plan.contract_number+"|"+form, "Form hidden on the Gantt: "+String(why).trim(), me); }catch(e){}
+    await logAudit("UPDATE","proc_plan_tbl",plan.contract_number,"Procurement Gantt: material form hidden — "+form+" · "+String(why).trim(),user?.username||"");
+    await load();
+  };
+  const restoreForm = async(form)=>{
+    if(!confirm("Bring "+form+" back onto the Gantt?")) return; const now = new Date().toISOString();
+    const forms = pgFormsAll(plan).map(f=>{ if(f.form!==form) return f; const { hidden, ...rest } = f; return { ...rest, restored:{ by:me, at:now, was:hidden||null } }; });
+    const { error } = await sb.from("proc_plan_tbl").update({ forms, updated_by:me, updated_at:now }).eq("id",plan.id);
+    if(error){ alert("Could not bring it back:\n\n"+error.message); return; }
+    await logAudit("UPDATE","proc_plan_tbl",plan.contract_number,"Procurement Gantt: material form brought back — "+form,user?.username||"");
+    await pgSyncTasks(plan.id, me); await load();
+  };
+  const hiddenBar = ()=>{ if(!plan || ed) return null; const hs = pgFormsHidden(plan); const ad = pgForms(plan).filter(pgAddedTag); const nb = pgForms(plan).filter(f=>f.no_bom);
+    const rea = plan.bom_changed_at && !plan.bom_reapproved_at;
+    if(!hs.length && !ad.length && !nb.length && !rea) return null;
+    return h("div",{style:{margin:"8px 12px 0",fontSize:11.5,color:colors.muted,display:"flex",gap:10,flexWrap:"wrap"}},
+      rea ? h("span",{style:{color:"#7a5200"}},h("b",null,"⚠ BOM changed "+fmtDMY(plan.bom_changed_at)+(plan.bom_changed_by?" by "+plan.bom_changed_by:"")+" — awaiting the Technical Head's re-approval. "),plan.bom_change_reason||"") : null,   // 224
+      nb.length ? h("span",{style:{color:"#a3312a"}},h("b",null,"No BOM lines now: "),nb.map(f=>f.form).join(", ")," — hide the form if it is no longer needed, or keep it.") : null,
+      ad.length ? h("span",null,h("b",{style:{color:"#2a6db0"}},"Added on the Gantt (BOM to be corrected): "),ad.map(f=>f.form+(f.added&&f.added.why?" — "+f.added.why:"")).join(" · ")) : null,
+      hs.length ? h("span",null,h("b",{style:{color:"#7a5200"}},"Hidden: "),hs.map(f=>h("span",{key:f.form,style:{marginRight:8}},f.form+(f.hidden&&f.hidden.why?" ("+f.hidden.why+")":"")," ",
+        canForm ? h("a",{href:"#",onClick:e=>{ e.preventDefault(); restoreForm(f.form); }},"bring back") : null))) : null); };
+
   // ---- upload BOM (Excel) ----
   const openUp = async()=>{
     setUp({ file:null, read:null, contract:"", client:"", po:"", deliv:"", note:"" });
@@ -41582,11 +41828,19 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
   };
   const openFile = async(p)=>{ const { data, error } = await sb.storage.from("direct-price-excels").createSignedUrl(p.bom_file_path, 300); if(error || !data){ alert("Could not open the file."); return; } window.open(data.signedUrl,"_blank","noopener"); };
   const refreshForms = async()=>{
-    const forms = await pgFormsFromBom(plan.contract_number); const have = pgFormNames(plan);
+    const forms = await pgFormsFromBom(plan.contract_number); const all = pgFormsAll(plan); const have = all.map(f=>f.form);
     const add = forms.filter(f=>!have.includes(f.form));
+    const merge = forms.filter(f=>{ const x = all.find(y=>y.form===f.form); return x && pgAddedTag(x); });   // 223: the BOM now has a form that was added on the Gantt
+    if(merge.length){ const now = new Date().toISOString();
+      const nf = all.map(x=>{ const b = merge.find(m=>m.form===x.form); return b ? { ...x, lines:b.lines||x.lines, cert:b.cert||x.cert, added:{ ...x.added, in_bom:now, in_bom_by:me } } : x; });
+      await sb.from("proc_plan_tbl").update({ forms:nf, updated_by:me, updated_at:now }).eq("id",plan.id);
+      await logAudit("UPDATE","proc_plan_tbl",plan.contract_number,"Procurement Gantt: BOM now has the form(s) added on the Gantt — merged, dates kept: "+merge.map(f=>f.form).join(", "),user?.username||"");
+      for(const f of merge){ try{ await stepDone("proc_form_added", plan.contract_number+"|"+f.form, "bom_fix", me, "The BOM now has "+f.form); }catch(e){} }
+      if(!add.length){ alert("Merged "+merge.length+" form"+(merge.length>1?"s":"")+" added on the Gantt with the corrected BOM (dates kept):\n\n"+merge.map(f=>"  • "+f.form).join("\n")); await load(); return; }
+      plan.forms = nf; }
     if(!add.length){ alert("No new material forms in the BOM — nothing to add."); return; }
     if(!confirm("Add "+add.length+" new material form"+(add.length>1?"s":"")+" from the BOM?\n\n"+add.map(f=>"  • "+f.form).join("\n")+"\n\nForms already on the plan stay as they are.")) return;
-    await sb.from("proc_plan_tbl").update({ forms:[...pgForms(plan), ...add], updated_by:me, updated_at:new Date().toISOString() }).eq("id",plan.id);
+    await sb.from("proc_plan_tbl").update({ forms:[...pgFormsAll(plan), ...add], updated_by:me, updated_at:new Date().toISOString() }).eq("id",plan.id);
     await logAudit("UPDATE","proc_plan_tbl",plan.contract_number,"Procurement Gantt: material forms added from the BOM — "+add.map(f=>f.form).join(", "),user?.username||"");
     await pgSyncTasks(plan.id, me); await load();
   };
@@ -41632,6 +41886,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
         h("b",null,r.title)," ",f ? pgCertPill(f.cert) : null,
         h("span",{onClick:()=>setStripOpen(o=>({...o,[r.form||"General"]:!o[r.form||"General"]})),title:"Show or fold the bars of this line item",style:{fontSize:11,color:"#0f7a5c",fontWeight:700,marginLeft:8,cursor:"pointer"}},(stripOpen[r.form||"General"]?"\u25be":"\u25b8")+" Bars"),   // 154
         f && f.lines ? h("span",{style:{fontSize:11,color:colors.muted,marginLeft:6,cursor:"pointer",textDecoration:"underline dotted"},onClick:()=>setOpenForm(o=>o===r.form?"":r.form)},f.lines.length+" BOM lines "+(openForm===r.form?"▾":"▸")) : null,
+        !ed && canForm && f ? h("a",{href:"#",onClick:e=>{ e.preventDefault(); hideForm(r.form); },style:{marginLeft:12,fontSize:11,color:"#a3312a"},title:"This form should not be on the Gantt (BOM error)"},"Hide form…") : null,   // 223
         ed && canEdit && f && !PG_NO_RFI.includes(f.form) ? h("label",{style:{marginLeft:12,fontSize:11.5,display:"inline-flex",gap:4,alignItems:"center"}},h("input",{type:"checkbox",checked:!!f.rfi,onChange:e=>setRfi(f.form,e.target.checked)}),"3.2 — RFI Stamping and RFI Test") : null)));
       if(f && f.lines && openForm===r.form) f.lines.forEach((l,i)=>out.push(h("tr",{key:"l"+r.form+i},h("td",{colSpan:6,style:{padding:"3px 8px 3px 24px",fontSize:11,color:colors.muted,background:"#faf9f5",borderBottom:"1px solid #f0eee6"}},
         (l.sheet?l.sheet+" · ":"")+(l.part?l.part+" · ":"")+l.desc+(l.qty!==""&&l.qty!=null?" · "+l.qty+" "+(l.uom||""):"")," ",pgCertPill(l.cert)))));
@@ -41673,6 +41928,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
         h("span",{style:{fontSize:11.5,color:colors.muted}},h("b",{style:{color:colors.text}},shown.length)," rows · ",h("b",{style:{color:colors.text}},st.n)," steps · ",h("b",{style:{color:"#a3312a"}},st.late)," behind · ",h("b",{style:{color:"#854f0b"}},st.miss)," need dates · ",h("b",{style:{color:"#0f6b4f"}},st.done)," done"),
         !ed ? h("span",{style:{marginLeft:"auto",display:"inline-flex",border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden"}},
           [["chart","Bar chart"],["table","Table"]].map(([v,l])=>h("button",{key:v,onClick:()=>{ setView(v); try{ localStorage.setItem("pg_view",v); }catch(e){} },style:{border:0,padding:"6px 11px",fontSize:12,cursor:"pointer",background:view===v?"#1c1f1a":"#fff",color:view===v?"#fff":colors.text,fontWeight:view===v?700:400}},l))) : h("span",{style:{marginLeft:"auto"}}),
+        !ed && canForm ? h("button",{style:{...btnSmall,fontWeight:700,color:"#2a6db0",borderColor:"#2a6db0",marginLeft:canEdit?0:"auto"},onClick:openAf,title:"A material form (shape) the BOM missed — legacy BOMs carry small errors"},"+ Add material form") : null,   // 223
         ed ? [h("button",{key:"c",style:btnSecondary,disabled:busy,onClick:()=>{ if(dirty) setAsk({ what:"Procurement Gantt dates", onSave:async()=>{ await saveEdit(); }, then:()=>setEd(null) }); else setEd(null); }},"Cancel"),
               h("button",{key:"s",style:{...btnPrimary,background:"#0f7a5c"},disabled:busy,onClick:saveEdit},busy?"Saving…":"Save dates")]
           : canEdit ? [plan.source!=="Uploaded BOM" ? h("button",{key:"r",style:btnSmall,onClick:refreshForms,title:"Add material forms that were added to the BOM later"},"Update forms from BOM") : null,
@@ -41682,7 +41938,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
               h("button",{key:"e",style:btnPrimary,onClick:()=>openEdit()},"Edit dates")]
           : storesOnly ? [h("span",{key:"n",style:{fontSize:11.5,color:colors.muted}},"Stores enter the receipt dates"), h("button",{key:"e",style:btnPrimary,onClick:()=>openEdit()},"Enter receipt dates")]
           : h("span",{style:{fontSize:11.5,color:colors.mutedLight}},"Read only — Purchase edit this plan")),
-      banner, legend,
+      banner, hiddenBar(), legend,
       // 144: chart controls — Plan / Progress, Weeks / Days, Jump to today, Full screen, downloads
       (!ed && view==="chart") ? h("div",{style:{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",padding:"0 12px 8px",fontSize:11.5,color:colors.muted}},
         "Rows:", seg([["mat","One row per material"],["step","Show the steps"]], tplLvl, setTplLvl),
@@ -41757,6 +42013,23 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
         fl("Plan: start (empty = same as the finish)",h(PgWhen,{value:ins.ps,weeks:weeksFor(plan),kind:"start",onChange:v=>setIns(x=>({...x,ps:v}))})),
         fl("Plan: finish *",h(PgWhen,{value:ins.pe,weeks:weeksFor(plan),kind:"end",onChange:v=>setIns(x=>({...x,pe:v}))}))),
       [h("button",{key:"c",style:btnSecondary,onClick:closeIns},"Cancel"),h("button",{key:"s",style:{...btnPrimary,background:"#0f7a5c"},onClick:saveIns},"Insert Step")], closeIns) : null,
+    af && plan ? modal("Add a material form — contract "+plan.contract_number,
+      h("div",null,
+        h("div",{style:{fontSize:12,color:colors.muted,marginBottom:10}},"For a shape the BOM is missing (legacy BOMs carry small errors from the FFS / app link). The BOM itself is not changed: the Technical Head gets a bell and a Pending Actions item to correct it. When Update forms from BOM later brings the same shape in, it merges into this row and keeps its dates."),
+        h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}},
+          fl("Material form (shape) *",h("select",{value:af.form,onChange:e=>setAf(x=>({...x,form:e.target.value})),style:inputStyle},
+            (af.opts||PG_FORMS).filter(f=>!pgForms(plan).some(x=>x.form===f)).map(f=>h("option",{key:f,value:f},f+(pgFormsHidden(plan).some(x=>x.form===f)?" (hidden — brings it back)":""))), h("option",{value:"__other"},"Other…"))),
+          af.form==="__other" ? fl("Name of the form *",h("input",{value:af.other,onChange:e=>setAf(x=>({...x,other:e.target.value})),placeholder:"e.g. Tube sheet",style:inputStyle})) : fl("Certification",h("select",{value:af.cert,onChange:e=>setAf(x=>({...x,cert:e.target.value})),style:inputStyle},["3.1","3.2","3.1 + 3.2"].map(c=>h("option",{key:c,value:c},c+(c!=="3.1"?" (RFI Stamping and Test)":""))))),
+          fl("Spec / grade (optional)",h("input",{value:af.spec,onChange:e=>setAf(x=>({...x,spec:e.target.value})),placeholder:"e.g. ASTM A240 316L",style:inputStyle})),
+          fl("Size / quantity note (optional)",h("input",{value:af.note,onChange:e=>setAf(x=>({...x,note:e.target.value})),placeholder:"e.g. 12 mm · 420 kg",style:inputStyle})),
+          fl("Owner (the sub-task on the card)",h("select",{value:af.owner,onChange:e=>setAf(x=>({...x,owner:e.target.value})),style:inputStyle},h("option",{value:""},"— the card's holder —"),
+            (af.emps||[]).filter(e=>/purchase/i.test(e.department||"")).concat((af.emps||[]).filter(e=>!/purchase/i.test(e.department||""))).map(e=>h("option",{key:e.employee_name,value:e.employee_name},e.employee_name+(e.department?" · "+e.department:""))))),
+          fl("Why it is added *",h("select",{value:af.why,onChange:e=>setAf(x=>({...x,why:e.target.value})),style:inputStyle},["Missing in the legacy BOM (FFS / app link)","Added by design after the BOM","Customer asked","Other"].map(w=>h("option",{key:w,value:w},w)))),
+          fl("Note"+(af.why==="Other"?" *":" (optional)"),h("input",{value:af.whyNote,onChange:e=>setAf(x=>({...x,whyNote:e.target.value})),placeholder:"e.g. body plate missed in BOM Rev 0",style:inputStyle}),true),
+          fl("PO Draft — planned",h("input",{type:"date",value:af.draft,onChange:e=>setAf(x=>({...x,draft:e.target.value})),style:inputStyle})),
+          fl("At our factory — planned",h("input",{type:"date",value:af.fac,onChange:e=>setAf(x=>({...x,fac:e.target.value})),style:inputStyle}))),
+        h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:6}},"The steps in between are spread evenly; change any of them in Edit dates. Leave both empty to fill all the dates in Edit dates.")),
+      [h("button",{key:"c",style:btnSecondary,onClick:()=>setAf(null)},"Cancel"),h("button",{key:"s",style:{...btnPrimary,background:"#0f7a5c"},disabled:busy,onClick:saveAf},busy?"Adding…":"Add to the Gantt")], ()=>setAf(null)) : null,
     up ? modal("Upload BOM for a contract", upBody(),
       [h("button",{key:"c",style:btnSecondary,onClick:closeUp},"Cancel"),h("button",{key:"s",style:{...btnPrimary,background:"#0f7a5c"},disabled:busy,onClick:saveUp},busy?"Making…":"Make the Gantt")], closeUp, true) : null,
     // 154: why are the planned dates moving
@@ -46628,6 +46901,167 @@ function QuoteHistoryPanel({ referenceNumber, onClose }){
   );
 }
 
+// =====================================================================================================
+// 21 Oct 2026 (224): SALE ORDER BOM — edited by admins only (no code), with a reason; after the edit the
+// Procurement Gantt follows the BOM, the Technical Head re-approves an approved Production BOM, and the PO owner
+// is told when a quantity goes up on a form that already has a PO.
+// =====================================================================================================
+const SO_BOM_WHY = ["Legacy BOM error (FFS / app link)","Design change after the Sale Order","Customer change","Other"];
+async function soBomAfterEdit(ct, slNo, why, me, changes, user){
+  const out = { added:[], merged:[], gone:[], qtyUp:[], poTold:[], reapprove:false, plan:false };
+  const now = new Date().toISOString();
+  let plan = null; try{ const r = await sb.from("proc_plan_tbl").select("*").eq("contract_number",ct).maybeSingle(); plan = r.data||null; }catch(e){}
+  if(plan){ out.plan = true;
+    const bom = await pgFormsFromBom(ct); const all = pgFormsAll(plan);
+    const sumQ = (ls)=> (ls||[]).reduce((s,l)=>s+(Number(l.qty)||0),0);
+    const nf = all.map(f=>{ const b = bom.find(x=>x.form===f.form);
+      if(b){ const was = sumQ(f.lines), now2 = sumQ(b.lines); if(now2>was+1e-9) out.qtyUp.push({ form:f.form, was, now:now2 });
+        const o = { ...f, lines:b.lines }; if(pgAddedTag(f)){ o.added = { ...f.added, in_bom:now, in_bom_by:me }; out.merged.push(f.form); } if(o.no_bom) delete o.no_bom; return o; }
+      if(!f.hidden && !pgAddedTag(f) && (f.lines||[]).length){ out.gone.push(f.form); return { ...f, lines:[], no_bom:{ at:now, by:me } }; }
+      return f; });
+    bom.forEach(b=>{ if(!all.some(f=>f.form===b.form)){ const r32 = plan.cert==="3.2"; nf.push({ ...b, cert: r32 ? "3.2" : "3.1", rfi: r32 && !PG_NO_RFI.includes(b.form), from_bom_edit:{ at:now, by:me } }); out.added.push(b.form); } });
+    const patch = { forms:nf, updated_by:me, updated_at:now };
+    if(plan.prod_bom_approved_at){ out.reapprove = true; Object.assign(patch, { bom_changed_at:now, bom_changed_by:me, bom_change_reason:why, bom_reapproved_at:null, bom_reapproved_by:null }); }
+    let { error } = await sb.from("proc_plan_tbl").update(patch).eq("id",plan.id);
+    if(error && /bom_change|bom_reapprov/.test(error.message||"")){ ["bom_changed_at","bom_changed_by","bom_change_reason","bom_reapproved_at","bom_reapproved_by"].forEach(k=>delete patch[k]); out.sqlMissing = true; ({ error } = await sb.from("proc_plan_tbl").update(patch).eq("id",plan.id)); }
+    if(error) out.err = error.message;
+    try{ await pgSyncTasks(plan.id, me); }catch(e){}
+    for(const f of out.merged){ try{ await stepDone("proc_form_added", ct+"|"+f, "bom_fix", me, "The BOM now has "+f); }catch(e){} }
+    await logAudit("UPDATE","proc_plan_tbl",ct,"Procurement Gantt follows the Sale Order BOM edit (Sl "+slNo+"): "+[out.added.length?"new rows "+out.added.join(", "):"", out.merged.length?"merged "+out.merged.join(", "):"", out.gone.length?"no BOM lines now "+out.gone.join(", "):"", out.qtyUp.length?"quantity up "+out.qtyUp.map(x=>x.form).join(", "):""].filter(Boolean).join(" · ")||"no change to the forms", user?.username||"");
+  }
+  // the Technical Head
+  try{ await loadPostPeople(); const th = postHolders("technical_head").filter(Boolean);
+    const msg = ct+" Sl "+slNo+": the Sale Order BOM was changed by "+me+" ("+why+") — "+changes+" change(s)."+(out.reapprove ? " The Production BOM needs your re-approval (Sale Order → Approve Production BOM)." : "");
+    if(th.length) await notifyPeople(th, msg, "info");
+    if(out.reapprove) await stepOpen({ module:"purchase", doc_type:"pbom_reapprove", doc_ref:ct, step:"reapprove", title:"Re-approve the Production BOM of "+ct+" (changed after approval)",
+      owner: th[0]||null, manager_post:"technical_head", link_tab:"proc_gantt", cardText:"The Sale Order BOM of "+ct+" (Sl "+slNo+") was changed by "+me+": "+why+". Check it and press Re-approve Production BOM on the Sale Order." }, me);
+  }catch(e){ console.warn("technical head notice", e); }
+  // the PO owner, where a quantity went up on a form that already has a PO
+  if(out.qtyUp.length){ try{
+    const { data: pos } = await sb.from("po_register").select("po_no,owner_name,stage,status,vendor_name").eq("contract_ref",ct);
+    const live = (pos||[]).filter(p=>!/^(Draft|Cancelled)$/i.test(p.stage||"") && !/cancel/i.test(p.status||""));
+    if(live.length){ const { data: its } = await sb.from("po_register_items").select("po_no,shape,description,item").in("po_no",live.map(p=>p.po_no));
+      const norm = s=>String(s||"").toLowerCase().replace(/[^a-z]/g,"");
+      for(const q of out.qtyUp){ const hit = live.filter(p=>(its||[]).some(i=>i.po_no===p.po_no && (norm(i.shape)===norm(q.form) || (norm(i.shape) && (norm(q.form).startsWith(norm(i.shape)) || norm(i.shape).startsWith(norm(q.form)))) || pgLineForm(i.description||i.item, i.shape)===q.form)));
+        for(const p of hit){ const to = [p.owner_name, ...postHolders("purchase_manager")].filter((x,i,a)=>x && a.indexOf(x)===i);
+          if(to.length) await notifyPeople(to, ct+": the BOM quantity of "+q.form+" went up ("+(Math.round(q.was*1000)/1000)+" → "+(Math.round(q.now*1000)/1000)+") after "+p.po_no+" ("+(p.vendor_name||"")+") was raised. The PO may need an amendment.", "warn");
+          out.poTold.push(p.po_no); } } }
+  }catch(e){ console.warn("PO owner notice", e); } }
+  return out;
+}
+
+// =====================================================================================================
+// 21 Oct 2026 (224): ACTIVITY & RISK REPORT (super admins) — every audit line in a date range, graded
+// Drastic / Check / Normal, with lenses; and a morning summary at login when something drastic happened.
+// =====================================================================================================
+const ACT_LIMIT = 100000;   // Rs — a "large amount"
+const ACT_MASTER = /^(materials_shape|material_rates|material_spec|grade_tbl|size_tbl|model_tbl|companies|customer[a-z_]*|vendor_tbl|vendor_contacts|doc_category_tbl|doc_status_tbl|test_types_tbl|acc_ledger_tbl|acc_group_tbl|item_master|items_tbl|uom_tbl|department_tbl|po_list_tbl|description_master|pricelist[a-z_]*|tax[a-z_]*|gst[a-z_]*)$/i;
+const ACT_PERM = /^(app_users|post_tbl|post_holder_tbl|board_member_tbl|auth[a-z_]*|user_permission[a-z_]*|role[a-z_]*|login[a-z_]*code[a-z_]*)$/i;
+function actModule(t){ t = String(t||"");
+  if(/^acc_|voucher|ledger|invoice|proforma|legacy_bill|bank/.test(t)) return "Accounts";
+  if(/^estimate|^bom|quote/.test(t)) return "Quotes & BOM";
+  if(/^po_|^proc_|grn|vendor|material_inward|tag_/.test(t)) return "Purchase & Stores";
+  if(/^universal_doc|^doc_|document/.test(t)) return "Documents";
+  if(/^sale_order|^so_|contract|work_order|despatch|dc_|gate_pass/.test(t)) return "Sales & Orders";
+  if(/^task|pending_step|handover/.test(t)) return "Tasks";
+  if(/employee|app_users|post|board_member|leave|attendance|hr_/.test(t)) return "People & Setup";
+  if(/compan|customer|enquiry|crm|follow/.test(t)) return "CRM";
+  return t || "Other"; }
+function actMaxAmount(s){ let m = 0; String(s||"").replace(/(?:rs\.?|₹|inr|amount|value|total)\s*:?\s*([0-9][0-9,]{4,}(?:\.\d+)?)/gi,(a,n)=>{ const v = Number(String(n).replace(/,/g,"")); if(v>m) m = v; return a; }); return m; }
+function actGrade(r){
+  const s = String(r.record_summary||""), t = String(r.table_name||""), a = String(r.action||"").toUpperCase();
+  const d = new Date(r.performed_at); const ist = new Date(d.getTime()+(330+d.getTimezoneOffset())*60000); const hr = ist.getHours(), sun = ist.getDay()===0;
+  const L = new Set();
+  if(a==="DELETE" || /\bdelet(ed|ion)\b/i.test(s)) L.add("Deletions");
+  if(/\bcode\b|override|unlock|without (a )?code|authori[sz]ation|super admin code|admin code|roll ?back/i.test(s)) L.add("Codes & overrides");
+  if(/locked month|period .*unlock|unlocked|re-?opened|month .*locked/i.test(s)) L.add("Locked month edited");
+  if(/after (the )?(approval|approved|sale order|it was sent|sent|draft)|no longer draft|left draft|changed after|amend/i.test(s)) L.add("Changed after approval / sent");
+  if(ACT_PERM.test(t) || /\b(role|permission|post holder|access)\b.*(changed|added|removed|granted|revoked)/i.test(s)) L.add("Permission changed");
+  if(ACT_MASTER.test(t)) L.add("Master data");
+  const bm = s.match(/\b(\d{2,})\s+(rows?|rates?|lines?|items?|vouchers?|entries|records?|documents?|customers?|vendors?|steps?)\b/i); if(bm && Number(bm[1])>=10) L.add("Bulk change");
+  if(hr<8 || hr>=20 || sun) L.add("Odd hours");
+  if(actMaxAmount(s)>=ACT_LIMIT) L.add("Large amounts");
+  let g = 1;
+  if(L.has("Deletions") || L.has("Codes & overrides") || L.has("Locked month edited") || L.has("Permission changed")) g = 3;
+  else if(L.size) g = 2;
+  if(g===2 && L.has("Large amounts") && L.has("Changed after approval / sent")) g = 3;
+  return { g, lenses:[...L], mod:actModule(t) };
+}
+const ACT_LENSES = ["Deletions","Changed after approval / sent","Codes & overrides","Locked month edited","Bulk change","Master data","Permission changed","Odd hours","Large amounts"];
+const ACT_G = ["","Normal","Check","Drastic"];
+const ACT_TONE = { 3:["#fdecec","#a3312a"], 2:["#fff4d6","#7a5200"], 1:["#eef0f3","#444"] };
+async function actLoad(fromIso, toIso){
+  const rows = []; let from = 0;
+  const a = fromIso+"T00:00:00+05:30", b = toIso+"T23:59:59+05:30";
+  while(rows.length<30000){ const { data, error } = await sb.from("audit_log").select("*").gte("performed_at",a).lte("performed_at",b).order("performed_at",{ascending:false}).range(from, from+999);
+    if(error) throw error; rows.push(...(data||[])); if(!data || data.length<1000) break; from += 1000; }
+  return rows.map(r=>({ ...r, ...actGrade(r) }));
+}
+function ActivityReport({ user }){
+  const today = toISODate(new Date());
+  const [from,setFrom] = useState(addDaysISO(today,-7)); const [to,setTo] = useState(today);
+  const [rows,setRows] = useState(null); const [err,setErr] = useState("");
+  const [g,setG] = useState(3); const [lens,setLens] = useState(""); const [who,setWho] = useState(""); const [mod,setMod] = useState(""); const [q,setQ] = useState(""); const [open,setOpen] = useState(null);
+  const sa = user && user.role==="super_admin";
+  useEffect(()=>{ if(!sa) return; setRows(null); setErr(""); actLoad(from, to).then(setRows).catch(e=>setErr(e.message||String(e))); },[from, to, sa]);
+  if(!sa) return h("div",{style:{padding:24}}, h("h2",{style:{fontSize:18}},"Activity & risk report"), h("div",{style:{color:colors.muted}},"Super admins only."));
+  const base = (rows||[]).filter(r=>(!who || r.performed_by===who) && (!mod || r.mod===mod) && (!q || (String(r.record_summary||"")+" "+r.table_name+" "+r.record_id).toLowerCase().includes(q.toLowerCase())));
+  const shown = base.filter(r=>(!g || r.g===g) && (!lens || r.lenses.includes(lens)));
+  const people = Array.from(new Set((rows||[]).map(r=>r.performed_by).filter(Boolean))).sort(), mods = Array.from(new Set((rows||[]).map(r=>r.mod))).sort();
+  const lab = { fontSize:11, color:colors.muted, fontWeight:600, display:"block", marginBottom:3 };
+  const model = ()=>({ file:"Activity_Report_"+from+"_to_"+to, sheet:"Activity", title:"Activity & risk report", sub:"From "+fmtDMY(from)+" to "+fmtDMY(to)+(g?" · "+ACT_G[g]:"")+(lens?" · "+lens:"")+(who?" · "+who:"")+(mod?" · "+mod:""), landscape:true,
+    cols:[{h:"Grade",kind:"text",w:9},{h:"When",kind:"text",w:16,pw:24},{h:"Who",kind:"text",w:18},{h:"Module",kind:"text",w:16},{h:"Action",kind:"text",w:9},{h:"Table · record",kind:"text",w:26},{h:"What",kind:"text",w:70},{h:"Why it is flagged",kind:"text",w:30}],
+    rows: shown.map((r,i)=>({ key:"a"+i, c:[ACT_G[r.g], fmtDMYTime(r.performed_at), r.performed_by||"", r.mod, r.action||"", (r.table_name||"")+" · "+(r.record_id||""), r.record_summary||"", r.lenses.join(", ")] })), notes:[] });
+  const tile = (k, label, n)=> h("div",{key:k,onClick:()=>setG(k),style:{border:"1px solid "+colors.border,borderRadius:8,padding:"8px 10px",background:"#faf9f4",cursor:"pointer",outline:g===k?"2px solid "+colors.dark:"none"}},
+    h("div",{style:{fontSize:11,color:colors.muted}},label), h("div",{style:{fontSize:20,fontWeight:700,color:k===3?"#a3312a":k===2?"#7a5200":colors.text}},n));
+  const td = { padding:"6px 8px", borderTop:"1px solid #f1efe7", fontSize:12.5, verticalAlign:"top" };
+  return h("div",{style:{padding:"20px 24px"}},
+    h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end",marginBottom:8}},
+      h("h2",{style:{margin:0,fontSize:18,fontWeight:700,flex:1}},"Activity & risk report"),
+      h("label",null,h("span",{style:lab},"From"),h("input",{type:"date",value:from,onChange:e=>setFrom(e.target.value||from),style:{...inputStyle,width:150}})),
+      h("label",null,h("span",{style:lab},"To"),h("input",{type:"date",value:to,onChange:e=>setTo(e.target.value||to),style:{...inputStyle,width:150}})),
+      h("select",{value:who,onChange:e=>setWho(e.target.value),style:{...inputStyle,width:170}}, h("option",{value:""},"Everyone"), people.map(p=>h("option",{key:p,value:p},p))),
+      h("select",{value:mod,onChange:e=>setMod(e.target.value),style:{...inputStyle,width:170}}, h("option",{value:""},"Every module"), mods.map(p=>h("option",{key:p,value:p},p))),
+      h("input",{value:q,onChange:e=>setQ(e.target.value),placeholder:"Search…",style:{...inputStyle,width:170}}),
+      h(AccDl,{ get:model, user })),
+    h("div",{style:{fontSize:12,color:colors.muted,marginBottom:8}},"Every change kept in the audit log for the dates, graded: Drastic — deletions, codes and overrides, locked accounts months, permission changes (and large changes after approval); Check — changes after approval / sending, master data, bulk changes of 10 or more, amounts of Rs 1 lakh or more, work before 8:00, after 20:00 or on a Sunday; Normal — the rest. Click a line for its before / after."),
+    err ? accNote("Could not read the audit log: "+err,"bad") : null,
+    !rows && !err ? h("div",{style:{color:colors.muted}},"Reading the audit log…") : null,
+    rows ? h("div",null,
+      h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:8,margin:"6px 0 10px"}}, tile(3,"Drastic",base.filter(r=>r.g===3).length), tile(2,"Check",base.filter(r=>r.g===2).length), tile(1,"Normal",base.filter(r=>r.g===1).length), tile(0,"All changes",base.length)),
+      h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}, ACT_LENSES.map(x=>{ const n = base.filter(r=>r.lenses.includes(x)).length; return h("button",{key:x,onClick:()=>setLens(l=>l===x?"":x),style:{fontSize:12,padding:"4px 10px",borderRadius:14,border:"1px solid "+(lens===x?colors.dark:colors.border),background:lens===x?colors.dark:"#fff",color:lens===x?"#fff":colors.text,cursor:"pointer"}},x+" ",h("span",{style:{opacity:.7}},n)); })),
+      h("div",{style:{overflowX:"auto",border:"1px solid "+colors.border,borderRadius:6}},
+        h("table",{style:{width:"100%",borderCollapse:"collapse"}},
+          h("thead",null,h("tr",{style:{background:"#f1efe6",textAlign:"left"}},["","When","Who","Module","What","Why flagged"].map(c=>h("th",{key:c,style:{padding:"7px 8px",fontSize:11.5}},c)))),
+          h("tbody",null, shown.slice(0,1500).map((r,i)=>[
+            h("tr",{key:"r"+i,onClick:()=>setOpen(o=>o===i?null:i),style:{cursor:"pointer"}},
+              h("td",{style:td},h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:9,padding:"1px 7px",background:ACT_TONE[r.g][0],color:ACT_TONE[r.g][1]}},ACT_G[r.g])),
+              h("td",{style:{...td,whiteSpace:"nowrap"}},fmtDMYTime(r.performed_at)), h("td",{style:td},r.performed_by||"—"), h("td",{style:td},r.mod),
+              h("td",{style:td}, h("b",null,(r.action||"")+" "), h("span",{style:{color:colors.muted,fontSize:11.5}},(r.table_name||"")+" · "+(r.record_id||"")), h("div",null,r.record_summary||"")),
+              h("td",{style:{...td,fontSize:11.5,color:colors.muted}},r.lenses.join(", "))),
+            open===i ? h("tr",{key:"o"+i},h("td",{colSpan:6,style:{...td,background:"#faf9f5"}},
+              h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,fontSize:11.5}},
+                h("div",null,h("b",null,"Before"),h("pre",{style:{whiteSpace:"pre-wrap",margin:"4px 0 0",fontSize:11}},r.old_data ? JSON.stringify(r.old_data,null,1) : "—")),
+                h("div",null,h("b",null,"After"),h("pre",{style:{whiteSpace:"pre-wrap",margin:"4px 0 0",fontSize:11}},r.new_data ? JSON.stringify(r.new_data,null,1) : "—"))))) : null ])),
+          !shown.length ? h("tbody",null,h("tr",null,h("td",{colSpan:6,style:{...td,color:colors.muted}},"Nothing here."))) : null)),
+      shown.length>1500 ? h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:4}},"Showing the first 1,500 of "+shown.length+" — narrow the dates or filters, or download Excel for all.") : null) : null);
+}
+// a dialog at login for super admins, once a day, when yesterday had drastic changes
+function ActivityMorning({ user, onOpen }){
+  const [list,setList] = useState(null);
+  useEffect(()=>{ if(!user || user.role!=="super_admin") return; const today = toISODate(new Date()); let k = "";
+    try{ k = "act_morning_"+(user.username||""); if(localStorage.getItem(k)===today) return; }catch(e){}
+    (async()=>{ try{ const y = addDaysISO(today,-1); const rows = await actLoad(y, y); const dr = rows.filter(r=>r.g===3); try{ localStorage.setItem(k, today); }catch(e){} if(dr.length) setList(dr); }catch(e){} })(); },[user && user.username]);
+  if(!list) return null;
+  return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:1400,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"40px 14px",overflow:"auto"}},
+    h("div",{style:{background:"#fff",borderRadius:10,width:640,maxWidth:"100%",padding:"16px 18px"}},
+      h("b",{style:{fontSize:15}},"Yesterday: "+list.length+" drastic change"+(list.length===1?"":"s")),
+      h("div",{style:{fontSize:12,color:colors.muted,margin:"4px 0 8px"}},"Deletions, codes and overrides, locked months and permission changes. The full list is in Admin → Logs → Activity & Risk Report."),
+      h("div",{style:{maxHeight:"50vh",overflow:"auto",fontSize:12.5}}, list.slice(0,15).map((r,i)=>h("div",{key:i,style:{padding:"5px 0",borderTop:"1px solid #f1efe7"}},
+        h("b",null,fmtDMYTime(r.performed_at).slice(-5)+" · "+(r.performed_by||"")+" · "), r.record_summary||((r.action||"")+" "+(r.table_name||"")), h("span",{style:{color:colors.muted,fontSize:11}}," ("+r.lenses.join(", ")+")")))),
+      h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}, h("button",{style:btnSecondary,onClick:()=>setList(null)},"Close"), h("button",{style:btnPrimary,onClick:()=>{ setList(null); if(onOpen) onOpen(); }},"Open the report"))));
+}
+
 function AuditLogViewer() {
   const [rows,setRows]=useState([]); const [loading,setLoading]=useState(true);
   const [filter,setFilter]=useState(""); const [actionFilter,setActionFilter]=useState("");
@@ -50670,6 +51104,7 @@ function App() {
     (isSalesCoordinatorUser||isSalesHeadUser||user.role==="super_admin") && showLoiPrompt && h(LoiPoAwaitedPrompt,{onDone:dismissLoiPrompt,onOpenContract:openContract}),
     (user.role==="admin"||user.role==="super_admin") && showDocSequenceReminder && h(DocumentSequenceReminder,{onDone:dismissDocSequenceReminder}),
     h(BankStmtReminder,{user,onOpen:()=>setTab("acc_bank")}),   // A1: bank stock statement due
+    h(ActivityMorning,{user,onOpen:()=>setTab("activity_report")}),   // 224
     h(PbomSyncOnce,{user}),   // 18 Oct: close Production BOM cards whose BOM is loaded
     h(StaleWatch,{user}), h(StaleReminder,{user}),   // 209: pending steps — reminder, stale sweep, PDF gate cache
     h(CtNavOnce,{setTab,openContract}),   // 19 Oct: the contract hold tag can open the Sale Order
@@ -50854,6 +51289,7 @@ function App() {
     tab==="tag_register"?h(TagRegisterScreen,{user}):
     tab==="login_history"?h(LoginHistoryViewer,null):
     tab==="audit_log"?h(AuditLogViewer,null):
+    tab==="activity_report"?h(ActivityReport,{user}):   // 224
     tab==="change_password"?h(ChangePassword,{user}):
     tab==="myday_history" && myDayHistory ? h(FollowupHistoryScreen,{scope:myDayHistory.scope, value:myDayHistory.value, user, onBack:openMyDay}) :   // 146
     tab==="home"?h("div",{style:{padding:"60px 24px",textAlign:"center"}},
@@ -61774,7 +62210,7 @@ function LegacyProformaScreen({ user, onClose }){
       styles:{ fontSize:8.5, cellPadding:1.6, valign:"top" }, headStyles:{ fillColor:[15,110,86] }, columnStyles:{ 0:{cellWidth:11}, 1:{cellWidth:24}, 3:{cellWidth:34}, 4:{cellWidth:22}, 5:{cellWidth:32, halign:"right"} } });
     const n = doc.internal.getNumberOfPages(), at = fmtDMYTime ? fmtDMYTime(new Date().toISOString()) : new Date().toLocaleString();
     for(let i=1;i<=n;i++){ doc.setPage(i); doc.setFontSize(7.5); doc.setTextColor(120); doc.text("Printed "+at+" by "+(user?.username||"")+"  \u00b7  Page "+i+" of "+n, 12, 290); }
-    doc.save("Sale_Orders_needed_for_legacy_PIs_"+new Date().toISOString().slice(0,10)+".pdf");
+    accPdfShow(doc, "Sale_Orders_needed_for_legacy_PIs_"+new Date().toISOString().slice(0,10)+".pdf");
   };
   const viewPdf = async(r)=>{ if(!r.file_path){ alert("No PDF on this one."); return; } const { data, error } = await sb.storage.from("quote-documents").createSignedUrl(r.file_path,60); if(error||!data){ alert("Could not open the PDF."); return; } window.open(data.signedUrl,"_blank"); };
   const addLink = async(r)=>{
@@ -63627,6 +64063,35 @@ function accModelSheet(m){
 function accSaveExcel(file, sheets){   // sheets: [{name, ws}]
   const wb = XLSX.utils.book_new(); sheets.forEach(s=>XLSX.utils.book_append_sheet(wb, s.ws, s.name.slice(0,31))); XLSX.writeFile(wb, file+".xlsx");
 }
+// 223: every Accounts PDF opens a preview first — Download, Print or Close
+function accPdfShow(doc, name){
+  let url = null;
+  try{
+    const blob = doc.output("blob"); url = URL.createObjectURL(blob);
+    const pages = doc.internal.getNumberOfPages ? doc.internal.getNumberOfPages() : 1;
+    const ov = document.createElement("div");
+    ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:6000;display:flex;align-items:stretch;justify-content:center;padding:14px";
+    const box = document.createElement("div");
+    box.style.cssText = "background:#fff;border-radius:10px;width:min(1050px,100%);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.35)";
+    const bar = document.createElement("div");
+    bar.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 14px;border-bottom:1px solid #e3e0d4;font:13px system-ui,sans-serif";
+    const t = document.createElement("b"); t.style.cssText = "flex:1;min-width:200px;font-size:14px"; t.textContent = "Preview — "+name+" · "+pages+" page"+(pages===1?"":"s"); bar.appendChild(t);
+    const mk = (label, primary)=>{ const b = document.createElement("button"); b.textContent = label;
+      b.style.cssText = "border:1px solid "+(primary?"#1c1f1a":"#d9d6cc")+";background:"+(primary?"#1c1f1a":"#fff")+";color:"+(primary?"#fff":"#1c1f1a")+";border-radius:6px;padding:7px 14px;font:inherit;font-weight:600;cursor:pointer"; bar.appendChild(b); return b; };
+    const bDl = mk("⬇ Download", true), bPr = mk("🖨 Print", false), bCl = mk("Close", false);
+    const fr = document.createElement("iframe"); fr.src = url; fr.title = name; fr.style.cssText = "flex:1;border:0;width:100%;min-height:60vh;background:#7d7f78";
+    const foot = document.createElement("div"); foot.style.cssText = "padding:6px 14px;font:11.5px system-ui,sans-serif;color:#6b6f60;border-top:1px solid #e3e0d4";
+    foot.textContent = "This is the exact file that will be saved. If the preview stays blank on this device (some phones), press Download.";
+    box.appendChild(bar); box.appendChild(fr); box.appendChild(foot); ov.appendChild(box); document.body.appendChild(ov);
+    const close = ()=>{ try{ ov.remove(); }catch(e){} document.removeEventListener("keydown", esc); setTimeout(()=>{ try{ URL.revokeObjectURL(url); }catch(e){} }, 60000); };
+    const esc = (e)=>{ if(e.key==="Escape") close(); };
+    document.addEventListener("keydown", esc);
+    ov.addEventListener("click", e=>{ if(e.target===ov) close(); });
+    bCl.onclick = close;
+    bDl.onclick = ()=>{ try{ doc.save(name); }catch(e){ const a = document.createElement("a"); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); } };
+    bPr.onclick = ()=>{ try{ fr.contentWindow.focus(); fr.contentWindow.print(); }catch(e){ window.open(url, "_blank"); } };
+  }catch(e){ console.error(e); doc.save(name); }
+}
 function accPdfFooter(doc, user){
   const n = doc.internal.getNumberOfPages(); const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight();
   const stamp = "Generated from the app on "+fmtDMYTime(new Date().toISOString())+(user&&user.username?" by "+user.username:"");
@@ -63670,7 +64135,7 @@ function accDownload(kind, getModels, user){
       yy = accModelPdfTable(doc, m, yy+1); });
     const notes = list.flatMap(m=>m.notes||[]);
     if(notes.length){ let ny = doc.lastAutoTable.finalY + 6; doc.setFontSize(7.5); notes.forEach(n=>{ const lines = doc.splitTextToSize(accPdfText(n), doc.internal.pageSize.getWidth()-28); if(ny + lines.length*3.5 > doc.internal.pageSize.getHeight()-14){ doc.addPage(); ny = 16; } doc.text(lines, 14, ny); ny += lines.length*3.5+1; }); }
-    accPdfFooter(doc, user); doc.save(m0.file+".pdf");
+    accPdfFooter(doc, user); accPdfShow(doc, m0.file+".pdf");
   }catch(e){ console.error(e); alert("The download couldn't be made: "+(e.message||e)); }
 }
 function AccDl({ get, user }){
@@ -63768,7 +64233,8 @@ function accPLModel(C, fromIso, asOn, open){
   const S = accPLStructure(C), D = accPLData(C, asOn, from), n = D.months.length;
   const sumA = arrs=>{ const o=new Array(n).fill(0); arrs.forEach(a=>a.forEach((x,k)=>o[k]+=x)); return o; };
   const tot = (vals, how)=> how==="first" ? vals[0] : how==="last" ? vals[n-1] : vals.reduce((s,x)=>s+x,0);
-  const row = (key, label, vals, o)=>({ key, depth:(o&&o.depth)||0, bold:o&&o.bold, total:o&&o.total, toggle:o&&o.toggle, open:o&&o.open, marks:o&&o.marks, lid:o&&o.lid, c:[label, ...vals, tot(vals, o&&o.how)] });
+  const showTot = n>2;   // 223: the Total column only when more than two months are shown
+  const row = (key, label, vals, o)=>({ key, depth:(o&&o.depth)||0, bold:o&&o.bold, total:o&&o.total, toggle:o&&o.toggle, open:o&&o.open, marks:o&&o.marks, lid:o&&o.lid, c:[label, ...vals, ...(showTot?[tot(vals, o&&o.how)]:[])] });
   const grp = (key, label, set, sign, depth)=>({ key, label, set, sign, depth, vals:D.sumSet(set).map(x=>x*sign) });
   const expand = (top, sign)=>{ const kids = C.kids[top.id]||[];
     if(!kids.length) return [grp("g"+top.id, top.name, accDesc(C,top.id), sign, 0)];
@@ -63793,7 +64259,7 @@ function accPLModel(C, fromIso, asOn, open){
   const missing = D.months.filter((m,k)=>rmMarks[k] || wMarks[k]);
   const part = from.slice(8)!=="01" || asOn!==accMonthEnd(accMonthOf(asOn));
   return { file:"Profit_and_Loss_"+from+"_to_"+asOn, sheet:"Profit & Loss", title:"Profit & Loss - month by month", sub:"From "+fmtDMY(from)+" to "+fmtDMY(asOn)+" · WIP & FG at selling value", prov:accProvText(C, from, asOn),
-    cols:[{h:"Rs",kind:"text",w:40}, ...D.months.map(m=>({h:accMonthLabel(m),kind:"amt"})), {h:"Total",kind:"amt"}], rows, dp:0, dash:true, redNeg:true, landscape:true,
+    cols:[{h:"Rs",kind:"text",w:40}, ...D.months.map(m=>({h:accMonthLabel(m),kind:"amt"})), ...(showTot?[{h:"Total",kind:"amt"}]:[])], rows, dp:0, dash:true, redNeg:true, landscape:n>2,
     notes: [ ...(missing.length ? ["* No closing stock entered yet for "+missing.map(accMonthLabel).join(", ")+": the last figure entered is carried, so no stock movement is shown for it."] : []),
       ...(part ? ["Stock is counted at month ends: the opening stock is the closing of "+accMonthLabel(accPrevMonth(accMonthOf(from)))+" and the closing stock is that of "+accMonthLabel(accMonthOf(asOn))+", although the period starts or ends mid-month."] : []) ] };
 }
@@ -64668,7 +65134,7 @@ function accVoucherPdf(C, list, user, file){
     const by = Math.max(y+18, H-40), bw = (W-28-12)/3;
     ["Prepared by","Checked by","Approved by"].forEach((t,k)=>{ const x = 14+k*(bw+6); doc.setDrawColor(150); doc.rect(x, by, bw, 18); doc.setFontSize(8); doc.text(t, x+2, by+16); });
   });
-  accPdfFooter(doc, user); doc.save((file||"Vouchers")+".pdf");
+  accPdfFooter(doc, user); accPdfShow(doc, (file||"Vouchers")+".pdf");
 }
 
 // ---------------------------------------------------------------------------- export for the auditor: Tally XML (masters + vouchers) and an Excel book, in one zip
@@ -65219,7 +65685,7 @@ async function accScreenPdf(root, meta, user){
       doc.addImage(c2.toDataURL("image/jpeg",0.9), "JPEG", M, y, cw, sh/pxPerMm); sy += sh; y += sh/pxPerMm + 3; }
   }
   } finally { root.style.width = prevW; root.style.maxWidth = prevMax; }
-  accPdfFooter(doc, user); doc.save(meta.file+".pdf");
+  accPdfFooter(doc, user); accPdfShow(doc, meta.file+".pdf");
 }
 function AccDashboard({ C, A, user, onGo, onLedger }){
   const dashRef = useRef(null); const [pdfBusy,setPdfBusy] = useState(false);
@@ -65694,7 +66160,7 @@ async function accBankPdf(container, fileName, user){
     const ratio = Math.min(W/cv.width, H/cv.height); const w = cv.width*ratio, hh = cv.height*ratio;
     doc.addImage(cv.toDataURL("image/jpeg",0.92), "JPEG", (W-w)/2, 0, w, hh);
   }
-  accPdfFooter(doc, user); doc.save(fileName); return true;
+  accPdfFooter(doc, user); accPdfShow(doc, fileName); return true;
 }
 function accBankExcel(F, P, st){
   const rows = [["Bank stock statement — "+P.bank+", "+P.branch],["As on",fmtDMY(F.asOn)],["Revision",F.rev||0],["Status",st||"Draft"],[],
@@ -66527,7 +66993,7 @@ async function accBalanceLetter(C, lid, asOn, user){
   doc.setFont("helvetica","bold"); doc.text("CONFIRMATION", W/2, y, { align:"center" }); doc.setFont("helvetica","normal"); y += 8;
   doc.splitTextToSize(accPdfText("We confirm that the balance in the account of "+pdfFooterCompanyName(co)+" in our books as on "+fmtDMY(asOn)+" is Rs "+accInr(Math.abs(bal))+" "+(recv?"Cr (payable by us)":"Dr (receivable by us)")+" / differs as per the statement enclosed."), W-28).forEach(t=>{ doc.text(t, 14, y); y += 5.6; });
   y += 18; doc.text("Signature and seal: ____________________", 14, y); doc.text("Date: ____________", W-14, y, { align:"right" });
-  accPdfFooter(doc, user); doc.save(("Balance_Confirmation_"+String(l.name).replace(/[^A-Za-z0-9]+/g,"_").slice(0,40)+"_"+asOn).replace(/_+/g,"_")+".pdf");
+  accPdfFooter(doc, user); accPdfShow(doc, ("Balance_Confirmation_"+String(l.name).replace(/[^A-Za-z0-9]+/g,"_").slice(0,40)+"_"+asOn).replace(/_+/g,"_")+".pdf");
 }
 function accPayDueModel(C, asOn, V){
   const M = accMoneySets(C); const rows = []; const today = asOn; const T = { over:0, week:0, month:0, later:0, msme:0 };
