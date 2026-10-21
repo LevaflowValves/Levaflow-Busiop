@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-21T00:15:00Z";
+  var APP_BUILD_VERSION = "2026-10-21T08:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -899,7 +899,7 @@ const MASTER_TABLES = [
   // grew only through type-to-add on the Documents panel, so nobody could
   // see or tidy it. is_critical is the flag the delivery-date trigger reads:
   // "the date the LAST critical-category document reached Code 2".
-  { key: "doc_category_tbl", label: "Document Categories", columns: ["value","number_prefix","per_sl_no","for_production_default","hold_level","department"], colLabels:{number_prefix:"Number prefix",per_sl_no:"One per Sl No",for_production_default:"For production by default",department:"Department (Document Control board)",hold_level:"Hold level (Full = Don't start production · Inspection = Start production, chase docs for inspection · Final = Start production, final-stage docs pending · blank = No Hold, fully cleared)"}, cascade:[{col:"department",from:"department_tbl",field:"department"}], addLabel:"New document category", freeText:["value","number_prefix"], boolCols:["per_sl_no","for_production_default"], constOptions:{hold_level:HOLD_LEVELS}, nullableCols:["hold_level","number_prefix","department"], groupBy:["hold_level"], editAllEnabled:true, exportEnabled:true },
+  { key: "doc_category_tbl", label: "Document Categories", columns: ["value","number_prefix","per_sl_no","for_production_default","info_only","hold_level","department"], colLabels:{info_only:"Info only (sent once for information: no approval, never chased, holds nothing)",number_prefix:"Number prefix",per_sl_no:"One per Sl No",for_production_default:"For production by default",department:"Department (Document Control board)",hold_level:"Hold level (Full = Don't start production · Inspection = Start production, chase docs for inspection · Final = Start production, final-stage docs pending · blank = No Hold, fully cleared)"}, cascade:[{col:"department",from:"department_tbl",field:"department"}], addLabel:"New document category", freeText:["value","number_prefix"], boolCols:["per_sl_no","for_production_default","info_only"], constOptions:{hold_level:HOLD_LEVELS}, nullableCols:["hold_level","number_prefix","department"], groupBy:["hold_level"], editAllEnabled:true, exportEnabled:true },
   { key: "job_attribute_tbl", label: "Job attributes", columns: ["attribute","sort_order"], addLabel:"New attribute", freeText:["attribute","sort_order"] },
   { key: "family_tbl", label: "Families", columns: ["family"], addLabel:"New family", freeText:["family"], exportEnabled:true },
   // 29 Sep (96) — Family sits above Item (Valves, Strainers, Tanks…). Pick
@@ -11803,7 +11803,10 @@ function docCategoryRow(cats, name){
 // 216 (Build A): a hold set on the document wins over its category's. "No Hold" = set on the document as none.
 const DOC_HOLD_NONE = "No Hold";
 function docHoldSet(row){ const o = String((row && row.hold_level) || "").trim(); return o===DOC_HOLD_NONE || ["Full Hold","Inspection Hold","Final Hold"].includes(o) ? o : ""; }
-function docHoldOf(row, cats){ const o = docHoldSet(row); if(o) return o===DOC_HOLD_NONE ? "" : o; return (docCategoryRow(cats, row && row.category)||{}).hold_level || ""; }
+// 222: info-only document — sent once for information, no approval route. Set on the document (or its request), else the category.
+function docInfoOwn(row){ return row && (row.info_only===true || row.info_only===false) ? row.info_only : null; }
+function docInfoOnly(row, cats, req){ const a = docInfoOwn(row); if(a!==null) return a; const b = docInfoOwn(req); if(b!==null) return b; return !!(docCategoryRow(cats, (row||req||{}).category)||{}).info_only; }
+function docHoldOf(row, cats){ if(docInfoOnly(row, cats)) return ""; const o = docHoldSet(row); if(o) return o===DOC_HOLD_NONE ? "" : o; return (docCategoryRow(cats, row && row.category)||{}).hold_level || ""; }
 function docNumberPrefix(cats, name){
   const c = docCategoryRow(cats, name);
   return (c && String(c.number_prefix||"").trim()) || DOC_PREFIX_DEFAULT[name] || "DOC";
@@ -12246,6 +12249,17 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
     await logAudit("UPDATE","universal_document_history_tbl",entityRef,note,user?.username||"unknown",{direction:oldDir},{direction:flipped});
     await refresh();
   };
+  const setInfoOnly = async(d, value)=>{   // 222
+    if(!mayFlagProduction){ noPermission("change this",{posts:["doc_controller","technical_head"]}); return; }
+    const why = prompt((value?"Mark "+d.doc_number+" as INFO ONLY (sent once for information, no approval, never chased, holds nothing).":"Put "+d.doc_number+" back on the APPROVAL route.")+"\n\nReason (kept with the change):");
+    if(why===null) return; if(String(why).trim().length<3){ alert("A reason is needed."); return; }
+    const catV = !!(docCategoryRow(cats,d.category)||{}).info_only; const store = value===catV ? null : value; const by = user?.username||"unknown";
+    const { error } = await sb.from("universal_documents_tbl").update({ info_only:store, info_set_by: store===null?null:by, info_set_at: store===null?null:new Date().toISOString(), info_reason: store===null?null:String(why).trim() }).eq("id",d.id);
+    if(error){ alert(/info_only|info_set/.test(error.message||"") ? "Run structure_doc_info_only_2026-10-21.sql first (both companies)." : "Couldn't save: "+error.message); return; }
+    try{ await sb.from("doc_hold_hist_tbl").insert({ what:"info_only", contract_number: entityRef, document_id:d.id, doc_label:d.doc_number, old_hold: value?"Approval":"Info only", new_hold: value?"Info only":"Approval", set_on_doc: store!==null, reason:String(why).trim(), changed_by:by }); }catch(e){}
+    await logAudit("UPDATE","universal_documents_tbl",entityRef,d.doc_number+" route → "+(value?"info only":"approval")+" — "+String(why).trim(),by,{info_only:!value},{info_only:value});
+    await refresh();
+  };
   const setForProduction = async(d, value)=>{
     if(!mayFlagProduction){ noPermission("change this",{posts:["doc_controller","technical_head"]}); return; }
     const { error } = await sb.from("universal_documents_tbl").update({for_production:value}).eq("id",d.id);
@@ -12413,6 +12427,10 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
           style:{display:"flex",gap:6,alignItems:"center",fontSize:12,color:fp?"#1f5c40":colors.muted,cursor:mayFlagProduction?"pointer":"not-allowed"}},
           h("input",{type:"checkbox",checked:fp,disabled:!mayFlagProduction,onChange:e=>setForProduction(d,e.target.checked),style:{accentColor:"#1f5c40"}}),
           "For production", d.for_production==null ? h("span",{style:{fontSize:10,color:colors.mutedLight}},"(category default)") : null),
+        isContract ? (()=>{ const io = docInfoOnly(d, cats); return h("label",{title:mayFlagProduction?"Info only: sent once for information — no approval code, never chased, holds nothing":"Only the Document Controller or the Technical Head can change this",
+          style:{display:"flex",gap:6,alignItems:"center",fontSize:12,color:io?"#2f5f8a":colors.muted,cursor:mayFlagProduction?"pointer":"not-allowed"}},
+          h("input",{type:"checkbox",checked:io,disabled:!mayFlagProduction,onChange:e=>setInfoOnly(d,e.target.checked),style:{accentColor:"#2f5f8a"}}),
+          "Info only (no approval)", docInfoOwn(d)===null ? h("span",{style:{fontSize:10,color:colors.mutedLight}},"(category default)") : null); })() : null,
         !isContract && (hasOut
           ? h("label",{style:{display:"flex",gap:6,alignItems:"center",fontSize:12,color:d.include_in_offer!==false?"#1f5c40":colors.muted,cursor:"pointer"}},
               h("input",{type:"checkbox",checked:d.include_in_offer!==false,onChange:e=>setInOffer(d,e.target.checked),style:{accentColor:"#1f5c40"}}),isPo?"In PO PDF":"In offer PDF")
@@ -12452,7 +12470,7 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
         h("div",{style:{flex:1,minWidth:220}},
           h("div",{style:{fontSize:12.5,fontWeight:700}},"Next expected: Rev "+exp.rev+(exp.direction?" · "+(exp.direction==="In"?"In — the client's reply":"Out — we send it"):"")),
           h("div",{style:{fontSize:11.5,color:colors.muted}}, !last ? "No entries yet." : exp.direction==="In" ? "The last entry was Rev "+last.rev_number+" Out, so the reply on it comes back as Rev "+last.rev_number+" In." : "The reply on Rev "+last.rev_number+" is in; the revised document goes Out as Rev "+exp.rev+".")),
-        h("button",{onClick:()=>{ setNx(x=>({...blankNx, link:x.link, dir:exp.direction||""})); setDirMissing(false); setNxOpen(true); },style:{...btnPrimary,background:"#1f5c40",padding:"8px 16px",fontSize:12.5}},"Log the next entry")) :
+        h("button",{onClick:()=>{ setNx(x=>({...blankNx, link:x.link, dir:exp.direction||"", status: isContract && exp.direction==="Out" && docInfoOnly(d, cats) ? "Info only – Sent for information" : ""})); setDirMissing(false); setNxOpen(true); },style:{...btnPrimary,background:"#1f5c40",padding:"8px 16px",fontSize:12.5}},"Log the next entry")) :
       h("div",{style:{border:"1px solid #1f5c40",background:"#fff",borderRadius:8,padding:"10px 14px"}},
         h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}},
           h("div",{style:{fontSize:12.5,fontWeight:700}},"New entry — "+d.doc_number+" · Rev "+rev+(exp.direction&&!override?" — the sequence says "+exp.direction:"")),
@@ -29880,6 +29898,43 @@ const MANUAL_SECTIONS = [
             ]
           }
         ]
+      },
+      {
+        "key": "doc_info_only",
+        "title": "Info-only documents (no approval route)",
+        "tag": "Order Status",
+        "blocks": [
+          {
+            "type": "p",
+            "text": "Some documents go to the client only for information — a catalogue, a copy of a certificate, a datasheet for record. They are not reviewed or coded. These are INFO ONLY documents. They are different from Code 1 – Submit for Info, which is the last step of the approval route (the client approved and asks for the final copy)."
+          },
+          {
+            "type": "h3",
+            "text": "How an info-only document runs"
+          },
+          {
+            "type": "steps",
+            "items": [
+              "Requirement and task card as for any document: it sits in Not submitted — our action with the strip INFO ONLY – TO SEND.",
+              "Send it (Send to client ▸, ✓ Completed on the task card, or Log the next entry on the Sale Order — the status Info only – Sent for information is filled in).",
+              "It goes straight to All approved with the strip INFO ONLY – SENT. The task card closes. It is never chased and never on a chase letter, gets no Code 1 / 2 / 3, and holds nothing: no Full Hold, no delivery clock.",
+              "If the client replies anyway, log the reply as usual; comments put it back to our action, and the next copy goes out the same way."
+            ]
+          },
+          {
+            "type": "h3",
+            "text": "Where it is set"
+          },
+          {
+            "type": "bullets",
+            "items": [
+              "Setup → Document Categories: Info only — the default for every document of that category.",
+              "One document: the Info only (no approval) tick on its tab in the Sale Order's Documents box, or ✎ Hold / route on its row in Document Control → Table (Route: Approval / Info only). Back to the category's setting is the same choice.",
+              "Changing the route needs a reason. Every change is kept with who, when and why, shown with the hold changes. Who: the Document Controller, the Technical Head, admins and super admins.",
+              "Board filter (the hold list): Approval documents only / Info only (no approval). Report by Contract marks them (for information)."
+            ]
+          }
+        ]
       }
     ]
   }
@@ -29905,6 +29960,7 @@ const MANUAL_TA = {
  "acc_books": {"title":"Day Book, Voucher Register, Ledger","tag":"கணக்குகள்","blocks":[{"type":"bullets","items":["Day Book: ஒரு நாளின் (அல்லது ஒரு காலத்தின்) எல்லா vouchers-உம் தேதி வரிசையில்; Previous day / Next day.","Voucher Register: எல்லா vouchers-உம், புதியது முதலில்; தேதி, வகை, மூலம் (FFS import, app-இல் பதிவு, invoices-இலிருந்து) மூலம் வடிகட்டலாம்; எண், narration, ledger மூலம் தேடலாம். Show cancelled, cancel ஆனவற்றையும் காட்டும்.","Ledger: ledger-ஐயும் தேதிகளையும் தேர்வு செய்யுங்கள்; opening, ஒவ்வொரு entry-உம் மறுபக்கத்துடன், running balance, closing காட்டும். இரண்டு stock ledgers (Raw Material, WIP & FG) ஒவ்வொரு மாதத்தின் opening, closing-ஐயும் காட்டும்."]},{"type":"p","text":"மாதப் பொத்தான்கள் ஒரு முழு மாதத்தை ஒரே தடவையில் தேர்வு செய்யும். More filters சேர்க்கும்: மூலம், தொகை முதல் / வரை, பதிவு செய்தவர், ஒரு group-ஐத் தொடும் vouchers (எ.கா. Sundry Creditor உள்ள ஒவ்வொரு voucher-உம்), பதிவுக்குப் பின் மாற்றப்பட்டவை, cancel ஆனவை."},{"type":"p","text":"Download PDF, Download Excel திரையில் உள்ள பட்டியலையே தரும். PDF of these vouchers பட்டியலில் உள்ள ஒவ்வொரு voucher-ஐயும் ஒரு பக்கத்துக்கு ஒன்றாக, Prepared / Checked / Approved பெட்டிகளுடன் அச்சிடும்; ஒரு voucher-க்கு அதன் சொந்த Download PDF உள்ளது."},{"type":"p","text":"பட்டியல்கள் ஒரு பக்கத்துக்கு 25 வரிகள்; Previous, Next பயன்படுத்துங்கள்."}],"en_sig":"9210c220"},
  "acc_statements": {"title":"Trial Balance, Profit & Loss, Balance Sheet, Cash Flow","tag":"கணக்குகள்","blocks":[{"type":"bullets","items":["Trial Balance: ஒரு தேதியில், group வாரியாக; group-ஐ click செய்தால் திறக்கும், ledger-ஐ click செய்தால் அதன் entries. Download Excel.","Profit & Loss: ஒரு காலத்துக்கு, From முதல் To வரை (தொடக்கத்தில் 1 ஏப்ரல் முதல் கடைசி entry வரை), மாதம் மாதமாக. Raw Material-க்கும் WIP & FG-க்கும் (விற்பனை மதிப்பில்) opening, closing stock காட்டப்படும், இரண்டும் Period Close-இலிருந்து; * குறியிட்ட மாதத்துக்கு closing stock இன்னும் இல்லை, கடைசித் தொகை தொடரும். வரியை click செய்தால் அதன் ledgers; Show all ledgers எல்லா வரிகளையும் திறக்கும்.","Balance Sheet: ஒரு தேதியில். Stocks, Raw Material, WIP & FG-ஐ அவற்றின் மாத இறுதித் தொகைகளில் காட்டும். 1 ஏப்ரல் WIP & FG, Capital Account கீழ் தனி prior-period வரிக்கு எதிராக உள்ளது, ஏனெனில் FFS அதை ஒருபோதும் கொண்டிருக்கவில்லை.","Cash Flow: Profit & Loss போலவே From முதல் To வரை ஒரு காலத்துக்கு: ஒவ்வொரு balance-sheet மாற்றத்துக்கும் சரிசெய்த profit, மாதம் மாதமாக; பணம் அதிகம் சென்ற (முடங்கிய) இடங்களும் வந்த இடங்களும். கடைசி இரண்டு வரிகள் ஒத்துப்போக வேண்டும்."]},{"type":"p","text":"ஒவ்வொரு statement-க்கும் Download PDF, Download Excel உண்டு. திரையில் உள்ளதே download ஆகும்: அதே தேதி, நீங்கள் திறந்த groups. Lock ஆகாத மாதங்கள் Provisional எனக் குறிக்கப்படும். Excel-இல் எண்கள் எண்களாகவே (debit +, credit −)."},{"type":"tip","text":"Cash Flow, Manikandan Constructions-ஐ Investing-இல் (கட்டட advance) காட்டுகிறது. அது supplier advance என்றால் developer-இடம் சொல்லுங்கள்; working capital-க்கு நகரும்."}],"en_sig":"adb55318"},
  "acc_bs_views_ageing": {"title":"Balance Sheet views மற்றும் debtors / creditors statement","tag":"Accounts","blocks":[{"type":"h3","text":"Balance Sheet: Summary, Detailed, Full details"},{"type":"bullets","items":["Summary முன்பு போலவே: main groups; ஒரு group-ஐத் திறந்தால் அதன் sub-groups.","Detailed: ஒவ்வொரு group, sub-group-உம் ledgers வரை திறந்து, Ledger, Sub-group, Total என மூன்று தொகை columns. Customers, suppliers ஒவ்வொரு group-க்கும் ஒரு வரியாக எண்ணிக்கையுடன்.","Full details: ஒவ்வொரு customer, supplier-உம் Ageing column-உடன் (மிகப் பழைய open bill-இன் வயது: பச்சை 0–30, மஞ்சள் 31–60, ஆரஞ்சு 61–90, சிவப்பு 90-க்கு மேல்). Party-ஐ click செய்தால் open bills.","Layout: Liabilities, Assets பக்கம் பக்கமாக அல்லது ஒன்றின் கீழ் ஒன்று. PDF, Excel திரையில் உள்ளதை அச்சிடும்."]},{"type":"h3","text":"Debtors / Creditors statement"},{"type":"bullets","items":["Outstanding & ageing இப்போது Statement-ஆகத் திறக்கும்: ஒவ்வொரு party-க்கும் ஒரு வரி — open bills, due, மிகப் பழைய bill-க்கு Ageing badge, advance, net. Ageing buckets பழைய table-ஐக் காட்டும்.","ஒரு tile-ஐ click செய்தால் அந்த வயதுப் பிரிவு parties மட்டும்; மீண்டும் click செய்தால் எல்லாம். Largest due, oldest bill, name என sort செய்யலாம்.","Party-ஐ click செய்தால் அதன் open bills, ஒவ்வொன்றின் வயதுடன்."]}],"en_sig":"4612ede2"},
+ "doc_info_only": {"title":"Info-only documents (approval இல்லாதவை)","tag":"Order Status","blocks":[{"type":"p","text":"சில documents client-க்குத் தகவலுக்காக மட்டும் அனுப்பப்படும் — catalogue, certificate நகல், பதிவுக்கான datasheet. அவற்றுக்கு review அல்லது code இல்லை. இவை INFO ONLY documents. இது Code 1 – Submit for Info-இலிருந்து வேறு; அது approval முறையின் கடைசிப் படி (client approve செய்து final நகல் கேட்கிறார்)."},{"type":"h3","text":"Info-only document எப்படி நடக்கும்"},{"type":"steps","items":["மற்ற documents போலவே requirement, task card: Not submitted — our action-இல் INFO ONLY – TO SEND strip-உடன்.","அனுப்புங்கள் (Send to client ▸, task card-இல் ✓ Completed, அல்லது Sale Order-இல் Log the next entry — Info only – Sent for information status தானாக வரும்).","நேராக All approved-க்கு INFO ONLY – SENT strip-உடன் போகும். Task card மூடும். Chase இல்லை, chase letter இல்லை, Code 1/2/3 இல்லை, எதையும் hold செய்யாது.","Client பதில் அனுப்பினால் வழக்கம்போல் பதிவு செய்யுங்கள்; comments இருந்தால் our action-க்குத் திரும்பும்."]},{"type":"h3","text":"எங்கே அமைப்பது"},{"type":"bullets","items":["Setup → Document Categories: Info only — அந்த category-இன் எல்லா documents-க்கும் default.","ஒரு document: Sale Order Documents box-இல் அதன் tab-இல் Info only (no approval) tick, அல்லது Document Control → Table வரியில் ✎ Hold / route.","Route மாற்ற காரணம் தேவை; ஒவ்வொரு மாற்றமும் யார், எப்போது, ஏன் என்று பதிவாகும். யார்: Document Controller, Technical Head, admins, super admins.","Board filter: Approval documents only / Info only (no approval). Report by Contract-இல் (for information) எனக் குறிக்கப்படும்."]}],"en_sig":"a271b6ff"},
  "acc_period": {"title":"Period Close: closing stock, மாதத்தை lock செய்தல்","tag":"கணக்குகள்","blocks":[{"type":"steps","items":["மாதம் முடிந்ததும் Finance & Accounts Manager, Raw Material closing stock-ஐ பதிவு செய்கிறார் (Enter RM stock).","Super admin, WIP & FG closing-ஐ விற்பனை மதிப்பில், குறிப்புடன் பதிவு செய்கிறார் (Enter WIP & FG).","புத்தகங்களைச் சரிபார்த்து Lock month. மாதங்கள் வரிசைப்படி lock ஆகும்."]},{"type":"bullets","items":["Lock ஆன மாதத்தில் voucher சேர்க்கவோ, மாற்றவோ, நீக்கவோ முடியாது; FFS import அதைத் தொடாது.","Super admin மட்டுமே காரணத்துடன் unlock செய்யலாம்; கடைசியாக lock ஆன மாதம் முதலில்.","இல்லாத closing stock-உம் lock செய்யத் தயாரான மாதங்களும், அதற்குப் பொறுப்பான post-க்கு Pending Actions-இல் வரும்."]},{"type":"p","text":"இந்த இரண்டு closing தொகைகளும் Current Assets → Stocks கீழ் உள்ள Raw Material, WIP & FG ledgers-இன் மாத இறுதி closing ஆகும். ஒவ்வொன்றுக்கும் 1 ஏப்ரல் opening-உம் உண்டு."},{"type":"p","text":"Settings (super admins): நிதியாண்டு தொடக்கம், go-live தேதி."}],"en_sig":"5c21aefa"},
  "acc_export": {"title":"Auditor-க்கான Export (Tally, Excel)","tag":"கணக்குகள்","blocks":[{"type":"p","text":"Accounts → Close & Masters → Export for Auditor, 1 ஏப்ரல் முதல் நீங்கள் தேர்வு செய்யும் தேதி வரை, auditor-க்குத் தேவையான அனைத்தையும் ஒரு zip கோப்பாகத் தரும்."},{"type":"steps","items":["Super admin-இடம் Accounts Export code கேளுங்கள் (Admin → Authorization Codes → Generate Accounts Export code). அது ஒரு முறை, 15 நிமிடங்களுக்கு மட்டும் வேலை செய்யும்.","Export எந்தத் தேதி வரை என்று தேர்வு செய்யுங்கள் (அல்லது Quick மாத இறுதிப் பொத்தான்), code-ஐ type செய்து Export for Auditor அழுத்துங்கள்.","Zip-ஐ auditor-இடம் கொடுங்கள்."]},{"type":"bullets","items":["Tally_Masters.xml, Tally_Vouchers.xml: Tally Prime-இல் 1 ஏப்ரல் முதல் books கொண்ட வெற்று company உருவாக்கி, Import → Masters (Tally_Masters.xml) முதலில், பிறகு Import → Transactions (Tally_Vouchers.xml). Trial Balance, Books.xlsx-இல் உள்ளதுடன் ஒத்துப்போக வேண்டும்.","Books.xlsx: Read Me, Trial Balance, Profit & Loss, Balance Sheet, Cash Flow, Stock (மாத இறுதித் தொகைகள், பதிவு செய்தவர்), Day Book, ஒவ்வொரு ledger-இன் entries, ledger பட்டியல் (Tally-இல் பயன்படும் பெயருடன்), cancel ஆன vouchers.","ஒரே பெயருள்ள ledgers, அல்லது group-இன் பெயருள்ள ledger, Tally-க்கு அடைப்புக்குறிக்குள் code-உடன் செல்லும்; Tally-இல் ஒவ்வொரு பெயரும் வேறுபட வேண்டும்.","Lock ஆகாத மாதங்கள் Provisional எனக் குறிக்கப்படும். ஒவ்வொரு export-உம் யார், எப்போது, காலம், code-உடன் பதிவாகும்."]},{"type":"warn","text":"Finance & Accounts Manager, Finance Director, super admins மட்டுமே export செய்யலாம், எப்போதும் புதிய super admin code-உடன்: export என்பது நிறுவனத்தின் முழுக் கணக்குப் புத்தகங்கள்."}],"en_sig":"71bda284"},
  "acc_pay_purchase": {"title":"Payment, Receipt, Contra, Purchase பதிவுகள்","tag":"கணக்குகள்","blocks":[{"type":"p","text":"Payment, Receipt, Contra ஆகியவற்றில் bank (அல்லது cash அல்லது card) மேலே ஒரே வரியில்; மற்ற accounts கீழே, ஒவ்வொன்றுக்கும் ledger, தொகை மட்டும் — Debit அல்லது Credit தேர்வு தேவையில்லை. Purchase என்பது Sales voucher போன்ற supplier bill."},{"type":"steps","items":["Payment: எந்த account-இலிருந்து செலுத்தப்படுகிறது, தேதி, mode (NEFT, RTGS, IMPS, Cheque, UPI…), UTR அல்லது cheque எண் தேர்வு செய்யுங்கள். யாருக்குச் செலுத்தப்படுகிறது என்பதைச் சேர்க்கவும். Supplier என்றால் Against bill-இல் இன்னும் நிலுவையில் உள்ள bills வரும்; Oldest first-இலேயே விடுங்கள், அல்லது ஒன்றைத் தேர்வு செய்யுங்கள்.","Receipt: அதே போல — பணம் வரும் account, யாரிடமிருந்து வருகிறது (customer-இன் invoices வரும்).","Contra: நம் சொந்த bank, cash accounts இடையே மட்டும் — cash கட்டியது, cash எடுத்தது, banks இடையே மாற்றம்.","Purchase: supplier (அதன் state CGST + SGST அல்லது IGST என்று முடிவு செய்யும்), supplier bill எண், தேதி, நம் தேதி, PO எண்; Goods அல்லது Service; items, charges, GST rate; TDS பிடித்தால் (bill பதியும்போதே பிடிக்கப்படும்); bill-இல் அச்சிட்ட மொத்தத்தை type செய்யுங்கள் — அது ஒத்துப்போக வேண்டும்."]},{"type":"bullets","items":["Purchase-இல் GST தேர்வுகள்: அதே state, வேறு state, unregistered (GST இல்லை), import (bill-இல் GST இல்லை; Bill of Entry — customs duty, IGST, யார் செலுத்தினார் — அதே திரையில்), reverse charge (GST-ஐ நாமே செலுத்துகிறோம்: GST RCM Payable-க்குச் செல்லும்). Input credit not eligible என்றால் GST cost-இல் சேரும்.","Supplier bill link: bill PDF-இன் OneDrive link-ஐ ஒட்டுங்கள். பிறகு சேர்க்கலாம், ஆனால் பதிந்து 3 நாட்கள் ஆகியும் இல்லையென்றால், பதிந்தவர் link சேர்க்கும் வரை Accounts-ஐப் பயன்படுத்த முடியாது; Finance & Accounts Manager-க்குத் தெரிவிக்கப்படும், 2 நாட்கள் கழித்து super admins-க்கு. FFS bills-க்குத் தேவையில்லை.","Supplier அல்லது customer ledger-இல் Bills to pay / Invoices to collect: ஒவ்வொரு bill-உம் இன்னும் நிலுவை எவ்வளவு; ஒரு payment குறிப்பிட்ட bill-க்கு எனக் குறிக்கப்படாவிட்டால் பழையது முதலில் கழியும்.","ஒரே voucher-இல் பல bank வரிகள், அல்லது மறு பக்க வரி (இரு parties தொடர்புடைய refund): Journal பயன்படுத்துங்கள். அப்படிப்பட்ட பழைய FFS voucher Debit / Credit view-இல் திறக்கும்."]}],"en_sig":"84730282"},
@@ -32758,6 +32814,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"21 Oct 2026 (222)", summary:"Built on 2026-10-21T08:30:00Z, on top of 2026-10-21T00:15:00Z. NEEDS SQL: structure_doc_info_only_2026-10-21.sql (BOTH companies). INFO-ONLY DOCUMENTS (no approval route; different from Code 1 – Submit for Info, which ends the approval route): Info only on Document Categories (default) and on one document (Documents box tick on the Sale Order, or ✎ Hold / route in Document Control → Table), reason required, history kept with the hold changes (doc_hold_hist_tbl.what), request's setting carried to its document. Before sending: Not submitted with the strip INFO ONLY – TO SEND and the usual task card. Sent (board, task card or Documents box, status Info only – Sent for information): straight to All approved, INFO ONLY – SENT, task card closes, never chased or on a chase letter, no code, holds nothing (board, contract hold, v_full_hold_outstanding, work-order hand-over). Client reply still loggable. Board filter Approval documents only / Info only; Report by Contract marks (for information). Manual article doc_info_only (English and Tamil)." },
   { date:"21 Oct 2026 (221)", summary:"Built on 2026-10-21T00:15:00Z, on top of 2026-10-20T23:30:00Z. No SQL. BALANCE SHEET VIEWS: Summary (as before), Detailed (every group and sub-group down to the ledgers, amount columns Ledger / Sub-group / Total, customers and suppliers as one line per group with the count) and Full details (every customer and supplier with an Ageing column for the oldest open bill, click a party for its open bills, Open every party's bills); layout side by side or one below the other; Open all / Close all; ledger opens the ledger, bill opens the voucher; PDF / Excel follow the view. DEBTORS / CREDITORS STATEMENT: Outstanding & ageing opens as a neat statement — open bills, due, Ageing badge (green 0–30, amber 31–60, orange 61–90, red 90+), advance, net; tiles filter by bucket or advance; sort by due, oldest or name; Ageing buckets keeps the old table; the Ageing column prints coloured in the PDF. Manual article acc_bs_views_ageing (English and Tamil)." },
   { date:"20 Oct 2026 (220)", summary:"Built on 2026-10-20T23:30:00Z, on top of 2026-10-20T22:00:00Z. NEEDS SQL: structure_accounts_statements_2026-10-20.sql (BOTH companies). ACCOUNTS → STATEMENTS: Cash Book (day totals, cash below nil flagged); Bank Book & Reconciliation (book vs bank, tick cleared with the bank date, upload the bank statement Excel / CSV and auto-match by amount within 15 days, bank-only lines listed, type the statement balance to check); Debtors and Creditors (ageing 0–30 / 31–60 / 61–90 / 90+ with advances, open bills per party, statement of account PDF / Excel, balance confirmation letter PDF); Creditors payments due from credit days, MSME 45-day flag and the 43B(h) year-end list, vendor MSME type / Udyam / credit days; GST Statements (GSTR-1 summary and B2B list, GSTR-3B summary, HSN summary, ITC vs uploaded GSTR-2B); TDS Register (by section and deductee, month by month against the 7th / 30 April, by quarter for 26Q, TDS by customers for 26AS); Sales & Purchase Registers (monthly totals, by GST rate); Fixed Asset Register (IT depreciation with the 180-day half rate, Companies Act time-proportionate, booked vs to book, rates per ledger); Contract Profitability (material view: invoiced vs bills booked to the contract's POs). Voucher rows in statements open the voucher. Manual article acc_statements (English and Tamil)." },
   { date:"20 Oct 2026 (219)", summary:"Built on 2026-10-20T22:00:00Z, on top of 2026-10-20T21:15:00Z. NEEDS SQL: structure_test_types_master_2026-10-20.sql (BOTH companies); structure_po_like_sale_order_2026-10-20.sql must have run first. AMEND FFS POs: an FFS / old-register PO that is Sent, Partly received or Received can be amended; on Start it becomes an app PO (lines copied: description, qty, unit, rate = FFS amount ÷ qty, HSN, GST %; received qty kept; Amd = FFS number + 1; the FFS version kept as the before for the was → now sheet; register shows App (from FFS)). DOCUMENTS LIST UP FRONT: the Documents tab shows every PO document type as ticks with suggestions from the material certificate and the tests (PMI → PMI Report, hydro / shell → Hydro Test Report, RT / UT / LPT / MPT… → Test Report, witness or 3.2 → ITP); Confirm the list adds / removes (a received one can't be removed); asked again at Send for approval and after each amendment; can be set on FFS POs too, and the GRN gate then applies. TEST TYPES MASTER: 62 tests for strainers, valves and vessels with code, group, standard, used for, type test, active (existing tests keep their names and prices); Sale Order NDE pickers grouped with the code first; PO NDE / Testing grouped with search and a Strainer / Valve / Vessel filter, ticked tests on top; the standard prints on the PO's Inspection & Testing. Manual article po_ffs_amend_tests (English and Tamil)." },
@@ -54193,6 +54250,10 @@ function docExpectedNext(revs){
 }
 // 175: ✓ Completed on a document card = it goes to the client. Which list it lands in, and with which status.
 function docSentTarget(it, statuses){
+  if(it.infoOnly && it.list!=="info"){   // 222: information only — sent once, nothing comes back
+    const dn = docPickable(statuses).filter(s=>{ const n = docStatusName(s); return n && docStatusListKey(s,n)==="done"; }).map(docStatusName);
+    return { to:"done", status: dn.find(x=>/info\s*only/i.test(x)) || dn.find(x=>/for\s*info/i.test(x)) || dn[0] || "", info:true, infoOnly:true };
+  }
   if(it.list==="info"){   // 214: the info copy closes the card — All approved, nothing comes back
     const dn = docPickable(statuses).filter(s=>{ const n = docStatusName(s); return n && docStatusListKey(s,n)==="done"; }).map(docStatusName);
     return { to:"done", status: dn.find(x=>/submitted\s*for\s*info/i.test(x)) || dn.find(x=>/code\s*-?\s*1/i.test(x)) || dn[0] || "", info:true };
@@ -54220,7 +54281,7 @@ function docLabelOf(list, bucket, sentBefore){
   if(list==="done") return { word:"Approved", bg:C.green };
   return null;
 }
-const docItemLabel = (it)=> docLabelOf(it.list, it.bucket, (it.revs||[]).some(r=>r.direction==="Out" && !r.legacy_unsent));
+const docItemLabel = (it)=> it.infoOnly && it.list==="done" ? { word:"Info only \u2013 sent", bg:"#4f7fa8" } : it.infoOnly && it.list==="our" && !(it.revs||[]).some(r=>r.direction==="Out" && !r.legacy_unsent) ? { word:"Info only \u2013 to send", bg:"linear-gradient(90deg,#c62828,#4f7fa8)" } : docLabelOf(it.list, it.bucket, (it.revs||[]).some(r=>r.direction==="Out" && !r.legacy_unsent));
 const docLabelStrip = (lb, key)=> lb ? h("div",{key:key||"lbl",title:lb.word,style:{margin:"-7px -9px 6px",height:18,lineHeight:"18px",padding:"0 8px",background:lb.bg,color:"#fff",fontSize:9.5,fontWeight:700,letterSpacing:".07em",textTransform:"uppercase",textShadow:"0 1px 1px rgba(0,0,0,.3)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},lb.word) : null;
 // 175: latest hold note while the document sits in Production Hold.
 function docHoldNoteOf(revs){
@@ -54300,7 +54361,7 @@ async function ctHoldLoad(force){
       try{ const r = await sb.from("doc_board_list_tbl").select("*").order("id"); if(!r.error) DOC_CUSTOM = (r.data||[]).filter(c=>c.active!==false).map(docCustomNorm); }catch(e){}
       const safe = p => p.then(x=>x, ()=>[]);
       const [docs, hist, reqs, statuses, catsR, sos, plans] = await Promise.all([
-        safe(fetchAll("universal_documents_tbl","id,doc_number,doc_name,category,entity_type,entity_id,is_archived,hold_level").catch(()=>fetchAll("universal_documents_tbl","id,doc_number,doc_name,category,entity_type,entity_id,is_archived"))),   // 216
+        safe(fetchAll("universal_documents_tbl","id,doc_number,doc_name,category,entity_type,entity_id,is_archived,hold_level,info_only").catch(()=>fetchAll("universal_documents_tbl","id,doc_number,doc_name,category,entity_type,entity_id,is_archived,hold_level")).catch(()=>fetchAll("universal_documents_tbl","id,doc_number,doc_name,category,entity_type,entity_id,is_archived"))),   // 216
         safe(fetchAll("universal_document_history_tbl","id,document_id,rev_number,status,direction,changed_at")),
         safe(fetchAll("document_requests_tbl","*")),
         loadDocStatuses().then(x=>x||[], ()=>[]), sb.from("doc_category_tbl").select("*"),
@@ -54501,12 +54562,14 @@ async function docBoardLoad(){
     const status = last ? (last.status||"") : "";
     const st = stBy[status];
     const skip = !!last && docSkips(st);   // 175
-    const list = skip ? "confirm" : last ? docStatusListKey(st, status) : "our";
-    const bucket = skip ? "no_action" : last ? docStatusBucketOf(st, status) : "our_action";
+    const req0 = (reqs||[]).find(r=>String(r.fulfilled_document_id)===String(d.id))||null;   // 222
+    const infoSent = !skip && docInfoOnly(d, cats, req0) && !!last && last.direction==="Out" && !last.legacy_unsent;
+    const list = skip ? "confirm" : infoSent ? "done" : last ? docStatusListKey(st, status) : "our";
+    const bucket = skip || infoSent ? "no_action" : last ? docStatusBucketOf(st, status) : "our_action";
     const lastOut = [...revs].reverse().find(r=>r.direction==="Out")||null;
     const ltrs = (sentFor["d"+d.id]||[]);
     const lastChase = ltrs.reduce((m,l)=> l.sent_at && l.sent_at>m ? l.sent_at : m, "");
-    const sub = skip ? "" : docStatusSubKey(st), cx = sub ? docCustomOf(sub) : null;   // 183
+    const sub = skip || infoSent ? "" : docStatusSubKey(st), cx = sub ? docCustomOf(sub) : null;   // 183
     const waitingClient = (list==="client" || ((list==="code2" || list==="phold") && bucket==="third_party_action")) && !(cx && cx.chase===false);   // 175: Production Hold Done is chased too
     const chaseBase = [docD10(lastOut&&lastOut.changed_at), docD10(lastChase)].filter(Boolean).sort().pop();
     const chaseAuto = waitingClient && chaseBase ? addDaysISO(chaseBase, (cx && Number(cx.chase_days)) || DOC_CHASE_DAYS) : "";
@@ -54528,6 +54591,8 @@ async function docBoardLoad(){
     const c = docCategoryRow(cats, it.cat)||{};
     const own = docHoldSet(it.doc) || docHoldSet(it.req);   // 216: set on the document (or on the request before it had a number)
     it.holdCat = c.hold_level||""; it.holdOwn = own; it.hold = own ? (own===DOC_HOLD_NONE ? "" : own) : it.holdCat; it.dept = c.department||"";
+    it.infoCat = !!c.info_only; it.infoOwn = docInfoOwn(it.doc)!==null ? docInfoOwn(it.doc) : docInfoOwn(it.req); it.infoOnly = docInfoOnly(it.doc, cats, it.req);   // 222
+    if(it.infoOnly){ it.hold = ""; it.holdNote = ""; }
     it.tasks = taskArr.filter(t=> (it.doc && String(t.doc_id)===String(it.doc.id)) || (it.req && String(t.doc_request_id)===String(it.req.id)));
     it.openTask = it.tasks.filter(t=>t.status!=="done").sort((a,b)=>String(b.created_at||"").localeCompare(String(a.created_at||"")))[0]||null;
     if(!it.owner && it.openTask && !taskIsPile(it.openTask)) it.owner = it.openTask.assignee;
@@ -54651,7 +54716,7 @@ async function docSendFromTask(t, f, username){
   const tg = docSentTarget(it, d.statuses);
   if(!tg.status) return { error:"No status in the Document Status Master moves this card to “"+docListOf(tg.to).label+"” as sent. Add one in Setup → Document Status Master." };
   const at = (f.date && f.date!==toISODate(new Date())) ? f.date+"T12:00:00" : new Date().toISOString();
-  const what = String(f.what||"").trim() || (tg.info ? "Final copy for information, Rev "+exp.rev : exp.rev>0 ? "Resubmitted Rev "+exp.rev : "First submission");
+  const what = String(f.what||"").trim() || (tg.infoOnly ? "Sent for information only, Rev "+exp.rev : tg.info ? "Final copy for information, Rev "+exp.rev : exp.rev>0 ? "Resubmitted Rev "+exp.rev : "First submission");
   const { error } = await sb.from("universal_document_history_tbl").insert({ document_id:it.doc.id, doc_number:it.no, rev_number:Number(exp.rev)||0, direction:"Out", status:tg.status,
     link:String(f.link||"").trim(), reason:what, notes:what+" (sent from the task card)", changed_by:username||"unknown", changed_at:at });
   if(error) return { error:error.message };
@@ -54734,8 +54799,8 @@ async function docContractReportPdf(cts, data, ext, company, me){
         const out = [...it.revs].reverse().find(r=>r.direction==="Out"), inn = [...it.revs].reverse().find(r=>r.direction==="In");
         const st = it.kind==="req" ? (ext?"To be submitted":"Requested — no document yet") : String(it.status||"").replace(/-Awarded|-Proceed/g,"");
         const rev = (it.no||"—")+" / "+(it.last?"Rev "+it.last.rev_number:"—");
-        body.push(ext ? [String(i+1), it.name, rev, st, out?fmtDMY(out.changed_at):"—", inn?fmtDMY(inn.changed_at):"—", it.list==="our"?((co&&co.company_name)||"Us"):it.list==="done"?"—":"Client"]
-          : [String(i+1), it.name, rev, holdLabel(it.hold), L.short, st, out?fmtDMY(out.changed_at):"—", inn?fmtDMY(inn.changed_at):"—", String(it.days)+(it.late?" (late)":""), it.owner||"Unassigned", it.chased?String(it.chased):""]);
+        body.push(ext ? [String(i+1), it.name+(it.infoOnly?" (for information)":""), rev, st, out?fmtDMY(out.changed_at):"—", inn?fmtDMY(inn.changed_at):"—", it.list==="our"?((co&&co.company_name)||"Us"):it.list==="done"?"—":"Client"]
+          : [String(i+1), it.name+(it.infoOnly?" (for information)":""), rev, holdLabel(it.hold), L.short, st, out?fmtDMY(out.changed_at):"—", inn?fmtDMY(inn.changed_at):"—", String(it.days)+(it.late?" (late)":""), it.owner||"Unassigned", it.chased?String(it.chased):""]);
       });
     });
     if(!body.length) body.push([{ content:"No documents on this contract.", colSpan: ext?7:11, styles:{halign:"left"} }]);
@@ -54862,7 +54927,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
   const allTiles = [...DOC_TILES, ...DOC_CUSTOM.filter(c=>c.tile!==false).map(c=>({ key:"c:"+c.key, grp:"Documents", label:c.label, color:c.color, note:c.sub, f:it=>it.sub===c.key }))];   // 183
   const tileDef = allTiles.find(t=>t.key===tile) || null;   // 174
   const tileItems = data.items.filter(it=> !mine || it.owner===me);
-  const visBase = data.items.filter(it=>(!tileDef || !tileDef.f || tileDef.f(it)) && (!mine || it.owner===me) && (mode==="all" || it.ct===curCt) && (!fHold || (fHold==="none" ? !it.hold : it.hold===fHold))
+  const visBase = data.items.filter(it=>(!tileDef || !tileDef.f || tileDef.f(it)) && (!mine || it.owner===me) && (mode==="all" || it.ct===curCt) && (!fHold || (fHold==="info" ? it.infoOnly : fHold==="appr" ? !it.infoOnly : fHold==="none" ? !it.hold && !it.infoOnly : it.hold===fHold))
     && (!fOwner || (fOwner==="__none" ? !it.owner : it.owner===fOwner)) && (!fDept || it.dept===fDept)
     && (!ql || [it.name,it.no,it.ct,it.customer,it.cat,it.owner].some(x=>hHas(x||"", ql)))
     && (!fSide || (fSide==="client" ? it.waitingClient : (!it.waitingClient && it.list!=="done" && it.list!=="confirm"))));
@@ -54923,7 +54988,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     const pref = exp.direction==="Out" && Number(exp.rev)===0 ? /third party/i : exp.direction==="Out" ? /resubmission done/i : null;
     const prevCode = it.last && /code\s*-?\s*2/i.test(it.last.status||"") ? /code\s*-?\s*2/i : it.last && /code\s*-?\s*3/i.test(it.last.status||"") ? /code\s*-?\s*3/i : null;
     const guess = (pref && (sts.find(x=>pref.test(x) && (!prevCode || prevCode.test(x))) || sts.find(x=>pref.test(x)))) || (sts.length===1 ? sts[0] : "");
-    setMv({ key:it.key, to, status: forceStatus || guess, rev:exp.rev, dir:exp.direction, date:today, link: it.last ? (it.last.link||"") : "", what: viaComplete ? (it.list==="info" ? "Final copy for information, Rev "+exp.rev : exp.rev>0 ? "Resubmitted Rev "+exp.rev : "First submission") : "", info: it.list==="info" && !!viaComplete, notes:"", hold:"", num, title:it.kind==="req"?it.cat:"", viaComplete:!!viaComplete, viaReply:!!viaReply });
+    setMv({ key:it.key, to, status: forceStatus || guess, rev:exp.rev, dir:exp.direction, date:today, link: it.last ? (it.last.link||"") : "", what: viaComplete ? (it.infoOnly && it.list!=="info" ? "Sent for information only, Rev "+exp.rev : it.list==="info" ? "Final copy for information, Rev "+exp.rev : exp.rev>0 ? "Resubmitted Rev "+exp.rev : "First submission") : "", info: it.list==="info" && !!viaComplete, infoOnly: !!it.infoOnly && it.list!=="info" && !!viaComplete, notes:"", hold:"", num, title:it.kind==="req"?it.cat:"", viaComplete:!!viaComplete, viaReply:!!viaReply });
     setPanel({ kind:"move", key:it.key, to });
   };
   // 175: ✓ Completed on a card = the document goes to the client now.
@@ -55170,9 +55235,9 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     const tr = (it)=> h("tr",{key:it.key},
       h("td",{style:td},h("input",{type:"checkbox",checked:!!tbl.pick[it.key],onChange:e=>setTbl(t=>({...t,pick:{...t.pick,[it.key]:e.target.checked}}))})),
       h("td",{style:td},h("b",{style:{color:"#2a6db0"}},it.ct), it.customer ? h("div",{style:{fontSize:10.5,color:colors.muted,lineHeight:1.25,maxWidth:150}},it.customer) : null), h("td",{style:td},h("span",{style:{cursor:"pointer"},onClick:()=>setPanel({kind:"hist",key:it.key,back:{kind:"table",key}})},it.name)),
-      h("td",{style:td},it.no||"—",it.last?" / Rev "+it.last.rev_number:"", " ", latestLink(it)), h("td",{style:td},it.cat), h("td",{style:td},tag(holdLabel(it.hold), docHoldTag(it.hold), "h"),
-        it.holdOwn ? h("div",{style:{fontSize:9.5,color:"#8a5a00"}},"set on the document") : null,
-        canHold ? h("button",{style:{...btnSmall,fontSize:10.5,padding:"1px 7px",marginTop:3},onClick:()=>{ setHd({ key:it.key, v: it.holdOwn ? it.holdOwn : (it.hold||DOC_HOLD_NONE), why:"" }); setPanel({kind:"hold",key:it.key,back:{kind:"table",key}}); }},"✎ Hold") : null),
+      h("td",{style:td},it.no||"—",it.last?" / Rev "+it.last.rev_number:"", " ", latestLink(it)), h("td",{style:td},it.cat), h("td",{style:td}, it.infoOnly ? tag("Info only",{background:"#e6eef6",color:"#2f5f8a"},"io") : tag(holdLabel(it.hold), docHoldTag(it.hold), "h"),
+        it.holdOwn && !it.infoOnly ? h("div",{style:{fontSize:9.5,color:"#8a5a00"}},"set on the document") : null, it.infoOwn!==null && it.infoOwn!==undefined && it.infoOwn!==it.infoCat ? h("div",{style:{fontSize:9.5,color:"#2f5f8a"}},(it.infoOnly?"info only":"approval")+" set on the document") : null,
+        canHold ? h("button",{style:{...btnSmall,fontSize:10.5,padding:"1px 7px",marginTop:3},onClick:()=>{ setHd({ key:it.key, v: it.holdOwn ? it.holdOwn : (it.hold||DOC_HOLD_NONE), why:"", io: it.infoOnly ? "info" : "appr" }); setPanel({kind:"hold",key:it.key,back:{kind:"table",key}}); }},"✎ Hold / route") : null),
       h("td",{style:td},docListOf(it.list).short), h("td",{style:td},it.status),
       h("td",{style:td},it.owner||h("span",{style:{color:"#a06a00",fontWeight:700}},"Unassigned")),
       h("td",{style:{...td,...(it.late?{color:"#a3312a",fontWeight:700}:{})}}, it.due?fmtDMY(it.due):"—"), h("td",{style:tdn},it.days));
@@ -55214,10 +55279,16 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     const past = (data.holdHist||[]).filter(r=>(it.doc && String(r.document_id)===String(it.doc.id)) || (it.req && String(r.request_id)===String(it.req.id)));
     const opts = [["Full Hold",holdLabel("Full Hold")],["Inspection Hold",holdLabel("Inspection Hold")],["Final Hold",holdLabel("Final Hold")],[DOC_HOLD_NONE,holdLabel("")]];
     return modal(500, [
-      h("div",{key:"h",style:{display:"flex",gap:8}}, h("div",{style:{flex:1}}, h("b",{style:{fontSize:14}},"Change hold — "+it.name),
+      h("div",{key:"h",style:{display:"flex",gap:8}}, h("div",{style:{flex:1}}, h("b",{style:{fontSize:14}},"Hold and route — "+it.name),
         h("div",{style:{fontSize:11.5,color:colors.muted}}, it.ct+" – "+(it.customer||"")+" · "+(it.no||"no number yet")+" · category "+it.cat+" ("+holdLabel(it.holdCat)+")")), h("button",{style:btnSmall,onClick:close},"Close")),
-      h("div",{key:"n",style:{fontSize:12,margin:"10px 0 4px"}},"Now: ",tag(holdLabel(it.hold), docHoldTag(it.hold), "n"), it.holdOwn ? h("span",{style:{fontSize:11,color:"#8a5a00"}},"set on the document") : h("span",{style:{fontSize:11,color:colors.muted}},"from the category")),
-      h("label",{key:"s",style:{display:"block",fontSize:11.5,color:colors.muted,marginTop:8}},"Hold for this document",
+      h("div",{key:"io",style:{border:"1px solid #c8d8e8",background:"#f5f9fd",borderRadius:7,padding:"8px 10px",marginTop:10}},   // 222
+        h("div",{style:{fontSize:11.5,fontWeight:700,color:"#2f5f8a",marginBottom:4}},"Route — category says "+(it.infoCat?"info only":"approval")),
+        h("div",{style:{display:"flex",gap:14,flexWrap:"wrap",fontSize:12.5}},
+          h("label",{style:{display:"flex",gap:5,alignItems:"center",cursor:"pointer"}}, h("input",{type:"radio",checked:(hd.io||"appr")==="appr",onChange:()=>setHd(x=>({...x,io:"appr"}))}),"Approval (codes, chase, hold)"),
+          h("label",{style:{display:"flex",gap:5,alignItems:"center",cursor:"pointer"}}, h("input",{type:"radio",checked:hd.io==="info",onChange:()=>setHd(x=>({...x,io:"info"}))}),"Info only — sent once, never chased, holds nothing")),
+        (hd.io==="info")!==!!it.infoOnly ? h("div",{style:{fontSize:11.5,color:"#7a5200",marginTop:4}},"Changing the route needs a reason below."+(hd.io==="info" && (it.revs||[]).some(r=>r.direction==="Out" && !r.legacy_unsent) && it.list!=="done" ? " The document has been sent: it moves to All approved and the chasing stops." : "")) : null),
+      hd.io==="info" ? null : h("div",{key:"n",style:{fontSize:12,margin:"10px 0 4px"}},"Now: ",tag(holdLabel(it.hold), docHoldTag(it.hold), "n"), it.holdOwn ? h("span",{style:{fontSize:11,color:"#8a5a00"}},"set on the document") : h("span",{style:{fontSize:11,color:colors.muted}},"from the category")),
+      hd.io==="info" ? null : h("label",{key:"s",style:{display:"block",fontSize:11.5,color:colors.muted,marginTop:8}},"Hold for this document",
         h("select",{value:hd.v||"",onChange:e=>setHd(x=>({...x,v:e.target.value})),style:{...inputStyle,marginTop:2}},
           opts.map(([v,l])=>h("option",{key:v,value:v},l)), it.holdOwn ? h("option",{value:"__cat"},"↺ Back to the category's hold ("+holdLabel(it.holdCat)+")") : null)),
       h("label",{key:"w",style:{display:"block",fontSize:11.5,color:colors.muted,marginTop:8}},"Reason "+(lower?"(required: the hold is lowered)":"(optional)"),
@@ -55226,14 +55297,35 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
         "This is the last open Full Hold document on "+it.ct+". After saving, the contract shows Ready for go-ahead and the Code 2 delivery clock can be started. The Sales Head is told.") : null,
       nv==="Full Hold" && it.hold!=="Full Hold" ? h("div",{key:"x2",style:{background:"#fffaf0",border:"1px solid #efd59c",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:8}},
         "Raising to Full Hold: the contract holds production again until this document reaches Code 2"+(it.so && /^Start Production/.test(it.so.go_ahead_state||"") ? ". Production is already released: the go-ahead stays, and the Sales Head is told." : ".")) : null,
-      past.length ? h("div",{key:"p",style:{fontSize:11,color:colors.muted,marginTop:10,borderTop:"1px dashed "+colors.border,paddingTop:6}}, h("b",null,"Hold changes"),
-        past.slice(0,8).map(r=>h("div",{key:r.id},fmtDMYTime(r.changed_at)+" · "+holdLabel(r.old_hold===DOC_HOLD_NONE?"":r.old_hold||"").split(" –")[0]+" → "+holdLabel(r.new_hold===DOC_HOLD_NONE?"":r.new_hold||"").split(" –")[0]+(r.set_on_doc?"":" (category)")+" · "+(r.changed_by||"")+(r.reason?" — "+r.reason:"")))) : null,
+      past.length ? h("div",{key:"p",style:{fontSize:11,color:colors.muted,marginTop:10,borderTop:"1px dashed "+colors.border,paddingTop:6}}, h("b",null,"Hold and route changes"),
+        past.slice(0,8).map(r=> r.what==="info_only" ? h("div",{key:r.id},fmtDMYTime(r.changed_at)+" · route "+r.old_hold+" → "+r.new_hold+(r.set_on_doc?"":" (category)")+" · "+(r.changed_by||"")+(r.reason?" — "+r.reason:"")) : h("div",{key:r.id},fmtDMYTime(r.changed_at)+" · "+holdLabel(r.old_hold===DOC_HOLD_NONE?"":r.old_hold||"").split(" –")[0]+" → "+holdLabel(r.new_hold===DOC_HOLD_NONE?"":r.new_hold||"").split(" –")[0]+(r.set_on_doc?"":" (category)")+" · "+(r.changed_by||"")+(r.reason?" — "+r.reason:"")))) : null,
       h("div",{key:"b",style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}, h("button",{style:btnSmall,onClick:close},"Cancel"),
-        h("button",{style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},disabled:busy,onClick:()=>saveHold(it, back)},busy?"Saving…":"Save hold"))
+        h("button",{style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},disabled:busy,onClick:()=>saveHold(it, back)},busy?"Saving…":"Save"))
     ], close);
   };
   const saveHold = async(it, back)=>{
     if(!canHold){ noPermission("change a document's hold",{posts:["doc_controller","technical_head"],roles:["admin","super_admin"]}); return; }
+    const wantInfo = hd.io==="info";
+    if(wantInfo!==!!it.infoOnly){   // 222: route change — info only / approval
+      const why0 = String(hd.why||"").trim(); if(why0.length<3){ alert("Changing the route needs a reason — it is kept with the change."); return; }
+      setBusy(true);
+      try{
+        const now = new Date().toISOString(); const by = me||user?.username||"";
+        const store = wantInfo===it.infoCat ? null : wantInfo;   // same as the category: nothing kept on the document
+        const patch = { info_only:store, info_set_by: store===null ? null : by, info_set_at: store===null ? null : now, info_reason: store===null ? null : why0 };
+        const tbn = it.doc ? "universal_documents_tbl" : "document_requests_tbl"; const id = it.doc ? it.doc.id : it.req.id;
+        let { error } = await sb.from(tbn).update(patch).eq("id",id);
+        if(!error && it.doc && it.req && docInfoOwn(it.req)!==null) await sb.from("document_requests_tbl").update(patch).eq("id",it.req.id);
+        if(error){ if(/info_only|info_set/.test(error.message||"")) throw new Error("Run structure_doc_info_only_2026-10-21.sql first (both companies)."); throw error; }
+        try{ await sb.from("doc_hold_hist_tbl").insert({ what:"info_only", contract_number:it.ct, document_id: it.doc ? it.doc.id : null, request_id: it.req ? it.req.id : null, doc_label:(it.no||it.name),
+          old_hold: it.infoOnly ? "Info only" : "Approval", new_hold: wantInfo ? "Info only" : "Approval", set_on_doc: store!==null, reason:why0, changed_by:by }); }catch(e){}
+        await logAudit("UPDATE", tbn, it.ct, (it.no||it.name)+": route "+(it.infoOnly?"info only":"approval")+" → "+(wantInfo?"info only":"approval")+" — "+why0, user?.username||"unknown", {info_only:!!it.infoOnly}, {info_only:wantInfo});
+        if(!wantInfo){ setPanel(back||null); await load(false); setBusy(false); return; }
+        setPanel(back||null); await load(false);
+      }catch(e){ alert("Could not change the route:\n\n"+(e&&e.message||e)); }
+      setBusy(false); return;
+    }
+    if(wantInfo){ setPanel(back||null); return; }   // info only: no hold to change
     const toCat = hd.v==="__cat";
     const nv = toCat ? it.holdCat : (hd.v===DOC_HOLD_NONE ? "" : hd.v);
     let store = toCat ? null : hd.v;                       // what goes on the document
@@ -55312,7 +55404,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     return modal(500, [
       h("b",{key:"t",style:{fontSize:14}},mv.viaComplete ? (mv.info ? "Send copy for info (Rev "+mv.rev+")" : Number(mv.rev)>0 ? "Send resubmission (Rev "+mv.rev+")" : "Send to client") : mv.viaReply ? "Log client reply (Rev "+mv.rev+" In)" : panel.to===it.list ? "Add revision" : "Move to “"+L.label+"”"),
       mv.viaReply ? h("div",{key:"vr",style:{background:"#eef4fb",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:8}},"The client has replied. Pick the code they gave (the status), paste the link to the returned file, and the date it came back. The card moves to the list that status belongs to.") : null,
-      mv.viaComplete ? h("div",{key:"vc",style:{background:"#e4f3ed",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:8}},mv.info ? "Code 1: the client only wants a copy for information. Saving logs Rev "+mv.rev+" Out, moves the card to “"+L.label+"” and closes its task card. Nothing comes back, so there is no chase." : "This task is done when the document goes to the client. Saving logs Rev "+mv.rev+" Out, moves the card to “"+L.label+"”, closes its task card and starts the "+DOC_CHASE_DAYS+"-day chase from the date below.") : null,
+      mv.viaComplete ? h("div",{key:"vc",style:{background:"#e4f3ed",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:8}},mv.infoOnly ? "Info only: this document goes to the client for information, with no approval. Saving logs Rev "+mv.rev+" Out, moves the card to “All approved” and closes its task card. Nothing comes back, so there is no chase and no code." : mv.info ? "Code 1: the client only wants a copy for information. Saving logs Rev "+mv.rev+" Out, moves the card to “"+L.label+"” and closes its task card. Nothing comes back, so there is no chase." : "This task is done when the document goes to the client. Saving logs Rev "+mv.rev+" Out, moves the card to “"+L.label+"”, closes its task card and starts the "+DOC_CHASE_DAYS+"-day chase from the date below.") : null,
       h("div",{key:"s",style:{fontSize:11.5,color:colors.muted,marginTop:3}},it.name+" · "+it.ct+(it.no?" · "+it.no:"")),
       it.kind==="req" ? h("div",{key:"rq",style:{display:"flex",gap:8}},h("div",{style:{flex:1}},lab("Document number"),inp("num")),h("div",{style:{flex:1.4}},lab("Title"),inp("title"))) : null,
       h("div",{key:"st"},lab("New status"),h("select",{value:mv.status,onChange:e=>setMv(m=>({...m,status:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12}},
@@ -55999,7 +56091,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
       seg([["all","All contracts"],["one","One contract"]], mode, setMode),
       mode==="one" ? h(SearchPick,{value:curCt,onChange:v=>setCt(v),width:300,options:contracts.map(c=>[c, ctOptLabel(c,(data.soBy[c]||{}).customer_name)])}) : null,
       seg([["stage","By stage"],["person","By person"],["list","All (list)"]], view, setView),
-      h("select",{value:fHold,onChange:e=>setFHold(e.target.value),style:sel}, h("option",{value:""},"Every hold level"), HOLD_LEVELS.map(x=>h("option",{key:x,value:x},holdLabel(x))), h("option",{value:"none"},holdLabel(""))),
+      h("select",{value:fHold,onChange:e=>setFHold(e.target.value),style:sel}, h("option",{value:""},"Every hold level"), HOLD_LEVELS.map(x=>h("option",{key:x,value:x},holdLabel(x))), h("option",{value:"none"},holdLabel("")), h("option",{value:"appr"},"Approval documents only"), h("option",{value:"info"},"Info only (no approval)")),   // 222
       h("select",{value:fOwner,onChange:e=>setFOwner(e.target.value),style:sel}, h("option",{value:""},"Every owner"), h("option",{value:"__none"},"Unassigned"), people.map(p=>h("option",{key:p,value:p},p))),
       depts.length ? h("select",{value:fDept,onChange:e=>setFDept(e.target.value),style:sel}, h("option",{value:""},"Every department"), depts.map(d=>h("option",{key:d,value:d},d))) : null,
       h("input",{value:q,onChange:e=>setQ(e.target.value),placeholder:"Search document, number, customer…",style:{...sel,width:200}}),
