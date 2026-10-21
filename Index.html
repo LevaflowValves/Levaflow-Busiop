@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-21T14:45:00Z";
+  var APP_BUILD_VERSION = "2026-10-21T16:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -899,7 +899,7 @@ const MASTER_TABLES = [
   // grew only through type-to-add on the Documents panel, so nobody could
   // see or tidy it. is_critical is the flag the delivery-date trigger reads:
   // "the date the LAST critical-category document reached Code 2".
-  { key: "doc_category_tbl", label: "Document Categories", columns: ["value","number_prefix","per_sl_no","for_production_default","info_only","hold_level","department"], colLabels:{info_only:"Info only (sent once for information: no approval, never chased, holds nothing)",number_prefix:"Number prefix",per_sl_no:"One per Sl No",for_production_default:"For production by default",department:"Department (Document Control board)",hold_level:"Hold level (Full = Don't start production · Inspection = Start production, chase docs for inspection · Final = Start production, final-stage docs pending · blank = No Hold, fully cleared)"}, cascade:[{col:"department",from:"department_tbl",field:"department"}], addLabel:"New document category", freeText:["value","number_prefix"], boolCols:["per_sl_no","for_production_default","info_only"], constOptions:{hold_level:HOLD_LEVELS}, nullableCols:["hold_level","number_prefix","department"], groupBy:["hold_level"], editAllEnabled:true, exportEnabled:true },
+  { key: "doc_category_tbl", label: "Document Categories", columns: ["value","number_prefix","per_sl_no","for_production_default","info_only","mandatory_at_contract","hold_level","department"], colLabels:{mandatory_at_contract:"Mandatory at contract (always ticked in the contract's document checklist)",info_only:"Info only (sent once for information: no approval, never chased, holds nothing)",number_prefix:"Number prefix",per_sl_no:"One per Sl No",for_production_default:"For production by default",department:"Department (Document Control board)",hold_level:"Hold level (Full = Don't start production · Inspection = Start production, chase docs for inspection · Final = Start production, final-stage docs pending · blank = No Hold, fully cleared)"}, cascade:[{col:"department",from:"department_tbl",field:"department"}], addLabel:"New document category", freeText:["value","number_prefix"], boolCols:["per_sl_no","for_production_default","info_only","mandatory_at_contract"], constOptions:{hold_level:HOLD_LEVELS}, nullableCols:["hold_level","number_prefix","department"], groupBy:["hold_level"], editAllEnabled:true, exportEnabled:true },
   { key: "job_attribute_tbl", label: "Job attributes", columns: ["attribute","sort_order"], addLabel:"New attribute", freeText:["attribute","sort_order"] },
   { key: "family_tbl", label: "Families", columns: ["family"], addLabel:"New family", freeText:["family"], exportEnabled:true },
   // 29 Sep (96) — Family sits above Item (Valves, Strainers, Tanks…). Pick
@@ -14841,6 +14841,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       try{ await recordOrderBasis(contractNumber, basis, user?.username); }
       catch(e){ alert("The sale order was created, but the "+basis.kind+" could not be recorded: "+(e.message||e)+"\n\nAdd it from the Documents box on the order."); }
       setQuoteBasisGate(null);
+      await contractDocChecklist({ cn:contractNumber, quoteRef:refFilter, client:quoteHeaderRow.customer_name, stage:"so", user });   // 228
       if(onOpenContract) onOpenContract(newContract);
     } catch(e){ alert("Couldn't create the Sale Order: "+e.message); }
   };
@@ -23732,8 +23733,98 @@ async function _ensurePoDocumentRequirement(contractNumber, username){
 // mandatory by being carried — that is a decision taken on the order.
 // A requirement already fulfilled on the quote carries its link, so a
 // document already sent is not chased twice.
+// ---- 228 (21 Oct 2026): document checklist the moment a contract number is saved (Contract Register),
+// and again at Sale Order with what is already on the contract ticked. GA Drawing (doc_category_tbl.mandatory_at_contract)
+// always goes; one card per document (no Sl No split). Cards land on the Document Control Board's Unassigned pile.
+const DOC_GA_RE = /^(g\.?\s*a\.?\b|gad\b|general\s+arrangement)/i;
+function docCatMandatory(c, hasCol){ return hasCol ? c.mandatory_at_contract===true : DOC_GA_RE.test(String(c.value||"").trim()); }
+async function crDocsListedAt(cn){
+  try{ const { data, error } = await sb.from("contract_register_tbl").select("docs_listed_at").eq("contract_number",cn).maybeSingle(); if(error) return null; return data && data.docs_listed_at || null; }catch(e){ return null; }
+}
+function contractDocChecklist(opts){
+  return new Promise(resolve=>{
+    const host = document.createElement("div"); document.body.appendChild(host);
+    const root = ReactDOM.createRoot(host);
+    const done = (r)=>{ try{ root.unmount(); }catch(e){} host.remove(); resolve(r); };
+    root.render(h(ContractDocChecklist,{ ...opts, onDone:done }));
+  });
+}
+function ContractDocChecklist({ cn, quoteRef, client, stage, user, onDone }){
+  const so = stage==="so";
+  const me = user?.username||"unknown";
+  const [S,setS] = useState(null); const [pick,setPick] = useState({}); const [busy,setBusy] = useState(false); const [err,setErr] = useState("");
+  const norm = s=>String(s||"").trim().toLowerCase();
+  useEffect(()=>{ (async()=>{
+    try{
+      const [cR, rR, dR, qR] = await Promise.all([
+        sb.from("doc_category_tbl").select("*"),
+        sb.from("document_requests_tbl").select("*").eq("entity_id",cn),
+        sb.from("universal_documents_tbl").select("id,category,is_archived").eq("entity_id",cn),
+        quoteRef ? sb.from("document_requests_tbl").select("category").eq("entity_id",quoteRef) : Promise.resolve({ data:[] }) ]);
+      const all = cR.data||[]; const hasPoUse = all.some(x=>"po_use" in x); const hasMand = all.some(x=>"mandatory_at_contract" in x);
+      const cats = all.filter(x=>String(x.value||"").trim() && (!hasPoUse || x.so_use!==false)).sort((a,b)=>String(a.value).localeCompare(String(b.value)));
+      const reqs = rR.data||[]; const docs = (dR.data||[]).filter(d=>!d.is_archived);
+      const info = {};
+      cats.forEach(c=>{ const k = norm(c.value); const rs = reqs.filter(r=>norm(r.category)===k);
+        info[k] = { name:String(c.value).trim(), mand:docCatMandatory(c,hasMand), po:k===norm(PO_DOC_CATEGORY), have:rs.length>0,
+          started: rs.some(r=>r.fulfilled_document_id) || docs.some(d=>norm(d.category)===k),
+          board: rs.some(r=>r.source==="review"), fromQuote:(qR.data||[]).some(r=>norm(r.category)===k), ids:rs.map(r=>r.id) }; });
+      // categories on the contract that are no longer in the master still show
+      reqs.forEach(r=>{ const k = norm(r.category); if(k && !info[k]) info[k] = { name:String(r.category).trim(), mand:false, po:k===norm(PO_DOC_CATEGORY), have:true, started:!!r.fulfilled_document_id, board:r.source==="review", fromQuote:false, ids:[r.id], gone:true }; else if(k && info[k].gone) info[k].ids.push(r.id); });
+      const p = {}; const anyHave = reqs.length>0;
+      Object.entries(info).forEach(([k,x])=>{ p[k] = x.mand || x.po || x.have || (!anyHave && x.fromQuote); });
+      setS({ info, order:Object.keys(info), anyHave }); setPick(p);
+    }catch(e){ setErr("Could not load the document list: "+(e.message||e)); }
+  })(); },[]);
+  const locked = x=> x.mand || x.po || x.started || x.board;
+  const apply = async(sel, why)=>{
+    setBusy(true); setErr("");
+    try{
+      const add = [], drop = [];
+      S.order.forEach(k=>{ const x = S.info[k]; const on = !!sel[k];
+        if(on && !x.have) add.push(x);
+        if(!on && x.have && !locked(x)) drop.push(x); });
+      for(const x of add){
+        const res = await insertTolerant("document_requests_tbl",{ entity_type:"contract", entity_id:cn, category:x.name, is_mandatory:x.po,
+          source: so ? "Sale Order checklist" : "Contract Register checklist", ...(x.fromQuote && quoteRef ? { carried_from:quoteRef } : {}), requested_by:me }, ["carried_from"], false);
+        if(res.error) throw res.error; }
+      for(const x of drop){ const ids = x.ids.filter(Boolean); if(ids.length){ const { error } = await sb.from("document_requests_tbl").delete().in("id",ids).is("fulfilled_document_id",null); if(error) throw error; } }
+      try{ await sb.from("contract_register_tbl").update({ docs_listed_at:new Date().toISOString(), docs_listed_by:me }).eq("contract_number",cn); }catch(e){}
+      const txt = (why||(so?"Sale Order":"Contract Register")+" document checklist")+": "+(add.length?"added "+add.map(x=>x.name).join(", "):"nothing added")+(drop.length?"; removed "+drop.map(x=>x.name).join(", "):"");
+      try{ await logAudit("UPDATE","document_requests_tbl",cn,txt,me,null,null); }catch(e){}
+      try{ await crHist(cn, me, txt); }catch(e){}
+      onDone({ added:add.length, removed:drop.length });
+    }catch(e){ setErr("Could not save: "+(e.message||e)); setBusy(false); }
+  };
+  const later = ()=>{ const sel = {}; S.order.forEach(k=>{ const x = S.info[k]; if(x.mand || x.po || x.have) sel[k] = true; }); apply(sel, (so?"Sale Order":"Contract Register")+" checklist skipped (Later) — mandatory documents kept"); };
+  const tag = (t,bg,c)=> h("span",{style:{fontSize:10.5,borderRadius:8,padding:"0 7px",whiteSpace:"nowrap",background:bg,color:c,marginLeft:4}},t);
+  const n = S ? S.order.filter(k=>pick[k]).length : 0;
+  const box = h("div",{style:{background:"#fff",borderRadius:10,padding:"18px 22px",width:560,maxWidth:"96vw",maxHeight:"88vh",overflowY:"auto"}},
+    h("div",{style:{fontWeight:700,fontSize:15,marginBottom:4}}, so ? "Documents for this order — check and confirm" : "Which documents will this order need?"),
+    h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:10}},"Contract ",h("b",null,cn), client?" · "+client:"", h("br"),
+      so ? "Everything already on the contract is ticked — chosen when the contract was saved, or added on the Document Control Board. Add anything missed; untick one only while it has no document."
+         : (S && !S.anyHave ? "Ticked from the quote's requirements. " : "")+"Each ticked document becomes one card in the Document Control Board's 📥 Unassigned pile now. GA Drawing always goes."),
+    err ? h("div",{style:{background:"#fdecea",color:"#a3312a",borderRadius:6,padding:"6px 10px",fontSize:12,marginBottom:8}},err) : null,
+    !S ? h("div",{style:{padding:20,color:colors.mutedLight}},"Loading…") :
+      S.order.map(k=>{ const x = S.info[k]; const lk = locked(x);
+        return h("label",{key:k,style:{display:"flex",gap:8,alignItems:"center",padding:"5px 4px",borderBottom:"1px solid #f1efe7",fontSize:12.5,cursor:lk?"default":"pointer"}},
+          h("input",{type:"checkbox",checked:!!pick[k],disabled:lk||busy,onChange:e=>setPick(p=>({...p,[k]:e.target.checked}))}),
+          h("span",{style:{flex:1}},x.name),
+          x.mand ? tag("mandatory","#fdecea","#a3312a") : null,
+          x.po ? tag("always","#eee","#666") : null,
+          x.board ? tag("added on Document Control Board","#efe8fb","#5b3a99") : null,
+          x.started && !x.po ? tag("document started","#efe8fb","#5b3a99") : null,
+          x.have && !x.board && !x.started && !x.mand && !x.po ? tag(so?"chosen when contract saved":"already on contract","#e3f2ec","#0f7a5c") : null,
+          !x.have && x.fromQuote && !x.mand ? tag("from quote","#e6f1fb","#0c447c") : null,
+          x.gone ? tag("not in the master","#fff4d6","#854f0b") : null); }),
+    h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}},
+      h("button",{onClick:later,disabled:!S||busy,style:btnSecondary,title:"Close for now. GA Drawing and Purchase Order still go; open the list again from 📋 Docs on the register line"},"Later"),
+      h("button",{onClick:()=>apply(pick),disabled:!S||busy,style:{...btnPrimary,background:"#0f7a5c",opacity:busy?0.6:1}}, busy?"Saving…":(so?"Confirm documents":"Send "+n+" to Document Control"))));
+  return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}, box);
+}
 async function carryRequirementsToContract(quoteRef, contractNumber, username){
   if(!quoteRef || !contractNumber) return { carried:0 };
+  if(await crDocsListedAt(contractNumber)) return { carried:0, listed:true };   // 228: the list was settled when the contract was saved
   try{
     const [{ data: fromQuote }, { data: already }] = await Promise.all([
       sb.from("document_requests_tbl").select("*").eq("entity_id",quoteRef),
@@ -24645,6 +24736,7 @@ function SaleOrderContractPicker({ user, onOpenContract, startCreate, onConsumed
     try{ await recordOrderBasis(num, basis, user?.username); }
     catch(e){ alert("The sale order was created, but the "+basis.kind+" could not be recorded: "+(e.message||e)+"\n\nAdd it from the Documents box on the order."); }
     basisRef.current = null;
+    await contractDocChecklist({ cn:num, quoteRef:quoteHit.latestRef, client:quoteHit.customer_name, stage:"so", user });   // 228
     onOpenContract(newContract);
   };
   const confirmDocPick = async()=>{
@@ -30184,6 +30276,24 @@ const MANUAL_SECTIONS = [
             ]
           }
         ]
+      },
+      {
+        "key": "doc_checklist_contract",
+        "title": "Document checklist when the contract number is saved",
+        "tag": "Order Status",
+        "blocks": [
+          {
+            "type": "bullets",
+            "items": [
+              "Order Status → Contract Register → + New contract: the moment the line is saved, the document checklist opens. The quote's requirements come ticked; tick or untick, then Send. Each ticked document becomes ONE card in the Document Control Board's 📥 Unassigned pile at once — no need to wait for the Sale Order.",
+              "GA Drawing is mandatory: always ticked and can't be unticked. Purchase Order is always ticked. Later closes the list — GA Drawing and Purchase Order still go.",
+              "📋 Docs beside Sale Order + on a register line opens the same list any time (📋 ✓ once it has been settled).",
+              "At Sale Order (Sale Order + or Create Sale Order on the quote) the same list opens again: everything already on the contract is ticked — chosen when the contract was saved, or added on the board (+ Missing document). Add anything missed; a document can be unticked only while it has no document started. The quote's requirements are not carried again once the list was settled at the register.",
+              "Every board card shows ↗ SO (opens the Sale Order) or 'SO not made yet'. A card added on the board is put on the contract, so it shows in the Sale Order's documents and is ticked in its checklist.",
+              "Which category is mandatory: Setup → Document Categories → Mandatory at contract (GA Drawing only)."
+            ]
+          }
+        ]
       }
     ]
   }
@@ -30217,6 +30327,7 @@ const MANUAL_TA = {
  "full_screen": {"title":"Full screen: எந்தத் திரையிலும் கூடுதல் இடம்","tag":"General","blocks":[{"type":"bullets","items":["மேலே உள்ள கருப்புப் பட்டையில் ⛶ Full screen அழுத்தவும் (New tab அருகில்). Browser full screen ஆகும் — Windows taskbar, browser பட்டைகள் மறையும் — app-இன் மேல் பட்டை, menu, அறிவிப்புகள் மடங்கும்.","கீழ் இடது மூலையில் இரண்டு பொத்தான்கள்: ☰ Menu — full screen-இல் இருந்தபடியே ribbon-ஐக் காட்டும்; ✕ Exit full screen — வெளியேறும்.","Esc அழுத்தினாலும் வெளியேறும்; ribbon தானாகத் திரும்பும்."]}],"en_sig":"58884cfc"},
  "hsn_sheet": {"title":"Accounts-க்கான HSN sheet: items மற்றும் raw material shapes","tag":"Setup","blocks":[{"type":"bullets","items":["Setup → Items → Items (அல்லது Material shapes): ⬇ HSN sheet for Accounts அழுத்தவும். எல்லா items, எல்லா raw material shapes உள்ள ஒரு Excel file வரும்; HSN column காலியாக இருக்கும்.","Raw material-க்கு HSN shape-ஐப் பொறுத்தது மட்டுமே (pipe, flange, plate…) — ஒரு shape-க்கு ஒரு HSN.","Item, Shape, Row id columns-ஐ மாற்ற வேண்டாம்; rows சேர்க்கவோ நீக்கவோ வேண்டாம். தெரியாவிட்டால் காலியாக விடவும்."]}],"en_sig":"f6557a59"},
  "all_boards_pile": {"title":"All boards: Unassigned எப்போதும் தெரியும்","tag":"Tasks","blocks":[{"type":"bullets","items":["Tasks → All boards: ஒவ்வொரு department band-இலும் 📥 Unassigned pile இடது பக்கம் நிலையாக இருக்கும்; வலது பக்கம் scroll செய்தாலும் தெரியும். அதனால் card-ஐ கடைசியில் உள்ள எவருக்கும் இழுத்து விடலாம்.","Phone போன்ற சிறிய திரையில் மற்றவற்றுடன் சேர்ந்து scroll ஆகும்."]}],"en_sig":"dc7dec76"},
+ "doc_checklist_contract": {"title":"Contract number save ஆனதும் document checklist","tag":"Order Status","blocks":[{"type":"bullets","items":["Order Status → Contract Register → + New contract: line save ஆனதும் document checklist திறக்கும். Quote-இன் requirements tick ஆகி இருக்கும்; மாற்றி Send அழுத்தவும். ஒவ்வொரு document-க்கும் ஒரு card Document Control Board-இன் 📥 Unassigned-க்கு உடனே போகும்.","GA Drawing கட்டாயம் — எப்போதும் tick, untick செய்ய முடியாது. Later அழுத்தினாலும் GA Drawing, Purchase Order போகும்.","Sale Order நேரத்தில் அதே list மீண்டும் வரும்; ஏற்கனவே உள்ளவை tick ஆகி இருக்கும். Document தொடங்காதவற்றை மட்டும் untick செய்யலாம்.","Board card-இல் ↗ SO (Sale Order திறக்கும்) அல்லது 'SO not made yet' தெரியும்."]}],"en_sig":"e8d335d6"},
  "acc_period": {"title":"Period Close: closing stock, மாதத்தை lock செய்தல்","tag":"கணக்குகள்","blocks":[{"type":"steps","items":["மாதம் முடிந்ததும் Finance & Accounts Manager, Raw Material closing stock-ஐ பதிவு செய்கிறார் (Enter RM stock).","Super admin, WIP & FG closing-ஐ விற்பனை மதிப்பில், குறிப்புடன் பதிவு செய்கிறார் (Enter WIP & FG).","புத்தகங்களைச் சரிபார்த்து Lock month. மாதங்கள் வரிசைப்படி lock ஆகும்."]},{"type":"bullets","items":["Lock ஆன மாதத்தில் voucher சேர்க்கவோ, மாற்றவோ, நீக்கவோ முடியாது; FFS import அதைத் தொடாது.","Super admin மட்டுமே காரணத்துடன் unlock செய்யலாம்; கடைசியாக lock ஆன மாதம் முதலில்.","இல்லாத closing stock-உம் lock செய்யத் தயாரான மாதங்களும், அதற்குப் பொறுப்பான post-க்கு Pending Actions-இல் வரும்."]},{"type":"p","text":"இந்த இரண்டு closing தொகைகளும் Current Assets → Stocks கீழ் உள்ள Raw Material, WIP & FG ledgers-இன் மாத இறுதி closing ஆகும். ஒவ்வொன்றுக்கும் 1 ஏப்ரல் opening-உம் உண்டு."},{"type":"p","text":"Settings (super admins): நிதியாண்டு தொடக்கம், go-live தேதி."}],"en_sig":"5c21aefa"},
  "acc_export": {"title":"Auditor-க்கான Export (Tally, Excel)","tag":"கணக்குகள்","blocks":[{"type":"p","text":"Accounts → Close & Masters → Export for Auditor, 1 ஏப்ரல் முதல் நீங்கள் தேர்வு செய்யும் தேதி வரை, auditor-க்குத் தேவையான அனைத்தையும் ஒரு zip கோப்பாகத் தரும்."},{"type":"steps","items":["Super admin-இடம் Accounts Export code கேளுங்கள் (Admin → Authorization Codes → Generate Accounts Export code). அது ஒரு முறை, 15 நிமிடங்களுக்கு மட்டும் வேலை செய்யும்.","Export எந்தத் தேதி வரை என்று தேர்வு செய்யுங்கள் (அல்லது Quick மாத இறுதிப் பொத்தான்), code-ஐ type செய்து Export for Auditor அழுத்துங்கள்.","Zip-ஐ auditor-இடம் கொடுங்கள்."]},{"type":"bullets","items":["Tally_Masters.xml, Tally_Vouchers.xml: Tally Prime-இல் 1 ஏப்ரல் முதல் books கொண்ட வெற்று company உருவாக்கி, Import → Masters (Tally_Masters.xml) முதலில், பிறகு Import → Transactions (Tally_Vouchers.xml). Trial Balance, Books.xlsx-இல் உள்ளதுடன் ஒத்துப்போக வேண்டும்.","Books.xlsx: Read Me, Trial Balance, Profit & Loss, Balance Sheet, Cash Flow, Stock (மாத இறுதித் தொகைகள், பதிவு செய்தவர்), Day Book, ஒவ்வொரு ledger-இன் entries, ledger பட்டியல் (Tally-இல் பயன்படும் பெயருடன்), cancel ஆன vouchers.","ஒரே பெயருள்ள ledgers, அல்லது group-இன் பெயருள்ள ledger, Tally-க்கு அடைப்புக்குறிக்குள் code-உடன் செல்லும்; Tally-இல் ஒவ்வொரு பெயரும் வேறுபட வேண்டும்.","Lock ஆகாத மாதங்கள் Provisional எனக் குறிக்கப்படும். ஒவ்வொரு export-உம் யார், எப்போது, காலம், code-உடன் பதிவாகும்."]},{"type":"warn","text":"Finance & Accounts Manager, Finance Director, super admins மட்டுமே export செய்யலாம், எப்போதும் புதிய super admin code-உடன்: export என்பது நிறுவனத்தின் முழுக் கணக்குப் புத்தகங்கள்."}],"en_sig":"71bda284"},
  "acc_pay_purchase": {"title":"Payment, Receipt, Contra, Purchase பதிவுகள்","tag":"கணக்குகள்","blocks":[{"type":"p","text":"Payment, Receipt, Contra ஆகியவற்றில் bank (அல்லது cash அல்லது card) மேலே ஒரே வரியில்; மற்ற accounts கீழே, ஒவ்வொன்றுக்கும் ledger, தொகை மட்டும் — Debit அல்லது Credit தேர்வு தேவையில்லை. Purchase என்பது Sales voucher போன்ற supplier bill."},{"type":"steps","items":["Payment: எந்த account-இலிருந்து செலுத்தப்படுகிறது, தேதி, mode (NEFT, RTGS, IMPS, Cheque, UPI…), UTR அல்லது cheque எண் தேர்வு செய்யுங்கள். யாருக்குச் செலுத்தப்படுகிறது என்பதைச் சேர்க்கவும். Supplier என்றால் Against bill-இல் இன்னும் நிலுவையில் உள்ள bills வரும்; Oldest first-இலேயே விடுங்கள், அல்லது ஒன்றைத் தேர்வு செய்யுங்கள்.","Receipt: அதே போல — பணம் வரும் account, யாரிடமிருந்து வருகிறது (customer-இன் invoices வரும்).","Contra: நம் சொந்த bank, cash accounts இடையே மட்டும் — cash கட்டியது, cash எடுத்தது, banks இடையே மாற்றம்.","Purchase: supplier (அதன் state CGST + SGST அல்லது IGST என்று முடிவு செய்யும்), supplier bill எண், தேதி, நம் தேதி, PO எண்; Goods அல்லது Service; items, charges, GST rate; TDS பிடித்தால் (bill பதியும்போதே பிடிக்கப்படும்); bill-இல் அச்சிட்ட மொத்தத்தை type செய்யுங்கள் — அது ஒத்துப்போக வேண்டும்."]},{"type":"bullets","items":["Purchase-இல் GST தேர்வுகள்: அதே state, வேறு state, unregistered (GST இல்லை), import (bill-இல் GST இல்லை; Bill of Entry — customs duty, IGST, யார் செலுத்தினார் — அதே திரையில்), reverse charge (GST-ஐ நாமே செலுத்துகிறோம்: GST RCM Payable-க்குச் செல்லும்). Input credit not eligible என்றால் GST cost-இல் சேரும்.","Supplier bill link: bill PDF-இன் OneDrive link-ஐ ஒட்டுங்கள். பிறகு சேர்க்கலாம், ஆனால் பதிந்து 3 நாட்கள் ஆகியும் இல்லையென்றால், பதிந்தவர் link சேர்க்கும் வரை Accounts-ஐப் பயன்படுத்த முடியாது; Finance & Accounts Manager-க்குத் தெரிவிக்கப்படும், 2 நாட்கள் கழித்து super admins-க்கு. FFS bills-க்குத் தேவையில்லை.","Supplier அல்லது customer ledger-இல் Bills to pay / Invoices to collect: ஒவ்வொரு bill-உம் இன்னும் நிலுவை எவ்வளவு; ஒரு payment குறிப்பிட்ட bill-க்கு எனக் குறிக்கப்படாவிட்டால் பழையது முதலில் கழியும்.","ஒரே voucher-இல் பல bank வரிகள், அல்லது மறு பக்க வரி (இரு parties தொடர்புடைய refund): Journal பயன்படுத்துங்கள். அப்படிப்பட்ட பழைய FFS voucher Debit / Credit view-இல் திறக்கும்."]}],"en_sig":"84730282"},
@@ -33070,6 +33181,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"21 Oct 2026 (228)", summary:"Built on 2026-10-21T16:00:00Z, on top of 2026-10-21T14:45:00Z. NEEDS SQL: structure_doc_checklist_contract_2026-10-21.sql (BOTH companies). DOCUMENT CHECKLIST AT CONTRACT SAVE: saving a new line in the Contract Register opens the document checklist (quote's requirements ticked; GA Drawing mandatory and locked; Purchase Order always); ticked documents become one requirement card each on the Document Control Board's Unassigned pile at once; Later keeps GA Drawing and Purchase Order. 📋 Docs on a register line reopens it (📋 ✓ when settled; contract_register_tbl.docs_listed_at/by). SALE ORDER: after Sale Order + / Create Sale Order the same checklist opens with everything on the contract ticked (from the register, or added on the board — locked); untick only while no document is started; the quote's requirements are not carried again once the list was settled. BOARD: every card shows ↗ SO or 'SO not made yet'. Setup → Document Categories: Mandatory at contract. Manual article doc_checklist_contract (English and Tamil)." },
   { date:"21 Oct 2026 (227)", summary:"Built on 2026-10-21T14:45:00Z, on top of 2026-10-21T13:00:00Z. No SQL. TASKS → ALL BOARDS: in every department band the 📥 Unassigned pile stays fixed on the left while scrolling across the people (wide screens), as on the Task Assignment Board. Manual article all_boards_pile (English and Tamil)." },
   { date:"21 Oct 2026 (226)", summary:"Built on 2026-10-21T13:00:00Z, on top of 2026-10-21T12:00:00Z. No SQL. HSN SHEET FOR ACCOUNTS: Setup → Items → Items (and Material shapes) has ⬇ HSN sheet for Accounts. It downloads one Excel file: Read me; Items (family, item, HSN and GST % now in the app, blank HSN code (fill) and GST % (fill) columns, row id); Raw material shapes (one row per shape, specs under it, blank HSN and GST % columns, row id) — for raw material the HSN depends on the shape only; Past HSN used (codes already on POs by shape and on sales invoices, reference only). The filled sheet comes back for a one-time SQL." },
   { date:"21 Oct 2026 (225)", summary:"Built on 2026-10-21T12:00:00Z, on top of 2026-10-21T11:00:00Z. No SQL. FULL SCREEN on every screen: ⛶ Full screen in the top bar puts the browser in full screen (Windows taskbar and browser bars hidden) and folds away the app's top bar, menu and notice chips; ☰ Menu shows the ribbon while staying full screen, ✕ Exit full screen or Esc leaves and the ribbon comes back. Manual article full_screen (English and Tamil)." },
@@ -55695,7 +55807,9 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
       style:{background:it.list==="confirm"?"#f4f5f5":"#fff",border:"1px solid "+colors.border,borderLeft:it.late?"4px solid #a3312a":"1px solid "+colors.border,borderRadius:7,padding:"7px 9px",marginBottom:7,fontSize:12,cursor:"grab",overflow:"hidden"}},
       docLabelStrip(docItemLabel(it)),   // 176
       h("div",{style:{display:"flex",gap:6,alignItems:"flex-start"}}, h("b",{style:{flex:1,minWidth:0,lineHeight:1.3}},it.name), latestLink(it)),
-      h("div",{style:{fontSize:11,color:colors.muted,marginTop:2}}, ctClientTag(it.ct, it.customer)),
+      h("div",{style:{fontSize:11,color:colors.muted,marginTop:2}}, ctClientTag(it.ct, it.customer),
+        it.so && it.so.contract_number ? (onOpenContract ? h("span",{onClick:e=>{ e.stopPropagation(); onOpenContract(it.so); },title:"Open Sale Order "+it.ct,style:{marginLeft:6,color:"#2a6db0",fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}},"\u2197 SO") : null)
+          : h("span",{title:"The Sale Order for "+it.ct+" is not made yet — the card was listed from the Contract Register",style:{marginLeft:6,color:"#c98a1b",fontWeight:700,fontSize:10.5,whiteSpace:"nowrap"}},"SO not made yet")),   // 228
       h("div",{style:{marginTop:4,display:"flex",flexWrap:"wrap",gap:2,alignItems:"center"}},
         view==="person" ? tag(lst.short,{background:lst.bg,color:lst.color},"l") : null,
         holdTag(it),
@@ -67712,7 +67826,7 @@ async function crLoadAll(){
     const sn = snapBy.get(cn); const tm = termBy.get(cn)||{};
     const valCcy = sn ? Number(sn.total_value_in_currency ?? sn.total_value)||0 : null;
     const soCountry = countryOf.get(String(so.customer_name||r.client||"").trim().toLowerCase())||"";
-    out.push({ cn, source:"app", quote:so.quote_reference_number||r.quote_number||"", legacyRef:r.legacy_ref||"", client:so.customer_name||r.client||"",
+    out.push({ cn, docsListed:r.docs_listed_at||null, source:"app", quote:so.quote_reference_number||r.quote_number||"", legacyRef:r.legacy_ref||"", client:so.customer_name||r.client||"",
       po: so.basis_number || head.po_number || r.po_no || "", poDate: toISODate(so.basis_date || head.po_date || so.oa_issued_on || so.created_at) || r.po_date || "",
       ccy, fx, valCcy, valInr: sn ? Number(sn.total_value)||0 : (valCcy!=null && fx ? valCcy*fx : null),
       status:r.status||"Pending", reason:r.status_reason||"", pay:tm.payment_term||"", freight:tm.freight||"", inco:tm.incoterms||"", endUser:head.end_user_name||"",
@@ -67726,7 +67840,7 @@ async function crLoadAll(){
     const ccy = String(r.currency||"INR").toUpperCase(); const fx = ccy==="INR" ? 1 : (Number(r.fx_rate)||null);
     const valCcy = ls.reduce((n,l)=>n+(Number(l.v)||0),0);
     const country = countryOf.get(String(r.client||"").trim().toLowerCase())||"";
-    out.push({ cn, source:r.source||"legacy", quote:r.quote_number||"", legacyRef:r.legacy_ref||"", client:r.client||"", po:r.po_no||"", poDate:r.po_date||"", poDateText:r.po_date_text||"",
+    out.push({ cn, docsListed:r.docs_listed_at||null, source:r.source||"legacy", quote:r.quote_number||"", legacyRef:r.legacy_ref||"", client:r.client||"", po:r.po_no||"", poDate:r.po_date||"", poDateText:r.po_date_text||"",
       ccy, fx, valCcy, valInr: fx ? valCcy*fx : null, status:r.status||"Pending", reason:r.status_reason||"", pay:r.payment_terms||"", freight:r.freight||"", inco:r.incoterm||"", endUser:r.end_user||"",
       tpi:r.tpi||"", tpiAgency:r.tpi_agency||"", cert:r.material_cert||"", remarks:r.remarks||"", hasReg:true, lines:ls,
       checkCcy: ccy==="INR" && !!country && !/^india$/i.test(country), country, isExport: ccy!=="INR" || (!!country && !/^india$/i.test(country)) });
@@ -67924,7 +68038,9 @@ function ContractRegisterScreen({ user, onOpenQuote, onOpenContract, onGoToTab, 
       }catch(e){ console.error("register lines from quote", e); }
       await crHist(num, user?.username, "Contract line added from quote "+hit.latestRef+(nl.po?" · PO "+nl.po:""));
       await logAudit("CREATE","contract_register_tbl",num,"Contract line from quote "+hit.latestRef+" ("+hit.customer+")",user?.username||"unknown",null,null);
-      setNl(null); setToast("Contract "+num+" added — press Sale Order + when the PO is in hand"); setTimeout(()=>setToast(""),3000); load();
+      setNl(null);
+      const ck = await contractDocChecklist({ cn:num, quoteRef:hit.latestRef, client:hit.customer, stage:"register", user });   // 228
+      setToast("Contract "+num+" added"+(ck&&ck.added?" · "+ck.added+" document card"+(ck.added>1?"s":"")+" on the Document Control Board":"")+" — press Sale Order + when the PO is in hand"); setTimeout(()=>setToast(""),4000); load();
     }catch(e){ alert("Could not save: "+(e.message||e)); setNl(x=>x?{...x,busy:false}:x); }
   };
   const saleOrderBtn = (c)=>{
@@ -67932,6 +68048,10 @@ function ContractRegisterScreen({ user, onOpenQuote, onOpenContract, onGoToTab, 
     if(c.quote && canEdit) return h("button",{onClick:e=>{ e.stopPropagation(); onStartSaleOrder && onStartSaleOrder({ num:c.cn, quoteRef:c.quote, client:c.client, po:c.po, poDate:c.poDate, ccy:c.ccy }); },title:"Create the Sale Order from quote "+c.quote+" — only the PO / LOI document is asked",style:{...btnSmall,background:colors.dark,color:"#fff",borderColor:colors.dark,fontWeight:700,whiteSpace:"nowrap"}},"Sale Order +");
     return h("span",{title:c.source==="legacy"?"Legacy contract — add its quotation number to make a Sale Order":"",style:{fontSize:10.5,color:colors.mutedLight}}, c.source==="legacy"?"Legacy":"\u2014");
   };
+  // 228: the document checklist of a line, any time
+  const docsBtn = (c)=> (canEdit && c.source!=="legacy" && c.cn) ? h("button",{onClick:async e=>{ e.stopPropagation(); const r = await contractDocChecklist({ cn:c.cn, quoteRef:c.quote, client:c.client, stage:c.source==="app"?"so":"register", user }); if(r && (r.added||r.removed)){ setToast("Contract "+c.cn+": "+(r.added?r.added+" document(s) added":"")+(r.added&&r.removed?", ":"")+(r.removed?r.removed+" removed":"")); setTimeout(()=>setToast(""),3000); } load(); },
+      title:c.docsListed?"Documents listed "+fmtDMY(String(c.docsListed).slice(0,10))+" — open the checklist":"Open the document checklist for this contract",
+      style:{...btnSmall,padding:"2px 7px",fontSize:11,whiteSpace:"nowrap",color:c.docsListed?"#0f7a5c":colors.muted,borderColor:c.docsListed?"#0f7a5c":colors.border}}, c.docsListed?"📋 ✓":"📋 Docs") : null;
   const toggleFull = ()=>{ try{ if(document.fullscreenElement) document.exitFullscreen(); else if(rootRef.current && rootRef.current.requestFullscreen){ const pr = rootRef.current.requestFullscreen(); pr && pr.catch && pr.catch(()=>{}); } }catch(e){} };
   const load = useCallback(async()=>{
     setLoading(true);
@@ -68003,7 +68123,7 @@ function ContractRegisterScreen({ user, onOpenQuote, onOpenContract, onGoToTab, 
             ...on.map(k=>{ const v = optText(c,k); return cell(v || h("span",{style:{color:colors.mutedLight}},"—"),k,{minWidth:k==="pay"||k==="due"?150:undefined}); }),
             cell(ccyCell(c),"ccy"), num(c.ccy==="INR"&&c.valCcy!=null?crN0(c.valCcy):"","vi"), num(c.ccy!=="INR"&&c.valCcy!=null?(c.ccy==="USD"?"":c.ccy+" ")+crN2(c.valCcy):"","vu"),
             num(c.valInr!=null?crN0(c.valInr):(c.ccy!=="INR"?"no rate":"—"),"va",true), cell(crPill(crStShow(c.status)),"st"),
-            cell(saleOrderBtn(c),"src"),
+            cell(h("span",{style:{display:"inline-flex",gap:4,alignItems:"center"}}, saleOrderBtn(c), docsBtn(c)),"src"),
             ...(prog ? crProgressCells(c, P).map(x=>cell(P ? x[2] : "…", "p"+x[0], { ...tdA, color: x[0]==="del" && /late/.test(x[2]) ? "#a3312a" : tdA.color, fontWeight: x[0]==="stage" ? 600 : 400 })) : []));
           if(!isOpen) return [r1];
           const r2 = h("tr",{key:c.cn+"-l"}, h("td",{colSpan:nCols,style:{background:"#faf9f4",padding:"4px 9px 10px 40px",borderBottom:"1px solid "+colors.border}},
