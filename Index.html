@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-23T06:50:00Z";
+  var APP_BUILD_VERSION = "2026-10-23T08:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -13385,6 +13385,8 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
 
   // ---- Production go-ahead + work orders (20 Sep) ----
   const [isSalesHead,setIsSalesHead] = useState(false);
+  const [isTechHeadSO,setIsTechHeadSO] = useState(false);   // 244: the Technical Head also releases work orders
+  useEffect(()=>{ woReleaserPosts(user).then(r=>setIsTechHeadSO(!!r.tech)); },[user?.id]);
   const [goState,setGoState] = useState("Hold");
   const [goBusy,setGoBusy] = useState(false);
   const [workOrders,setWorkOrders] = useState([]);
@@ -13484,7 +13486,7 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
     await loadPbom(); return true;
   };
   const releaseGoAhead = async(toState)=>{
-    if(!canReleaseGoAhead(user,isSalesHead)){ noPermission("release production",{posts:["sales_head"],roles:["super_admin"]}); return; }
+    if(!canReleaseGoAhead(user,isSalesHead||isTechHeadSO)){ noPermission("release production",{posts:["sales_head","technical_head"],roles:["super_admin"]}); return; }
     let bomAns = null;   // 184c
     const backward = GO_AHEAD_STATES.indexOf(toState) < GO_AHEAD_STATES.indexOf(goState||"Hold");
     let reason = null;
@@ -13502,25 +13504,11 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
       if(!bomAns) return;
     }
     setGoBusy(true);
-    const res = await setGoAheadState(contractInfo.contract_number, goState, toState, user?.username, reason);
-    if(res.error){ setGoBusy(false); alert("Could not change the work order release: "+res.error); return; }
-    if(bomAns){   // 184c
-      const client = contractInfo.customer_name || (quoteHeaderRow && quoteHeaderRow.customer_name) || "";
-      if(bomAns.yes){ await savePbomLink(bomAns.link, "given at production release ("+toState+")"); }   // 18 Oct: BOM loaded at release -> no card
-      else {
-        const now = new Date().toISOString();
-        await sb.from("sale_order_tbl").update({ prod_bom_answer:"No", prod_bom_answered_by:user?.username||"unknown", prod_bom_answered_at:now }).eq("contract_number",contractInfo.contract_number);
-        await logAudit("UPDATE","sale_order_tbl",contractInfo.contract_number,"Production release ("+toState+"): Production BOM not available \u2014 card to the "+postLabel(PBOM_POST)+" post",user?.username||"unknown",null,null);
-        await pbomTaskFor(contractInfo.contract_number, client, "pending", user?.username||"", { note:"Asked at production release ("+toState+") on "+fmtDMY(now)+" by "+(user?.username||"")+": the Production BOM was not available." });
-        await loadPbom();
-      }
-    }
-    // The work order is raised automatically on the first release into
-    // production, covering every Sl No not already on one.
-    if(!backward && toState.indexOf("Start Production")===0 && unissuedSlNos.length){
-      const created = await createWorkOrder(contractInfo.contract_number, unissuedSlNos.map(e=>e.item_sl_no), user?.username, "Raised automatically on production release");
-      if(created.error) alert("Work order release saved, but the work order was not raised: "+created.error);
-    }
+    const client = contractInfo.customer_name || (quoteHeaderRow && quoteHeaderRow.customer_name) || "";
+    const res = await woReleaseRun({ ct:contractInfo.contract_number, toState, expectFrom:goState, username:user?.username, reason, bom:bomAns, client });   // 244: the one release routine
+    if(res.error){ setGoBusy(false); alert("Could not change the work order release: "+res.error); await loadGoAhead(); return; }
+    if(res.warn) alert(res.warn);
+    if(bomAns) await loadPbom();
     setGoBusy(false);
     await loadGoAhead();
     onChanged && onChanged();
@@ -14034,9 +14022,9 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
       // Sales Head or a Super Admin can act on it.
       goState==="Hold" && readyForGoAhead && h("span",{style:{fontSize:10.5,padding:"2px 8px",borderRadius:9,background:"#fff4d6",color:"#854f0b",fontWeight:600}},
         "Ready — work order not released"),
-      canReleaseGoAhead(user,isSalesHead) && h("select",{value:"",disabled:goBusy,
+      canReleaseGoAhead(user,isSalesHead||isTechHeadSO) && h("select",{value:"",disabled:goBusy,
         onChange:e=>{ const v=e.target.value; if(v) releaseGoAhead(v); },
-        title:"Only the Sales Head and Super Admins see this",
+        title:"Only the Sales Head, the Technical Head and Super Admins see this",
         style:{...inputStyle,padding:"2px 6px",fontSize:10.5,width:150}},
         h("option",{value:""},goBusy?"Working…":"Work order release…"),
         GO_AHEAD_STATES.filter(st=>st!==goState).map(st=>h("option",{key:st,value:st},woLabel(st)))
@@ -23709,6 +23697,51 @@ async function createWorkOrder(contractNumber, slNos, username, note){
   await logAudit("CREATE","work_order_tbl",wo_number,"Work order raised for Sl No "+slNos.join(", "),username||"unknown",null,null);
   return { workOrder:wo };
 }
+// 244: Sales Head, Technical Head (post) and Super Admins release work orders.
+async function woReleaserPosts(user){
+  if(!user || !user.id) return { sales:false, tech:false };
+  try{ const [{ data: emp },{ data: holders }] = await Promise.all([
+      sb.from("employee_tbl").select("employee_name").eq("app_user_id",user.id).limit(1).maybeSingle(),
+      sb.from("post_holder_tbl").select("employee_name,post_key").in("post_key",["sales_head","technical_head"]) ]);
+    const me = emp && emp.employee_name; const mine = (k)=> !!me && (holders||[]).some(x=>x.post_key===k && x.employee_name===me);
+    return { sales:mine("sales_head"), tech:mine("technical_head") }; }catch(e){ return { sales:false, tech:false }; }
+}
+// 244: the ONE release routine — the Sale Order and the "orders ready" list both call it, so the rules never drift.
+// Re-reads the state first: if somebody moved it meanwhile, nothing is written. Production BOM (link or a card to the
+// Technical Head) and the automatic work order for every Sl No not yet on one, exactly as before.
+async function woReleaseRun({ ct, toState, expectFrom, username, reason, bom, client, via }){
+  const { data: so, error: rErr } = await sb.from("sale_order_tbl").select("go_ahead_state,go_ahead_by,go_ahead_at,customer_name").eq("contract_number",ct).maybeSingle();
+  if(rErr) return { error:rErr.message };
+  if(!so) return { error:"No Sale Order for "+ct+"." };
+  const from = so.go_ahead_state||"Hold";
+  if(expectFrom!=null && from!==(expectFrom||"Hold")) return { stale:true, error:ct+" was just moved to \u201c"+woLabel(from)+"\u201d by "+(so.go_ahead_by||"someone")+(so.go_ahead_at?" ("+fmtDMY(so.go_ahead_at)+")":"")+". Nothing was changed." };
+  if(from===toState) return { stale:true, error:ct+" is already \u201c"+woLabel(from)+"\u201d." };
+  const note = [reason, via].filter(x=>x && String(x).trim()).join(" \u2014 ") || null;
+  const res = await setGoAheadState(ct, from, toState, username, note);
+  if(res.error) return res;
+  const prod = !res.backward && /^Start Production/.test(toState);
+  const now = new Date().toISOString(); const who = username||"unknown"; const out = { ok:true, backward:res.backward, from };
+  if(prod && bom && bom.yes===true && String(bom.link||"").trim()){
+    const link = String(bom.link).trim();
+    const { error } = await sb.from("sale_order_tbl").update({ prod_bom_link:link, prod_bom_link_by:who, prod_bom_link_at:now, prod_bom_answer:"Yes", prod_bom_answered_by:who, prod_bom_answered_at:now }).eq("contract_number",ct);
+    if(error) out.warn = "Production BOM link not saved: "+error.message;
+    else { await logAudit("UPDATE","sale_order_tbl",ct,"Production BOM link given at production release ("+toState+"): "+link,who,null,null); try{ await pbomTick(ct, null, who, true); }catch(e){} }
+  } else if(prod && bom && bom.yes===false){
+    await sb.from("sale_order_tbl").update({ prod_bom_answer:"No", prod_bom_answered_by:who, prod_bom_answered_at:now }).eq("contract_number",ct);
+    await logAudit("UPDATE","sale_order_tbl",ct,"Production release ("+toState+"): Production BOM not available \u2014 card to the "+postLabel(PBOM_POST)+" post",who,null,null);
+    await pbomTaskFor(ct, client||so.customer_name||"", "pending", who, { note:"Asked at production release ("+toState+") on "+fmtDMY(now)+" by "+who+": the Production BOM was not available." });
+  }
+  if(prod){
+    try{
+      const [{ data: ests }, onWo] = await Promise.all([ sb.from("estimates").select("item_sl_no").eq("reference_number",ct), slNosOnWorkOrders(ct) ]);
+      const taken = new Set((onWo||[]).map(r=>String(r.item_sl_no)));
+      const free = Array.from(new Set((ests||[]).map(e=>e.item_sl_no).filter(n=>n!=null && !taken.has(String(n))))).sort((a,b)=>Number(a)-Number(b));
+      if(free.length){ const created = await createWorkOrder(ct, free, username, "Raised automatically on production release"+(via?" ("+via+")":""));
+        if(created.error) out.warn = (out.warn?out.warn+"\n":"")+"Work order release saved, but the work order was not raised: "+created.error; else out.wo = created.workOrder; }
+    }catch(e){ out.warn = (out.warn?out.warn+"\n":"")+"Work order not raised: "+e.message; }
+  }
+  return out;
+}
 // Moves the state, writes the history row, and on a release raises the
 // work order for everything not yet issued.
 async function setGoAheadState(contractNumber, fromState, toState, username, reason){
@@ -29861,6 +29894,8 @@ const MANUAL_SECTIONS = [
       {"key": "training_sop", "title": "Training: the Document Control SOP and the Excel export", "tag": "Help", "blocks": [{"type": "p", "text": "Training (on the help bar, next to Tour) teaches the document flow from the Contract Register to despatch in 12 steps. Each step says who does it, where it is in the app (Open this screen takes you there), what to do and what stops you, with a screenshot made from sample data."}, {"type": "bullets", "items": ["The Overview shows the flow of gateways: Contract Register → Sale Order → Documents → Order Status board → Work order release → Purchase & GRN → Despatch. Click a box to go to its step.", "English / தமிழ் switches the language; the choice is remembered.", "▶ Play tour moves through every picture by itself, 9 seconds each, like a video. Pause stops it; ← and → move by hand. Click a picture to see it full size.", "The same SOP comes as a PDF and a silent captioned video (MP4) to share."]}, {"type": "h3", "text": "Offers and Orders to Excel"}, {"type": "bullets", "items": ["CRM → Offers & Orders → ⬇ Download Excel saves exactly the list on screen: the same filters, revisions choice and order.", "Values are in three columns: the value in the quote's own currency, the currency, and the value in INR worked out at the 1 USD rate typed on the screen (blank when no rate is typed).", "A second sheet, Filters used, records who exported it, when, every filter and the number of rows.", "For FSEs, the Sales Head, admins and super admins. Every export is written to the audit log."]}]},
       {"key": "task_done_click", "title": "☐ Done? Click — finishing a task card", "tag": "Tasks", "blocks": [{"type": "p", "text": "Task cards no longer have a green ✓ Completed. Press ☐ Done? Click when your work on the card is completed; the app says what happens next before it saves anything. A card turns green only once it is completed."}, {"type": "h3", "text": "Enquiry cards"}, {"type": "bullets", "items": ["The card shows its quote: Quote# … · Draft · not sent (amber), Quote# … · Offer Sent (green), or not made yet.", "The card completes by itself when its quote moves to Offer Sent or any later stage; the enquiry closes with it.", "☐ Done? Click while the quote is Draft (or not made) asks: Open / Start the quote, or Send for approval with a reason. Sent for approval, the card goes to Under Approval and the quote stays Draft; the approver approves or sends it back.", "Not quoting at all: use ✖ Regret Quote."]}, {"type": "h3", "text": "Other cards"}, {"type": "bullets", "items": ["As before: if you hold the card you choose Completed (no approval) or Send for approval; an approver or Super Admin completes it at once. Open checklist items are ticked.", "Document cards keep Send to client ▸ and Log client reply ▸; Under Approval cards keep ✓ Approve and ↩ Send back."]}]},
       {"key": "task_same_contract_subtask", "title": "Same contract, same person: sub-tasks, not new cards", "tag": "Tasks", "blocks": [{"type": "p", "text": "One person, one card per contract (or quote). When you save a new card for someone who already has an open card on the same contract or quote, the app asks before saving."}, {"type": "bullets", "items": ["Add as a sub-task: pick their card. The new work becomes a line under Sub-tasks on it, with its own due date and tick. If the line is due later than the card, the card's due date moves out. Links and the note go with it. No new card is made.", "Keep as a separate card: give the reason; it is kept in the card's history.", "The contract or quote is read from Linked to, or from the contract number in the Ref.", "Cards the app makes by itself (documents, chase letters, enquiries, procurement, despatch) are never offered and never asked about."]}, {"type": "h3", "text": "Finishing"}, {"type": "bullets", "items": ["Tick each sub-task line as it is done and Save. When every line is ticked, the app completes the card.", "In an open card, Sub-tasks → Add sub-task for the card's own holder adds a line on this card; for anyone else it still makes a card on their board."]}, {"type": "h3", "text": "Employees: new designation"}, {"type": "p", "text": "Add Employee has + Add new designation under the Designation box. Type it and press Add: it is saved to the Designations list and picked. The same name in any spelling of capitals is not added twice."}]},
+      {"key": "wo_release_ready_list", "title": "Releasing work orders from the Ready list", "tag": "Sales", "blocks": [{"type": "p", "text": "Once a day the Sales Head, the Technical Head and Super Admins see the orders whose Full Hold documents have all cleared but whose work order is not released. Each can be released from the list; it is the same release as on the Sale Order."}, {"type": "h3", "text": "Before release"}, {"type": "bullets", "items": ["✓ Hold documents cleared — or ⚠ No hold documents recorded (check the contract's documents are logged).", "✓ Sale Order approved — or ✖ Commercial / Technical approval pending. ✖ blocks; a Super Admin may release anyway with a reason.", "✓ PO attached — or ⚠ PO not attached (the order runs on an LOI).", "✓ / ⚠ Advance received — shown only when the delivery clock starts on the advance.", "✓ Production BOM loaded — or ⚠ not loaded: give the Drive link at release, or Not available (a card goes to the Technical Head)."]}, {"type": "h3", "text": "Releasing"}, {"type": "bullets", "items": ["Release ▸: pick Engineering started, Work order released – Code 2 (proposed) or Code 1. A reason is asked when anything is ⚠ or ✖; it is kept in the release history.", "A release into production raises the work order (contract/WO1, WO2 …) for every Sl No not already on one and flags it to every post.", "Release ticked: releases as Code 2 the ticked orders whose every item is ✓.", "If someone released the order a moment earlier, you are told who and nothing is written twice. The Sale Order, the Order Status board and Report by contract show the release at once."]}]},
+      {"key": "doc_add_missing_245", "title": "Add a missing document: quote, contract or others; stage and revision", "tag": "Documents", "blocks": [{"type": "p", "text": "Order Status → Document Control → + Missing document (or + on any list). The form now asks, in order:"}, {"type": "bullets", "items": ["Document for: Offer (Quote), Contract or Others.", "Contract: pick it from the contracts in the app, as on the Sale Order. Quote: pick the Quote# from the Quote Register. Only numbers in the list are accepted. Others: the field is greyed — the document is not linked.", "Category, title and number as before.", "Stage: the list it starts in. On Not submitted — our action: Initial submission? Yes (nothing sent yet) or No (a revision exists).", "Not an initial submission: the Rev no, then In or Out (we sent it / the client returned it), the status and the date. They are logged in the document's history.", "Hand to, why added, and the Drive link (required)."]}, {"type": "h3", "text": "No link at hand?"}, {"type": "bullets", "items": ["Press Add or “Don't have the link?”: the app shows the steps — leave the window open, minimise it, open Google Drive, right-click the folder or file → Share → Copy link, come back to the app, paste, Save with this link.", "What you typed stays in the form (and in this browser for a day; opening the form again offers to carry on).", "Cancel adding asks “Are you sure?” before anything typed is thrown away."]}, {"type": "p", "text": "A document for a quote shows on the quote's Documents; quote and Others documents get their own task card when they start as our action. The contract board shows contract documents only."}]},
       {
         "key": "doc_hold_change",
         "title": "Document Control table: grouped by contract, and changing one document's hold",
@@ -30395,6 +30430,8 @@ const MANUAL_SECTIONS = [
 // English text with a note. Screen and button names stay in English on purpose,
 // so they match what is on the screen. Not proofread — small errors accepted.
 const MANUAL_TA = {
+ "doc_add_missing_245": {"title":"விடுபட்ட document சேர்ப்பது: quote, contract அல்லது others; stage, revision","tag":"Documents","blocks":[{"type":"p","text":"Order Status → Document Control → + Missing document (அல்லது எந்தப் பட்டியலிலும் +). Form இப்போது வரிசையாகக் கேட்கும்:"},{"type":"bullets","items":["Document for: Offer (Quote), Contract அல்லது Others.","Contract: Sale Order-இல் உள்ளது போல app-இல் உள்ள contracts-இலிருந்து தேர்ந்தெடுங்கள். Quote: Quote Register-இலிருந்து Quote#-ஐத் தேர்ந்தெடுங்கள். பட்டியலில் உள்ள எண்கள் மட்டுமே ஏற்கப்படும். Others: அந்தப் பெட்டி சாம்பல் நிறம் — document எதனுடனும் இணைக்கப்படாது.","Category, title, number முன்பு போலவே.","Stage: அது தொடங்கும் பட்டியல். Not submitted — our action என்றால்: Initial submission? Yes (இன்னும் எதுவும் அனுப்பவில்லை) அல்லது No (ஒரு revision உள்ளது).","Initial submission இல்லையென்றால்: Rev no, பிறகு In அல்லது Out (நாம் அனுப்பியது / client திருப்பியது), status, தேதி. இவை document history-இல் பதிவாகும்.","Hand to, why added, Drive link (கட்டாயம்)."]},{"type":"h3","text":"Link கையில் இல்லையா?"},{"type":"bullets","items":["Add அல்லது “Don't have the link?” அழுத்துங்கள்: app படிகளைக் காட்டும் — window-ஐத் திறந்தே வையுங்கள், minimise செய்யுங்கள், Google Drive திறங்கள், folder அல்லது file-ஐ right-click → Share → Copy link, app-க்குத் திரும்புங்கள், paste செய்து Save with this link.","நீங்கள் type செய்தவை form-இல் இருக்கும் (இந்த browser-இல் ஒரு நாள்; மீண்டும் form திறந்தால் தொடரலாமா எனக் கேட்கும்).","Cancel adding, type செய்தவற்றை நீக்கும் முன் “Are you sure?” எனக் கேட்கும்."]},{"type":"p","text":"Quote-க்கான document அந்த quote-இன் Documents-இல் தெரியும்; quote, Others documents our action-இல் தொடங்கினால் அவற்றுக்கு தனி task card வரும். Contract board contract documents-ஐ மட்டுமே காட்டும்."}],"en_sig":"c7ab0973"},
+ "wo_release_ready_list": {"title":"Ready list-இலிருந்து work orders release செய்வது","tag":"Sales","blocks":[{"type":"p","text":"தினமும் ஒருமுறை Sales Head, Technical Head, Super Admins-க்கு, எல்லா Full Hold documents-உம் clear ஆகியும் work order release ஆகாத orders காட்டப்படும். ஒவ்வொன்றையும் இந்தப் பட்டியலிலிருந்தே release செய்யலாம்; அது Sale Order-இல் செய்யும் அதே release."},{"type":"h3","text":"Release-க்கு முன்"},{"type":"bullets","items":["✓ Hold documents cleared — அல்லது ⚠ No hold documents recorded (contract-இன் documents பதிவாகியுள்ளதா எனப் பாருங்கள்).","✓ Sale Order approved — அல்லது ✖ Commercial / Technical approval pending. ✖ தடுக்கும்; Super Admin காரணத்துடன் release செய்யலாம்.","✓ PO attached — அல்லது ⚠ PO not attached (order LOI-இல் ஓடுகிறது).","✓ / ⚠ Advance received — delivery clock advance-இல் தொடங்கும்போது மட்டும் காட்டப்படும்.","✓ Production BOM loaded — அல்லது ⚠ not loaded: release-இல் Drive link கொடுங்கள், அல்லது Not available (Technical Head-க்கு card செல்லும்)."]},{"type":"h3","text":"Release செய்வது"},{"type":"bullets","items":["Release ▸: Engineering started, Work order released – Code 2 (பரிந்துரை) அல்லது Code 1 தேர்ந்தெடுங்கள். ⚠ அல்லது ✖ இருந்தால் காரணம் கேட்கப்படும்; அது release history-இல் இருக்கும்.","Production-க்கு release செய்தால், இன்னும் work order-இல் இல்லாத ஒவ்வொரு Sl No-க்கும் work order (contract/WO1, WO2 …) உருவாகி ஒவ்வொரு post-க்கும் flag ஆகும்.","Release ticked: tick செய்த, எல்லாம் ✓ உள்ள orders-ஐ Code 2-ஆக release செய்யும்.","ஒரு கணம் முன் வேறொருவர் release செய்திருந்தால், யார் என்று சொல்லப்படும், எதுவும் இருமுறை எழுதப்படாது. Sale Order, Order Status board, Report by contract உடனே release-ஐக் காட்டும்."]}],"en_sig":"122c3b21"},
  "task_same_contract_subtask": {"title":"ஒரே contract, ஒரே நபர்: புதிய cards இல்லை, sub-tasks","tag":"Tasks","blocks":[{"type":"p","text":"ஒரு நபருக்கு ஒரு contract-க்கு (அல்லது quote-க்கு) ஒரு card. அதே contract அல்லது quote-இல் ஏற்கனவே open card உள்ள ஒருவருக்கு புதிய card-ஐ save செய்தால், save செய்யும் முன் app கேட்கும்."},{"type":"bullets","items":["Add as a sub-task: அவரது card-ஐத் தேர்ந்தெடுங்கள். புதிய வேலை அதில் Sub-tasks-இன் கீழ் ஒரு வரியாகும், தனி due date, tick-உடன். அந்த வரி card-ஐ விடப் பின்னர் due என்றால் card-இன் due date தள்ளிப்போகும். Links, note அதனுடன் செல்லும். புதிய card உருவாகாது.","Keep as a separate card: காரணத்தைக் கொடுங்கள்; அது card-இன் history-இல் இருக்கும்.","Contract அல்லது quote, Linked to-விலிருந்தோ Ref-இல் உள்ள contract எண்ணிலிருந்தோ எடுக்கப்படும்.","App தானாகச் செய்யும் cards (documents, chase letters, enquiries, procurement, despatch) ஒருபோதும் காட்டப்படாது, கேட்கப்படாது."]},{"type":"h3","text":"முடிப்பது"},{"type":"bullets","items":["ஒவ்வொரு sub-task வரியும் முடிந்ததும் tick செய்து Save செய்யுங்கள். எல்லா வரிகளும் tick ஆனதும் app card-ஐ முடிக்கும்.","திறந்த card-இல், Sub-tasks → Add sub-task card-இன் சொந்த holder-க்கு என்றால் இந்த card-இலேயே ஒரு வரி சேர்க்கும்; வேறு யாருக்காவது என்றால் அவர் board-இல் card உருவாகும்."]},{"type":"h3","text":"Employees: புதிய designation"},{"type":"p","text":"Add Employee-இல் Designation பெட்டியின் கீழ் + Add new designation உள்ளது. Type செய்து Add அழுத்துங்கள்: Designations பட்டியலில் சேமிக்கப்பட்டு தேர்ந்தெடுக்கப்படும். பெரிய/சிறிய எழுத்து வேறுபாட்டுடன் அதே பெயர் இரண்டு முறை சேராது."}],"en_sig":"20c9736c"},
  "task_done_click": {"title":"☐ Done? Click — task card-ஐ முடிப்பது","tag":"Tasks","blocks":[{"type":"p","text":"Task cards-இல் இனி பச்சை ✓ Completed இல்லை. Card-இன் வேலை முடிந்ததும் ☐ Done? Click அழுத்துங்கள்; எதையும் சேமிக்கும் முன் அடுத்து என்ன நடக்கும் என்று app சொல்லும். Card முடிந்த பிறகுதான் பச்சையாகும்."},{"type":"h3","text":"Enquiry cards"},{"type":"bullets","items":["Card அதன் quote-ஐக் காட்டும்: Quote# … · Draft · not sent (மஞ்சள்), Quote# … · Offer Sent (பச்சை), அல்லது இன்னும் செய்யவில்லை.","Quote Offer Sent அல்லது அதற்குப் பிந்தைய stage-க்குச் சென்றதும் card தானாக முடியும்; enquiry-உம் மூடும்.","Quote Draft-ஆக (அல்லது செய்யாமல்) இருக்கும்போது ☐ Done? Click கேட்கும்: Quote-ஐ Open / Start செய்யுங்கள், அல்லது காரணத்துடன் Send for approval. Approval-க்கு அனுப்பினால் card Under Approval-க்குச் செல்லும், quote Draft-ஆகவே இருக்கும்; approver approve செய்வார் அல்லது திருப்பி அனுப்புவார்.","Quote செய்யவே போவதில்லை என்றால்: ✖ Regret Quote."]},{"type":"h3","text":"மற்ற cards"},{"type":"bullets","items":["முன்பு போலவே: card உங்களிடம் இருந்தால் Completed (approval இல்லை) அல்லது Send for approval தேர்ந்தெடுக்கலாம்; approver அல்லது Super Admin உடனே முடிப்பார். திறந்துள்ள checklist items tick ஆகும்.","Document cards-இல் Send to client ▸, Log client reply ▸ அப்படியே; Under Approval cards-இல் ✓ Approve, ↩ Send back அப்படியே."]}],"en_sig":"e3e68dd1"},
  "training_sop": {"title":"பயிற்சி: Document Control SOP, Excel export","tag":"Help","blocks":[{"type":"p","text":"Training (help bar-இல் Tour அருகில்) Contract Register முதல் despatch வரை document ஓட்டத்தை 12 படிகளில் கற்பிக்கிறது. ஒவ்வொரு படியும் யார் செய்வது, app-இல் எங்கே (Open this screen அங்கே அழைத்துச் செல்லும்), என்ன செய்ய வேண்டும், எது தடுக்கும் என்று சொல்லும், மாதிரி தரவில் எடுத்த screenshot-உடன்."},{"type":"bullets","items":["Overview gateways ஓட்டத்தைக் காட்டும்: Contract Register → Sale Order → Documents → Order Status board → Work order release → Purchase & GRN → Despatch. ஒரு பெட்டியை click செய்தால் அதன் படிக்குச் செல்லும்.","English / தமிழ் மொழியை மாற்றும்; தேர்வு நினைவில் இருக்கும்.","▶ Play tour ஒவ்வொரு படத்தையும் தானாக, ஒவ்வொன்றும் 9 வினாடிகள், video போல நகர்த்தும். Pause நிறுத்தும்; ← → கையால் நகர்த்தும். படத்தை click செய்தால் முழு அளவில் தெரியும்.","அதே SOP PDF ஆகவும், captions உள்ள ஒலியில்லா video (MP4) ஆகவும் பகிர வருகிறது."]},{"type":"h3","text":"Offers, Orders-ஐ Excel-க்கு"},{"type":"bullets","items":["CRM → Offers & Orders → ⬇ Download Excel திரையில் உள்ள பட்டியலை அப்படியே சேமிக்கும்: அதே filters, revisions தேர்வு, வரிசை.","மதிப்புகள் மூன்று columns-இல்: quote-இன் சொந்த currency-இல் மதிப்பு, currency, திரையில் type செய்த 1 USD rate-இல் கணக்கிட்ட INR மதிப்பு (rate இல்லையென்றால் காலி).","இரண்டாவது sheet Filters used: யார், எப்போது, ஒவ்வொரு filter, எத்தனை வரிகள்.","FSEs, Sales Head, admins, super admins-க்கு. ஒவ்வொரு export-உம் audit log-இல் பதிவாகும்."]}],"en_sig":"fe07d9b6"},
@@ -33279,6 +33316,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"23 Oct 2026 (245)", summary:"Built on 2026-10-23T08:00:00Z, on top of 2026-10-23T07:30:00Z. No SQL (a document for Others may need one if the database limits entity types \u2014 the app says so). ADD A MISSING DOCUMENT (every list of the Document Control board, its bar button, all views): first Document for \u2014 Offer (Quote) / Contract / Others. Contract: picked from the contracts in the app (Sale Orders and the Contract Register), limit to list. Quote: picked from the Quote Register, limit to list. Others: the field is greyed (not linked). Stage: the board\u2019s lists; on Not submitted \u2014 our action it asks Initial submission? (Yes = nothing sent; No = a revision exists). When it is not an initial submission: Rev no, then In or Out (shown once the Rev is given), the status and the date \u2014 logged in the document history. A quote / Others document gets its own task card (quote cards linked to the quote). DRIVE LINK stays mandatory: pressing Add without it opens step-by-step instructions (leave the window open, minimise, open Google Drive, Share \u2192 Copy link, come back, paste, Save with this link), with Back to the form and Cancel adding. Cancel (and clicking outside) asks Are you sure when anything was typed. What was typed is kept in this browser for a day: opening the form again offers to carry on." },
+  { date:"23 Oct 2026 (244)", summary:"Built on 2026-10-23T07:30:00Z, on top of 2026-10-23T06:50:00Z. No SQL. RELEASE FROM THE READY LIST: the daily pop-up \u201corders ready \u2014 work order not released\u201d now goes to the Technical Head post too (with the Sales Head and Super Admins). Each order shows what stands before the release: Hold documents cleared / No hold documents recorded (\u26a0), Sale Order approved / Commercial or Technical approval pending (\u2716), PO attached / not attached on an LOI (\u26a0), Advance received / not received when the delivery clock starts on it (\u26a0), Production BOM loaded / not loaded (\u26a0, asked at release). Release \u25b8 opens the release: Engineering started / Code 2 (proposed) / Code 1, the Production BOM link or Not available (card to the Technical Head), a reason when anything is \u26a0 or \u2716; \u2716 blocks except for a Super Admin. Release ticked releases, as Code 2, the ticked orders whose every item is \u2713. ONE RELEASE ROUTINE: the Sale Order and the pop-up call the same routine (woReleaseRun): it re-reads the state first and writes nothing if someone moved it meanwhile; work order for every Sl No not already on one; Production BOM link/card; history and audit (\u201creleased from the Ready list\u201d). The Technical Head may also release from the Sale Order." },
   { date:"23 Oct 2026 (243)", summary:"Built on 2026-10-23T06:50:00Z, on top of 2026-10-23T04:00:00Z (includes 242, ☐ Done? Click). No SQL. FIX: the 05:00 and 05:30 files carried the old build version inside and kept reloading on start (blinking screen); this file replaces both. SUB-TASKS INSTEAD OF NEW CARDS: saving a new card for a person who already has an open card on the same contract or quote (Linked to, or the contract number in its Ref) asks first — pick the card and Add as a sub-task (a line under Sub-tasks with its own due date and tick; the card's due date moves out if the new line is later; its links and note go with it; no new card), or Keep as a separate card (reason asked, kept in its history). Applies to everyone, the Document Controller included; cards the app makes (documents, chase letters, enquiries, procurement, despatch) are not offered and not asked. A card whose Sub-tasks lines are all ticked is completed by the app when saved. The Sub-tasks section of a card adds a line on the card itself when the person is the card's own holder; anyone else still gets a card on their board. EMPLOYEES: + Add new designation under the Designation box of Add Employee — anyone who can add an employee; the same spelling in any case is not added twice (the existing one is picked); audit-logged. The Designation list box when editing a row also lets anyone add." },
   { date:"23 Oct 2026 (242)", summary:"Built on 2026-10-23T05:00:00Z, on top of 2026-10-23T04:00:00Z. No SQL. ☐ DONE? CLICK: the green ✓ Completed on task cards (every task board, the Task Assignment Board, cards opened from the Order Status board, Sale Order and Quote) is now an outlined ☐ Done? Click — an instruction, not a status; green is used only once a card is completed. ENQUIRY CARDS show their quote: Quote# … · Draft · not sent (amber), Quote# … · Offer Sent (green), not made / no Quote# yet. ☐ Done? Click on an enquiry card whose quote is still Draft or not made says so first: Open / Start the quote (the card and the enquiry close by themselves at Offer Sent), or Send for approval with a reason — the card goes to Under Approval and the quote stays Draft. This applies to everyone, approvers included. Document cards keep Send to client ▸ / Log client reply ▸; Approve, Close (pile) unchanged." },
   { date:"23 Oct 2026 (241)", summary:"Built on 2026-10-23T04:00:00Z, on top of 2026-10-23T03:45:00Z. No new SQL. BUILD V — OFFERS / ORDERS TO EXCEL: CRM → Offers & Orders gets ⬇ Download Excel for FSEs, the Sales Head, admins and super admins: exactly the list on screen (filters, Latest revision / All revisions, sort); the value in three columns — Value (the quote's own currency), Currency, Value (INR) worked out at the 1 USD rate typed on the screen (blank when no rate); a second sheet Filters used (who, when, every filter, rows); Orders the same (Value, Currency, Value (INR), total), and its button is now for the same people. Each export is in the audit log. BUILD U — TRAINING: Help bar → Training: the Document Control SOP from the Contract Register to despatch in 12 steps — who, where (Open this screen), what to do, what stops you — with screenshots (sample data), the flow of gateways, English / தமிழ், and ▶ Play tour (9 seconds a picture). The same SOP comes as a PDF and a silent captioned video with this build. Manual: new article \"Training: the Document Control SOP and the Excel export\" (English and Tamil)." },
@@ -35188,45 +35227,121 @@ function SignatoryOverrideNoticesPopup({ notices, onAcknowledgeOne, onAcknowledg
 // Hold documents have all cleared but which nobody has released yet. The
 // app finds them; a person still clicks. (20 Sep)
 function GoAheadPendingPrompt({ user, onDone, onOpenContract }){
+  // 244: each row says what stands before the release and has Release ▸; Release ticked does the fully clear ones.
   const [rows,setRows] = useState(null);
-  useEffect(()=>{
-    (async()=>{
-      try{
-        const [{data:sos},{data:holds}] = await Promise.all([
-          pagedRead(()=>sb.from("sale_order_tbl").select("id,contract_number,customer_name,go_ahead_state,oa_issued_on")),
-          sb.from("v_full_hold_outstanding").select("contract_number,full_hold_docs_open")
-        ]);
-        const openBy = new Map((holds||[]).map(hh=>[hh.contract_number, Number(hh.full_hold_docs_open)||0]));
-        // Ready = documents clear AND still on Hold. An order whose
-        // documents are clear but which somebody already released is not
-        // pending anything.
-        setRows((sos||[]).filter(so=>(so.go_ahead_state||"Hold")==="Hold" && (openBy.get(so.contract_number)||0)===0));
-      }catch(e){ console.error("Go-ahead prompt failed", e); setRows([]); }
-    })();
-  },[]);
+  const [tick,setTick] = useState({});
+  const [rel,setRel] = useState(null);     // { r, toState, bomYes, link, reason, busy, err }
+  const [msg,setMsg] = useState("");
+  const [busyAll,setBusyAll] = useState(false);
+  const isSA = user?.role==="super_admin";
+  const load = async()=>{
+    try{
+      const [{data:sos},{data:holds}] = await Promise.all([
+        pagedRead(()=>sb.from("sale_order_tbl").select("id,contract_number,customer_name,go_ahead_state,oa_issued_on,commercial_approved_by,technical_approved_by")),
+        sb.from("v_full_hold_outstanding").select("contract_number,full_hold_docs_open")
+      ]);
+      const openBy = new Map((holds||[]).map(hh=>[hh.contract_number, Number(hh.full_hold_docs_open)||0]));
+      // Ready = documents clear AND still on Hold.
+      const base = (sos||[]).filter(so=>(so.go_ahead_state||"Hold")==="Hold" && (openBy.get(so.contract_number)||0)===0);
+      const cts = base.map(r=>r.contract_number);
+      let hold = {}, reqs = [], del = [], trig = [], bomSet = new Set();
+      try{ hold = await ctHoldLoad(true) || {}; }catch(e){}
+      try{ for(let k=0;k<cts.length;k+=150){ const { data } = await sb.from("document_requests_tbl").select("entity_id,category,is_mandatory,fulfilled_document_id").in("entity_id",cts.slice(k,k+150)); reqs = reqs.concat(data||[]); } }catch(e){}
+      try{ for(let k=0;k<cts.length;k+=150){ const { data } = await sb.from("v_contract_delivery").select("contract_number,delivery_trigger,trigger_advance_at").in("contract_number",cts.slice(k,k+150)); del = del.concat(data||[]); } }catch(e){}
+      try{ const { data } = await sb.from("delivery_trigger_tbl").select("trigger_key,needs_advance"); trig = data||[]; }catch(e){}
+      try{ bomSet = await pbomLoadedSet(cts); }catch(e){}
+      const poWait = new Set(outstandingMandatory(reqs).filter(isPoDocRequirement).map(r=>String(r.entity_id)));
+      setRows(base.map(r=>{
+        const ct = r.contract_number, chips = [];
+        const hd = hold[String(ct)];
+        chips.push(hd && hd.holdDocs ? { k:"ok", t:"Hold documents cleared" } : { k:"warn", t:"No hold documents recorded", why:"No document on this contract has a hold level — check its documents are logged." });
+        if(soAllApproved(r)) chips.push({ k:"ok", t:"Sale Order approved" });
+        else { if(!r.commercial_approved_by) chips.push({ k:"bad", t:"Commercial approval pending", why:"Accounts Admin approves on the Sale Order." });
+               if(!r.technical_approved_by) chips.push({ k:"bad", t:"Technical approval pending", why:"The FSE or the Sales Head approves on the Sale Order." }); }
+        chips.push(poWait.has(String(ct)) ? { k:"warn", t:"PO not attached (LOI)", why:"The order runs on an LOI; the PO is still awaited." } : { k:"ok", t:"PO attached" });
+        const dv = del.find(x=>x.contract_number===ct); const tg = dv && trig.find(t=>t.trigger_key===dv.delivery_trigger);
+        if(tg && tg.needs_advance) chips.push(dv.trigger_advance_at ? { k:"ok", t:"Advance received" } : { k:"warn", t:"Advance not received", why:"The delivery clock starts on the advance." });
+        const bomOk = bomSet.has(ct);
+        chips.push(bomOk ? { k:"ok", t:"Production BOM loaded" } : { k:"warn", t:"Production BOM not loaded", bom:true, why:"Give the Drive link at release, or send it to the Technical Head." });
+        return { ...r, chips, bomOk, clear: chips.every(c=>c.k==="ok"), blocked: chips.some(c=>c.k==="bad") };
+      }));
+    }catch(e){ console.error("Go-ahead prompt failed", e); setRows([]); }
+  };
+  useEffect(()=>{ load(); },[]);
   if(rows===null) return null;
   if(!rows.length){ onDone(); return null; }
+  const CH = { ok:["#eef6f3","#0f7a5c"], warn:["#fff6df","#7a5200"], bad:["#fbe9e7","#a3312a"] };
+  const chip = (c,i)=> h("span",{key:i,title:c.why||"",style:{display:"inline-block",fontSize:10.5,fontWeight:700,borderRadius:9,padding:"1px 7px",margin:"1px 3px 1px 0",background:CH[c.k][0],color:CH[c.k][1],border:"1px solid "+CH[c.k][1],whiteSpace:"nowrap"}},(c.k==="ok"?"✓ ":c.k==="bad"?"✖ ":"⚠ ")+c.t);
+  const doOne = async(r, toState, bom, reason)=>{
+    const res = await woReleaseRun({ ct:r.contract_number, toState, expectFrom:"Hold", username:user?.username, reason, bom, client:r.customer_name, via:"released from the Ready list" });
+    return res;
+  };
+  const openRel = (r)=>{ if(r.blocked && !isSA){ alert(r.contract_number+": "+r.chips.filter(c=>c.k==="bad").map(c=>c.t+" — "+(c.why||"")).join("\n")+"\n\nOnly a Super Admin can release it before that, with a reason."); return; }
+    setRel({ r, toState:"Start Production Code 2", bomYes: r.bomOk ? null : true, link:"", reason:"", busy:false, err:"" }); };
+  const needReason = (r)=> r.chips.some(c=>c.k==="bad" || (c.k==="warn" && !c.bom));
+  const confirmRel = async()=>{
+    const a = rel; const r = a.r; const prod = /^Start Production/.test(a.toState);
+    if(prod && !r.bomOk && a.bomYes===true && !/^https?:\/\/\S+\.\S+/i.test(String(a.link||"").trim())){ setRel({...a,err:"Paste the Drive link to the Production BOM, or pick “Not available”."}); return; }
+    if(needReason(r) && !String(a.reason||"").trim()){ setRel({...a,err:"Give the reason for releasing with the items marked ⚠ / ✖."}); return; }
+    setRel({...a,busy:true,err:""});
+    const res = await doOne(r, a.toState, prod && !r.bomOk ? { yes:a.bomYes===true, link:a.link } : null, String(a.reason||"").trim() || null);
+    if(res.error){ setRel({...a,busy:false,err:res.error}); if(res.stale) load(); return; }
+    setRel(null); setMsg("✓ "+r.contract_number+": "+woLabel(a.toState)+(res.wo?" · "+res.wo.wo_number+" raised":"")+(res.warn?" — "+res.warn:""));
+    setRows(x=>(x||[]).filter(y=>y.contract_number!==r.contract_number));
+  };
+  const relTicked = async()=>{
+    const list = rows.filter(r=>tick[r.contract_number] && r.clear);
+    if(!list.length){ alert("Tick the orders to release. Only orders with every item ✓ can be released together; the others go one by one with Release ▸."); return; }
+    if(!confirm("Release "+list.length+" order"+(list.length>1?"s":"")+" as “Work order released – Code 2” and raise their work orders?\n\n"+list.map(r=>r.contract_number+" – "+(r.customer_name||"")).join("\n"))) return;
+    setBusyAll(true); const done = [], bad = [];
+    for(const r of list){ const res = await doOne(r, "Start Production Code 2", null, null); if(res.error) bad.push(r.contract_number+": "+res.error); else done.push(r.contract_number+(res.wo?" ("+res.wo.wo_number+")":"")); }
+    setBusyAll(false); setTick({});
+    setMsg((done.length?"✓ Released: "+done.join(", "):"")+(bad.length?(done.length?" · ":"")+"Not released — "+bad.join("; "):""));
+    setRows(x=>(x||[]).filter(y=>!done.some(d=>d.indexOf(y.contract_number)===0)));
+  };
+  const nClear = rows.filter(r=>r.clear).length, nTick = rows.filter(r=>tick[r.contract_number] && r.clear).length;
+  const relBox = rel ? (()=>{ const a = rel, r = a.r, prod = /^Start Production/.test(a.toState);
+    return h("div",{"data-t":"wo-rel",onClick:e=>{ if(e.target===e.currentTarget && !a.busy) setRel(null); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.35)",zIndex:1360,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"60px 16px"}},
+      h("div",{style:{background:"#fff",borderRadius:10,padding:"16px 18px",width:540,maxWidth:"100%"}},
+        h("div",{style:{fontWeight:700,fontSize:14.5}},"Release work order — "+r.contract_number+" · "+(r.customer_name||"")),
+        h("div",{style:{margin:"10px 0",fontSize:12.5,lineHeight:1.6}}, r.chips.map((c,i)=>h("div",{key:i},h("span",{style:{color:CH[c.k][1],fontWeight:700,display:"inline-block",width:18}},c.k==="ok"?"✓":c.k==="bad"?"✖":"⚠"),c.t,c.why&&c.k!=="ok"?h("span",{style:{color:colors.muted}}," — "+c.why):null))),
+        h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:8}},h("b",{style:{fontSize:12.5}},"Release as"),
+          ["Start Engineering","Start Production Code 2","Start Production Code 1"].map(st=>h("button",{key:st,"data-st":st,onClick:()=>setRel({...a,toState:st}),style:{...btnSmall,fontSize:11.5,background:a.toState===st?colors.dark:"#fff",color:a.toState===st?"#fff":colors.text}},woLabel(st)))),
+        prod && !r.bomOk ? h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,padding:"8px 10px",marginBottom:8,fontSize:12.5}},
+          h("b",null,"Production BOM"),
+          h("label",{style:{display:"flex",gap:6,alignItems:"center",marginTop:6}},h("input",{type:"radio",checked:a.bomYes===true,onChange:()=>setRel({...a,bomYes:true})}),"Drive link:",
+            h("input",{"data-t":"wo-rel-link",value:a.link,placeholder:"https://drive.google.com/…",onChange:e=>setRel({...a,link:e.target.value,bomYes:true}),style:{...inputStyle,flex:1,padding:"5px 7px",fontSize:12}})),
+          h("label",{style:{display:"flex",gap:6,alignItems:"center",marginTop:4}},h("input",{type:"radio","data-t":"wo-rel-nobom",checked:a.bomYes===false,onChange:()=>setRel({...a,bomYes:false})}),"Not available — card to "+postPersonText(PBOM_POST))) : null,
+        prod ? h("div",{style:{fontSize:12,color:colors.muted,marginBottom:8}},"The work order for every Sl No not yet on one is raised with the release, and flagged to every post.") : null,
+        needReason(r) ? h("textarea",{"data-t":"wo-rel-why",rows:2,value:a.reason,placeholder:"Reason for releasing with the ⚠ / ✖ items (kept in the release history)",onChange:e=>setRel({...a,reason:e.target.value}),style:{...inputStyle,fontSize:12.5,marginBottom:6}}) : null,
+        a.err ? h("div",{style:{fontSize:12,color:colors.danger,marginBottom:6,whiteSpace:"pre-wrap"}},a.err) : null,
+        h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end"}},
+          h("button",{onClick:()=>setRel(null),disabled:a.busy,style:btnSecondary},"Cancel"),
+          h("button",{"data-t":"wo-rel-go",onClick:confirmRel,disabled:a.busy,style:btnPrimary},a.busy?"Working…":"Release"+(prod?" and raise the work order":"")))));
+  })() : null;
   return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1350,display:"flex",alignItems:"center",justifyContent:"center",padding:16}},
-    h("div",{style:{background:"#fff",borderRadius:12,padding:"22px 26px",width:560,maxWidth:"94vw",maxHeight:"80vh",overflowY:"auto"}},
+    h("div",{"data-t":"wo-ready",style:{background:"#fff",borderRadius:12,padding:"22px 26px",width:860,maxWidth:"96vw",maxHeight:"84vh",overflowY:"auto"}},
       h("div",{style:{fontWeight:700,fontSize:15,marginBottom:4}},rows.length+" order"+(rows.length>1?"s":"")+" ready — work order not released"),
-      h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:14}},"Every Full Hold document on these has cleared to Code 2 or better. The work order has not been released."),
-      h("table",{style:{width:"100%",fontSize:12,borderCollapse:"collapse",marginBottom:14}},
+      h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:12}},"Every Full Hold document on these has cleared to Code 2 or better. Release from here or from the Sale Order — it is the same release. ✖ blocks (a Super Admin may release anyway, with a reason); ⚠ needs a reason."),
+      h("div",{style:{overflowX:"auto"}},h("table",{style:{width:"100%",minWidth:640,fontSize:12,borderCollapse:"collapse",marginBottom:12}},
         h("thead",null,h("tr",{style:{background:"#faf9f4",textAlign:"left"}},
+          h("th",{style:{padding:"6px 8px",width:24}},h("input",{type:"checkbox",title:"Tick every order that is fully clear",checked:nClear>0 && nTick===nClear,onChange:e=>{ const t = {}; if(e.target.checked) rows.filter(r=>r.clear).forEach(r=>{ t[r.contract_number]=true; }); setTick(t); }})),
           h("th",{style:{padding:"6px 8px",fontSize:10.5}},"Contract"),
-          h("th",{style:{padding:"6px 8px",fontSize:10.5}},"Customer"),
-          h("th",{style:{padding:"6px 8px",fontSize:10.5}},"")
-        )),
-        h("tbody",null, rows.map(r=>h("tr",{key:r.id,style:{borderTop:"1px solid #f0eee6"}},
-          h("td",{style:{padding:"6px 8px",fontWeight:600}},h(CtRef,{ct:r.contract_number,name:r.customer_name,compact:true})),
-          h("td",{style:{padding:"6px 8px",color:colors.muted}},r.customer_name||"—"),
-          h("td",{style:{padding:"6px 8px",textAlign:"right"}},
+          h("th",{style:{padding:"6px 8px",fontSize:10.5}},"Before release"),
+          h("th",{style:{padding:"6px 8px",fontSize:10.5}},""))),
+        h("tbody",null, rows.map(r=>h("tr",{key:r.id,"data-ct":r.contract_number,style:{borderTop:"1px solid #f0eee6"}},
+          h("td",{style:{padding:"6px 8px"}},h("input",{type:"checkbox",disabled:!r.clear,title:r.clear?"":"Not every item is ✓ — release this one with Release ▸",checked:!!tick[r.contract_number],onChange:e=>setTick(t=>({...t,[r.contract_number]:e.target.checked}))})),
+          h("td",{style:{padding:"6px 8px",fontWeight:600,whiteSpace:"nowrap"}},h(CtRef,{ct:r.contract_number,name:r.customer_name,compact:true})),
+          h("td",{style:{padding:"6px 8px"}},r.chips.map(chip)),
+          h("td",{style:{padding:"6px 8px",textAlign:"right",whiteSpace:"nowrap"}},
+            h("button",{"data-t":"wo-rel-btn",onClick:()=>openRel(r),title:r.blocked&&!isSA?"Blocked — see the ✖ items":"Release the work order",style:{...btnSmall,fontSize:10.5,fontWeight:700,marginRight:4,...(r.blocked&&!isSA?{opacity:.5}:{background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c"})}},"Release ▸"),
             h("button",{onClick:()=>{ onDone(); onOpenContract && onOpenContract(r); },style:{...btnSmall,fontSize:10.5}},"Open"))
-        )))
-      ),
-      h("div",{style:{display:"flex",justifyContent:"flex-end"}},
-        h("button",{onClick:onDone,style:btnSecondary},"Later"))
-    )
-  );
+        ))))),
+      msg ? h("div",{"data-t":"wo-msg",style:{fontSize:12,color:"#0f6e56",marginBottom:10,whiteSpace:"pre-wrap"}},msg) : null,
+      h("div",{style:{display:"flex",justifyContent:"space-between",gap:8,flexWrap:"wrap"}},
+        h("button",{"data-t":"wo-rel-ticked",onClick:relTicked,disabled:busyAll||!nTick,style:{...btnPrimary,opacity:nTick?1:.5}},busyAll?"Releasing…":"Release ticked ("+nTick+") — Code 2"),
+        h("button",{onClick:onDone,style:btnSecondary},"Later"))),
+    relBox);
 }
 // Orders running on an LOI with the PO still not attached (22 Sep). Once a
 // day, to the Sales Coordinator, the Sales Head and Super Admins. It stops
@@ -52038,6 +52153,8 @@ function App() {
   };
   const [isSalesCoordinatorUser,setIsSalesCoordinatorUser]=useState(false);
   const [isSalesHeadUser,setIsSalesHeadUser]=useState(false);
+  const [isTechHeadUser,setIsTechHeadUser]=useState(false);   // 244
+  useEffect(()=>{ woReleaserPosts(user).then(r=>setIsTechHeadUser(!!r.tech)); },[user?.id]);
   useEffect(()=>{
     if(!user?.id){ setIsSalesHeadUser(false); return; }
     (async()=>{
@@ -52116,7 +52233,7 @@ function App() {
       h("button",{onClick:()=>setReturnToReport(false),title:"Dismiss",
         style:{background:"transparent",border:"none",color:"#cfeee3",fontSize:15,padding:"6px 12px 6px 6px",cursor:"pointer"}},"\u00d7")
     ),
-    (isSalesHeadUser||user.role==="super_admin") && showGoAheadPrompt && h(GoAheadPendingPrompt,{user,onDone:dismissGoAheadPrompt,onOpenContract:openContract}),
+    (isSalesHeadUser||isTechHeadUser||user.role==="super_admin") && showGoAheadPrompt && h(GoAheadPendingPrompt,{user,onDone:dismissGoAheadPrompt,onOpenContract:openContract}),
     showWorkOrderFlags && h(WorkOrderFlagPrompt,{user,onDone:()=>setShowWorkOrderFlags(false)}),
     (isSalesCoordinatorUser||isSalesHeadUser||user.role==="super_admin") && showLoiPrompt && h(LoiPoAwaitedPrompt,{onDone:dismissLoiPrompt,onOpenContract:openContract}),
     (user.role==="admin"||user.role==="super_admin") && showDocSequenceReminder && h(DocumentSequenceReminder,{onDone:dismissDocSequenceReminder}),
@@ -56193,11 +56310,11 @@ async function docNonCritRelease(cn, by, dcNo){
 // 183: a missing document's link must be the OneDrive (or Drive) folder or file.
 function docReviewLinkOk(raw){
   const url = String(raw||"").trim();
-  if(!url) return "The OneDrive link is required: paste the link to the document's folder or file.";
+  if(!url) return "The Drive link is required: paste the link to the document's folder or file.";
   if(!/^https:\/\//i.test(url)) return "The link must be a full web address starting https://";
-  let host = ""; try{ host = new URL(url).hostname.toLowerCase(); }catch(e){ return "That doesn't read as a web address. Paste the link exactly as OneDrive gives it."; }
+  let host = ""; try{ host = new URL(url).hostname.toLowerCase(); }catch(e){ return "That doesn't read as a web address. Paste the link exactly as Drive gives it (Share \u2192 Copy link)."; }
   if(/onedrive\.live\.com$|(^|\.)1drv\.ms$|sharepoint\.com$|(^|\.)drive\.google\.com$|(^|\.)docs\.google\.com$/.test(host)) return "";
-  return "That is not a OneDrive link ("+host+"). Paste the OneDrive link to the document's folder or file.";
+  return "That is not a Drive link ("+host+"). Paste the Google Drive (or OneDrive) link to the document's folder or file.";
 }
 const DOC_ADD_CODE_HOURS = 24;
 const DOC_ADD_WHY = ["Found missing in review","Client asked for it later","Was on Trello only","Was in OneDrive, not in the app"];
@@ -56905,7 +57022,8 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
   const [tile,setTile] = useState(null);     // 174: picked count tile
   const [mine,setMine] = useState(false);    // 174: count / show only my cards
   const [del,setDel] = useState(null);       // 174: open contracts with a delivery date
-  const [ad,setAd] = useState({});           // 183: + Missing document form
+  const [ad,setAd] = useState({});
+  const [adCts,setAdCts] = useState(null); const [adQs,setAdQs] = useState(null); const [adHelp,setAdHelp] = useState(false);   // 245           // 183: + Missing document form
   const [lf,setLf] = useState(null);         // 183: ⚙ Lists form (Super Admin)
   const [fDue,setFDueS] = useState(()=>{ try{ return localStorage.getItem("doc_due")||"all"; }catch(e){ return "all"; } });   // 211
   const setFDue = (v)=>{ setFDueS(v); try{ localStorage.setItem("doc_due",v); }catch(e){} };
@@ -57536,26 +57654,63 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     return base+"-"+String(1+Math.max(0,...used)).padStart(3,"0");
   };
   const addDirOf = (to)=>{ const b = docCustomOf(to) ? docCustomOf(to).base : to; return b==="client" ? "Out" : "In"; };
+  // 245: the document is for an Offer (Quote#, from the Quote Register), a Contract (as on the Sale Order) or Others (not linked).
+  const DOC_ADD_DRAFT = "flo_doc_add_draft";
+  const adRel = (a)=> a.rel || (a.ct ? "contract" : "");
+  const adRef = (a)=> adRel(a)==="other" ? "GENERAL" : a.ct;
+  const adWhat = (a)=> adRel(a)==="quote" ? "Quote# "+a.ct : adRel(a)==="other" ? "general documents (no contract or quote)" : "contract "+a.ct;
+  const adInit = (a)=> a.start==="our" && a.initial!==false;   // initial submission: nothing sent yet, no revision to record
+  const adKeep = (n)=>{ try{ if(n && (n.title||n.ct||n.cat||n.link)) sessionStorage.setItem(DOC_ADD_DRAFT, JSON.stringify({ at:Date.now(), a:{ ...n, code:"" } })); }catch(e){} };
+  const adForget = ()=>{ try{ sessionStorage.removeItem(DOC_ADD_DRAFT); }catch(e){} };
+  const adLoadLists = ()=>{
+    if(!adCts) taskContractList().then(l=>setAdCts(l||[])).catch(()=>setAdCts([]));
+    if(!adQs) fetchPaged(()=>sb.from("register_line_tbl").select("quote_no,customer_name,struck_kind")).then(rows=>{
+      const m = new Map(); (rows||[]).forEach(r=>{ const q = String(r.quote_no||"").trim(); if(q && !r.struck_kind && !m.has(q)) m.set(q, r.customer_name||""); });
+      setAdQs([...m.entries()].sort((x,y)=>y[0].localeCompare(x[0])).map(([q,c])=>[q, q+(c?" \u2013 "+c:"")])); }).catch(()=>setAdQs([]));
+  };
   const openAdd = (to)=>{
+    adLoadLists(); setAdHelp(false);
+    let dr = null; try{ dr = JSON.parse(sessionStorage.getItem(DOC_ADD_DRAFT)||"null"); }catch(e){}
+    if(dr && dr.a && Date.now()-(dr.at||0) < 864e5 && confirm("You were adding \u201c"+(dr.a.title||dr.a.cat||"a document")+"\u201d"+(dr.a.ct?" ("+dr.a.ct+")":"")+" and did not save it.\n\nOK = carry on with it\nCancel = start a new one")){ setAd({ ...dr.a, code:"" }); setPanel("add"); return; }
+    adForget();
     const c = mode==="one" ? curCt : "";
-    setAd({ ct:c, cat:"", title:"", num:"", numTouched:false, start:to||"our", status:"", rev:"0", dir:addDirOf(to||"our"), date:today, owner:"", why:DOC_ADD_WHY[0], whyText:"", link:"", code:"" });
+    setAd({ rel:c?"contract":"", ct:c, cat:"", title:"", num:"", numTouched:false, start:to||"our", initial:(to||"our")==="our", status:"", rev:"", dir:"", date:today, owner:"", why:DOC_ADD_WHY[0], whyText:"", link:"", code:"" });
     setPanel("add");
   };
   const setAdF = (k, v)=> setAd(a=>{
     const n = { ...a, [k]:v };
-    if((k==="ct" || k==="cat") && !a.numTouched) n.num = numFor(n.ct, n.cat);
+    if(k==="rel"){ n.ct = ""; }
+    if((k==="ct" || k==="cat" || k==="rel") && !a.numTouched) n.num = numFor(adRel(n)==="other" ? "GEN" : n.ct, n.cat);
     if(k==="cat" && (!a.title || a.title===a.cat)) n.title = v;
     if(k==="num") n.numTouched = true;
-    if(k==="start"){ n.dir = addDirOf(v); n.status = ""; }
+    if(k==="start"){ n.dir = ""; n.status = ""; n.rev = ""; n.initial = v==="our"; }
+    if(k==="initial"){ n.status = ""; n.dir = ""; n.rev = ""; }
+    if(k==="rev" && String(v).trim()==="") n.dir = "";
+    adKeep(n);
     return n;
   });
+  const cancelAdd = ()=>{
+    const a = ad || {};
+    const typed = !!(a.ct || a.cat || a.link || String(a.title||"").trim() || String(a.whyText||"").trim());
+    if(typed && !confirm("Are you sure you want to cancel?\n\nWhat you entered for this document will be lost.")) return;
+    adForget(); setAdHelp(false); setPanel(null);
+  };
   const addWhy = (a)=>{ const t = String(a.whyText||"").trim(); return a.why==="Other" ? t : (a.why + (t ? " — "+t : "")); };
   const addCheck = (a)=>{
-    if(!a.ct) return "Pick the contract.";
+    const rel = adRel(a);   // 245
+    if(!rel) return "Say what the document is for: Offer (Quote), Contract or Others.";
+    if(rel==="contract" && !a.ct) return "Pick the contract from the list.";
+    if(rel==="quote" && !a.ct) return "Pick the Quote# from the Quote Register list.";
+    if(rel==="contract" && adCts && !adCts.some(x=>String(x[0])===String(a.ct)) && !boardContracts.includes(a.ct)) return "Contract "+a.ct+" is not in the app. Pick it from the list.";
+    if(rel==="quote" && adQs && !adQs.some(x=>x[0]===a.ct)) return "Quote# "+a.ct+" is not in the Quote Register. Pick it from the list.";
     if(!a.cat) return "Pick the document category.";
     if(!String(a.title||"").trim()) return "Give the document a title.";
     if(!String(a.num||"").trim()) return "Give the document a number.";
-    if(a.start!=="our" && !a.status) return "Pick the status it is at (the list “"+docListOf(a.start).label+"” needs one).";
+    if(!adInit(a)){   // 245: not an initial submission — the revision it is at
+      if(String(a.rev==null?"":a.rev).trim()==="" || !(Number(a.rev)>=0)) return "Give the revision number it is at (0 for the first issue).";
+      if(!a.dir) return "Say whether Rev "+a.rev+" is Out (we sent it to the client) or In (the client returned it).";
+      if(!a.status) return "Pick the status it is at (the list “"+docListOf(a.start).label+"” needs one).";
+    }
     const lk = docReviewLinkOk(a.link); if(lk) return lk;
     if(a.why==="Other" && !String(a.whyText||"").trim()) return "Say why it is being added.";
     return "";
@@ -57567,25 +57722,42 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     const { data:taken } = await sb.from("universal_documents_tbl").select("entity_id").ilike("doc_number",docNo.replace(/[%_]/g,"\\$&")).limit(1);
     if(taken && taken.length) throw new Error(docNo+" is already used"+(taken[0].entity_id?" on "+taken[0].entity_id:"")+". Pick another number.");
     const why = addWhy(a), now = new Date().toISOString(), link = String(a.link).trim();
-    const ins = await sb.from("universal_documents_tbl").insert({ doc_number:docNo, doc_name:String(a.title).trim(), category:a.cat, entity_type:"contract", entity_id:a.ct, is_mandatory:false, is_archived:false,
+    const rel = adRel(a) || "contract", ref = adRef(a), etype = rel==="quote" ? "quote" : rel==="other" ? "other" : "contract";   // 245
+    const ins = await sb.from("universal_documents_tbl").insert({ doc_number:docNo, doc_name:String(a.title).trim(), category:a.cat, entity_type:etype, entity_id:ref, is_mandatory:false, is_archived:false,
       for_production: !!(docCategoryRow(data.cats,a.cat)||{}).for_production_default, created_by:by, owner:a.owner||null,
       review_added_by:by, review_added_at:now, review_reason:why, review_link:link, review_via:via }).select().single();
     if(ins.error){ if(/review_/.test(ins.error.message||"")) throw new Error("Run structure_doc_board_gateway_2026-10-13.sql first (both companies)."); throw ins.error; }
     const docId = ins.data.id;
-    await sb.from("document_requests_tbl").insert({ entity_type:"contract", entity_id:a.ct, category:a.cat, fulfilled_document_id:docId, requested_by:by, is_mandatory:false, source:"review", owner:a.owner||null });
-    if(a.start!=="our"){
+    if(rel!=="other") await sb.from("document_requests_tbl").insert({ entity_type:etype, entity_id:ref, category:a.cat, fulfilled_document_id:docId, requested_by:by, is_mandatory:false, source:"review", owner:a.owner||null });
+    if(!adInit(a)){
       const at = (a.date && a.date!==today) ? a.date+"T12:00:00" : now;
       const { error } = await sb.from("universal_document_history_tbl").insert({ document_id:docId, doc_number:docNo, rev_number:Number(a.rev)||0, direction:a.dir, status:a.status,
         link, reason:"Added in review: "+why, notes:"Added in review: "+why, changed_by:by, changed_at:at });
       if(error) throw error;
     }
-    await logAudit("INSERT","universal_documents_tbl",a.ct,"Added in review: "+docNo+" "+String(a.title).trim()+" ("+a.cat+") in “"+docListOf(a.start).label+"”"+(a.owner?", handed to "+a.owner:"")+" — "+why+" ["+via+"]",user?.username||"unknown",null,null);
-    if(a.owner && a.owner!==me) await notifyPeople([a.owner], "📄 "+(me||by)+" added "+String(a.title).trim()+" ("+docNo+") to contract "+a.ct+" in review and handed it to you — "+why+". Order Status → Document Control.", "doc_review_add");
+    // 245: quote / other documents are not on the contract board, so their task card is made here (our action only)
+    const ourStage = (docCustomOf(a.start) ? docCustomOf(a.start).base : a.start)==="our";
+    if(rel!=="contract" && ourStage){
+      const ownerE = a.owner ? (data.emps||[]).find(e=>e.employee_name===a.owner) : null;
+      const dept = a.owner && ownerE && !empInDept(ownerE, DOC_DEPT) ? (ownerE.department||DOC_DEPT) : DOC_DEPT;
+      const card = { title:String(a.title).trim()+(adInit(a)?" \u2014 prepare & submit":" \u2014 resubmit"), ref:docNo+" \u00b7 "+(rel==="quote"?a.ct:"general"), department:dept, assignee:a.owner||null,
+        due_date: a.owner ? addDaysISO(today,3) : null, status:"open", labels:["Document"], links:[{ name:"Drive", url:link }], checklists:[], notes:"Added in review: "+why, created_by:by,
+        ...(rel==="quote" ? { link_kind:"quote", link_ref:a.ct } : {}) };
+      let r = await sb.from("task_tbl").insert(card).select().single();
+      if(r.error && /link_kind|link_ref/.test(r.error.message||"")){ const c2 = { ...card }; delete c2.link_kind; delete c2.link_ref; r = await sb.from("task_tbl").insert(c2).select().single(); }
+      if(r.error) console.error("Card for the added document not made", r.error);
+      else await taskLog(r.data.id, by, "Created with document "+docNo+" ("+adWhat(a)+") "+(a.owner?"on "+a.owner+"'s board":"in the "+DOC_DEPT+" Unassigned pile"));
+    }
+    await logAudit("INSERT","universal_documents_tbl",ref,"Added in review: "+docNo+" "+String(a.title).trim()+" ("+a.cat+", "+adWhat(a)+") in “"+docListOf(a.start).label+"”"+(adInit(a)?"":" at Rev "+(Number(a.rev)||0)+" "+a.dir)+(a.owner?", handed to "+a.owner:"")+" — "+why+" ["+via+"]",user?.username||"unknown",null,null);
+    if(a.owner && a.owner!==me) await notifyPeople([a.owner], "📄 "+(me||by)+" added "+String(a.title).trim()+" ("+docNo+") to "+adWhat(a)+" in review and handed it to you — "+why+". "+(rel==="contract"?"Order Status → Document Control.":"Your task board."), "doc_review_add");
     return docNo;
   };
   const saveAdd = async()=>{
-    const a = ad; const err = addCheck(a); if(err){ alert(err); return; }
-    const dup = data.items.filter(it=>it.ct===a.ct && it.cat===a.cat);
+    const a = ad;
+    const err0 = addCheck({ ...a, link:"https://drive.google.com/x" }); if(err0){ alert(err0); return; }   // 245: everything but the link first
+    if(!String(a.link||"").trim()){ setAdHelp(true); return; }
+    const err = addCheck(a); if(err){ alert(err); return; }
+    const dup = adRel(a)==="contract" ? data.items.filter(it=>it.ct===a.ct && it.cat===a.cat) : [];
     if(dup.length && !confirm("Contract "+a.ct+" already has "+dup.map(it=>"“"+it.name+"” ("+(it.no||"requested")+", "+docListOf(it.sub||it.list).short+")").join(", ")+" under "+a.cat+".\n\nAdd another one anyway?")) return;
     let via;
     if(isSuper) via = "Super Admin";
@@ -57595,8 +57767,8 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
       if(!c){ alert("Adding a document needs an Admin's code. Press Ask an Admin, or enter the code an Admin gave you."); return; }
       const { data:rows } = await sb.from("authorization_codes").select("*").eq("code",c).eq("code_type","doc_add").eq("used",false).limit(1);
       const row = rows && rows[0];
-      if(!row){ alert("That code didn't work. It must be the add-document code an Admin gave for contract "+a.ct+"."); return; }
-      if(row.reference_number && row.reference_number!==a.ct){ alert("That code is for contract "+row.reference_number+", not "+a.ct+"."); return; }
+      if(!row){ alert("That code didn't work. It must be the add-document code an Admin gave for "+adWhat(a)+"."); return; }
+      if(row.reference_number && row.reference_number!==adRef(a)){ alert("That code is for "+row.reference_number+", not "+adRef(a)+"."); return; }
       if(row.expires_at && new Date(row.expires_at) < new Date()){ alert("That code has expired. Ask an Admin for a new one."); return; }
       await sb.from("authorization_codes").update({ used:true, used_by:user?.username||"unknown", used_at:new Date().toISOString() }).eq("id",row.id);
       via = "code from "+(row.generated_by||"Admin");
@@ -57604,68 +57776,101 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
     setBusy(true);
     try{
       const docNo = await doAdd(a, user?.username||"unknown", via);
-      if(via.startsWith("code")){ try{ const rq = (data.addReqs||[]).filter(r=>r.contract_number===a.ct && r.requested_by===user?.username && (r.status==="Open"||r.status==="Code given")); if(rq.length) await sb.from("doc_add_request_tbl").update({ status:"Code used", resolved_at:new Date().toISOString() }).in("id",rq.map(r=>r.id)); }catch(e){} }
-      if(via==="Admin"){ try{ await notifySuperAdmins("📄 "+(me||user?.username)+" (Admin) added "+String(a.title).trim()+" ("+docNo+") to contract "+a.ct+" during review — "+addWhy(a)+(a.owner?" · handed to "+a.owner:"")+". Order Status → Document Control → Review additions.", company && company.company_name, "doc_review_add"); }catch(e){} }
-      setPanel(null); await load(true);
-    }catch(e){ alert("Could not add the document:\n\n"+(e&&e.message||e)); }
+      if(via.startsWith("code")){ try{ const rq = (data.addReqs||[]).filter(r=>r.contract_number===adRef(a) && r.requested_by===user?.username && (r.status==="Open"||r.status==="Code given")); if(rq.length) await sb.from("doc_add_request_tbl").update({ status:"Code used", resolved_at:new Date().toISOString() }).in("id",rq.map(r=>r.id)); }catch(e){} }
+      if(via==="Admin"){ try{ await notifySuperAdmins("📄 "+(me||user?.username)+" (Admin) added "+String(a.title).trim()+" ("+docNo+") to "+adWhat(a)+" during review — "+addWhy(a)+(a.owner?" · handed to "+a.owner:"")+". Order Status → Document Control → Review additions.", company && company.company_name, "doc_review_add"); }catch(e){} }
+      adForget(); setAdHelp(false); setPanel(null); await load(true);
+    }catch(e){ alert("Could not add the document:\n\n"+(e&&e.message||e)+(/entity_type|check constraint/i.test(String(e&&e.message||e)) && adRel(a)!=="contract" ? "\n\nDocuments for a quote or for Others need a small SQL \u2014 send this message to Bala." : "")); }
     finally{ setBusy(false); }
   };
   const askAdmin = async()=>{
-    const a = ad; const err = addCheck(a); if(err){ alert(err); return; }
+    const a = ad;
+    const err0 = addCheck({ ...a, link:"https://drive.google.com/x" }); if(err0){ alert(err0); return; }
+    if(!String(a.link||"").trim()){ setAdHelp(true); return; }   // 245
+    const err = addCheck(a); if(err){ alert(err); return; }
     const payload = { ...a }; delete payload.code; delete payload.numTouched;
     setBusy(true);
     try{
-      const r = await sb.from("doc_add_request_tbl").insert({ contract_number:a.ct, payload, requested_by:user?.username||"unknown", status:"Open" });
+      const r = await sb.from("doc_add_request_tbl").insert({ contract_number:adRef(a), payload, requested_by:user?.username||"unknown", status:"Open" });
       if(r.error) throw new Error(/doc_add_request/.test(r.error.message||"") ? "Run structure_doc_board_gateway_2026-10-13.sql first (both companies)." : r.error.message);
       const who = me || user?.username;
       const names = (await priceCheckAdminNames()).filter(x=>x!==who);
-      await notifyPeople(names, "📄 "+who+" asks to add "+String(a.title).trim()+" ("+a.cat+") to contract "+a.ct+" — "+addWhy(a)+". Order Status → Document Control → Requests to add: approve it, give a code, or send it back.", "doc_add_request");
+      await notifyPeople(names, "📄 "+who+" asks to add "+String(a.title).trim()+" ("+a.cat+") to "+adWhat(a)+" — "+addWhy(a)+". Order Status → Document Control → Requests to add: approve it, give a code, or send it back.", "doc_add_request");
       await logAudit("INSERT","doc_add_request_tbl",a.ct,"Asked an Admin to add "+String(a.title).trim()+" ("+a.cat+") — "+addWhy(a),user?.username||"unknown",null,null);
       alert("Sent to "+(names.length?names.join(", "):"the Admins")+". If an Admin approves it, the card appears on the board. If they give you a code, open + Missing document again and enter it.");
-      setPanel(null); await load(false);
+      adForget(); setAdHelp(false); setPanel(null); await load(false);
     }catch(e){ alert("Could not send the request:\n\n"+(e&&e.message||e)); }
     finally{ setBusy(false); }
   };
   const fld = (label, el, k)=> h("div",{key:k||label,style:{display:"grid",gridTemplateColumns:"150px 1fr",gap:8,alignItems:"center",marginTop:7}}, h("span",{style:{fontSize:11.5,color:colors.muted}},label), el);
   const inS = {...inputStyle,padding:"6px 8px",fontSize:12,width:"100%",boxSizing:"border-box"};
   const addModal = ()=>{
-    const a = ad;
+    const a = ad; const rel = adRel(a);
     const startLists = docStageLists().filter(l=>l.key!=="confirm");
-    const stOpts = a.start==="our" ? [] : docPickable(data.statuses).filter(s=>docListMatch(s, a.start)).map(docStatusName).filter(Boolean);
+    const stOpts = docPickable(data.statuses).filter(s=>docListMatch(s, a.start)).map(docStatusName).filter(Boolean);   // 245: "our" too, for a resubmission due
     const hold = a.cat ? holdLabel((docCategoryRow(data.cats,a.cat)||{}).hold_level||"") : "—";
     const needCode = !isAdmin;
-    return modal(600, [
+    const ctOpts = (()=>{ const m = new Map(); (adCts||[]).forEach(x=>m.set(String(x[0]), ctOptLabel(x[0], x[1]))); boardContracts.forEach(c=>{ if(!m.has(String(c))) m.set(String(c), ctOptLabel(c,(data.soBy[c]||{}).customer_name)); }); return [...m.entries()].sort((x,y)=>y[0].localeCompare(x[0])); })();
+    const relBtn = (k,l)=> h("button",{key:k,"data-testid":"add-rel-"+k,onClick:()=>setAdF("rel",k),style:{...btnSmall,padding:"6px 12px",fontWeight:700,background:rel===k?colors.dark:"#fff",color:rel===k?"#fff":colors.text,borderColor:rel===k?colors.dark:colors.border}},l);
+    const yn = (k,v,l)=> h("button",{key:l,"data-testid":"add-"+k+"-"+(v?"yes":"no"),onClick:()=>setAdF(k,v),style:{...btnSmall,padding:"5px 10px",background:a[k]===v?colors.dark:"#fff",color:a[k]===v?"#fff":colors.text}},l);
+    const help = adHelp ? h("div",{key:"help","data-testid":"add-link-help",onClick:e=>e.stopPropagation(),style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1010,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"40px 12px",overflowY:"auto"}},
+      h("div",{style:{background:"#fff",borderRadius:10,width:560,maxWidth:"100%",padding:"16px 18px"}},
+        h("b",{style:{fontSize:14.5}},"The Drive link is needed to save this document"),
+        h("div",{style:{fontSize:12,color:colors.muted,margin:"4px 0 10px"}},"Nothing is lost: what you typed stays here while you fetch the link."),
+        h("ol",{style:{margin:"0 0 10px 18px",padding:0,fontSize:13,lineHeight:1.6}},
+          h("li",null,h("b",null,"Leave this window open.")," Don't close the tab or press Back."),
+          h("li",null,h("b",null,"Minimise the app"),": the – button at the top right of this browser window (or open a new tab with Ctrl + T)."),
+          h("li",null,h("b",null,"Open Google Drive"),", drive.google.com. Find the document's folder or file."),
+          h("li",null,"Right-click it → ",h("b",null,"Share → Copy link"),"."),
+          h("li",null,h("b",null,"Come back to the app"),": click it on the taskbar to maximise it again."),
+          h("li",null,h("b",null,"Paste the link below")," (Ctrl + V) and press ",h("b",null,"Save with this link"),".")),
+        h("input",{"data-testid":"add-help-link",value:a.link||"",onChange:e=>setAdF("link",e.target.value),placeholder:"Paste the Drive link here: https://drive.google.com/…",style:{...inS,fontSize:13,padding:"8px 9px"}}),
+        h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:4}},"Saving is not possible without the link. If you can't get it now, press Back to the form and keep this window open, or cancel adding."),
+        h("div",{style:{display:"flex",gap:8,justifyContent:"space-between",flexWrap:"wrap",marginTop:12}},
+          h("button",{"data-testid":"add-help-cancel",style:{...btnSmall,color:colors.danger,borderColor:"#e3a7a2"},onClick:cancelAdd},"Cancel adding the document"),
+          h("span",{style:{display:"flex",gap:8}},
+            h("button",{style:btnSmall,onClick:()=>setAdHelp(false)},"Back to the form"),
+            h("button",{"data-testid":"add-help-save",style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},disabled:busy,onClick:()=>{ const e2 = docReviewLinkOk(a.link); if(e2){ alert(e2); return; } setAdHelp(false); needCode && !String(a.code||"").trim() ? askAdmin() : saveAdd(); }},"Save with this link"))))) : null;
+    return modal(640, [
       h("b",{key:"t",style:{fontSize:14}},"Add a missing document"),
-      h("div",{key:"s",style:{fontSize:11.5,color:colors.muted,marginTop:3}},"Found missing while reviewing? Add it here and hand it to someone. It becomes one of the contract's required documents, and the person gets a task card."),
-      fld("Contract", h(SearchPick,{value:a.ct,onChange:v=>setAdF("ct",v),width:420,placeholder:"Type a contract number or customer",options:boardContracts.map(c=>[c, ctOptLabel(c,(data.soBy[c]||{}).customer_name)])}),"ct"),
+      h("div",{key:"s",style:{fontSize:11.5,color:colors.muted,marginTop:3}},"Found missing while reviewing? Add it here and hand it to someone. It becomes one of the required documents of its contract or quote, and the person gets a task card."),
+      fld("Document for", h("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}}, relBtn("quote","Offer (Quote)"), relBtn("contract","Contract"), relBtn("other","Others")),"rel"),
+      fld(rel==="quote" ? "Quote# (Quote Register)" : "Contract",
+        rel==="quote" ? h(SearchPick,{value:a.ct,onChange:v=>setAdF("ct",v),width:440,placeholder:adQs?"Type a Quote# or customer — pick from the list":"Loading the Quote Register…",options:adQs||[]})
+                      : h(SearchPick,{value:rel==="contract"?a.ct:"",disabled:rel!=="contract",onChange:v=>setAdF("ct",v),width:440,placeholder: rel==="other" ? "— not linked (Others) —" : !rel ? "Pick Offer, Contract or Others first" : "Type a contract number or customer — pick from the list",options:ctOpts}),"ct"),
       fld("Document category", h("select",{value:a.cat,onChange:e=>setAdF("cat",e.target.value),style:inS,"data-testid":"add-cat"}, h("option",{value:""},"— pick —"), addCats.map(c=>h("option",{key:c,value:c},c))),"cat"),
       fld("Title", h("input",{value:a.title||"",onChange:e=>setAdF("title",e.target.value),style:inS,"data-testid":"add-title"}),"ti"),
       fld("Doc number", h("input",{value:a.num||"",onChange:e=>setAdF("num",e.target.value),style:inS,"data-testid":"add-num"}),"nu"),
-      fld("Starts in", h("select",{value:a.start,onChange:e=>setAdF("start",e.target.value),style:inS,"data-testid":"add-start"}, startLists.map(l=>h("option",{key:l.key,value:l.key},l.label+(docCustomOf(l.key)?" (added list)":"")))),"st"),
-      a.start!=="our" ? h("div",{key:"rv",style:{background:"#f6f6f2",borderRadius:6,padding:"4px 8px 8px",marginTop:6}},
+      fld("Stage", h("select",{value:a.start,onChange:e=>setAdF("start",e.target.value),style:inS,"data-testid":"add-start"}, startLists.map(l=>h("option",{key:l.key,value:l.key},l.label+(docCustomOf(l.key)?" (added list)":"")))),"st"),
+      a.start==="our" ? fld("Initial submission?", h("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}}, yn("initial",true,"Yes — nothing sent yet"), yn("initial",false,"No — a revision exists")),"ini") : null,
+      !adInit(a) ? h("div",{key:"rv",style:{background:"#f6f6f2",borderRadius:6,padding:"4px 8px 8px",marginTop:6}},
+        fld("Rev no", h("input",{type:"number",min:0,value:a.rev,placeholder:"e.g. 1",onChange:e=>setAdF("rev",e.target.value),style:{...inS,width:100},"data-testid":"add-rev"}),"rn"),
+        String(a.rev==null?"":a.rev).trim()!=="" ? fld("In or Out", h("select",{value:a.dir,onChange:e=>setAdF("dir",e.target.value),style:{...inS,width:280},"data-testid":"add-dir"}, h("option",{value:""},"— pick —"), h("option",{value:"Out"},"Out — we sent Rev "+a.rev+" to the client"), h("option",{value:"In"},"In — the client returned Rev "+a.rev)),"rd") : null,
         fld("Status it is at", h("select",{value:a.status,onChange:e=>setAdF("status",e.target.value),style:inS,"data-testid":"add-status"}, h("option",{value:""},"— pick —"), stOpts.map(x=>h("option",{key:x,value:x},x))),"ss"),
-        fld("Rev / direction", h("div",{style:{display:"flex",gap:6}}, h("input",{type:"number",min:0,value:a.rev,onChange:e=>setAdF("rev",e.target.value),style:{...inS,width:80}}),
-          h("select",{value:a.dir,onChange:e=>setAdF("dir",e.target.value),style:{...inS,width:200}}, h("option",{value:"Out"},"Out — we sent it"), h("option",{value:"In"},"In — client returned it"))),"rd"),
         fld("Date", h("input",{type:"date",value:a.date,onChange:e=>setAdF("date",e.target.value),style:{...inS,width:170}}),"dt")) : null,
       fld("Hand to", h("select",{value:a.owner,onChange:e=>setAdF("owner",e.target.value),style:inS,"data-testid":"add-owner"}, h("option",{value:""},"📥 Unassigned (Document Control pile)"), addPeople.map(p=>h("option",{key:p,value:p},p))),"ow"),
       fld("Hold level", h("span",{style:{fontSize:12}},hold+" (from the category)"),"hl"),
       fld("Why added", h("div",{style:{display:"flex",gap:6}}, h("select",{value:a.why,onChange:e=>setAdF("why",e.target.value),style:{...inS,width:230}}, [...DOC_ADD_WHY,"Other"].map(x=>h("option",{key:x,value:x},x))),
         h("input",{value:a.whyText||"",onChange:e=>setAdF("whyText",e.target.value),placeholder:a.why==="Other"?"say why (required)":"more detail (optional)",style:inS})),"wh"),
-      fld(h("span",null,"OneDrive link ",h("b",{style:{color:"#a3312a"}},"(required)")), h("input",{value:a.link||"",onChange:e=>setAdF("link",e.target.value),placeholder:"https://onedrive.live.com/… (the document's folder or file)",style:inS,"data-testid":"add-link"}),"lk"),
+      fld(h("span",null,"Drive link ",h("b",{style:{color:"#a3312a"}},"(required)")), h("div",null,
+        h("input",{value:a.link||"",onChange:e=>setAdF("link",e.target.value),placeholder:"https://drive.google.com/… (the document's folder or file)",style:inS,"data-testid":"add-link"}),
+        !String(a.link||"").trim() ? h("button",{"data-testid":"add-link-howto",onClick:()=>setAdHelp(true),style:{background:"none",border:"none",padding:"3px 0 0",cursor:"pointer",font:"inherit",fontSize:11.5,fontWeight:700,color:"#2a6db0"}},"Don't have the link? How to get it ▸") : null),"lk"),
       h("div",{key:"what",style:{background:"#e4f3ed",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:10,lineHeight:1.45}},
-        "On Add: the card goes into “"+docListOf(a.start).label+"”"+(a.owner?", handed to "+a.owner+" (bell + task card":" (Unassigned pile")+(a.start==="our"||((docCustomOf(a.start)||{}).base==="our")?", due by the task type's days)":")")+"; the contract lists it as a required document; it carries an “Added in review” tag for 30 days and is listed under Review additions."),
+        rel==="contract" || !rel
+          ? "On Add: the card goes into “"+docListOf(a.start).label+"”"+(a.owner?", handed to "+a.owner+" (bell + task card":" (Unassigned pile")+(a.start==="our"||((docCustomOf(a.start)||{}).base==="our")?", due by the task type's days)":")")+"; the contract lists it as a required document; it carries an “Added in review” tag for 30 days and is listed under Review additions."
+          : "On Add: the document is recorded for "+(rel==="quote"?"Quote# "+(a.ct||"…")+" (it shows on the quote's Documents)":"general use (no contract or quote)")+(a.start==="our"||((docCustomOf(a.start)||{}).base==="our") ? "; "+(a.owner?a.owner+" gets":"the Document Control pile gets")+" a task card to "+(adInit(a)?"prepare and submit it":"resubmit it")+"." : ".")+" The contract board shows contract documents only."),
       needCode ? h("div",{key:"code",style:{background:"#fff4d6",border:"1px solid #f0d9a8",borderRadius:8,padding:"8px 10px",marginTop:10,fontSize:12,color:"#5c3d06"}},
         h("b",null,"Adding a document needs an Admin's code."),
         h("div",{style:{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginTop:6}},
           h("button",{style:{...btnSmall,background:"#2a6db0",color:"#fff",borderColor:"#2a6db0",fontWeight:700},disabled:busy,onClick:askAdmin,"data-testid":"add-ask"},"Ask an Admin"),
           h("span",{style:{color:colors.muted}},"or, if an Admin gave you a code:"),
           h("input",{value:a.code||"",onChange:e=>setAdF("code",e.target.value),placeholder:"Code",style:{...inS,width:110,letterSpacing:".15em"},"data-testid":"add-code"})),
-        h("div",{style:{fontSize:11,color:colors.muted,marginTop:4}},"One code, for this contract only, valid "+DOC_ADD_CODE_HOURS+" hours.")) :
+        h("div",{style:{fontSize:11,color:colors.muted,marginTop:4}},"One code, for this contract or quote only, valid "+DOC_ADD_CODE_HOURS+" hours.")) :
         !isSuper ? h("div",{key:"adm",style:{fontSize:11,color:colors.muted,marginTop:8}},"You are an Admin: no code needed. Super Admins are told about the addition.") : null,
       h("div",{key:"b",style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}},
-        h("button",{style:btnSmall,onClick:()=>setPanel(null)},"Cancel"),
-        h("button",{style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},disabled:busy,onClick:saveAdd,"data-testid":"add-save"},busy?"Saving…":needCode?"Use code & add":"Add & hand over"))
-    ], ()=>setPanel(null));
+        h("button",{style:btnSmall,onClick:cancelAdd,"data-testid":"add-cancel"},"Cancel"),
+        h("button",{style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},disabled:busy,onClick:saveAdd,"data-testid":"add-save"},busy?"Saving…":needCode?"Use code & add":"Add & hand over")),
+      help
+    ], cancelAdd);
   };
   // Admins: requests from users
   const reqDecide = async(r, how)=>{
