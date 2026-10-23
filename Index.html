@@ -4265,7 +4265,8 @@ function MasterEditor({ tableKey, user }) {
   const [rows,setRows]=useState([]); const [loading,setLoading]=useState(true);
   const [error,setError]=useState(""); const [search,setSearch]=useState("");
   const [editingId,setEditingId]=useState(null); const [editDraft,setEditDraft]=useState({});
-  const [adding,setAdding]=useState(false); const [addDraft,setAddDraft]=useState({});
+  const [adding,setAdding]=useState(false); const [desNew,setDesNew] = useState(null);   // 243
+  const [addDraft,setAddDraft]=useState({});
   const [page,setPage]=useState(0); const pageSize=50;
   const [cascadeOptions,setCascadeOptions]=useState({}); // col -> options[]
 
@@ -5001,7 +5002,26 @@ function MasterEditor({ tableKey, user }) {
   };
 
   // Render add field — cascade select or free text
+  // 243: Employees — "+ Add new designation" under the Designation box, for anyone who can add an employee
+  const addDesigNew = async()=>{
+    const v = String(desNew.v||"").trim(); if(!v){ alert("Type the new designation."); return; }
+    const cd = tableDef.cascade?.find(c=>c.col==="designation"); if(!cd) return;
+    let have = (cascadeOptions.designation||[]).find(x=>String(x).trim().toLowerCase()===v.toLowerCase());
+    if(!have){ try{ const { data: ex } = await sb.from(cd.from).select(cd.field); const r = (ex||[]).find(x=>String(x[cd.field]||"").trim().toLowerCase()===v.toLowerCase()); if(r) have = r[cd.field]; }catch(e){} }
+    if(have){ setAddDraft(d=>({...d,designation:have})); setCascadeOptions(o=>({...o,designation:Array.from(new Set([...(o.designation||[]),have])).sort()})); setDesNew(null); appToast("“"+have+"” is already in the list — picked."); return; }
+    setDesNew(x=>({...x,busy:true}));
+    const ok = await addCascadeValue("designation", cd, v);
+    if(!ok){ setDesNew(x=>({...x,busy:false})); return; }
+    setAddDraft(d=>({...d,designation:v})); setDesNew(null); appToast("✓ “"+v+"” added to Designations and picked.");
+  };
+  const desigAddBox = ()=> desNew
+    ? h("div",{"data-t":"desig-new",style:{display:"flex",gap:4,marginTop:4}},
+        h("input",{autoFocus:true,value:desNew.v||"",placeholder:"New designation",onChange:e=>setDesNew({...desNew,v:e.target.value}),onKeyDown:e=>{ if(e.key==="Enter") addDesigNew(); if(e.key==="Escape") setDesNew(null); },style:{...inputStyle,padding:"4px 6px",fontSize:11.5,flex:1,minWidth:0}}),
+        h("button",{onClick:addDesigNew,disabled:!!desNew.busy,style:{...btnSmall,fontSize:11,padding:"3px 8px",fontWeight:700}},"Add"),
+        h("button",{onClick:()=>setDesNew(null),title:"Cancel",style:{...btnSmall,fontSize:11,padding:"3px 6px"}},"✕"))
+    : h("button",{"data-t":"desig-new-link",onClick:()=>setDesNew({v:""}),style:{background:"none",border:"none",padding:"3px 0 0",cursor:"pointer",font:"inherit",fontSize:11,fontWeight:700,color:"#0f7a5c",textAlign:"left"}},"+ Add new designation");
   const renderAddField=(col)=>{
+    if(tableKey==="employee_tbl" && col==="designation" && !renderAddField.__in){ renderAddField.__in = true; try{ return h("div",{style:{display:"flex",flexDirection:"column"}}, renderAddField(col), desigAddBox()); } finally { renderAddField.__in = false; } }   // 243
     const cascadeDef=tableDef.cascade?.find(c=>c.col===col);
     const isFree=!cascadeDef||(tableDef.freeText||[]).includes(col);
     const isNumeric=NUMERIC_COLS.has(col);
@@ -5169,7 +5189,7 @@ function MasterEditor({ tableKey, user }) {
     }
     if(cascadeDef && !isFree){
       const opts = cascadeOptions[col]||[];
-      return h(MasterCascadeSelect,{value:value||"",onChange,options:opts,placeholder:"Select "+col.replace(/_/g," ")+"…",style:{...inputStyle,padding:"5px 7px",fontSize:12},canAdd:isAdmin,onAddNew:(v)=>addCascadeValue(col,cascadeDef,v)});
+      return h(MasterCascadeSelect,{value:value||"",onChange,options:opts,placeholder:"Select "+col.replace(/_/g," ")+"…",style:{...inputStyle,padding:"5px 7px",fontSize:12},canAdd:isAdmin || (tableKey==="employee_tbl" && col==="designation"),onAddNew:(v)=>addCascadeValue(col,cascadeDef,v)});   // 243
     }
     const isNumeric = NUMERIC_COLS.has(col);
     return h("input",{type:isNumeric?"number":"text",value:value??"",onChange:e=>onChange(e.target.value),style:{...inputStyle,padding:"5px 7px",fontSize:12}});
@@ -5289,7 +5309,7 @@ function MasterEditor({ tableKey, user }) {
     ),
     adding&&tableKey!=="material_rates"&&h("div",{style:{padding:"14px 16px",background:"#fff8e1",border:"1px solid #f0c060",borderRadius:8,marginBottom:14}},
       h("div",{style:{fontWeight:600,fontSize:12,color:"#7a5000",marginBottom:10}},addLabel),
-      h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end"}},
+      h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",alignItems:tableKey==="employee_tbl"?"flex-start":"flex-end"}},
         tableDef.columns.map(col=>h("div",{key:col,style:{display:"flex",flexDirection:"column",gap:3,minWidth:120,flex:1}},
           h("label",{style:{fontSize:10,color:colors.muted,fontWeight:500}},
             colLabel(col),
@@ -29839,6 +29859,8 @@ const MANUAL_SECTIONS = [
       {"key": "task_pinned_report", "title": "Pinned checklist cards and the VP Projects progress report", "tag": "Tasks", "blocks": [{"type": "p", "text": "Added 23 October 2026 (build 240). A task card with the label Pinned is a must-do list for one person."}, {"type": "bullets", "items": ["It has a red background and a 📌 PINNED chip, and sits at the top of every list on the board whatever the sort order, above Urgent cards.", "Tick the boxes on the card and press Save as you go. When the card is saved with every box ticked (sub-items included), the app completes it and it leaves the board. Until then it stays.", "Progress report: when the VP Projects post holder (Suresh Subramaniam) starts the app and any pinned card is open, a ⚑ Progress report opens first. It shows each pinned card, whose it is, the due date, how many boxes are ticked, and each checklist group with its own count. Open task boards takes him to the boards. The bell also carries a ⚑ flag with the counts once a day.", "The first pinned card is Trello drift clean-up — Document Control, on the Document Controller's board."]}]},
       {"key": "task_links", "title": "Task cards on quotes and contracts; the Show filter", "tag": "Tasks", "blocks": [{"type": "p", "text": "A task card can be linked to a quote, a contract, or nothing (for internal work such as appointing a housekeeper). A linked card is one card shown in every place it belongs; edit it in any of them and every place shows the change."}, {"type": "h3", "text": "Where a card shows"}, {"type": "bullets", "items": ["On the person's task board (or its department's Unassigned pile), as always.", "Contract: on the Order Status board under that contract (By contract view, Tasks), and on the Sale Order (Tasks on this contract).", "Quote: on the quote (Tasks on this quote). Once the quote is won, its open cards also show under the contract, marked “from the quote”.", "Open on any of them goes to the card editor; a Back button returns you to where you were."]}, {"type": "h3", "text": "Linking"}, {"type": "bullets", "items": ["In the card: Linked to — Quote, Contract or Nothing. The number must be one that is in the app; nothing is added to any list from a card.", "Cards made before 23 October 2026, and cards the app makes (documents, procurement, despatch), are matched from the contract or quote number in their Ref. The editor says “From its Ref: Contract …” until someone sets the link by hand.", "Documents stay one record wherever they are added (the Sale Order's Documents, the Order Status board, a PO): the board makes and closes their cards as before."]}, {"type": "h3", "text": "Adding a card from a contract or a quote"}, {"type": "bullets", "items": ["+ Add a card (Order Status board, By contract) and + Add task (Sale Order, Quote) open a new card already linked. They are for the Document Controller, managers (post holders) and admins. Everyone still adds their own cards on their task board."]}, {"type": "h3", "text": "The Show filter (Order Status board and Report by contract)"}, {"type": "bullets", "items": ["Clear — work order release pending: no Full Hold document open, work order not released.", "Not clear for work order release: one or more Full Hold documents open.", "Work order not released (any reason); Engineering started; Work order released.", "Work order released — despatch pending; Part despatched; Despatched — documents open. Despatched means every Sl No has gone on DCs that have a bill number.", "Documents with client; Delivery overdue (delivery date passed, not fully despatched); No Sale Order yet.", "Each contract list shows its work order tag and, once anything has gone, a despatch tag. The report lists only the contracts in the group; the internal PDF heading names it."]}, {"type": "warn", "text": "Needs structure_task_links_2026-10-23.sql on both companies. check_task_links_unmatched_2026-10-23.sql lists the open cards whose Ref matched no quote or contract."}]},
       {"key": "training_sop", "title": "Training: the Document Control SOP and the Excel export", "tag": "Help", "blocks": [{"type": "p", "text": "Training (on the help bar, next to Tour) teaches the document flow from the Contract Register to despatch in 12 steps. Each step says who does it, where it is in the app (Open this screen takes you there), what to do and what stops you, with a screenshot made from sample data."}, {"type": "bullets", "items": ["The Overview shows the flow of gateways: Contract Register → Sale Order → Documents → Order Status board → Work order release → Purchase & GRN → Despatch. Click a box to go to its step.", "English / தமிழ் switches the language; the choice is remembered.", "▶ Play tour moves through every picture by itself, 9 seconds each, like a video. Pause stops it; ← and → move by hand. Click a picture to see it full size.", "The same SOP comes as a PDF and a silent captioned video (MP4) to share."]}, {"type": "h3", "text": "Offers and Orders to Excel"}, {"type": "bullets", "items": ["CRM → Offers & Orders → ⬇ Download Excel saves exactly the list on screen: the same filters, revisions choice and order.", "Values are in three columns: the value in the quote's own currency, the currency, and the value in INR worked out at the 1 USD rate typed on the screen (blank when no rate is typed).", "A second sheet, Filters used, records who exported it, when, every filter and the number of rows.", "For FSEs, the Sales Head, admins and super admins. Every export is written to the audit log."]}]},
+      {"key": "task_done_click", "title": "☐ Done? Click — finishing a task card", "tag": "Tasks", "blocks": [{"type": "p", "text": "Task cards no longer have a green ✓ Completed. Press ☐ Done? Click when your work on the card is completed; the app says what happens next before it saves anything. A card turns green only once it is completed."}, {"type": "h3", "text": "Enquiry cards"}, {"type": "bullets", "items": ["The card shows its quote: Quote# … · Draft · not sent (amber), Quote# … · Offer Sent (green), or not made yet.", "The card completes by itself when its quote moves to Offer Sent or any later stage; the enquiry closes with it.", "☐ Done? Click while the quote is Draft (or not made) asks: Open / Start the quote, or Send for approval with a reason. Sent for approval, the card goes to Under Approval and the quote stays Draft; the approver approves or sends it back.", "Not quoting at all: use ✖ Regret Quote."]}, {"type": "h3", "text": "Other cards"}, {"type": "bullets", "items": ["As before: if you hold the card you choose Completed (no approval) or Send for approval; an approver or Super Admin completes it at once. Open checklist items are ticked.", "Document cards keep Send to client ▸ and Log client reply ▸; Under Approval cards keep ✓ Approve and ↩ Send back."]}]},
+      {"key": "task_same_contract_subtask", "title": "Same contract, same person: sub-tasks, not new cards", "tag": "Tasks", "blocks": [{"type": "p", "text": "One person, one card per contract (or quote). When you save a new card for someone who already has an open card on the same contract or quote, the app asks before saving."}, {"type": "bullets", "items": ["Add as a sub-task: pick their card. The new work becomes a line under Sub-tasks on it, with its own due date and tick. If the line is due later than the card, the card's due date moves out. Links and the note go with it. No new card is made.", "Keep as a separate card: give the reason; it is kept in the card's history.", "The contract or quote is read from Linked to, or from the contract number in the Ref.", "Cards the app makes by itself (documents, chase letters, enquiries, procurement, despatch) are never offered and never asked about."]}, {"type": "h3", "text": "Finishing"}, {"type": "bullets", "items": ["Tick each sub-task line as it is done and Save. When every line is ticked, the app completes the card.", "In an open card, Sub-tasks → Add sub-task for the card's own holder adds a line on this card; for anyone else it still makes a card on their board."]}, {"type": "h3", "text": "Employees: new designation"}, {"type": "p", "text": "Add Employee has + Add new designation under the Designation box. Type it and press Add: it is saved to the Designations list and picked. The same name in any spelling of capitals is not added twice."}]},
       {
         "key": "doc_hold_change",
         "title": "Document Control table: grouped by contract, and changing one document's hold",
@@ -30373,6 +30395,8 @@ const MANUAL_SECTIONS = [
 // English text with a note. Screen and button names stay in English on purpose,
 // so they match what is on the screen. Not proofread — small errors accepted.
 const MANUAL_TA = {
+ "task_same_contract_subtask": {"title":"ஒரே contract, ஒரே நபர்: புதிய cards இல்லை, sub-tasks","tag":"Tasks","blocks":[{"type":"p","text":"ஒரு நபருக்கு ஒரு contract-க்கு (அல்லது quote-க்கு) ஒரு card. அதே contract அல்லது quote-இல் ஏற்கனவே open card உள்ள ஒருவருக்கு புதிய card-ஐ save செய்தால், save செய்யும் முன் app கேட்கும்."},{"type":"bullets","items":["Add as a sub-task: அவரது card-ஐத் தேர்ந்தெடுங்கள். புதிய வேலை அதில் Sub-tasks-இன் கீழ் ஒரு வரியாகும், தனி due date, tick-உடன். அந்த வரி card-ஐ விடப் பின்னர் due என்றால் card-இன் due date தள்ளிப்போகும். Links, note அதனுடன் செல்லும். புதிய card உருவாகாது.","Keep as a separate card: காரணத்தைக் கொடுங்கள்; அது card-இன் history-இல் இருக்கும்.","Contract அல்லது quote, Linked to-விலிருந்தோ Ref-இல் உள்ள contract எண்ணிலிருந்தோ எடுக்கப்படும்.","App தானாகச் செய்யும் cards (documents, chase letters, enquiries, procurement, despatch) ஒருபோதும் காட்டப்படாது, கேட்கப்படாது."]},{"type":"h3","text":"முடிப்பது"},{"type":"bullets","items":["ஒவ்வொரு sub-task வரியும் முடிந்ததும் tick செய்து Save செய்யுங்கள். எல்லா வரிகளும் tick ஆனதும் app card-ஐ முடிக்கும்.","திறந்த card-இல், Sub-tasks → Add sub-task card-இன் சொந்த holder-க்கு என்றால் இந்த card-இலேயே ஒரு வரி சேர்க்கும்; வேறு யாருக்காவது என்றால் அவர் board-இல் card உருவாகும்."]},{"type":"h3","text":"Employees: புதிய designation"},{"type":"p","text":"Add Employee-இல் Designation பெட்டியின் கீழ் + Add new designation உள்ளது. Type செய்து Add அழுத்துங்கள்: Designations பட்டியலில் சேமிக்கப்பட்டு தேர்ந்தெடுக்கப்படும். பெரிய/சிறிய எழுத்து வேறுபாட்டுடன் அதே பெயர் இரண்டு முறை சேராது."}],"en_sig":"20c9736c"},
+ "task_done_click": {"title":"☐ Done? Click — task card-ஐ முடிப்பது","tag":"Tasks","blocks":[{"type":"p","text":"Task cards-இல் இனி பச்சை ✓ Completed இல்லை. Card-இன் வேலை முடிந்ததும் ☐ Done? Click அழுத்துங்கள்; எதையும் சேமிக்கும் முன் அடுத்து என்ன நடக்கும் என்று app சொல்லும். Card முடிந்த பிறகுதான் பச்சையாகும்."},{"type":"h3","text":"Enquiry cards"},{"type":"bullets","items":["Card அதன் quote-ஐக் காட்டும்: Quote# … · Draft · not sent (மஞ்சள்), Quote# … · Offer Sent (பச்சை), அல்லது இன்னும் செய்யவில்லை.","Quote Offer Sent அல்லது அதற்குப் பிந்தைய stage-க்குச் சென்றதும் card தானாக முடியும்; enquiry-உம் மூடும்.","Quote Draft-ஆக (அல்லது செய்யாமல்) இருக்கும்போது ☐ Done? Click கேட்கும்: Quote-ஐ Open / Start செய்யுங்கள், அல்லது காரணத்துடன் Send for approval. Approval-க்கு அனுப்பினால் card Under Approval-க்குச் செல்லும், quote Draft-ஆகவே இருக்கும்; approver approve செய்வார் அல்லது திருப்பி அனுப்புவார்.","Quote செய்யவே போவதில்லை என்றால்: ✖ Regret Quote."]},{"type":"h3","text":"மற்ற cards"},{"type":"bullets","items":["முன்பு போலவே: card உங்களிடம் இருந்தால் Completed (approval இல்லை) அல்லது Send for approval தேர்ந்தெடுக்கலாம்; approver அல்லது Super Admin உடனே முடிப்பார். திறந்துள்ள checklist items tick ஆகும்.","Document cards-இல் Send to client ▸, Log client reply ▸ அப்படியே; Under Approval cards-இல் ✓ Approve, ↩ Send back அப்படியே."]}],"en_sig":"e3e68dd1"},
  "training_sop": {"title":"பயிற்சி: Document Control SOP, Excel export","tag":"Help","blocks":[{"type":"p","text":"Training (help bar-இல் Tour அருகில்) Contract Register முதல் despatch வரை document ஓட்டத்தை 12 படிகளில் கற்பிக்கிறது. ஒவ்வொரு படியும் யார் செய்வது, app-இல் எங்கே (Open this screen அங்கே அழைத்துச் செல்லும்), என்ன செய்ய வேண்டும், எது தடுக்கும் என்று சொல்லும், மாதிரி தரவில் எடுத்த screenshot-உடன்."},{"type":"bullets","items":["Overview gateways ஓட்டத்தைக் காட்டும்: Contract Register → Sale Order → Documents → Order Status board → Work order release → Purchase & GRN → Despatch. ஒரு பெட்டியை click செய்தால் அதன் படிக்குச் செல்லும்.","English / தமிழ் மொழியை மாற்றும்; தேர்வு நினைவில் இருக்கும்.","▶ Play tour ஒவ்வொரு படத்தையும் தானாக, ஒவ்வொன்றும் 9 வினாடிகள், video போல நகர்த்தும். Pause நிறுத்தும்; ← → கையால் நகர்த்தும். படத்தை click செய்தால் முழு அளவில் தெரியும்.","அதே SOP PDF ஆகவும், captions உள்ள ஒலியில்லா video (MP4) ஆகவும் பகிர வருகிறது."]},{"type":"h3","text":"Offers, Orders-ஐ Excel-க்கு"},{"type":"bullets","items":["CRM → Offers & Orders → ⬇ Download Excel திரையில் உள்ள பட்டியலை அப்படியே சேமிக்கும்: அதே filters, revisions தேர்வு, வரிசை.","மதிப்புகள் மூன்று columns-இல்: quote-இன் சொந்த currency-இல் மதிப்பு, currency, திரையில் type செய்த 1 USD rate-இல் கணக்கிட்ட INR மதிப்பு (rate இல்லையென்றால் காலி).","இரண்டாவது sheet Filters used: யார், எப்போது, ஒவ்வொரு filter, எத்தனை வரிகள்.","FSEs, Sales Head, admins, super admins-க்கு. ஒவ்வொரு export-உம் audit log-இல் பதிவாகும்."]}],"en_sig":"fe07d9b6"},
  "task_links": {"title":"Quotes, contracts-இல் task cards; Show filter","tag":"Tasks","blocks":[{"type":"p","text":"ஒரு task card-ஐ ஒரு quote, ஒரு contract, அல்லது எதனுடனும் இல்லாமல் (housekeeper நியமிப்பது போன்ற உள் வேலை) இணைக்கலாம். இணைக்கப்பட்ட card ஒரே card தான், அது இருக்க வேண்டிய எல்லா இடங்களிலும் தெரியும்; எங்கே மாற்றினாலும் எல்லா இடத்திலும் மாறும்."},{"type":"h3","text":"Card எங்கே தெரியும்"},{"type":"bullets","items":["எப்போதும் போல அந்த நபரின் task board-இல் (அல்லது துறையின் Unassigned pile-இல்).","Contract: Order Status board-இல் அந்த contract-இன் கீழ் (By contract பார்வை, Tasks), Sale Order-இல் (Tasks on this contract).","Quote: quote-இல் (Tasks on this quote). Quote win ஆனதும், அதன் open cards contract-இன் கீழும் “from the quote” என்று தெரியும்.","எதிலும் Open அழுத்தினால் card editor திறக்கும்; Back பொத்தான் நீங்கள் இருந்த இடத்துக்குத் திருப்பும்."]},{"type":"h3","text":"இணைப்பது"},{"type":"bullets","items":["Card-இல்: Linked to — Quote, Contract அல்லது Nothing. எண் app-இல் இருக்க வேண்டும்; card-இலிருந்து எந்தப் பட்டியலிலும் எதுவும் சேர்க்கப்படாது.","23 October 2026-க்கு முன் செய்த cards-உம், app செய்யும் cards-உம் (documents, procurement, despatch) அவற்றின் Ref-இல் உள்ள contract அல்லது quote எண்ணால் பொருத்தப்படும். யாராவது கையால் இணைக்கும் வரை editor “From its Ref: Contract …” என்று காட்டும்.","Documents எங்கே சேர்த்தாலும் (Sale Order-இன் Documents, Order Status board, PO) ஒரே record; board முன்பு போலவே அவற்றின் cards-ஐ உருவாக்கி மூடும்."]},{"type":"h3","text":"Contract அல்லது quote-இலிருந்து card சேர்ப்பது"},{"type":"bullets","items":["+ Add a card (Order Status board, By contract), + Add task (Sale Order, Quote) ஏற்கனவே இணைக்கப்பட்ட புதிய card-ஐத் திறக்கும். இவை Document Controller, managers (post holders), admins-க்கு. எல்லோரும் தங்கள் task board-இல் தங்கள் cards-ஐச் சேர்க்கலாம்."]},{"type":"h3","text":"Show filter (Order Status board, Report by contract)"},{"type":"bullets","items":["Clear — work order release pending: Full Hold document எதுவும் திறந்தில்லை, work order release ஆகவில்லை.","Not clear for work order release: ஒன்று அல்லது அதற்கு மேற்பட்ட Full Hold documents திறந்துள்ளன.","Work order not released (எந்தக் காரணமும்); Engineering started; Work order released.","Work order released — despatch pending; Part despatched; Despatched — documents open. Despatched என்றால் ஒவ்வொரு Sl No-உம் bill number உள்ள DC-களில் சென்றுவிட்டது.","Documents with client; Delivery overdue (delivery தேதி கடந்தது, முழுதும் despatch ஆகவில்லை); No Sale Order yet.","ஒவ்வொரு contract list-உம் work order tag-ஐயும், ஏதாவது சென்றதும் despatch tag-ஐயும் காட்டும். Report அந்தக் குழுவின் contracts-ஐ மட்டும் பட்டியலிடும்; internal PDF தலைப்பு குழுவின் பெயரைச் சொல்லும்."]},{"type":"warn","text":"இரண்டு companies-இலும் structure_task_links_2026-10-23.sql தேவை. check_task_links_unmatched_2026-10-23.sql, எந்த quote-உம் contract-உம் பொருந்தாத Ref உள்ள open cards-ஐப் பட்டியலிடும்."}],"en_sig":"216fc5e7"},
  "mtc_avl_gateways": {"title":"MTC, vendor (AVL) gateways: Contract Register முதல் GRN வரை","tag":"Purchase","blocks":[{"type":"p","text":"Material certificate (EN 10204 3.1, 3.2 அல்லது இரண்டும்), vendor client-இன் approved vendor list (AVL)-இலிருந்து வர வேண்டுமா என்பது contract-க்கு ஒருமுறை அமைக்கப்பட்டு, GRN வரை ஐந்து gateways வழியாகப் பின்பற்றப்படும். End user இல்லையென்றாலோ, அந்த end user-க்கு rules இல்லையென்றாலோ எதுவும் தடுக்கப்படாது: app அதைச் சொல்லிவிட்டுத் தொடரும்."},{"type":"h3","text":"End User Rules (Purchase → End User Rules; Setup → Rules-இலும்)"},{"type":"bullets","items":["முக்கியமான ஒவ்வொரு end user-க்கும் ஒரு rule: group (எ.கா. ADNOC), வேறு பெயர்கள், default MTC (3.1, 3.2, 3.1 & 3.2, Not critical), vendor rule (As per AVL அல்லது Any vendor), AVL file link, 3.2 material-க்கான standard inspection stages.","Contract-இன் end user-இல் rule-இன் பெயரோ அதன் வேறு பெயரோ இருந்தால் அந்த rule பொருந்தும்: ADNOC Offshore rule “ADNOC Offshore - Upper Zakum”-க்குப் பொருந்தும்.","Technical Head, admins, super admins இந்தப் பட்டியலைப் பராமரிப்பார்கள். Rule நீக்கப்படாது, inactive ஆக்கப்படும். Sale Order-இலிருந்து இதில் எதுவும் சேர்க்கப்படாது."]},{"type":"h3","text":"1. Contract Register"},{"type":"bullets","items":["End user (இருந்தால்), MTC, Vendor, As per AVL என்றால் AVL file link. இங்கே link கட்டாயமில்லை.","End user-க்கு rule இருந்தால் panel அதைச் சொல்லும்; Fill from the rule அதன் MTC, vendor, AVL link-ஐ நிரப்பும். End user இல்லை அல்லது rule இல்லை: செய்தி மட்டும்."]},{"type":"h3","text":"2. Sale Order → MTC & AVL (Technical Head)"},{"type":"bullets","items":["Sale Order-இல் approvals அருகில் MTC & AVL பொத்தான் உள்ளது. Contract-இன் BOM-இலிருந்து components-ஐக் காட்டும்: ஒவ்வொரு Shape, Component-க்கும் ஒரு வரி, Sl Nos-உடன்; + Line கையால் ஒன்றைச் சேர்க்கும்.","MTC 3.1 & 3.2: ஒவ்வொரு வரிக்கும் 3.1, 3.2 அல்லது Not critical தேர்வு செய்யுங்கள்; எல்லாம் நிரப்பும் வரை Save ஆகாது. வேறு MTC என்றால் எல்லா வரிகளிலும் நிரம்பும்; ஒரு வரியை மாற்ற Override… காரணமும் உறுதிப்படுத்தலும் கேட்கும், அது வரியில் வைக்கப்படும்.","Vendor As per AVL: ஒவ்வொரு வரியும் As per AVL attached அல்லது Any vendor. Vendor Any vendor: எல்லா வரிகளிலும் நிரம்பும், Override… அதே போல.","இங்கே AVL link கட்டாயம். Link இல்லாமல் save செய்தால், save செய்தவருக்கு 3 நாட்கள்; அதன் பிறகு link நிரப்பும் வரை அவருக்கு app எந்த PDF-உம் தராது. Super admin ஒரு PDF unblock code தரலாம் (Admin → Authorization Codes → Generate PDF unblock code): block செய்தியில் type செய்தால் 24 மணி நேரம் PDFs வரும். Super admins ஒருபோதும் தடுக்கப்பட மாட்டார்கள்.","Technical Head MTC & AVL-ஐ save செய்யும் வரை Sale Order-இன் Everything else approval (FSE / Sales Head) காத்திருக்கும்.","Production BOM approve ஆகும்போது, Procurement Gantt ஒவ்வொரு material form-இன் 3.1 / 3.2-ஐ இந்த அட்டவணையிலிருந்து எடுக்கும்."]},{"type":"h3","text":"3. Purchase Order"},{"type":"bullets","items":["Contract-இன் PO-வில், Documents tab contract-இன் end user, MTC, vendor rule, AVL link-ஐக் காட்டும்; PO வரிகளின் shapes-ஐக் கொண்டு Sale Order-இன் MTC & AVL-இலிருந்து (அல்லது Contract Register-இலிருந்து) material certificate-ஐ நிரப்பும். மாற்றினால் காரணமும் உறுதிப்படுத்தலும் கேட்கும்.","PO-வில் 3.1 & 3.2: MTC of each line-இல் ஒவ்வொரு வரியின் MTC-ஐத் தேர்வு செய்யுங்கள் (முடிந்த இடங்களில் contract-இலிருந்து நிரம்பும்); Send for approval-க்கு முன் எல்லா வரிகளுக்கும் தேவை. எந்த Sl Nos 3.2, எவை 3.1 என்று PDF சொல்லும்.","Vendor as per AVL: AVL file-ஐத் திறந்து அதிலிருந்து vendor-ஐத் தேர்வு செய்யுங்கள். App vendor-ஐ பட்டியலுடன் சரிபார்க்காது.","3.2 material: inspection stages end user rule-இலிருந்து நிரம்பும். Purchase engineer அவை இல்லாமலும் approval-க்கு அனுப்பலாம்."]},{"type":"h3","text":"4. PO approval — Purchase Manager மட்டும்"},{"type":"bullets","items":["QC இனி POs-ஐ approve செய்வதில்லை. Purchase Manager (அல்லது super admin) approve செய்தால் PO உறைந்துவிடும்.","3.2 material உள்ள, inspection stages இல்லாத PO-வில் Approve அழுத்தினால் stages window திறக்கும்: அவற்றை நிரப்பி Save stages & approve. அவை PO-வில் அச்சாகும்."]},{"type":"h3","text":"5. GRN"},{"type":"bullets","items":["Material certificate-உம் ஒவ்வொரு 3.2 inspection stage-உம் (“3.2 inspection release — stage” என்று) vendor அனுப்ப வேண்டிய documents. முன்பு போலவே, அவை வரும் வரை GRN clear ஆகாது; Purchase Manager காரணத்துடன் override செய்யலாம்."]},{"type":"warn","text":"இரண்டு companies-இலும் structure_mtc_avl_gateways_2026-10-23.sql தேவை. அதை run செய்யும் வரை End User Rules, MTC & AVL அதைச் சொல்லும்; எதுவும் தடுக்கப்படாது."}],"en_sig":"693be3e4"},
@@ -33165,7 +33189,7 @@ const FAQ_ENTRIES = [
   { q:"Someone is leaving, or taking over another person's work. How do I move everything at once?", a:"Tasks → Hand Over Work (also under HR). Super Admin, Admin and the HR & Admin Manager can use it. Pick who hands over, who receives and the reason for transfer, add a note if useful. The screen lists their open task cards, document cards, document requests, approver roles and posts (all ticked) and the customers they own (not ticked). Untick what should stay, then press Hand over. Each card gets a history line and both people get a bell message. Undo is offered for 7 days and puts back everything that has not been moved again since." },
   { q:"A card is stuck because I am waiting on a colleague or a supplier. How do I stop it showing as overdue?", a:"Open the card and press ⏳ Waiting on someone. Say who and for what. The card shows “Waiting on <name> – <what>” and is not counted as overdue while it waits; a colleague gets a bell message. Press ▶ Got it from <name> when it arrives." },
   { q:"What does a grey “Status to confirm” card mean?", a:"It was loaded from the old OneDrive folders and its status is not known yet. It makes no task card, chase letter or alert, but it does hold the contract: a grey card in a Full Hold category counts as “not at Code 2” until its status is set. Press Set status ▸ on the card, pick the status and the date it was sent or returned: that sets the loaded revision and the card behaves normally from then on." },
-  { q:"How do I finish a task card without dragging it?", a:"Press ✓ Completed on the card. If you hold the card it goes to Under Approval; if you are its approver it is completed at once. A document card asks the date and the file link sent to the client and logs the revision Out. On Under Approval cards the approver has ✓ Approve and ↩ Send back." },
+  { q:"How do I finish a task card without dragging it?", a:"Press ☐ Done? Click on the card. On an enquiry card whose quote is still Draft it says so: open the quote (the card closes by itself at Offer Sent) or send the card for approval with a reason. Otherwise: if you hold the card it goes to Under Approval; if you are its approver it is completed at once. A document card asks the date and the file link sent to the client and logs the revision Out. On Under Approval cards the approver has ✓ Approve and ↩ Send back." },
   { q:"Why does Release production warn about a Production Hold?", a:"A Full Hold document whose client returned Code 2 with production held does not clear the delivery clock. The warning lists each held document and the client's hold condition. Only the Sales Head or a Super Admin can release anyway." },
   { q:"How do I add a new contract to the Contract Register?", a:"Press + New contract: a line appears at the bottom with the next contract number. Pick the won quote (the client and items come from it), type the PO number and date, and Save line. When the PO is in hand, press Sale Order + on that line \u2014 only the PO / LOI document is asked, and the Sale Order is created." },
   { q:"Why does a legacy contract show a ? next to INR?", a:"The old register had no currency, so every legacy contract was loaded in INR. The ? means the client is outside India: open the contract and, if the order was in dollars, set the currency to USD and enter the rate." },
@@ -33255,6 +33279,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"23 Oct 2026 (243)", summary:"Built on 2026-10-23T05:30:00Z, on top of 2026-10-23T05:00:00Z. No SQL. SUB-TASKS INSTEAD OF NEW CARDS: saving a new card for a person who already has an open card on the same contract or quote (Linked to, or the contract number in its Ref) asks first — pick the card and Add as a sub-task (a line under Sub-tasks with its own due date and tick; the card's due date moves out if the new line is later; its links and note go with it; no new card), or Keep as a separate card (reason asked, kept in its history). Applies to everyone, the Document Controller included; cards the app makes (documents, chase letters, enquiries, procurement, despatch) are not offered and not asked. A card whose Sub-tasks lines are all ticked is completed by the app when saved. The Sub-tasks section of a card adds a line on the card itself when the person is the card's own holder; anyone else still gets a card on their board. EMPLOYEES: + Add new designation under the Designation box of Add Employee — anyone who can add an employee; the same spelling in any case is not added twice (the existing one is picked); audit-logged. The Designation list box when editing a row also lets anyone add." },
+  { date:"23 Oct 2026 (242)", summary:"Built on 2026-10-23T05:00:00Z, on top of 2026-10-23T04:00:00Z. No SQL. ☐ DONE? CLICK: the green ✓ Completed on task cards (every task board, the Task Assignment Board, cards opened from the Order Status board, Sale Order and Quote) is now an outlined ☐ Done? Click — an instruction, not a status; green is used only once a card is completed. ENQUIRY CARDS show their quote: Quote# … · Draft · not sent (amber), Quote# … · Offer Sent (green), not made / no Quote# yet. ☐ Done? Click on an enquiry card whose quote is still Draft or not made says so first: Open / Start the quote (the card and the enquiry close by themselves at Offer Sent), or Send for approval with a reason — the card goes to Under Approval and the quote stays Draft. This applies to everyone, approvers included. Document cards keep Send to client ▸ / Log client reply ▸; Approve, Close (pile) unchanged." },
   { date:"23 Oct 2026 (241)", summary:"Built on 2026-10-23T04:00:00Z, on top of 2026-10-23T03:45:00Z. No new SQL. BUILD V — OFFERS / ORDERS TO EXCEL: CRM → Offers & Orders gets ⬇ Download Excel for FSEs, the Sales Head, admins and super admins: exactly the list on screen (filters, Latest revision / All revisions, sort); the value in three columns — Value (the quote's own currency), Currency, Value (INR) worked out at the 1 USD rate typed on the screen (blank when no rate); a second sheet Filters used (who, when, every filter, rows); Orders the same (Value, Currency, Value (INR), total), and its button is now for the same people. Each export is in the audit log. BUILD U — TRAINING: Help bar → Training: the Document Control SOP from the Contract Register to despatch in 12 steps — who, where (Open this screen), what to do, what stops you — with screenshots (sample data), the flow of gateways, English / தமிழ், and ▶ Play tour (9 seconds a picture). The same SOP comes as a PDF and a silent captioned video with this build. Manual: new article \"Training: the Document Control SOP and the Excel export\" (English and Tamil)." },
   { date:"23 Oct 2026 (239)", summary:"Built on 2026-10-23T03:45:00Z, on top of 2026-10-23T03:15:00Z (pinned cards) — it also carries everything of 2026-10-23T03:30:00Z, which was built beside 03:15. A card can be linked by hand to a quote that is only in the Quote Register. NEEDS SQL: structure_task_links_2026-10-23.sql (BOTH companies; links the existing cards once). TASK CARDS LINKED: every card has Linked to — Quote, Contract or Nothing (picked from the app, never typed into a master); older and app-made cards are read from the contract / quote number in their Ref. The same card shows on the person's task board, under its contract on the Order Status board (By contract: Tasks, + Add a card), on the Sale Order and on the Quote (Tasks on this contract / quote, with + Add task and Open); a won quote's cards show under its contract too. Open from any of them goes to the one card editor with a Back button. Adding a card from these places: the Document Controller, managers (post holders) and admins. SHOW FILTER on the Order Status board and the Report by contract: Clear — work order release pending; Not clear (Full Hold open); Work order not released; Engineering started; Work order released; Released — despatch pending; Part despatched; Despatched — documents open; Documents with client; Delivery overdue; No Sale Order. Despatched = every Sl No gone on DCs with a bill number; each contract list shows a despatch tag; the internal PDF heading names the group." },
   { date:"23 Oct 2026 (240)", summary:"Built on 2026-10-23T03:15:00Z, on top of 2026-10-23T02:45:00Z. No structure SQL (data only: ramesh_drift_card_2026-10-23.sql and trello_drift_5_history.sql, Flometriq). PINNED CHECKLIST CARDS: a task card with the label Pinned has a red background and a \ud83d\udccc PINNED chip, sits at the top of every list whatever the sort (above Urgent), and is completed by the app the moment it is saved with every box ticked (it then leaves the open lists; the log says so). START-UP PROGRESS REPORT: when the VP Projects post holder (Suresh Subramaniam) starts the app and any pinned card is open, a \u2691 Progress report opens: each pinned card, whose it is, its due date, x of y boxes and a bar, and every checklist group with its count; Open task boards / Close. Once per app start; the bell also carries a \u2691 flag with the counts once a day. First pinned card: Trello drift clean-up \u2014 Document Control, on the Document Controller's board (111 boxes). Manual (English and Tamil): Pinned checklist cards and the progress report." },
@@ -55765,6 +55791,24 @@ const taskOverdue = (t, today)=> (t.status==="open" || t.status==="progress") &&
 const TASK_PIN = "Pinned";
 const taskPinned = (t)=> !!t && t.status!=="done" && Array.isArray(t.labels) && t.labels.includes(TASK_PIN);
 const taskAllTicked = (t)=>{ const [d,n] = taskProgress(t); return n>0 && d===n; };
+// 243: a card whose "Sub-tasks" lines are all ticked is completed by the app
+async function taskSubsAutoClose(t, by){
+  if(!t || t.status==="done" || t.enquiry_id || !(t.checklists||[]).some(c=>c.id==="subs") || !taskAllTicked(t)) return false;
+  const now = new Date().toISOString();
+  const { error } = await sb.from("task_tbl").update({ status:"done", approved_by:"App (every sub-task ticked)", approved_at:now, sent_at:t.sent_at||now, moved_by:by||"App", moved_at:now, moved_what:"Every sub-task ticked: card completed" }).eq("id",t.id);
+  if(error){ console.error("Card not closed", error); return false; }
+  await taskLog(t.id, by||"App", "Every sub-task ticked — card completed by the app");
+  return true;
+}
+// 243: open hand-made cards of the same person on the same contract / quote
+function taskSameLinkCards(tasks, d, ctNos){
+  const lk = d.link_kind ? { k:d.link_kind, v:String(d.link_ref||"").trim() } : taskLinkOf({ ref:d.ref, title:d.title }, { ct:new Set(ctNos||[]) });
+  if(!lk.k || !lk.v || !d.assignee) return { lk, list:[] };
+  const known = { ct:new Set([lk.v]), q:new Set([lk.v]) };
+  const list = (tasks||[]).filter(t=> t.assignee===d.assignee && t.status!=="done" && !t.parent_id && !t.doc_id && !t.doc_request_id && !t.chase_letter_id && !t.enquiry_id && !t.proc_plan_id && !t.despatch_id
+    && (()=>{ const l = taskLinkOf(t, known); return l.k===lk.k && String(l.v)===lk.v; })());
+  return { lk, list };
+}
 async function taskPinnedAutoClose(t, by){
   if(!t || t.status==="done" || !Array.isArray(t.labels) || !t.labels.includes(TASK_PIN) || !taskAllTicked(t)) return false;
   const now = new Date().toISOString();
@@ -58926,6 +58970,41 @@ function HandOverScreen({ user }){
               : age<=HANDOVER_UNDO_DAYS ? h("button",{disabled:busy,onClick:()=>undo(r),style:{...btnSmall,fontSize:11,padding:"2px 8px"}},"↶ Undo ("+Math.max(0,Math.ceil(HANDOVER_UNDO_DAYS-age))+" d left)") : h("span",{style:{color:colors.mutedLight}},"—"))); })))
   );
 }
+// 242 (23 Oct): "☐ Done? Click" replaces the green ✓ Completed on task cards. On an enquiry card whose
+// quote is still Draft (or not made) it says so first: open / start the quote (the card completes by itself
+// at Offer Sent), or send the card for approval with a reason (the quote stays Draft).
+const DONE_LABEL = "☐ Done? Click";
+function doneBtnStyle(small){ return { font:"inherit", fontSize:small?10.5:11, fontWeight:700, border:"1.5px dashed #1c1f1a", background:"#fff", color:"#1c1f1a", borderRadius:6, padding:small?"1px 6px":"2px 8px", cursor:"pointer", display:"inline-flex", gap:3, alignItems:"center", whiteSpace:"nowrap" }; }
+function doneQuoteDraft(e, quoteMade){ if(!e) return null; const qn = e.linked_reference_number||""; const qs = qn && quoteMade ? quoteMade[qn] : null;
+  if(qs && qs!=="Draft") return null; return { qn, made:!!qs }; }
+function quoteStatePill(e, quoteMade){
+  if(!e) return null; const qn = e.linked_reference_number||""; const qs = qn && quoteMade ? quoteMade[qn] : null;
+  const sent = qs && qs!=="Draft";
+  const txt = !qn ? "No Quote# yet" : !qs ? "Quote# "+qn+" · not made" : sent ? "Quote# "+qn+" · "+qs : "Quote# "+qn+" · Draft · not sent";
+  return h("span",{"data-qpill":sent?"sent":"draft",title:sent?"The quote has left Draft":"The card completes by itself when the quote moves to Offer Sent",
+    style:{display:"inline-block",fontSize:10.5,fontWeight:700,borderRadius:9,padding:"0 7px",marginTop:3,border:"1px solid "+(sent?"#0f7a5c":"#c99a2e"),background:sent?"#eef6f3":"#fff6df",color:sent?"#0f7a5c":"#7a5200"}},txt);
+}
+function DoneDraftDialog({ t, info, onQuote, onSend, onCancel }){
+  const [why,setWhy] = useState(""); const [busy,setBusy] = useState(false);
+  const qn = info.qn;
+  const opt = { textAlign:"left", border:"1px solid "+colors.border, background:"#fff", borderRadius:8, padding:"10px 12px", cursor:"pointer", font:"inherit", width:"100%" };
+  return h("div",{"data-t":"done-draft",onClick:e=>{ if(e.target===e.currentTarget) onCancel(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",zIndex:2500,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"70px 16px"}},
+    h("div",{style:{background:"#fff",borderRadius:10,width:480,maxWidth:"100%",padding:"16px 18px"}},
+      h("b",{style:{fontSize:14}},DONE_LABEL+" — “"+(t.title||"")+"”"),
+      h("div",{style:{background:"#fff6df",border:"1px solid #c99a2e",borderRadius:7,padding:"8px 10px",margin:"10px 0 12px",fontSize:12.5,color:"#5a3d00"}},
+        h("b",null, !qn ? "No Quote# is linked to this enquiry yet." : info.made ? "Quote# "+qn+" is still Draft — not sent." : "Quote# "+qn+" has not been made yet."),
+        " This card completes by itself when the quote moves to Offer Sent (or any later stage). Closing the card does not send the quote."),
+      qn && onQuote ? h("button",{"data-t":"done-draft-quote",onClick:onQuote,style:{...opt,border:"2px solid #0f7a5c",background:"#f1faf5",marginBottom:8}},
+        h("b",{style:{display:"block",fontSize:13}},(info.made?"Open Quote# ":"Start Quote# ")+qn+" ▸"),
+        h("span",{style:{fontSize:12,color:colors.muted}},"Finish the quote and set its stage to Offer Sent; the card and the enquiry close by themselves.")) : null,
+      h("div",{style:{...opt,cursor:"default"}},
+        h("b",{style:{display:"block",fontSize:13}},"Send for approval — the quote stays Draft"),
+        h("span",{style:{fontSize:12,color:colors.muted}},"For work finished another way (merged into another quote, sent outside the app). The card goes to Under Approval with your reason."),
+        h("textarea",{"data-t":"done-draft-why",rows:2,value:why,placeholder:"Reason (required)",onChange:e=>setWhy(e.target.value),style:{...inputStyle,fontSize:12.5,marginTop:6}}),
+        h("div",{style:{textAlign:"right",marginTop:6}},h("button",{"data-t":"done-draft-send",disabled:busy,onClick:async()=>{ if(!why.trim()){ alert("Give the reason."); return; } setBusy(true); try{ await onSend(why.trim()); }finally{ setBusy(false); } },style:{...btnSmall,fontWeight:700}},"Send for approval"))),
+      h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:8}},"Not quoting at all? Use ✖ Regret Quote on the card."),
+      h("div",{style:{textAlign:"right",marginTop:10}},h("button",{onClick:onCancel,style:btnSecondary},"Cancel"))));
+}
 function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackToEnquiry, company, onGoToTab, onOpenGantt }){
   // 3 Oct (119) — three views:
   //   Task Assignment Board  a department's Unassigned pile + one list per employee
@@ -58989,7 +59068,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
   const [dueOk,setDueOk] = useState(null);
   const [cardAct,setCardAct] = useState(null);   // { kind:"move"|"copy", t, dept, to, due, why, title, people:{}, chk, sub, lnk, busy }
   const [docDone,setDocDone] = useState(null);   // 175: { t, date, link, what, busy } — ✓ Completed on a document card
-  const [cmpAsk,setCmpAsk] = useState(null);     // 185g: {t, left} — the holder picks Completed or Send for approval
+  const [cmpAsk,setCmpAsk] = useState(null); const [draftAsk,setDraftAsk] = useState(null);   // 242     // 185g: {t, left} — the holder picks Completed or Send for approval
   const [pileClose,setPileClose] = useState(null);   // 185g: {t} — enquiry card closed from the pile: Regret / Ignored / Others
   const [pileDoneTab,setPileDoneTab] = useState("today");   // 185g
   const [regretAll,setRegretAll] = useState(false);   // 190: Regret list — last 30 days or all
@@ -59046,7 +59125,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
       const refs = Array.from(new Set(enqRows.map(x=>x.linked_reference_number).filter(Boolean)));
       let est = [];
       for(let k=0;k<refs.length;k+=150){ const { data:er } = await sb.from("estimates").select("reference_number,quote_status,status_changed_at,status_changed_by").in("reference_number",refs.slice(k,k+150)); est=est.concat(er||[]); }
-      const made = {}; est.forEach(r=>{ made[r.reference_number]=true; }); setQuoteMade(made);
+      const made = {}; est.forEach(r=>{ made[r.reference_number]=r.quote_status||"Draft"; }); setQuoteMade(made);   // 242: the quote's stage
       let fixed = 0;
       for(const e of enqRows){
         const tk = tl.find(x=>x.id===e.task_id);
@@ -59379,7 +59458,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
       appr ? (canApprove(t) ? gb(small?"\u2713":"\u2713 Approve",()=>approveCard(t),"Approve: the card is completed") : null)
            : (t.doc_id || t.doc_request_id) && !t.chase_letter_id ? docSendBtn(t, small, noMove)   // 178: document cards say what the button does
            : (taskIsPile(t) && !t.parent_id) ? gb(small?"\u2713":"\u2713 Close",()=>closePileCard(t), "Close this card without assigning it (it goes to Closed without assignment)", mayClosePile(t) ? null : "Only the board's approver or an Admin closes cards in the Unassigned pile.")   // 185g
-           : gb(small?"\u2713":"\u2713 Completed",()=>completeCard(t), canApprove(t)?"Complete the card (you approve it)":"Completed, or send for approval", noMove),   // 175
+           : h("button",{"data-t":"card-done",onClick:ev=>{ ev.stopPropagation(); if(noMove){ alert(noMove); return; } completeCard(t); },onMouseDown:ev=>ev.stopPropagation(),title:noMove||"Click when the work is completed — the app says what happens next",style:{...doneBtnStyle(small),...(noMove?{color:colors.mutedLight,borderColor:colors.border}:{})}},DONE_LABEL),   // 242
       appr && canApprove(t) ? b("\u21a9","Send back",()=>sendBackCard(t),"Send it back to "+taskWho(t)+" with a reason",null) : null,
       b("\ud83d\udcc5","Due",()=>setDueEd(t.id),"Change the due date",noDue),
       b("\u21c4","Move",()=>openCardMove(t),"Move to another person, pile or department",noMove),
@@ -59391,6 +59470,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
   const completeCard = async(t)=>{
     if(t.doc_id || t.doc_request_id){ if(t.chase_letter_id){ alert("A chase letter card completes when the letter is marked sent: Order Status → Document Control → ✉ Chase letters."); return; }
       setDocDone({ t, date:today, link:"", what:"", busy:false }); return; }
+    if(t.enquiry_id){ const dq = doneQuoteDraft(enqOf(t), quoteMade); if(dq){ setDraftAsk({ t, ...dq }); return; } }   // 242
     const left = openItems(t);
     const self = canApprove(t);
     if(!self){ setCmpAsk({ t, left }); return; }   // 185g: the holder picks: Completed (no approval) or Send for approval
@@ -59646,7 +59726,8 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
       comments[t.id] ? h("span",{title:comments[t.id]+" comment"+(comments[t.id]===1?"":"s"),style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#f1efe8",color:colors.muted,marginBottom:3,marginRight:4}},"\ud83d\udcac "+comments[t.id]) : null,
       prog ? h("span",{style:{display:"inline-block",fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#fff6d5",color:"#7a5c00",marginBottom:3}},"In progress") : null,
       h("div",{style:{display:"flex",gap:6,alignItems:"baseline"}},...top),
-      e ? h("div",{style:{fontSize:11,color:colors.muted,marginTop:1}},e.enquiry_number,copyBtn(e.enquiry_number)," · "+fmtDMY(e.enquiry_date))
+      e ? h("div",{style:{fontSize:11,color:colors.muted,marginTop:1}},e.enquiry_number,copyBtn(e.enquiry_number)," · "+fmtDMY(e.enquiry_date)) : null,
+      e && st!=="done" ? h("div",null,quoteStatePill(e, quoteMade))   // 242
         : line2 ? h("div",{style:{fontSize:11,color:colors.muted,marginTop:1}},line2) : null,
       st!=="done" ? waitBadge(t,true) : null, waitOnBadge(t,true), e ? regretBadge(e,true) : null,   // 135 Build 4 / 178
       h("div",{style:{display:"flex",alignItems:"center",gap:6,marginTop:3,fontSize:11.5}},
@@ -59802,6 +59883,7 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
           t.status==="approval" ? h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:8,padding:"0 7px",background:"#fff4d6",color:"#854f0b"}},"Under approval") : null,
           num ? h("span",null,num,copyBtn(num)) : null,
           e ? h("span",null,e.enquiry_number,copyBtn(e.enquiry_number)) : null,
+          e && t.status!=="done" ? quoteStatePill(e, quoteMade) : null,   // 242
           e ? regretBadge(e) : null,
           t.wait_on ? h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:8,padding:"0 7px",background:"#fff4d6",color:"#854f0b"}},"⏳ "+t.wait_on+(t.wait_what?" – "+t.wait_what:"")) : null,
           (()=>{ const [d,n] = taskProgress(t); return n ? h("span",null,"☑ "+d+"/"+n) : null; })(),
@@ -60518,6 +60600,11 @@ function TaskBoardScreen({ user, onOpenQuote, onStartQuote, openTaskId, onBackTo
     cardActModal(),   // 154
     docDoneModal(),   // 175
     cmpModal(),   // 185g
+    draftAsk ? h(DoneDraftDialog,{ t:draftAsk.t, info:draftAsk,
+      onQuote:()=>{ const a = draftAsk; const e = enqOf(a.t); setDraftAsk(null); if(a.made){ if(onOpenQuote) onOpenQuote(a.qn,1); } else if(onStartQuote && e) onStartQuote(a.qn, e.id, e.company_name); },
+      onSend:async(why)=>{ const t = draftAsk.t; const now = new Date().toISOString(); const from = taskStageLabel(taskStage(t,today));
+        await move(t,{ status:"approval", sent_at:now }, from+" → Under Approval (☐ Done? Click — Quote# "+(draftAsk.qn||"none")+" still Draft: "+why+")"); setDraftAsk(null); },
+      onCancel:()=>setDraftAsk(null) }) : null,   // 242
     xferModal(),   // 145
     dateAsk && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center"}},
       h("div",{style:{background:"#fff",borderRadius:8,padding:"18px 20px",width:360}},
@@ -61079,6 +61166,7 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
   const [newCl,setNewCl] = useState("");
   const [newItem,setNewItem] = useState({});
   const [sub,setSub] = useState({title:"",assignee:"",due:""});
+  const [subAsk,setSubAsk] = useState(null);   // 243: { lk, list, sel } — same person already has an open card on this contract / quote
   const set = (p)=>{ setD(x=>({...x,...p})); setDirty(true); };
   const [rd,setRd] = useState(null);          // 135 Build 4: "wait" | "regret" reason box
   const [wo,setWo] = useState(null);          // 178: waiting on someone {on, what}
@@ -61119,13 +61207,15 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
   const [askClose,setAskClose] = useState(false);   // 185e: Save and close / Discard / Keep editing
   const close = ()=>{ if(dirty){ setAskClose(true); return; } onClose(); };
 
-  const save = async()=>{
+  const save = async(opt)=>{
+    const keepSep = (opt && typeof opt==="object" && opt.keepSeparate) ? opt.keepSeparate : null;   // 243
     if(!d.title.trim()){ alert("Give the task a title."); return; }
     if(!d.assignee && !(d.department||defaultDept)){ alert("Pick a person \u2014 or create the card from a department's Task Assignment Board to put it in that department's Unassigned pile."); return; }
     if(!d.assignee && isInterDept(d.department||defaultDept)){ alert("The Inter-Department board is never a card's home.\n\nCreate the card on its home department's board and tick the other boards under Also on boards \u2014 it then shows here by itself."); return; }   // 150
     if(isNew && !d.task_type && (taskTypes||[]).length){ alert("Pick the type of task."); return; }   // 128
     if(d.assignee && !d.due_date){ alert("Give a due date \u2014 every card on a person's board needs one."); return; }   // 128
     if((d.link_kind==="quote" || d.link_kind==="contract") && !(await taskLinkCheck(d.link_kind, d.link_ref))){ alert((d.link_kind==="quote"?"Quote ":"Contract ")+(String(d.link_ref||"").trim()||"(blank)")+" is not in the app. Pick it from the list, or set Linked to: Nothing."); return; }   // 239
+    if(isNew && !keepSep && d.assignee && !d.parent_id){ const sm = taskSameLinkCards(tasks, d, (ctList||[]).map(x=>x[0])); if(sm.list.length){ setSubAsk({ ...sm, sel:sm.list[0].id }); return; } }   // 243
     setBusy(true);
     const aEmp = emps.find(e=>e.employee_name===d.assignee);   // 123: a person in two departments keeps the card's department
     const department = !d.assignee ? (d.department||defaultDept||null) : (empInDept(aEmp, d.department) ? d.department : (deptOf(d.assignee)||d.department||null));
@@ -61153,6 +61243,7 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
       setBusy(false);
       if(error){ alert("Could not save the task:\n\n"+error.message); return; }
       await taskLog(data.id, me, "Created "+(data.assignee?"on "+data.assignee+"'s board":"in the "+(data.department||"")+" Unassigned pile")+(data.due_date?", due "+fmtDMY(data.due_date):""));
+      if(keepSep) await taskLog(data.id, me, "Kept as a separate card (an open card on the same "+(keepSep.k==="quote"?"quote":"contract")+" was offered): "+keepSep.why);   // 243
       savedMark("task:"+data.id);
       appToast("✓ Task added — "+(data.assignee?"on "+data.assignee+"'s board":"in the "+(data.department||"")+" Unassigned pile")+(data.due_date?", due "+fmtDMY(data.due_date):""));   // 185e
       onChanged(data); setDirty(false); onClose(); return;
@@ -61174,11 +61265,30 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
     await taskLog(saved.id, me, changes.length ? changes.join("; ") : "Edited");
     if(changes.length) await taskSyncEnquiry(saved, { assignee:row.assignee, due_date:row.due_date }, me);   // 123
     if(saved.proc_plan_id) await pgTaskChanged({...saved,...data}, saved, me);   // 139: procurement card / sub-task -> Gantt (and a reassigned card takes its open sub-tasks)
+    if(data && await taskSubsAutoClose({...saved,...data}, me)){ appToast("\u2713 Every sub-task ticked \u2014 the card is completed."); onChanged({...saved,...data,status:"done"}); setDirty(false); onClose(); return; }   // 243
     if(data && await taskPinnedAutoClose({...saved,...data}, me)){ appToast("\u2713 Every box ticked \u2014 the pinned card is complete and leaves the board."); onChanged({...saved,...data,status:"done"}); setDirty(false); onClose(); return; }   // 240
     savedMark("task:"+saved.id); appToast("✓ Saved — "+(data&&data.title||saved.title||"task"));   // 185e
     onChanged(data); setDirty(false); onClose();
   };
   const act = async(patch, what)=>{ if(dirty){ alert("Save your changes first."); return; } const ok = await move(saved, patch, what); if(ok) onClose(); };
+  // 243: the new card becomes a line under "Sub-tasks" on the person's existing card
+  const addAsSubLine = async()=>{
+    const pc = (tasks||[]).find(t=>t.id===subAsk.sel); if(!pc){ alert("Pick the card."); return; }
+    setBusy(true);
+    const item = { id:taskNewId(), text:d.title.trim(), due:d.due_date||"", done:false, items:[] };
+    const cls = pc.checklists||[]; const sc = cls.find(c=>c.id==="subs");
+    const patch = { checklists: sc ? cls.map(c=>c.id==="subs" ? { ...c, items:[...(c.items||[]), item] } : c) : [...cls, { id:"subs", name:"Sub-tasks", items:[item] }] };
+    const later = d.due_date && (!pc.due_date || d.due_date > String(pc.due_date).slice(0,10));
+    if(later) patch.due_date = d.due_date;
+    if((d.links||[]).length) patch.links = [...(pc.links||[]), ...d.links];
+    if(String(d.notes||"").trim()) patch.notes = (pc.notes ? pc.notes+"\n\n" : "")+"["+item.text+"] "+String(d.notes).trim();
+    const { data, error } = await sb.from("task_tbl").update(patch).eq("id",pc.id).select().single();
+    setBusy(false);
+    if(error){ alert("Could not add the sub-task:\n\n"+error.message); return; }
+    await taskLog(pc.id, me, "Sub-task added: "+item.text+(item.due?" (due "+fmtDMY(item.due)+")":"")+(later?"; card due moved to "+fmtDMY(d.due_date):"")+" \u2014 instead of a new card");
+    appToast("\u2713 Added as a sub-task of \u201c"+pc.title+"\u201d");
+    setSubAsk(null); onChanged(data||{...pc,...patch}); setDirty(false); onClose();
+  };
   // 135 Build 4 — the three card actions: Start Task, Waiting For Customer, Regret Quote (enquiry cards only).
   const enqQn = enq ? enq.linked_reference_number : null;
   const enqMade = !!(enqQn && quoteMade && quoteMade[enqQn]);
@@ -61237,6 +61347,12 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
   };
   const addSub = async()=>{
     if(!sub.title.trim()){ alert("Name the sub-task."); return; }
+    if((sub.assignee||d.assignee) && (sub.assignee||d.assignee)===d.assignee){   // 243: same person -> a line under Sub-tasks on this card, no new card
+      const item = { id:taskNewId(), text:sub.title.trim(), due:sub.due||"", done:false, items:[] };
+      const cls = d.checklists||[]; const sc = cls.find(c=>c.id==="subs");
+      set({ checklists: sc ? cls.map(c=>c.id==="subs" ? { ...c, items:[...(c.items||[]), item] } : c) : [...cls, { id:"subs", name:"Sub-tasks", items:[item] }] });
+      setSub({title:"",assignee:"",due:""}); appToast("Added under Sub-tasks on this card \u2014 press Save."); return;
+    }
     const { data, error } = await sb.from("task_tbl").insert({ title:sub.title.trim(), assignee:(sub.assignee||d.assignee)||null, department:(!(sub.assignee||d.assignee) ? (d.department||defaultDept||null) : (deptOf(sub.assignee||d.assignee)||null)), due_date:sub.due||null, status:"open", parent_id:saved.id, ref:d.ref||null, customer:d.customer||null, created_by:me }).select().single();
     if(error){ alert("Could not add the sub-task:\n\n"+error.message); return; }
     await taskLog(data.id, me, "Created as a sub-task of “"+saved.title+"” \u2014 "+taskWho(data));
@@ -61367,7 +61483,7 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
         editable ? h("div",{style:{display:"flex",gap:8}},
           h("input",{placeholder:"New checklist name",value:newCl,onChange:e=>setNewCl(e.target.value),style:{...inputStyle,flex:1,padding:"6px 8px"}}),
           h("button",{onClick:()=>{ if(!newCl.trim()) return; set({checklists:[...d.checklists,{id:taskNewId(),name:newCl.trim(),items:[]}]}); setNewCl(""); },style:btnSmall},"+ Checklist")) : null);
-  const subsSec = sec("Sub-tasks","each is its own card on that person's board",
+  const subsSec = sec("Sub-tasks","for the card's own holder: a line under Sub-tasks on this card; for anyone else: a card on their board",
         isNew ? h("div",{style:{fontSize:12,color:colors.mutedLight}},"Save the task first, then add sub-tasks.") : null,
         subs.map(s=>h("div",{key:s.id,style:{display:"flex",gap:10,alignItems:"center",padding:"3px 0",fontSize:12.5}},
           h("span",{style:{fontSize:10,fontWeight:700,color:"#fff",background:TASK_STAGES.find(x=>x.key===taskStage(s,today)).color,borderRadius:9,padding:"1px 7px"}},taskStageLabel(taskStage(s,today))),
@@ -61414,7 +61530,7 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
                           taskIsPile(saved) && !saved.parent_id
                             ? ((isAdmin || canApprove(saved)) && !saved.enquiry_id ? h("button",{key:"pc","data-t":"modal-pile-close",disabled:busy,onClick:()=>{ const now = new Date().toISOString(); act({status:"done",approved_by:me+TASK_CLOSED_PILE,approved_at:now,sent_at:now},"Unassigned → Closed at the review, not assigned"); },style:{...btnPrimary,padding:"7px 14px",background:"#5f625a",borderColor:"#5f625a"}},"\u2713 Close (not assigned)")
                                : h("span",{key:"pc",style:{fontSize:11.5,color:colors.muted}},saved.enquiry_id ? "Close an enquiry card in the pile with \u2713 Close on the board (Regret / Ignored / Others)." : "In the Unassigned pile \u2014 the board's approver or an Admin closes it, or hands it out."))   // 185g
-                            : h("button",{key:"c","data-t":"modal-complete",disabled:busy,onClick:()=>{ const now = new Date().toISOString(); const self = canApprove(saved); act({status:"done",approved_by:self?me:me+TASK_CLOSED_HOLDER,approved_at:now,sent_at:saved.sent_at||now}, taskStageLabel(st)+" → Completed"+(self?" (you approve it)":" by "+me+" (no approval)")); },title:"Done; no approval needed",style:{...btnPrimary,padding:"7px 14px",background:"#0f7a5c",borderColor:"#0f7a5c"}},"\u2713 Completed"),   // 185g
+                            : h("button",{key:"c","data-t":"modal-complete",disabled:busy,onClick:()=>{ if(enq){ if(dirty){ alert("Save your changes first."); return; } const dq = doneQuoteDraft(enq, quoteMade); if(dq){ setRd("draft"); return; } } const now = new Date().toISOString(); const self = canApprove(saved); act({status:"done",approved_by:self?me:me+TASK_CLOSED_HOLDER,approved_at:now,sent_at:saved.sent_at||now}, taskStageLabel(st)+" → Completed"+(self?" (you approve it)":" by "+me+" (no approval)")); },title:"Click when the work is completed",style:{...doneBtnStyle(false),fontSize:13,padding:"6px 14px"}},DONE_LABEL),   // 242
                           (taskIsPile(saved) && !saved.parent_id) ? null : h("button",{key:"s",disabled:busy,onClick:()=>act({status:"approval",sent_at:new Date().toISOString()},taskStageLabel(st)+" → Under Approval (sent for approval)"),style:{...btnSmall,padding:"7px 14px",fontWeight:700}},"Send for approval"),
                           h("span",{key:"h",style:{fontSize:11.5,color:colors.mutedLight}},"Approver: "+(ap.length?ap.join(" / "):"an Admin"))] : null) : null,
       (!isNew && saved.wait_reason) ? waitBadge(saved,true) : null,   // 135 Build 4
@@ -61461,6 +61577,24 @@ function TaskDetailModal({ taskId, tasks, emps, labels, me, who, today, defaultD
         onCancel:()=>setEnqForm(null), onSaved:afterEnqSaved }) : null,
       rd==="wait" ? h(ReasonDialog,{title:"\u23f8 Waiting For Customer",subtitle:(enq?enq.enquiry_number+" \u00b7 "+(enq.company_name||""):saved.title),placeholder:"What are we waiting for?",picks:waitPicks,
         info:"Due moves to "+fmtDMY(addDaysISO(today,3))+" (+3 days), label \u201cWaiting customer\u201d is added, and the card is not counted as stale.",okLabel:"Mark waiting",onOk:doWait,onCancel:()=>setRd(null)}) : null,
+      subAsk ? h("div",{"data-t":"sub-ask",onClick:e=>{ if(e.target===e.currentTarget) setSubAsk(null); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",zIndex:2500,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"70px 16px"}},
+        h("div",{style:{background:"#fff",borderRadius:10,width:500,maxWidth:"100%",padding:"16px 18px"}},
+          h("b",{style:{fontSize:14}},d.assignee+" already has an open card on "+(subAsk.lk.k==="quote"?"Quote# ":"contract ")+subAsk.lk.v),
+          h("div",{style:{background:"#fff6df",border:"1px solid #c99a2e",borderRadius:7,padding:"8px 10px",margin:"10px 0",fontSize:12.5,color:"#5a3d00"}},"Add \u201c"+d.title.trim()+"\u201d"+(d.due_date?" (due "+fmtDMY(d.due_date)+")":"")+" as a sub-task of a card below, or keep it as a separate card."),
+          subAsk.list.map(t=>{ const [dn,nn] = taskProgress(t); return h("label",{key:t.id,style:{display:"flex",gap:8,alignItems:"center",border:"1px solid "+(subAsk.sel===t.id?"#0f7a5c":colors.border),borderRadius:7,padding:"7px 9px",marginBottom:6,fontSize:12.5,cursor:"pointer"}},
+            h("input",{type:"radio",name:"subask",checked:subAsk.sel===t.id,onChange:()=>setSubAsk({...subAsk,sel:t.id})}),
+            h("span",null,h("b",null,t.title),h("span",{style:{color:colors.muted}}," \u00b7 "+(t.due_date?"due "+fmtDMY(t.due_date):"no due date")+(nn?" \u00b7 "+dn+"/"+nn+" ticked":"")))); }),
+          h("button",{"data-t":"sub-ask-add",disabled:busy,onClick:addAsSubLine,style:{textAlign:"left",width:"100%",border:"2px solid #0f7a5c",background:"#f1faf5",borderRadius:8,padding:"9px 12px",cursor:"pointer",font:"inherit",margin:"4px 0 8px"}},
+            h("b",{style:{display:"block",fontSize:13}},"Add as a sub-task \u25b8"),h("span",{style:{fontSize:12,color:colors.muted}},"A line under Sub-tasks on that card, with its own due date and tick. No new card. The card completes when every sub-task is ticked.")),
+          h("button",{"data-t":"sub-ask-sep",disabled:busy,onClick:()=>setRd("sep"),style:{textAlign:"left",width:"100%",border:"1px solid "+colors.border,background:"#fff",borderRadius:8,padding:"9px 12px",cursor:"pointer",font:"inherit"}},
+            h("b",{style:{display:"block",fontSize:13}},"Keep as a separate card"),h("span",{style:{fontSize:12,color:colors.muted}},"Saved as a card of its own; the reason is asked and kept in its history.")),
+          h("div",{style:{textAlign:"right",marginTop:10}},h("button",{onClick:()=>setSubAsk(null),style:btnSecondary},"Back to editing")))) : null,
+      rd==="sep" && subAsk ? h(ReasonDialog,{title:"Keep as a separate card",subtitle:d.title.trim(),placeholder:"Why a separate card?",okLabel:"Save as a separate card",
+        onOk:(why)=>{ const lk = subAsk.lk; setRd(null); setSubAsk(null); save({ keepSeparate:{ why, k:lk.k } }); },onCancel:()=>setRd(null)}) : null,   // 243
+      rd==="draft" && enq ? h(DoneDraftDialog,{ t:saved, info:doneQuoteDraft(enq, quoteMade)||{ qn:enqQn, made:enqMade },
+        onQuote:()=>{ setRd(null); onClose(); if(enqMade && onOpenQuote) onOpenQuote(enqQn,1); else if(onStartQuote) onStartQuote(enqQn, enq.id, enq.company_name); },
+        onSend:async(why)=>{ setRd(null); await act({ status:"approval", sent_at:new Date().toISOString() }, taskStageLabel(st)+" \u2192 Under Approval (\u2610 Done? Click \u2014 Quote# "+(enqQn||"none")+" still Draft: "+why+")"); },
+        onCancel:()=>setRd(null) }) : null,   // 242
       rd==="regret" ? h(ReasonDialog,{title:"\u2716 Regret Quote \u2014 "+(enq?enq.enquiry_number:""),subtitle:(canApprove && canApprove(saved)) ? "You approve regrets on this board, so it is regretted at once: the enquiry closes as Regretted." : "Goes to the approver; the enquiry closes as Regretted once approved.",placeholder:"Why are we regretting?",picks:regretPicks,okLabel:(canApprove && canApprove(saved)) ? "Regret now" : "Send for approval",okStyle:{background:colors.danger,borderColor:colors.danger},onOk:doRegret,onCancel:()=>setRd(null)}) : null,
       askClose ? h(UnsavedAsk,{ what:"This task", onStay:()=>setAskClose(false), onDiscard:()=>{ setAskClose(false); setDirty(false); onClose(); }, onSave:()=>{ setAskClose(false); save(); } }) : null));   // 185e
 }
