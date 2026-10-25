@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-25T08:30:00Z";
+  var APP_BUILD_VERSION = "2026-10-25T19:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -919,6 +919,12 @@ const MASTER_TABLES = [
   { key: "materials_shape", label: "Material shapes", columns: ["shape"], addLabel:"New shape", freeText:["shape"], editAllEnabled:true },
   { key: "material_spec", label: "Material specs", columns: ["material_spec","material_shape"], addLabel:"New material spec", cascade:[{col:"material_shape",from:"materials_shape",field:"shape"}], freeText:["material_spec"], exportEnabled:true },
   { key: "grade_tbl", label: "Grades", columns: ["material_grade","material_shape"], addLabel:"New grade", cascade:[{col:"material_shape",from:"materials_shape",field:"shape"}], freeText:["material_grade"], groupBy:["material_shape"], editAllEnabled:true, exportEnabled:true },
+  // 256 — Davit arm masters (seeded by Davit_Arm_Masters_2026-10-25.sql; validated by engineering)
+  { key: "davit_cover_weight_tbl", label: "Davit: Cover Weights", columns: ["standard","rating","nb","od_mm","thickness_mm","weight_kg","validated","source"], addLabel:"New cover", freeText:["standard","rating","nb","od_mm","thickness_mm","weight_kg","validated","source"], exportEnabled:true },
+  { key: "davit_master_tbl", label: "Davit: Designs", columns: ["davit_code","lift_type","standard","rating","nb","lifted_weight_kg","reach_mm","mast_height_mm","arm_pipe","arm_schedule","bending_stress_mpa","tip_deflection_mm","bracket_force_kn","lifting_screw","validated","warnings"], addLabel:"New davit (use the Design Generator)", freeText:["davit_code","lift_type","standard","rating","nb","lifted_weight_kg","reach_mm","mast_height_mm","arm_pipe","arm_schedule","bending_stress_mpa","tip_deflection_mm","bracket_force_kn","lifting_screw","validated","warnings"], exportEnabled:true },
+  { key: "davit_bom_tbl", label: "Davit: BOM lines", columns: ["davit_id","line_no","sub_assembly","component","material_shape","material_spec","grade","cutting_plan_layout_size","qty_required","uom","sf"], addLabel:"New davit line", freeText:["davit_id","line_no","sub_assembly","component","material_shape","material_spec","grade","cutting_plan_layout_size","qty_required","uom","sf"], exportEnabled:true },
+  // 257 — which BOM line is the inlet flange, cover bolting, drain... (Connections & Element)
+  { key: "conn_role_tbl", label: "Connections: BOM line roles", columns: ["component","sub_assembly","role","note"], addLabel:"New role", freeText:["component","sub_assembly","role","note"], exportEnabled:true },
   { key: "uom_tbl", label: "UOM", columns: ["uom"], addLabel:"New UOM", freeText:["uom"], editAllEnabled:true },
   { key: "material_rates", label: "Material rates", columns: ["material_shape","material_spec","material_grade","rate","uom","spec_grade"], addLabel:"New rate", cascade:[{col:"material_spec",from:"material_spec",field:"material_spec"},{col:"material_grade",from:"grade_tbl",field:"material_grade"},{col:"material_shape",from:"materials_shape",field:"shape"},{col:"uom",from:"uom_tbl",field:"uom"}], freeText:["rate","spec_grade"] },
   { key: "bom", label: "BOM", columns: ["item","size","model","sub_assembly","component","material_shape","cutting_plan_layout_size","cutting_plan_qty","cutting_plan_uom","material_spec","qty_required","uom","rate","cost","sf","sales_price"], addLabel:"New BOM line", groupBy:["item","model"], cascade:[{col:"item",from:"item_tbl",field:"item"},{col:"size",from:"size_tbl",field:"size"},{col:"model",from:"model_tbl",field:"model"},{col:"component",from:"component_item_tbl",field:"component"},{col:"sub_assembly",from:"subassembly_tbl",field:"sub_assembly"},{col:"material_shape",from:"materials_shape",field:"shape"},{col:"material_spec",from:"material_spec",field:"material_spec"},{col:"uom",from:"uom_tbl",field:"uom"},{col:"cutting_plan_uom",from:"uom_tbl",field:"uom"}], freeText:["cutting_plan_layout_size","cutting_plan_qty","qty_required","rate","cost","sf","sales_price"] },
@@ -1032,7 +1038,7 @@ function classifyModelCategory(item, model){
   if(m.startsWith("TCE")) return "Casting";
   if(m.startsWith("T")) return "Fabricated";
   if(m.startsWith("BCE")||m.startsWith("YCE")||m.startsWith("YCP")) return "Casting";
-  if(m.startsWith("BFS")||m.startsWith("YFS")||m.startsWith("YFP")) return "Fabricated";
+  if(m.startsWith("BFS")||m.startsWith("BFP")||m.startsWith("YFS")||m.startsWith("YFP")) return "Fabricated";   // 256: BFP (ANSI) too
   return null;
 }
 const CATEGORY_TAG_COLORS = {
@@ -1460,6 +1466,7 @@ function buildDatasheetSectionRows(template, fieldValues, mocRow, slLines, model
         let val;
         if(isSlNoLabel(f.label)) val = slNo!==undefined&&slNo!==null ? String(slNo) : "";
         else if(f.type==="auto_model") val = model||"";
+        else if(f.key==="davit_arm") val = davitDatasheetValue(slLines);   // 256
         else val = values[f.key]!==undefined ? values[f.key] : (f.default||"");
         return { key:f.key, label:f.label, value:val };
       });
@@ -2314,6 +2321,7 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
         {key:"bolting_calc",label:"Bolting Calculator"},
         {key:"flange_chart",label:"Flange Chart"},
         {key:"free_area_calc",label:"Free Area Calculator"},
+        {key:"davit_calc",label:"Davit Arm Design Generator"},   // 256
       ]},
     ]};
   const purchaseGroup = { label:"Purchase", subgroups:[
@@ -7152,6 +7160,9 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
   const [orderQtyGateTag,setOrderQtyGateTag]=useState("");
   const [orderQtyGateLocation,setOrderQtyGateLocation]=useState("");
   const [orderQtyGateEnq,setOrderQtyGateEnq]=useState("");
+  const [orderQtyGateDavit,setOrderQtyGateDavit]=useState("Not Required");   // 256
+  const [orderQtyGateConn,setOrderQtyGateConn]=useState(null);   // 257 {choices, flags}
+  const [showGateConn,setShowGateConn]=useState(false);   // 257
   // Datasheet Yes/No — same gate, only shown when the cart being saved
   // contains a Direct Price line (a real catalog Sl No never gets asked
   // this; the requirement stays hard for those). null = unanswered.
@@ -8666,6 +8677,8 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
       ? (siblingRows.find(r=>r.quote_status)||{}).quote_status || "Draft"
       : "Draft";
     let estimateId, createdNewHeader=false;
+    let davitStash=null, davitNote="";   // 256
+    let connStash=null, connNote="";   // 257
     try {
       const headerModel = (effectiveCart[0]&&effectiveCart[0].model) || selectedModel || "";
       const {data:existing}=await sb.from("estimates").select("id").eq("reference_number",ref).eq("item_sl_no",slNo).limit(1);
@@ -8685,7 +8698,8 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
         // line, so the user confirms it instead of typing it twice.
         setOrderQtyGateInput(dpOnlyCart && dpTypedQty>=1 ? String(dpTypedQty) : "");
         setDatasheetChoice(null);
-        setOrderQtyGateTag(""); setOrderQtyGateLocation(""); setOrderQtyGateEnq("");
+        setOrderQtyGateTag(""); setOrderQtyGateLocation(""); setOrderQtyGateEnq(""); setOrderQtyGateConn(null); setShowGateConn(false);
+        connLoadCtx().catch(()=>{});   // 257: roles / flange lists ready for the window
         return false;
       }
       if(existing&&existing.length>0){
@@ -8697,6 +8711,8 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
           ? {...headerPayload, order_qty: dpTypedQty}
           : headerPayload;
         await sb.from("estimates").update(existingPayload).eq("id",estimateId);
+        davitStash = await davitStashBeforeResave(ref, slNo);   // 256: davit lines kept apart, put back below
+        connStash = await connStashBeforeResave(ref, slNo);   // 257
         await sb.from("estimate_lines").delete().eq("reference_number",ref).eq("item_sl_no",slNo);
       } else {
         const{data:created,error:err}=await sb.from("estimates").insert({reference_number:ref,item_sl_no:slNo,...headerPayload,order_qty:Number(orderQty),quote_status:resolvedQuoteStatus,company_id:resolvedCompanyId,created_by:user.username,datasheet_not_required:skipDatasheet===true,linked_allocation_id:(holdingNewSlNo&&holdingNewSlNo.linked_allocation_id)||null,linked_project_id:linkedProjectId||null,linked_enquiry_id:(holdingNewSlNo&&holdingNewSlNo.linked_enquiry_id)||null}).select().single();
@@ -8720,7 +8736,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
       // item, with the count held on order_qty. Every other cart keeps the
       // quantity exactly as it was. dp_order_qty is deliberately not in
       // this list — it is a carrier, not a column.
-      const rows=effectiveCart.map((l,idx)=>({reference_number:ref,item_sl_no:slNo,sl_no:idx+1,estimate_id:estimateId,model:l.model,item:l.item,size:l.size,sub_assembly:l.sub_assembly,component:l.component,material_shape:l.material_shape||"",material_spec:l.material_spec,grade:l.grade,qty_required:(dpOnlyCart?1:l.qty_required),uom:l.uom,rate:l.rate,cost:l.cost,sf:l.sf,sales_price:l.sales_price,cutting_plan_layout_size:l.cutting_plan_layout_size||"",cutting_plan_qty:Number(l.cutting_plan_qty)||0,cutting_plan_uom:l.cutting_plan_uom||"",is_direct_price:l.is_direct_price===true,validation_status:l.validation_status||null,excel_file_name:l.excel_file_name||null,excel_file_path:l.excel_file_path||null,no_excel_code_used:l.no_excel_code_used||null,added_by:l.added_by||null,custom_item:l.custom_item||null,custom_model_recorded:l.custom_model_recorded||null,
+      const rows=effectiveCart.filter(l=>!isDavitLine(l)).map((l,idx)=>({reference_number:ref,item_sl_no:slNo,sl_no:idx+1,estimate_id:estimateId,model:l.model,item:l.item,size:l.size,sub_assembly:l.sub_assembly,component:l.component,material_shape:l.material_shape||"",material_spec:l.material_spec,grade:l.grade,qty_required:(dpOnlyCart?1:l.qty_required),uom:l.uom,rate:l.rate,cost:l.cost,sf:l.sf,sales_price:l.sales_price,cutting_plan_layout_size:l.cutting_plan_layout_size||"",cutting_plan_qty:Number(l.cutting_plan_qty)||0,cutting_plan_uom:l.cutting_plan_uom||"",is_direct_price:l.is_direct_price===true,validation_status:l.validation_status||null,excel_file_name:l.excel_file_name||null,excel_file_path:l.excel_file_path||null,no_excel_code_used:l.no_excel_code_used||null,added_by:l.added_by||null,custom_item:l.custom_item||null,custom_model_recorded:l.custom_model_recorded||null,
         // Pricelist lines only — the keys are left off other lines so a
         // database without the price list columns keeps saving as before.
         ...(l.price_source ? {price_source:l.price_source, pricelist_model_code:l.pricelist_model_code||null, pricelist_ref:l.pricelist_ref||null, material_values:l.material_values||null, ...(l.pricelist_vendor?{pricelist_vendor:l.pricelist_vendor}:{})} : {})}));
@@ -8734,6 +8750,20 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
           })));
         } catch(exErr){ /* non-fatal — the quote itself saved fine; the exception record is best-effort */ }
         setMocDeletedExceptions([]);
+      }
+      // 257 — connections applied again (same model) or cleared and flagged.
+      // Before the davit, which reads the cover flange line.
+      if(connStash){
+        try{ const cr = await connRestoreAfterResave({ ref, slNo, stash:connStash, model:headerModel, user }); if(cr && cr.message) connNote = " "+cr.message; }
+        catch(cErr){ connNote = " Connections were NOT applied again: "+cErr.message+" \u2014 confirm them from Options & Testing \u2192 Connections."; }
+      }
+      // 256 — davit lines: kept as they were when model, line size and cover
+      // are unchanged; regenerated (and the Sl No flagged) when any changed.
+      if(davitStash){
+        try{
+          const dr = await davitRestoreAfterResave({ ref, slNo, stash:davitStash, user });
+          if(dr && dr.message) davitNote = " Davit: "+dr.message;
+        }catch(dErr){ davitNote = " Davit lines were NOT put back: "+dErr.message+" \u2014 set the davit again from Options & Testing \u2192 Davit Arm."; }
       }
       // Signatory override notice (22 Aug) — only for a plain "user" role;
       // Admin/Super Admin overriding their own default isn't flagged.
@@ -8751,7 +8781,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
           await logAudit("UPDATE","estimates",ref+"-"+slNo,"Signatory changed by "+user.username+" from their own default (\""+(signatoryDefault?.employee_name||"")+"\") to \""+signatoryName.trim()+"\" — flagged for Super Admin",user.username,null,null);
         } catch(notifErr){ /* non-fatal — best-effort, same as the moc-exception write above */ }
       }
-      const successMsg = "Saved as Quote# \""+ref+"\" Sl No "+slNo+" with "+rows.length+" line(s).";
+      const successMsg = "Saved as Quote# \""+ref+"\" Sl No "+slNo+" with "+rows.length+" line(s)."+connNote+davitNote;
       setSaveMsg(successMsg); if(!showSave) alert(successMsg);
       setCart([]); setRefNumber(""); setRefDesc(""); setItemSlNo(""); setEnquiryNumber(""); setEnquiryDate(""); setQuoteDate(""); setCurrency("INR"); setConversionRate("1"); setCustomerName(""); setCustomerAddress(""); setContactName(""); setContactDesignation(""); setSignatoryName(""); setSignatoryDesignation(""); setExistingQuoteHeader(null); setShowSave(false); setLinkedProjectId(null); setLinkedProjectName("");
       return true;
@@ -8779,6 +8809,19 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     const gateCart = orderQtyGate.cartOverride||[];
     const hasDirectPrice = gateCart.some(l=>l.is_direct_price===true && l.price_source!=="pricelist");
     const ok = await saveReference(orderQtyGate.cartOverride, Number(orderQtyGateInput), hasDirectPrice && datasheetChoice==="no");
+    // 257 — Connections & Element chosen in this window go on the Sl No
+    if(ok && orderQtyGateConn){
+      try{ await connAfterGateSave({ ref:refNumber, slNo:Number(itemSlNo), choices:orderQtyGateConn.choices, user }); }
+      catch(cErr){ alert("Saved, but the connection choices were not recorded: "+cErr.message+"\n\nThe BOM lines are saved as chosen. Run the SQL, then confirm them again from Options & Testing \u2192 Connections."); }
+    }
+    // 256 — Davit arm, asked with the Sl No (strainer families only)
+    const gateItem = (gateCart[0]&&gateCart[0].item)||"";
+    if(ok && isDavitItem(gateItem)){
+      try{
+        const res = await applyDavitToSl({ ref:refNumber, slNo:Number(itemSlNo), option:orderQtyGateDavit||"Not Required", user });
+        if(orderQtyGateDavit && orderQtyGateDavit!=="Not Required") alert(res.message);
+      }catch(dErr){ alert("Saved, but the davit arm was not added: "+dErr.message+"\n\nSet it later from Options & Testing \u2192 Davit Arm."); }
+    }
     if(ok && (orderQtyGateTag.trim()||orderQtyGateLocation.trim()||orderQtyGateEnq.trim())){
       await sb.from("estimates").update({
         tag_number: orderQtyGateTag.trim()||null,
@@ -8789,7 +8832,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     setOrderQtyGateSaving(false);
     if(ok){
       setOrderQtyGate(null); setOrderQtyGateInput(""); setDatasheetChoice(null);
-      setOrderQtyGateTag(""); setOrderQtyGateLocation(""); setOrderQtyGateEnq("");
+      setOrderQtyGateTag(""); setOrderQtyGateLocation(""); setOrderQtyGateEnq(""); setOrderQtyGateDavit("Not Required"); setOrderQtyGateConn(null); setShowGateConn(false);
       setShowSave(false); setSaveMaximised(true);
       if(holdingNewSlNo) await afterNewSlNoSave();
     }
@@ -9796,13 +9839,16 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
       const hasDirectPrice = gateCart.some(l=>l.is_direct_price===true && l.price_source!=="pricelist");
       const qtyOk = Number(orderQtyGateInput)>=1;
       const dsOk = !hasDirectPrice || datasheetChoice!==null;
+      const gateIsStrainer = isConnItem((gateCart[0]&&gateCart[0].item)||"");   // 257
+      const connRequired = gateIsStrainer && connIsFlanged(gateCart, CONN_CTX?CONN_CTX.roles:CONN_DEFAULT_ROLES);
+      const connOk = !connRequired || !!orderQtyGateConn;
       return h("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.65)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}},
       h("div",{style:{background:"#fff",borderRadius:8,width:340,maxWidth:"92vw",padding:"20px 22px"}},
         h("div",{style:{fontSize:14,fontWeight:700,marginBottom:6}},"Order Quantity"),
         h("div",{style:{fontSize:12,color:colors.muted,marginBottom:14}},"Enter the order quantity before saving."),
         h("input",{type:"number",min:1,step:1,value:orderQtyGateInput,autoFocus:true,
           onChange:e=>setOrderQtyGateInput(e.target.value),
-          onKeyDown:e=>{ if(e.key==="Enter" && qtyOk && dsOk && !orderQtyGateSaving) confirmOrderQtyGate(); },
+          onKeyDown:e=>{ if(e.key==="Enter" && qtyOk && dsOk && connOk && !orderQtyGateSaving) confirmOrderQtyGate(); },
           placeholder:"units", style:{...inputStyle,width:"100%",fontSize:15,padding:"9px 10px",marginBottom:6}}),
         !qtyOk && orderQtyGateInput!=="" && h("div",{style:{fontSize:11,color:colors.danger,marginBottom:6}},"Must be 1 or more."),
         h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginBottom:14}},"Required — must be 1 or more."),
@@ -9820,6 +9866,27 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
           h("label",{style:{display:"block",fontSize:10.5,color:colors.mutedLight,marginBottom:3}},"Location"),
           h("input",{type:"text",value:orderQtyGateLocation,onChange:e=>setOrderQtyGateLocation(e.target.value),placeholder:"optional",style:{...inputStyle,width:"100%",padding:"6px 8px",fontSize:12.5,boxSizing:"border-box"}})
         ),
+        gateIsStrainer && h("div",{style:{marginBottom:14}},   // 257
+          h("label",{style:{display:"block",fontSize:10.5,color:colors.mutedLight,marginBottom:3}},"Connections & Element"+(connRequired?" \u2014 required":" (optional)")),
+          h("div",{style:{display:"flex",gap:8,alignItems:"center"}},
+            h("span",{style:{flex:1,fontSize:11.5,color:orderQtyGateConn?"#0f6e56":(connRequired?colors.danger:colors.muted)}},
+              orderQtyGateConn ? "\u2713 "+(connSummary(orderQtyGateConn.choices)||"checked, no change") : (connRequired ? "Not set \u2014 flanges, cover bolting, drain / vent, element" : "Screwed / socket-weld ends \u2014 not needed")),
+            h("button",{onClick:()=>setShowGateConn(true),style:{...btnSmall,fontSize:11.5}},orderQtyGateConn?"Change":"Set")),
+          orderQtyGateConn && orderQtyGateConn.flags && orderQtyGateConn.flags.length>0 && h("div",{style:{fontSize:10.5,color:"#854f0b",marginTop:4}},orderQtyGateConn.flags.length+" point(s) to check \u2014 open Change to see them.")
+        ),
+        showGateConn && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",zIndex:1300,display:"flex",alignItems:"center",justifyContent:"center",padding:20}},
+          h("div",{style:{background:"#fff",borderRadius:8,padding:"16px 20px",width:980,maxWidth:"100%",maxHeight:"90vh",overflow:"auto"}},
+            h(ConnectionsEditor,{ lines:gateCart, title:"Connections & Element \u2014 "+((gateCart[0]&&gateCart[0].model)||""), required:connRequired,
+              initial:orderQtyGateConn&&orderQtyGateConn.choices, onCancel:()=>setShowGateConn(false),
+              onApply: async(ch,res)=>{ await connPrice(res); setOrderQtyGate({...orderQtyGate, cartOverride:res.lines.map(connStrip)}); setOrderQtyGateConn({choices:ch, flags:res.flags}); setShowGateConn(false); } }))),
+        isDavitItem((gateCart[0]&&gateCart[0].item)||"") && h("div",{style:{marginBottom:14}},   // 256
+          h("label",{style:{display:"block",fontSize:10.5,color:colors.mutedLight,marginBottom:3}},"Davit arm"),
+          h("select",{value:orderQtyGateDavit,onChange:e=>setOrderQtyGateDavit(e.target.value),style:{...inputStyle,width:"100%",padding:"6px 8px",fontSize:12.5,boxSizing:"border-box"}},
+            h("option",{value:"Not Required"},"Not Required"),
+            h("option",{value:"Lifts cover"},"Required \u2014 lifts the cover (bolted cover)"),
+            h("option",{value:"Lifts basket"},"Required \u2014 lifts the basket only (hinged cover)")),
+          h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:3}},"Found from this Sl No\u2019s cover flange; the davit lines are added and priced after saving.")
+        ),
         hasDirectPrice && h("div",{style:{marginBottom:14,paddingTop:10,borderTop:"1px solid "+colors.border}},
           h("div",{style:{fontSize:12.5,fontWeight:600,marginBottom:8}},"Does this line need a Datasheet?"),
           h("div",{style:{display:"flex",gap:8}},
@@ -9830,8 +9897,8 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
         ),
         h("button",{
           onClick:confirmOrderQtyGate,
-          disabled:!qtyOk||!dsOk||orderQtyGateSaving,
-          style:{...btnPrimary,width:"100%",padding:"10px",opacity:(!qtyOk||!dsOk||orderQtyGateSaving)?0.55:1}
+          disabled:!qtyOk||!dsOk||!connOk||orderQtyGateSaving,
+          style:{...btnPrimary,width:"100%",padding:"10px",opacity:(!qtyOk||!dsOk||!connOk||orderQtyGateSaving)?0.55:1}
         },orderQtyGateSaving?h(React.Fragment,null,h("i",{className:"ti ti-hourglass hourglass-spin","aria-hidden":"true",style:{marginRight:6}}),"Saving…"):"Confirm & Save")
       )
       );
@@ -10514,7 +10581,18 @@ function DatasheetModalTemplate({ openRef, openLines, model, modelItemMap, user,
               if(v) forced[f.key]=v;
             }));
           }
-          setValues({...prefill, ...loadedValues, ...forced});
+          // 257 — Nozzle & Connection / cover / element words follow the BOM lines
+          // once the Sl No's Connections & Element are confirmed.
+          const connForced = {};
+          try{
+            const { data:ce } = await sb.from("estimates").select("conn_choices").eq("reference_number",openRef.reference_number).eq("item_sl_no",openRef.item_sl_no).limit(1);
+            if(ce && ce[0] && ce[0].conn_choices){
+              const fieldKeys = new Set(); t.sections.forEach(sec=>sec.fields.forEach(f=>fieldKeys.add(f.key)));
+              const dv = connDatasheetValues(openLines, CONN_CTX?CONN_CTX.roles:CONN_DEFAULT_ROLES);
+              Object.keys(dv).forEach(k=>{ if(fieldKeys.has(k) && dv[k]) connForced[k]=dv[k]; });
+            }
+          }catch(cdErr){ /* column not there yet: nothing forced */ }
+          setValues({...prefill, ...loadedValues, ...forced, ...connForced});
           setOverrides((data&&data.overrides)||{});
           setReview({ exists:!!data, by:(data&&data.reviewed_by)||null, at:(data&&data.reviewed_at)||null });
           originalOverridesRef.current = (data&&data.overrides)||{};
@@ -10568,6 +10646,7 @@ function DatasheetModalTemplate({ openRef, openLines, model, modelItemMap, user,
       if(overrides[field.key]!==undefined) return overrides[field.key];
       return bomFieldDisplay(bomMatches[field.key]);
     }
+    if(field.key==="davit_arm") return davitDatasheetValue(openLines);   // 256: follows the Sl No's davit option
     if(values[field.key]!==undefined) return values[field.key];
     return field.default||"";
   };
@@ -11019,6 +11098,8 @@ function DatasheetModalTemplate({ openRef, openLines, model, modelItemMap, user,
                 ? h("input",{value:String(openRef.item_sl_no),disabled:true,style:{...inputStyle,background:"#f4f2ea"}})
               : field.type==="auto_model"
                 ? h("input",{value:model||(openLines&&openLines[0]&&openLines[0].model)||"",disabled:true,style:{...inputStyle,background:"#f4f2ea"}})
+              : field.key==="davit_arm"   // 256: follows the Sl No
+                ? h("input",{value:davitDatasheetValue(openLines)+"  (set on the Sl No: Options & Testing \u2192 Davit Arm)",disabled:true,style:{...inputStyle,background:"#f4f2ea"}})
               : field.type==="dropdown"
                 ? h(React.Fragment,null,
                     h(LimitToListCombo,{value:values[field.key]!==undefined?values[field.key]:(field.default||""),onChange:v=>{ setField(field.key,v); if(addingOptionKey===field.key){ setAddingOptionKey(null); setOptionCode(""); setOptionAddMsg(""); } },options:field.options,limitToList:false,placeholder:"Type or pick a value…",style:{...inputStyle,...changedStyle}}),
@@ -17121,7 +17202,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     const currentByKey = new Map((currentLines||[]).map(l=>[lineKey(l),l]));
     const masterByKey = new Map((masterRows||[]).map(m=>[lineKey(m),m]));
     const willAdd = (masterRows||[]).filter(m=>!currentByKey.has(lineKey(m)));
-    const willRemove = (currentLines||[]).filter(l=>!masterByKey.has(lineKey(l)));
+    const willRemove = (currentLines||[]).filter(l=>!masterByKey.has(lineKey(l)) && !isDavitLine(l));   // 256: davit lines are not in the model BOM
     const untouchedCount = (currentLines||[]).length - willRemove.length;
     const maxSlNo = (currentLines||[]).reduce((max,l)=>Math.max(max, Number(l.sl_no)||0), 0);
     setBomRefreshPreview({estRow, itemName, willAdd, willRemove, untouchedCount, maxSlNo});
@@ -17154,6 +17235,10 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         const { error:insErr } = await sb.from("estimate_lines").insert(newRows);
         if(insErr) throw insErr;
       }
+      try{   // 257 — the Sl No's connection choices go back on after a refresh
+        const cst = await connStashBeforeResave(estRow.reference_number, estRow.item_sl_no);
+        if(cst && cst.conn_choices) await connApplyToSl({ ref:estRow.reference_number, slNo:estRow.item_sl_no, choices:cst.conn_choices, user, note:"re-applied after Refresh BOM" });
+      }catch(cErr){ alert("BOM refreshed, but the connection choices were not applied again: "+cErr.message+" \u2014 confirm them from Options & Testing \u2192 Connections."); }
       await logAudit("UPDATE","estimate_lines",estRow.reference_number+"-"+estRow.item_sl_no,"Refresh BOM: added "+willAdd.length+", removed "+willRemove.length+" line(s) to match the master template",user?.username||"unknown",null,{added:willAdd.length,removed:willRemove.length});
       setBomRefreshPreview(null);
       await refreshAll();
@@ -19565,7 +19650,9 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           letterhead("ANNEXURE - IB  NOTES");
           notesStartPage = doc.internal.getNumberOfPages();
           doc.autoTable({
-            ...notesTableOpts(34),
+            // 25 Oct 2026: was a raw 34, which in the Classic frame drew the
+            // table header over the annexure title and frame line.
+            ...notesTableOpts(topY(38)),
             didDrawPage:()=>{ if(doc.internal.getNumberOfPages() > notesStartPage) letterhead("ANNEXURE - IB  NOTES"); }
           });
         }
@@ -22771,13 +22858,15 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       )
     ),
     showOptionsTesting && h("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.55)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}},
-      h("div",{style:{background:"#fff",borderRadius:8,padding:"20px 24px",width:560,maxWidth:"100%",maxHeight:"85vh",overflow:"auto"}},
+      h("div",{style:{background:"#fff",borderRadius:8,padding:"20px 24px",width:optionsTestingTab==="connections"?980:560,maxWidth:"100%",maxHeight:"85vh",overflow:"auto"}},
         h("div",{style:{fontWeight:700,fontSize:14,marginBottom:2}},"Options & Testing — Sl No "+(openRef&&openRef.item_sl_no)),
         h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:14}},"Both fold into this Sl No's own unit price (total ÷ qty). Shown as labels only on the Datasheet — no cost breakdown there."),
         h("div",{style:{display:"flex",gap:6,marginBottom:14,borderBottom:"1px solid "+colors.border}},
           h("button",{onClick:()=>setOptionsTestingTab("options"),style:{fontSize:12,padding:"7px 14px",border:"none",borderBottom:optionsTestingTab==="options"?"2px solid "+colors.accent:"2px solid transparent",background:"none",fontWeight:optionsTestingTab==="options"?700:400,color:optionsTestingTab==="options"?colors.accent:colors.muted,cursor:"pointer"}},"Options (Extra Price)"),
           h("button",{onClick:()=>setOptionsTestingTab("testing"),style:{fontSize:12,padding:"7px 14px",border:"none",borderBottom:optionsTestingTab==="testing"?"2px solid "+colors.accent:"2px solid transparent",background:"none",fontWeight:optionsTestingTab==="testing"?700:400,color:optionsTestingTab==="testing"?colors.accent:colors.muted,cursor:"pointer"}},"Testing (NDE)"),
-          h("button",{onClick:()=>setOptionsTestingTab("compliance"),style:{fontSize:12,padding:"7px 14px",border:"none",borderBottom:optionsTestingTab==="compliance"?"2px solid "+colors.accent:"2px solid transparent",background:"none",fontWeight:optionsTestingTab==="compliance"?700:400,color:optionsTestingTab==="compliance"?colors.accent:colors.muted,cursor:"pointer"}},"Compliance")
+          h("button",{onClick:()=>setOptionsTestingTab("compliance"),style:{fontSize:12,padding:"7px 14px",border:"none",borderBottom:optionsTestingTab==="compliance"?"2px solid "+colors.accent:"2px solid transparent",background:"none",fontWeight:optionsTestingTab==="compliance"?700:400,color:optionsTestingTab==="compliance"?colors.accent:colors.muted,cursor:"pointer"}},"Compliance"),
+          h("button",{onClick:()=>setOptionsTestingTab("davit"),style:{fontSize:12,padding:"7px 14px",border:"none",borderBottom:optionsTestingTab==="davit"?"2px solid "+colors.accent:"2px solid transparent",background:"none",fontWeight:optionsTestingTab==="davit"?700:400,color:optionsTestingTab==="davit"?colors.accent:colors.muted,cursor:"pointer"}},"Davit Arm"),
+          h("button",{onClick:()=>setOptionsTestingTab("connections"),style:{fontSize:12,padding:"7px 14px",border:"none",borderBottom:optionsTestingTab==="connections"?"2px solid "+colors.accent:"2px solid transparent",background:"none",fontWeight:optionsTestingTab==="connections"?700:400,color:optionsTestingTab==="connections"?colors.accent:colors.muted,cursor:"pointer"}},"Connections")
         ),
 
         optionsTestingTab==="options" ? h("div",null,
@@ -22833,6 +22922,13 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           h("p",{style:{fontSize:11,color:colors.muted,marginTop:10,borderTop:"1px solid "+colors.border,paddingTop:8}},
             "Not printed on the quote. Carries into the Contract with this line, and onto the order board so inspection scope is visible per item.")
         ) : null,
+
+        optionsTestingTab==="connections" && openRef ? h(ConnectionsSlPanel,{ user, refNo:openRef.reference_number, slNo:openRef.item_sl_no, lines:openLines,   // 257
+          locked: mode==="contract" ? ((soEd && soEd.all) ? "" : soMsg()) : (quoteAnyNonDraft() ? "This quote has left Draft \u2014 start an amendment to change the connections." : ""),
+          onChanged: async()=>{ await refreshAll(); const { data } = await sb.from("estimate_lines").select("*").eq("reference_number",openRef.reference_number).eq("item_sl_no",openRef.item_sl_no).order("sl_no"); setOpenLines(data||[]); } }) : null,
+        optionsTestingTab==="davit" && openRef ? h(DavitSlPanel,{ user, refNo:openRef.reference_number, slNo:openRef.item_sl_no, mode, lines:openLines,   // 256
+          locked: mode==="contract" ? ((soEd && soEd.all) ? "" : soMsg()) : (quoteAnyNonDraft() ? "This quote has left Draft \u2014 start an amendment to change the davit arm." : ""),
+          onChanged: async()=>{ await refreshAll(); const { data } = await sb.from("estimate_lines").select("*").eq("reference_number",openRef.reference_number).eq("item_sl_no",openRef.item_sl_no).order("sl_no"); setOpenLines(data||[]); } }) : null,
 
         h("div",{style:{display:"flex",justifyContent:"flex-end",marginTop:16,borderTop:"1px solid "+colors.border,paddingTop:14}},
           h("button",{onClick:()=>setShowOptionsTesting(false),style:btnPrimary},"Close")
@@ -26494,6 +26590,7 @@ const MANUAL_SECTIONS = [
   {
     "group": "Engineering Calc",
     "articles": [
+      {"key": "davit_arm", "title": "Davit Arm: an option on every strainer Sl No, and the Davit Arm Design Generator", "tag": "Engineering Calc", "blocks": [{"type": "p", "text": "A davit arm is never a model. It is an answer on the Sl No: Not Required, Required \u2014 lifts the cover (bolted cover), or Required \u2014 lifts the basket only (hinged cover). When it is required the app adds the component Davit Arm to the Sl No's BOM \u2014 mast & arm, socket and guide brackets, gussets, reinforcing pads, lifting screw, nut, handwheel, anchor bar, lifting lug and locking pin \u2014 priced from Material Rates like any other line."}, {"type": "steps", "items": ["New Sl No of a strainer: the Order Quantity window asks Davit arm. Pick the answer and Confirm & Save.", "Existing Sl No, on a quote or a contract: open the Sl No \u2192 Options & Testing \u2192 Davit Arm. Pick the answer and Apply.", "The davit is found from the Sl No's own Cover Flange line (standard, rating and cover size). With no flange cover line it uses the line size and the rating in the model, and says so.", "The datasheet shows Davit Arm \u2014 Included in Price or Not Required under Accessories & Options. It follows the Sl No by itself; it is not typed."]}, {"type": "p", "text": "The davit is recorded against the Sl No's model and line size. If the Sl No is saved again from the Estimator with the same model, size and cover, its davit lines are put back exactly as they were, hand edits included. If any of the three changed, the davit lines are made again from the master, the old ones are kept in the revision history, and the Sl No is flagged \u201cDavit lines regenerated - check\u201d. Options & Testing \u2192 Davit Arm shows the flag; press Checked \u2014 clear flag once it has been looked at."}, {"type": "h3", "text": "Davit Arm Design Generator"}, {"type": "p", "text": "Two ways in: Engineering Calc \u2192 Davit Arm Design Generator (a free calculation, or linked to a quote or contract Sl No by typing its number), and Options & Testing \u2192 Davit Arm \u2192 Open Davit Arm Design Generator on any Sl No, which opens it linked and filled in from that Sl No."}, {"type": "bullets", "items": ["Basis: ASME BTH-1 Design Category A, design factor 2.0 on yield (A106 Gr B, 240 MPa), load factor 1.15 on a cover and 1.25 on a basket, proof load 1.25 x safe working load.", "The arm and mast are one bent pipe: moment = load x reach. Checks shown with their figures: pipe stress and tip deflection, socket bearing, gussets and welds, reinforcing pads, lifting screw and thread, anchor bar, lifting lug and locking pin.", "Bracket forces above 10 kN are flagged for a local shell stress check (WRC 537).", "Generate PDF prints the calculation on the chosen company's letterhead. Save calculation numbers it DAVC-26-0001 and keeps it with its link."]}, {"type": "p", "text": "Save to master (Admin, Super Admin, Technical Head) writes the design and its BOM lines into the davit master under its davit code, for example DAV-B16.5-CL150-450nb-C (lifts the cover) or DAV-800nb-B (lifts the basket). From a Sl No, Save to master & apply to this Sl No also puts the new lines on that Sl No."}, {"type": "tip", "text": "The masters are under Setup: Davit: Cover Weights, Davit: Designs and Davit: BOM lines. They were seeded for 150NB to 1200NB in ASME B16.5, ASME B16.47 Series A and B, BS 10 Table E and AWWA C207, all marked not validated. Engineering validates them from the task card \u201cEngineering check - Davit Arm masters\u201d."}]},
       {
         "key": "free_area_calc",
         "title": "Free Flow / Open Area Calculator",
@@ -28674,6 +28771,7 @@ const MANUAL_SECTIONS = [
   {
     "group": "Estimator",
     "articles": [
+      {"key": "connections_element", "title": "Connections & Element: inlet, outlet, cover, drain, vent and filter specs on a strainer Sl No", "tag": "Estimator / Quotes", "blocks": [{"type": "p", "text": "The model BOM masters stay as they are: slip-on end flanges and a BS 10 Table E cover. When the customer wants something else (weld neck ends, an ASME cover, flanged drain and vent, a different perforated sheet or mesh), only that Sl No's BOM lines are changed, here. The flange, stud, gasket and drain lines change together, so the cost cannot be missed."}, {"type": "steps", "items": ["New strainer Sl No with flanged ends: the Order Quantity window shows Connections & Element \u2014 required. Press Set, pick each flange, check what changes, then Confirm connections. Confirm & Save stays off until this is done.", "Screwed and socket-weld strainers have no flange lines; for them the form is optional.", "Existing Sl No of a quote or contract: Options & Testing \u2192 Connections. Change and Confirm connections; the lines are updated straight away."]}, {"type": "bullets", "items": ["Each flange line (inlet / outlet, body flange, cover) has a list of every flange in the spec master, in the same format as the BOM, e.g. Flange-450nb-ANSI B16.5 150 LBS-WNRF. A spec that is not in the master shows red.", "Cover studs, nuts and washers are worked out again from the Flange Chart (number, size, length rounded up to 5 mm, kg), the cover gasket area from the flange OD. A spiral wound gasket becomes 1 Nos.", "Drain / Vent: As in BOM, or Flanged \u2014 the coupling and plug are replaced by a pipe stub, flange, blind, gasket, studs and nuts.", "Perforated sheet and mesh: pick the spec; the quantity stays.", "New or changed lines are priced from Material Rates (spec + grade). Anything without a rate, a missing spec or a flange the Flange Chart does not cover (BS 10, B16.47 Series B, DIN) is listed in yellow \u2014 check those lines by hand.", "The datasheet's Inlet / Outlet Connection, Cover Standard, Drain / Vent and filter element sizes follow the lines."]}, {"type": "p", "text": "The choices are kept on the Sl No. A re-save from the Estimator with the same model and Refresh BOM apply them again. A different model clears them and flags the Sl No \u201cConnections must be set again\u201d. If the cover flange changes and the Sl No has a davit arm, the davit is made again for the new cover."}, {"type": "tip", "text": "Which BOM line is which (inlet flange, cover bolting, drain...) comes from Setup \u2192 Connections: BOM line roles. A model whose lines have other names needs a row there."}]},
       {
         "key": "direct_price_line",
         "title": "Direct Price lines and Pending Validation",
@@ -30446,6 +30544,8 @@ const MANUAL_SECTIONS = [
 // English text with a note. Screen and button names stay in English on purpose,
 // so they match what is on the screen. Not proofread — small errors accepted.
 const MANUAL_TA = {
+ "connections_element": {"title": "Connections & Element: strainer Sl No-இல் inlet, outlet, cover, drain, vent, filter specs", "tag": "Estimator / Quotes", "blocks": [{"type": "p", "text": "Model BOM masters அப்படியே இருக்கும்: slip-on end flanges, BS 10 Table E cover. Customer வேறு கேட்டால் (weld neck ends, ASME cover, flanged drain, vent, வேறு perforated sheet அல்லது mesh), அந்த Sl No-இன் BOM lines மட்டும் இங்கே மாற்றப்படும். Flange, stud, gasket, drain lines ஒன்றாக மாறுவதால் cost தவறாது."}, {"type": "steps", "items": ["Flanged ends உள்ள புதிய strainer Sl No: Order Quantity window-இல் Connections & Element — required வரும். Set அழுத்தி, ஒவ்வொரு flange-ஐயும் தேர்வு செய்து, என்ன மாறுகிறது என்று பார்த்து, Confirm connections. இது முடியும் வரை Confirm & Save வேலை செய்யாது.", "Screwed, socket-weld strainers-க்கு flange lines இல்லை; அவற்றுக்கு இந்த form கட்டாயமில்லை.", "ஏற்கனவே உள்ள quote அல்லது contract Sl No: Options & Testing → Connections. மாற்றி Confirm connections; lines உடனே மாறும்."]}, {"type": "bullets", "items": ["ஒவ்வொரு flange line-க்கும் (inlet / outlet, body flange, cover) spec master-இல் உள்ள எல்லா flanges-உம் BOM format-இல் பட்டியலாக வரும், உதா. Flange-450nb-ANSI B16.5 150 LBS-WNRF. Master-இல் இல்லாத spec சிவப்பில் காட்டும்.", "Cover studs, nuts, washers Flange Chart-இலிருந்து மீண்டும் கணக்கிடப்படும் (எண்ணிக்கை, size, 5 mm-க்கு round up செய்த நீளம், kg); cover gasket area flange OD-இலிருந்து. Spiral wound gasket 1 Nos ஆகும்.", "Drain / Vent: As in BOM, அல்லது Flanged — coupling, plug-க்குப் பதிலாக pipe stub, flange, blind, gasket, studs, nuts.", "Perforated sheet, mesh: spec-ஐத் தேர்வு செய்யுங்கள்; quantity மாறாது.", "புதிய / மாறிய lines Material Rates-இலிருந்து (spec + grade) விலை பெறும். Rate இல்லாதவை, master-இல் இல்லாத spec, Flange Chart-இல் இல்லாத flange (BS 10, B16.47 Series B, DIN) மஞ்சளில் பட்டியலிடப்படும் — அவற்றைக் கையால் சரிபாருங்கள்.", "Datasheet-இன் Inlet / Outlet Connection, Cover Standard, Drain / Vent, filter element sizes lines-ஐப் பின்பற்றும்."]}, {"type": "p", "text": "தேர்வுகள் Sl No-இல் வைக்கப்படும். அதே model-உடன் Estimator-இலிருந்து re-save, Refresh BOM இரண்டும் அவற்றை மீண்டும் போடும். Model மாறினால் அவை நீக்கப்பட்டு Sl No-க்கு “Connections must be set again” flag வரும். Cover flange மாறி Sl No-இல் davit arm இருந்தால், புதிய cover-க்கு davit மீண்டும் உருவாக்கப்படும்."}, {"type": "tip", "text": "எந்த BOM line எது (inlet flange, cover bolting, drain...) என்பது Setup → Connections: BOM line roles-இலிருந்து. Lines வேறு பெயரில் உள்ள model-க்கு அங்கே ஒரு row தேவை."}], "en_sig": "299d4a11"},
+ "davit_arm": {"title": "Davit Arm: ஒவ்வொரு strainer Sl No-க்கும் ஒரு option, Davit Arm Design Generator", "tag": "Engineering Calc", "blocks": [{"type": "p", "text": "Davit arm ஒருபோதும் model அல்ல. அது Sl No-இல் கேட்கப்படும் ஒரு பதில்: Not Required, Required — lifts the cover (bolted cover), அல்லது Required — lifts the basket only (hinged cover). தேவை என்றால் app அந்த Sl No-இன் BOM-இல் Davit Arm component-ஐச் சேர்க்கும் — mast & arm, socket, guide brackets, gussets, reinforcing pads, lifting screw, nut, handwheel, anchor bar, lifting lug, locking pin — மற்ற lines போலவே Material Rates-இலிருந்து விலை."}, {"type": "steps", "items": ["புதிய strainer Sl No: Order Quantity window-இல் Davit arm கேட்கப்படும். பதிலைத் தேர்வு செய்து Confirm & Save.", "ஏற்கனவே உள்ள Sl No (quote அல்லது contract): Sl No-ஐத் திறந்து Options & Testing → Davit Arm. பதிலைத் தேர்வு செய்து Apply.", "Davit அந்த Sl No-இன் Cover Flange line-இலிருந்து (standard, rating, cover size) கண்டுபிடிக்கப்படும். Flange cover line இல்லையென்றால் line size-ஐயும் model-இல் உள்ள rating-ஐயும் எடுத்துக்கொண்டு அதைச் சொல்லும்.", "Datasheet-இல் Accessories & Options கீழ் Davit Arm — Included in Price அல்லது Not Required. இது Sl No-ஐத் தானே பின்பற்றும்; type செய்ய வேண்டாம்."]}, {"type": "p", "text": "Davit அந்த Sl No-இன் model, line size-க்கு எதிராகப் பதிவு செய்யப்படும். Estimator-இலிருந்து அதே model, size, cover-உடன் மீண்டும் save செய்தால், davit lines கை மாற்றங்களுடன் அப்படியே திரும்ப வைக்கப்படும். மூன்றில் ஏதாவது மாறியிருந்தால், davit lines master-இலிருந்து மீண்டும் உருவாக்கப்படும், பழையவை revision history-இல் வைக்கப்படும், Sl No-க்கு “Davit lines regenerated - check” flag வரும். பார்த்து முடித்ததும் Options & Testing → Davit Arm-இல் Checked — clear flag அழுத்தவும்."}, {"type": "h3", "text": "Davit Arm Design Generator"}, {"type": "p", "text": "இரண்டு வழிகள்: Engineering Calc → Davit Arm Design Generator (தனிக் கணக்கு, அல்லது number type செய்து quote / contract Sl No-உடன் இணைத்து), மற்றும் எந்த Sl No-இலும் Options & Testing → Davit Arm → Open Davit Arm Design Generator — அது அந்த Sl No-உடன் இணைந்து, விவரங்கள் நிரப்பப்பட்டுத் திறக்கும்."}, {"type": "bullets", "items": ["அடிப்படை: ASME BTH-1 Design Category A, yield மீது design factor 2.0 (A106 Gr B, 240 MPa), cover-க்கு load factor 1.15, basket-க்கு 1.25, proof load = 1.25 x safe working load.", "Arm-உம் mast-உம் ஒரே வளைத்த pipe: moment = load x reach. கணக்குடன் காட்டப்படும் checks: pipe stress, tip deflection, socket bearing, gussets, welds, reinforcing pads, lifting screw, thread, anchor bar, lifting lug, locking pin.", "10 kN-க்கு மேல் bracket force இருந்தால் local shell stress check (WRC 537) என flag செய்யப்படும்.", "Generate PDF தேர்ந்தெடுத்த company letterhead-இல் கணக்கை அச்சிடும். Save calculation அதை DAVC-26-0001 என number செய்து அதன் link-உடன் வைக்கும்."]}, {"type": "p", "text": "Save to master (Admin, Super Admin, Technical Head) design-ஐயும் அதன் BOM lines-ஐயும் davit code-இன் கீழ் master-இல் எழுதும் — உதாரணம் DAV-B16.5-CL150-450nb-C (cover தூக்கும்) அல்லது DAV-800nb-B (basket தூக்கும்). Sl No-இலிருந்து Save to master & apply to this Sl No அந்த Sl No-இலும் புதிய lines-ஐ வைக்கும்."}, {"type": "tip", "text": "Masters Setup-இல் உள்ளன: Davit: Cover Weights, Davit: Designs, Davit: BOM lines. 150NB முதல் 1200NB வரை ASME B16.5, ASME B16.47 Series A, B, BS 10 Table E, AWWA C207-க்கு seed செய்யப்பட்டு, அனைத்தும் not validated எனக் குறிக்கப்பட்டுள்ளன. Engineering “Engineering check - Davit Arm masters” task card-இலிருந்து validate செய்யும்."}], "en_sig": "7500703d"},
  "doc_board_lanes": {"title":"Document Control: stage lists, By contract lanes ஆக","tag":"Order Status","blocks":[{"type":"p","text":"Board-இன் lists, இடமிருந்து வலம்: Status to confirm · Initial submission pending · Code 3 — resubmit · Submitted — awaiting code · Code 2 — production clear · Code 2 — production hold · Code 1 — all approved · Code 1 — submitted for info · Non Critical."},{"type":"bullets","items":["Initial submission pending: கேட்கப்பட்டு இதுவரை அனுப்பப்படாதவை. Code 3 — resubmit: client comments-உடன் திருப்பி அனுப்பியவை. அனுப்பியதும் அல்லது Code 3 reply பதிந்ததும் card தானாக நகரும்.","By contract: ஒவ்வொரு live contract-க்கும் ஒரு band. இடதுபுறம்: contract, work order, despatch நிலை, எத்தனை documents approved, Full Hold எண்ணிக்கை, ஒவ்வொரு stage-க்கும் சிறிய எண்ணிக்கை. Stage lists band முழுவதும் வரிசையாக.","Hide empty lists — காட்டப்படும் bands-இல் எதுவும் இல்லாத lists மறையும். ▾ fold ஒரு contract-ஐ எண்ணிக்கைகளாகச் சுருக்கும்; Fold all / Open all அனைத்துக்கும். Task cards tick செய்தால் contract-இன் task cards கடைசி column-ஆக வரும்.","Show filter (உதா. Not clear — Full Hold open, Work order released) மற்ற filters எந்த bands காட்டப்படும் என்பதைத் தேர்வு செய்யும்.","Cards-ஐ முன்பு போலவே card-இலிருந்தே திறக்கலாம், அனுப்பலாம், reply பதியலாம். இழுத்து நகர்த்த By stage பயன்படுத்துங்கள்."]}],"en_sig":"17d03627"},
  "bill_po_footer_service": {"title":"Purchase bill: PO footer charges, Service POs","tag":"Accounts","blocks":[{"type":"p","text":"Accounts → Vouchers → Purchase, Against PO. PO value-இல் இப்போது PO footer-உம் சேரும் — FFS PO-வின் கீழே அச்சிடப்பட்ட transport, P&F, loading."},{"type":"bullets","items":["PO value, Left to bill இரண்டும் footer-ஐக் கணக்கிடும். உதா. SPO/0190: items 10,000 + transport 2,000 = GST-க்கு முன் 12,000 (GST உடன் 14,160).","Fill items from PO, item lines-உடன் PO footer charges என்ற ஒரு charge line-ஐ, footer-இல் இன்னும் bill செய்ய வேண்டிய தொகையுடன் கொண்டுவரும். இந்த bill ஒரு பகுதியை மட்டும் எடுத்தால் தொகையை மாற்றுங்கள்; மீதி bill செய்ய இருக்கும். Charge-இன் ledger-ஐத் தேர்ந்தெடுங்கள் (உதா. Freight Inward).","Service PO-க்கு GRN இல்லை. PO-வில் மீதமுள்ளதுடன் lines நிரம்பும்; ஒவ்வொரு row-க்கும் காரணம் கேட்காது. PO-வை விட அதிகமான bill இன்னும் காரணம் கேட்கும், Purchase Manager-க்குத் தெரிவிக்கப்படும்.","\"row-level security\" என்று save மறுக்கப்பட்டால், admin Supabase-இல் fix_rls_new_tables_2026-10-24.sql run செய்து, மீண்டும் முயற்சிக்கவும்."]}],"en_sig":"bbfd96a6"},
  "so_terms_lock_mtc_lines": {"title":"Sale Order: terms எப்போது lock ஆகும், BOM-இலிருந்து MTC & AVL lines","tag":"Order Status","blocks":[{"type":"p","text":"ஒரு Sale Order Stage Open-இல் தொடங்கும். O.A அனுப்பப்படும் வரை அதன் Commercial Terms-ஐ மாற்றலாம். O.A Sent முதல் lock ஆகும்: காரணத்துடன் Amend terms… பயன்படுத்துங்கள்; ஒவ்வொரு மாற்றமும் Revision History-இல் இருக்கும்."},{"type":"bullets","items":["Stage Open (அல்லது Draft) ஆக இருக்கும்போது O.A உருவாக்கினால், Draft watermark தேர்வும், Stage-ஐ O.A Sent எனக் குறிக்கலாமா என்ற கேள்வியும் வரும்.","MTC & AVL, Sale Order BOM-இன் ஒவ்வொரு shape / component-ஐயும் ஒருமுறை காட்டும். + Line விடுபட்ட ஒன்றைச் சேர்க்கும்: BOM-இலிருந்து shape, பின் அதன் கீழ் உள்ள component. ஏற்கனவே பட்டியலில் உள்ளவை காட்டப்படாது; நகல் இருந்தால் Save ஏற்காது.","Sale Order-இல் shape உள்ள BOM இல்லையெனில் (price-list / direct-price items), MTC & AVL ஒவ்வொரு Sl No-க்கும் ஒரு line (Whole item), அதன் MTC, AVL உடன் காட்டும்."]},{"type":"warn","text":"structure_mtc_avl_gateways_2026-10-23.sql அந்த company-இல் run செய்த பிறகுதான் MTC & AVL save ஆகும். அதுவரை Save அதைச் சொல்லும்."}],"en_sig":"b0682ab7"},
@@ -33340,6 +33440,9 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"25 Oct 2026 (258)", summary:"Built on 2026-10-25T19:00:00Z, on top of 2026-10-25T18:00:00Z. No SQL. QUOTE PDF \u2014 when the notes do not fit on the Commercial Terms page they go on their own page, ANNEXURE - IB NOTES. In the Classic frame that table started too high, so its Sl No / Note header and first row printed over the annexure title and frame line. It now starts below the title, the same as Commercial Terms." },
+  { date:"25 Oct 2026 (257)", summary:"Built on 2026-10-25T18:00:00Z, on top of 2026-10-25T16:00:00Z. NEEDS SQL FIRST: Connections_Element_2026-10-25.sql (both databases, Flometriq and Levaflow). CONNECTIONS & ELEMENT \u2014 the model masters stay slip-on / BS 10 Table E; only the quote BOM changes. A new flanged strainer Sl No cannot be saved from the Order Quantity window until its connections are confirmed (screwed / socket-weld ends: optional). Each flange line (inlet / outlet, body, cover) picks from every flange in the spec master, in the BOM format. Cover studs, nuts, washers are recalculated from the Flange Chart (count, size, length, kg) and the cover gasket from the flange OD (spiral wound = 1 Nos); drain / vent can be made flanged (pipe stub, flange, blind, gasket, studs, nuts); perforated sheet and mesh specs can be changed. Changed and new lines are priced from Material Rates; missing specs, missing rates and flanges the chart does not cover are listed. Choices kept on the Sl No (estimates.conn_choices): applied again after an Estimator re-save with the same model and after Refresh BOM; a different model clears them and flags the Sl No. Existing Sl Nos: Options & Testing \u2192 Connections. Datasheet Inlet / Outlet Connection, Cover Standard, Drain / Vent, filter element sizes follow the lines. A cover change remakes the davit arm. Setup: Connections: BOM line roles." },
+  { date:"25 Oct 2026 (256)", summary:"Built on 2026-10-25T16:00:00Z, on top of 2026-10-25T08:30:00Z. NEEDS SQL FIRST: Davit_Arm_Masters_2026-10-25.sql on the Flometriq database, Davit_Arm_Masters_Levaflow_2026-10-25.sql on the Levaflow database. DAVIT ARM \u2014 AN OPTION ON EVERY STRAINER SL NO, NEVER A MODEL: the Order Quantity window of a new strainer Sl No asks Davit arm (Not Required / lifts the cover / lifts the basket); existing Sl Nos of quotes and contracts get Options & Testing \u2192 Davit Arm. The davit is found from the Sl No\u2019s Cover Flange line (standard, rating, cover size) in davit_master_tbl and its lines (component Davit Arm, 12 sub-assemblies) come from davit_bom_tbl, priced from Material Rates. Recorded against the Sl No\u2019s model and line size: an Estimator re-save with the same model, size and cover keeps the davit lines as they were (hand edits included); otherwise they are regenerated, the old lines go to revision history and the Sl No is flagged. Refresh BOM leaves davit lines alone. Datasheet: Davit Arm \u2014 Included in Price / Not Required under Accessories & Options, following the Sl No. DAVIT ARM DESIGN GENERATOR (Engineering Calc, and from any Sl No): ASME BTH-1 Cat A, arm/mast pipe, deflection, socket bearing, gussets, welds, pads (WRC 537 flag above 10 kN), lifting screw, anchor bar, lug, locking pin, proof load; PDF, saved calculations DAVC-YY-NNNN (free or linked to a quote / contract Sl No), Save to master (admin, super admin, technical head). Setup masters: Davit: Cover Weights / Designs / BOM lines. BFP models count as Fabricated." },
   { date:"25 Oct 2026 (255)", summary:"Built on 2026-10-25T08:30:00Z, on top of 2026-10-25T08:15:00Z. No SQL. ORDER STATUS — REVISION HISTORY: \ud83d\udd58 Revision history beside \u2922 Expand by status on every contract column (and in the expanded contract's header) opens every document of the contract grouped by document, in status order red to green (Initial submission pending, Code 3, Status to confirm, Submitted, Code 2 hold, Code 2, info, approved); documents with no revision yet are listed too. Each revision: Rev, In / Out, status, date, by, what changed / client's comment, file. Search, Open all / Close all, Newest / Oldest first, Excel, PDF \u2014 internal and PDF \u2014 for the client; Card detail \u2192 opens the document and comes back; Esc closes. Every document card has a \ud83d\udd58 History button (the small clock is gone). CLIENT PDFs are the same as the internal ones without internal details (names, our notes, file links, owner, hold); the client's own comments stay. The Report by contract's Include reasons and names tick is gone for the same reason. PROJECT DUE DATE on cards: every card on a quote or a contract shows \ud83c\udfc1 Project due beside its own due date (Card due / Task due) \u2014 contract: the delivery date; quote or enquiry: the last date for submission. Amber within 7 days, red when passed. On the Order Status board (document cards, task cards, contract column and expanded header) and on every task board (person, department, Task Assignment Board, All boards). Manual (English and Tamil) updated." },
   { date:"25 Oct 2026 (254)", summary:"Built on 2026-10-25T08:15:00Z, on top of 2026-10-25T03:30:00Z. No SQL. DOCUMENT CONTROL BOARD — BY CONTRACT back to one column per live contract (the bands of 253 are gone): contract and customer, work order and despatch tags, approved / Full Hold count, a count per stage, cards in stage order with overdue first, ▾ fold per column and Fold all, task cards and + Add a card under each contract as before. ⤢ EXPAND BY STATUS on a column opens that one contract across the screen in the stage lists (same names and order as 253, Hide empty lists, task cards as the last list); ← Back to all contracts or Esc returns to the columns at the same scroll place, the column flashes; ‹ Prev / Next › steps through the contracts in the board's order and filters. The contract last opened is remembered on this computer and opens again when you come back to the board (Back clears it). List names, the Code 3 split and the Table summary of 253 are unchanged. Manual (English and Tamil): Document Control — By contract updated." },
   { date:"25 Oct 2026 (253)", summary:"Built on 2026-10-25T03:30:00Z, on top of 2026-10-24T13:30:00Z. No new SQL. DOCUMENT CONTROL BOARD: lists named and ordered as the team uses them — Status to confirm · Initial submission pending · Code 3 — resubmit · Submitted — awaiting code · Code 2 — production clear · Code 2 — production hold · Code 1 — all approved · Code 1 — submitted for info · (Non Critical and lists a Super Admin added). Not submitted is shown as two lists: never sent, and returned with comments (Code 3); underneath it is one list, so chasing, task cards and the production release work as before. The Table summary (screen and PDF) counts them apart. BY CONTRACT is now lanes: one band per live contract with its work-order and despatch tags, approved / Full Hold count and a count per stage; the stage lists run across; the contract stays on the left when scrolling sideways and the list names stay on top when scrolling down. Hide empty lists (remembered on this computer), ▾ fold / Fold all, Task cards as the last column when ticked. The Show filter and the other filters cut the bands." },
@@ -48514,6 +48617,1183 @@ function calcBlindFlange(P, D, S, E, CA) {
 }
 
 /* ---- CALCS UI ---- */
+// ===================== DAVIT ARM — design engine (shared) =====================
+// One engine used three ways: the Davit Arm Design Generator, the "Save to
+// master" button, and (outside the app) the seed SQL. Basis: ASME BTH-1
+// Design Category A, design factor Nd = 2.0 on yield; proof load 1.25 x SWL.
+// The arm and mast are ONE bent pipe, so both carry M = W x reach; the mast
+// sits in a bottom socket bracket and a top guide bracket, s apart, which
+// take M as a horizontal couple F = M / s.
+const DAVIT_G = 9.81;
+const DAVIT_PIPES = [ // NB, OD mm, Sch 40 t, Sch 80 t (ASME B36.10)
+  ["25nb",33.4,3.38,4.55],["32nb",42.2,3.56,4.85],["40nb",48.3,3.68,5.08],["50nb",60.3,3.91,5.54],
+  ["65nb",73.0,5.16,7.01],["80nb",88.9,5.49,7.62],["100nb",114.3,6.02,8.56],["125nb",141.3,6.55,9.53],
+  ["150nb",168.3,7.11,10.97],["200nb",219.1,8.18,12.70],["250nb",273.0,9.27,15.09]
+];
+const DAVIT_PLATES = [10,12,16,20,25,32,40];
+const DAVIT_SCREWS = [ // metric coarse: size, stress area mm2, pitch
+  [16,157,2.0],[20,245,2.5],[24,353,3.0],[30,561,3.5],[36,817,4.0],[42,1121,4.5],[48,1473,5.0]
+];
+const DAVIT_NUT_SPEC = {16:"Nut-Metric-M16-Ø27.72x14.8",20:"Nut-Metric-M20-Ø34.65x18",24:"Nut-Metric-M24-Ø41.58x21.5",
+  30:"Nut-Metric-M30-Ø53.13x25.6",36:"Nut-Metric-M39-Ø60x31",42:"Nut-Metric-M39-Ø60x31",48:"Nut-Metric-M39-Ø60x31"};
+const DAVIT_DEFAULTS = {
+  fy:240, fu:415, E:200000, nd:2.0, weldFexx:485,
+  loadFactorCover:1.15, loadFactorBasket:1.25,
+  bracketSpacing:500, socketLen:150, gussetHeight:150, deflDiv:150, screwFy:250,
+};
+function davitPipeProps(od,t){
+  const di = od-2*t;
+  const I = Math.PI/64*(Math.pow(od,4)-Math.pow(di,4));
+  const A = Math.PI/4*(od*od-di*di);
+  return { di, I, Z:2*I/od, A, kgm:A*7.85e-3 };
+}
+// Typical basket weight (screen + bottom plate + handle) when nothing better is known.
+function davitBasketWeightGuess(nbNum){ return Math.max(8, Math.round(0.00019*nbNum*nbNum)); }
+function davitBasketLength(nbNum){ return nbNum>=400 ? 2.0*nbNum : 1.5*nbNum+200; }
+function davitNbNum(nb){ const m = String(nb||"").match(/(\d+)/); return m ? Number(m[1]) : 0; }
+
+// inp: { liftType:"Cover"|"Basket", liftedKg, coverOdMm, nb, mastHeightMm?, reachMm?, clearanceMm?,
+//        bracketSpacingMm?, loadFactor?, nd?, fy?, sch? }
+function davitDesign(inp){
+  const P = {...DAVIT_DEFAULTS};
+  const nd = Number(inp.nd)||P.nd, fy = Number(inp.fy)||P.fy;
+  const allow = fy/nd;
+  const lf = Number(inp.loadFactor) || (inp.liftType==="Basket" ? P.loadFactorBasket : P.loadFactorCover);
+  const lifted = Number(inp.liftedKg)||0;
+  const swlKg = lifted*lf;
+  const W = swlKg*DAVIT_G;                       // N
+  const nbNum = davitNbNum(inp.nb);
+  const odCover = Number(inp.coverOdMm)||nbNum*1.3;
+  const clear = Number(inp.clearanceMm) || (odCover>900 ? 120 : 100);
+  const s = Number(inp.bracketSpacingMm)||P.bracketSpacing;
+  const h = Number(inp.mastHeightMm) || (inp.liftType==="Basket"
+              ? Math.round(davitBasketLength(nbNum)+300)
+              : Math.round(Math.max(500, 0.35*odCover+300)));
+  const schIdx = inp.sch==="40" ? 2 : 3;
+  const warnings = [];
+  let pick=null, R=0;
+  // reach depends on the socket size, which depends on the pipe: iterate twice
+  let socketOd = 60;
+  for(let pass=0; pass<3; pass++){
+    R = Number(inp.reachMm) || Math.round(odCover/2 + clear + socketOd/2);
+    const M = W*R;
+    pick = null;
+    for(let i=0;i<DAVIT_PIPES.length;i++){
+      const [nb,od,t40,t80] = DAVIT_PIPES[i];
+      const t = schIdx===2?t40:t80;
+      const pp = davitPipeProps(od,t);
+      const sigB = M/pp.Z, sigA = W/pp.A, sig = sigA+sigB;
+      const defl = W*Math.pow(R,3)/(3*P.E*pp.I) + W*R*h*R/(P.E*pp.I);
+      const deflLim = (R+h)/P.deflDiv;
+      if(sig<=allow && defl<=deflLim){ pick={nb,od,t,idx:i,...pp,M,sigB,sigA,sig,defl,deflLim}; break; }
+    }
+    if(!pick){ warnings.push("No pipe up to 250NB passes — use a structural section; values shown for 250NB.");
+      const [nb,od,t40,t80]=DAVIT_PIPES[DAVIT_PIPES.length-1]; const t=schIdx===2?t40:t80; const pp=davitPipeProps(od,t);
+      pick={nb,od,t,idx:DAVIT_PIPES.length-1,...pp,M:W*R,sigB:W*R/pp.Z,sigA:W/pp.A,sig:W*R/pp.Z+W/pp.A,
+            defl:W*Math.pow(R,3)/(3*P.E*pp.I)+W*R*h*R/(P.E*pp.I),deflLim:(R+h)/P.deflDiv}; }
+    const sock = DAVIT_PIPES[Math.min(pick.idx+1,DAVIT_PIPES.length-1)];
+    const newSocketOd = sock[1];
+    if(Math.abs(newSocketOd-socketOd)<1 || inp.reachMm) { socketOd=newSocketOd; break; }
+    socketOd = newSocketOd;
+  }
+  const sock = DAVIT_PIPES[Math.min(pick.idx+1,DAVIT_PIPES.length-1)];
+  const M = pick.M;
+  const F = M/s;                                   // N, bracket couple
+  // socket bearing: arm bears on the socket over its length
+  const bearing = F/(pick.od*P.socketLen);         // MPa
+  const bearingAllow = 0.9*fy/nd;
+  // gussets: 2 per bracket, cantilever projection p, height hg
+  const proj = sock[1]/2 + 50, hg = P.gussetHeight;
+  const Mg = Math.max(F, W)*proj;
+  let tg = DAVIT_PLATES[DAVIT_PLATES.length-1], sigG=0;
+  for(const t of DAVIT_PLATES){ const zg = 2*t*hg*hg/6; const sg = Mg/zg; if(sg<=allow){ tg=t; sigG=sg; break; } }
+  if(!sigG){ const zg=2*tg*hg*hg/6; sigG=Mg/zg; warnings.push("Gusset needs more than 40 mm — deepen the gusset."); }
+  // fillet welds of each bracket (two gussets, both sides) to its pad
+  const Lw = 4*hg;                                 // mm of weld
+  const wAllow = 0.6*P.weldFexx/(1.2*nd);          // MPa on throat
+  const Fres = Math.sqrt(F*F + W*W);
+  const throatReq = Fres/(Lw*wAllow);
+  const weldLeg = Math.max(6, Math.ceil(throatReq/0.707));
+  // reinforcing pad (shell side)
+  const padT = F>10000 ? 12 : 10;
+  const padW = Math.round(2*proj+100), padH = hg+100;
+  const shellCheck = F>10000 ? "Local shell stress at the brackets to be checked (WRC 537) — bracket force above 10 kN." : "";
+  if(shellCheck) warnings.push(shellCheck);
+  // lifting screw
+  const screwAllow = 0.4*P.screwFy;                // MPa (tension on stress area, Nd ~2.5 on yield incl. thread)
+  let screw = DAVIT_SCREWS[DAVIT_SCREWS.length-1];
+  for(const sc of DAVIT_SCREWS){ if(sc[0]>=20 && W/sc[1] <= screwAllow){ screw=sc; break; } }
+  const screwStress = W/screw[1];
+  const nutLen = Math.max(screw[0]*1.0, 20);
+  const threadShear = W/(Math.PI*screw[0]*0.75*nutLen*0.5); // ~50% engagement
+  const screwLen = Math.round((inp.liftType==="Basket"?400:250) + 150);
+  // anchor bar at the arm tip, simply supported over the nut span b
+  const b = Math.max(80, screw[0]*3), bw = 60;
+  const Ma = W*b/4;
+  let tb = DAVIT_PLATES[DAVIT_PLATES.length-1], sigAb=0;
+  for(const t of DAVIT_PLATES){ const sa = 6*Ma/(bw*t*t); if(sa<=allow){ tb=t; sigAb=sa; break; } }
+  if(!sigAb){ sigAb = 6*Ma/(bw*tb*tb); }
+  // lifting lug (BTH-1 pin-connected plate, simplified)
+  const dh = screw[0]+6, Rl = Math.max(2*dh, 40);
+  let tl = DAVIT_PLATES[DAVIT_PLATES.length-1], lugT=0, lugB=0, lugS=0;
+  for(const t of DAVIT_PLATES){
+    const ten = W/((2*Rl-dh)*t), brg = W/(dh*t), shr = W/(2*(Rl-dh/2)*t);
+    if(ten<=allow && brg<=1.25*fy/nd && shr<=0.6*fy/nd){ tl=t; lugT=ten; lugB=brg; lugS=shr; break; }
+  }
+  if(!lugT){ lugT=W/((2*Rl-dh)*tl); lugB=W/(dh*tl); lugS=W/(2*(Rl-dh/2)*tl); }
+  // locking pin: resists an accidental push of 10% W at the reach, reacted at the collar radius
+  const collarR = sock[1]/2 + 20;
+  const Fpin = 0.1*W*R/collarR;
+  let pinD = 16; for(const d of [16,20,25,30,36]){ if(Fpin/(Math.PI*d*d/4) <= 0.4*fy/nd){ pinD=d; break; } }
+  // lengths and weights for the BOM
+  const armLenM = Math.round((R + h + s + 100 + 200))/1000;     // arm + mast + below socket + bend allowance
+  const proofKg = Math.round(1.25*swlKg);
+  return {
+    inputs:{liftType:inp.liftType, liftedKg:lifted, loadFactor:lf, coverOdMm:odCover, clearanceMm:clear, reachMm:R,
+            mastHeightMm:h, bracketSpacingMm:s, nd, fy, allow, sch:schIdx===2?"40":"80", nb:inp.nb||""},
+    swlKg, W, M, R, h, s,
+    arm:{ nb:pick.nb, sch:"Sch "+(schIdx===2?"40":"80"), od:pick.od, t:pick.t, Z:pick.Z, I:pick.I, A:pick.A, kgm:pick.kgm,
+          sigB:pick.sigB, sigA:pick.sigA, sig:pick.sig, ratio:pick.sig/allow, defl:pick.defl, deflLim:pick.deflLim, lenM:armLenM },
+    socket:{ nb:sock[0], od:sock[1], t:sock[3], len:P.socketLen, bearing, bearingAllow, kgm:davitPipeProps(sock[1],sock[3]).kgm },
+    bracket:{ F, proj, hg, tg, sigG, weldLeg, throatReq, wAllow, padT, padW, padH },
+    screw:{ d:screw[0], As:screw[1], stress:screwStress, allow:screwAllow, nutLen, threadShear, lenMm:screwLen },
+    anchor:{ b, bw, t:tb, M:Ma, sig:sigAb },
+    lug:{ t:tl, dh, R:Rl, ten:lugT, brg:lugB, shr:lugS },
+    pin:{ d:pinD, F:Fpin },
+    proofKg, warnings,
+    ok: pick.sig<=allow && pick.defl<=pick.deflLim && bearing<=bearingAllow,
+  };
+}
+// BOM lines for one design — same columns as the bom table. Grades are the
+// defaults the app prices with; they can be changed on the Sl No like any line.
+function davitBomLines(d){
+  const kgPlate = (l,w,t)=> Math.round(l*w*t*7.85e-6*100)/100;
+  const lines = [];
+  const add = (sub,shape,spec,grade,qty,uom,layout,cpq,cpu,sf)=>lines.push({sub_assembly:sub,component:"Davit Arm",material_shape:shape,
+     material_spec:spec,grade,qty_required:Math.round(qty*1000)/1000,uom,cutting_plan_layout_size:layout||"",cutting_plan_qty:cpq||0,cutting_plan_uom:cpu||"",sf:sf||3.1});
+  add("Mast & Arm","Pipe","Pipe-"+d.arm.nb,"ASTM A106 SCHDL 80",d.arm.lenM,"Metres",
+      d.arm.nb+" "+d.arm.sch+" bent: reach "+Math.round(d.R)+" + mast "+Math.round(d.h)+" mm");
+  add("Socket Bracket","Pipe","Pipe-"+d.socket.nb,"ASTM A106 SCHDL 80",0.15,"Metres",d.socket.nb+" x 150 long socket");
+  const collarOd = d.socket.od+80;
+  add("Thrust Collar","Plate","Plate-"+d.bracket.tg+"mm","CS TO IS 2062",kgPlate(collarOd,collarOd,d.bracket.tg),"Kg","Collar "+Math.round(collarOd)+" sq x "+d.bracket.tg);
+  add("Guide Bracket","Plate","Plate-"+d.bracket.tg+"mm","CS TO IS 2062",kgPlate(collarOd,d.bracket.proj+60,d.bracket.tg),"Kg","Guide collar plate");
+  add("Gussets","Plate","Plate-"+d.bracket.tg+"mm","CS TO IS 2062",4*kgPlate(d.bracket.proj,d.bracket.hg,d.bracket.tg)*0.5,"Kg","4 nos, "+Math.round(d.bracket.proj)+" x "+d.bracket.hg+" triangular",4,"Nos");
+  add("Reinforcing Pad","Plate","Plate-"+d.bracket.padT+"mm","SA 516 GR 60",2*kgPlate(d.bracket.padW,d.bracket.padH,d.bracket.padT),"Kg","2 nos, "+d.bracket.padW+" x "+d.bracket.padH,2,"Nos");
+  add("Lifting Screw","Rod","Rod-"+d.screw.d+"Dia","CS TO IS 2062",Math.round(Math.PI/4*d.screw.d*d.screw.d*d.screw.lenMm*7.85e-6*100)/100,"Kg","M"+d.screw.d+" x "+d.screw.lenMm+" threaded");
+  add("Lifting Screw Nut","Nut",DAVIT_NUT_SPEC[d.screw.d]||DAVIT_NUT_SPEC[30],"A194 GR 2H",Math.max(0.1,Math.round(d.screw.d*d.screw.d*d.screw.d*1.1e-5*100)/100),"Kg","M"+d.screw.d,1,"Nos");
+  const hwD = Math.max(200, d.screw.d*10);
+  add("Handwheel","Plate","Plate-10mm","CS TO IS 2062",Math.round(kgPlate(hwD,hwD,10)*0.45*100)/100,"Kg","Handwheel dia "+hwD);
+  add("Anchor Bar","Plate","Plate-"+d.anchor.t+"mm","CS TO IS 2062",kgPlate(d.anchor.b+60,d.anchor.bw,d.anchor.t),"Kg","Bar "+(d.anchor.b+60)+" x "+d.anchor.bw+" x "+d.anchor.t);
+  add("Lifting Lug","Plate","Plate-"+d.lug.t+"mm",d.inputs.liftType==="Basket"?"CS TO IS 2062":"SA 516 GR 60",kgPlate(2*d.lug.R+20,2*d.lug.R+40,d.lug.t),"Kg",
+      (d.inputs.liftType==="Basket"?"Basket lifting eye":"Cover lifting lug")+", hole "+d.lug.dh);
+  add("Locking Pin","Rod","Rod-"+(d.pin.d<=20?20:d.pin.d)+"Dia","CS TO IS 2062",Math.round(Math.PI/4*d.pin.d*d.pin.d*120*7.85e-6*100)/100,"Kg","Pin dia "+d.pin.d+" x 120");
+  return lines;
+}
+function davitCode(o){
+  if(o.liftType==="Basket") return "DAV-"+String(o.nb).toLowerCase()+"-B";
+  return "DAV-"+o.stdCode+"-"+o.ratingCode+"-"+String(o.nb).toLowerCase()+"-C";
+}
+// Short codes used in the davit code (one place, so app and SQL agree)
+const DAVIT_STD_CODE = {"ASME B16.5":"B16.5","ASME B16.47 Series A":"B16.47A","ASME B16.47 Series B":"B16.47B","BS 10 Table E":"BS10E","AWWA C207":"AWWA"};
+function davitRatingCode(std, rating){
+  const r = String(rating||"").trim();
+  if(std==="AWWA C207") return "CL"+r.replace(/^class\s*/i,"").toUpperCase();
+  if(std==="BS 10 Table E") return "TE";
+  return "CL"+r.replace(/[^0-9]/g,"");
+}
+// Reads the cover from a Sl No's own Cover Flange line; falls back to line size + model rating.
+function davitCoverKeyFromLines(lines, model, size){
+  const cov = (lines||[]).find(l=>/cover/i.test(String(l.sub_assembly||"")+" "+String(l.component||"")) && /^flange-/i.test(String(l.material_spec||"")));
+  const ratingFromModel = (()=>{ const m = String(model||"").toUpperCase().match(/CL\s?(\d{3,4})|(\d{3,4})\s?#|(\d{3,4})\s?LBS/); return m ? (m[1]||m[2]||m[3]) : "150"; })();
+  if(cov){
+    const s = String(cov.material_spec);
+    const nbm = s.match(/-(\d+)\s*nb/i); const nb = nbm ? (nbm[1]+"nb") : String(size||"").toLowerCase();
+    let std=null, rating=null;
+    if(/B16\.47/i.test(s)){ std = /SERIES\s*B/i.test(s) ? "ASME B16.47 Series B" : "ASME B16.47 Series A"; const r=s.match(/(\d{3,4})\s*LBS/i); rating = r?r[1]:ratingFromModel; }
+    else if(/B16\.5/i.test(s)){ std="ASME B16.5"; const r=s.match(/(\d{3,4})\s*LBS/i); rating = r?r[1]:ratingFromModel; }
+    else if(/BS\s*10/i.test(s)){ std="BS 10 Table E"; rating="Table E"; }
+    else if(/AWWA/i.test(s)){ std="AWWA C207"; const r=s.match(/CLASS\s*([A-Z])/i); rating = r?("Class "+r[1].toUpperCase()):"Class D"; }
+    if(std) return { std, rating, nb, source:"cover line: "+s };
+  }
+  const nb = String(size||"").toLowerCase();
+  return { std:"ASME B16.5", rating:ratingFromModel, nb, source:"line size "+nb+" and model rating (no flange cover line found)" };
+}
+
+// ===================== DAVIT ARM — option on every strainer Sl No (256) =====================
+// Davit arm is never a model. It is a line-item answer on the Sl No
+// ("Not Required" / "Lifts cover" / "Lifts basket"); when it is wanted the
+// app adds the "Davit Arm" component lines from davit_bom_tbl, priced from
+// material_rates like any other line. The davit is FOUND from the Sl No's own
+// Cover Flange line (standard, rating, cover size) and RECORDED against the
+// Sl No's line size and model, so a later change of either is noticed.
+const DAVIT_OPTIONS = ["Not Required","Lifts cover","Lifts basket"];
+function isDavitItem(item){ return /strainer|diffuser/i.test(String(item||"")); }
+function isDavitLine(l){ return !!l && (l.component==="Davit Arm" || l.price_source==="davit"); }
+function davitKeyText(k){ return k ? [k.std, k.rating, k.nb].filter(Boolean).join(" ") : ""; }
+function davitResolveKey(key){
+  if(key && key.std==="ASME B16.5" && davitNbNum(key.nb)>600)
+    return {...key, std:"ASME B16.47 Series A", source:(key.source||"")+" (above 600NB read as ASME B16.47 Series A)"};
+  return key;
+}
+function davitTableMissing(err){ return err && /does not exist|schema cache|42P01/i.test((err.message||"")+" "+(err.code||"")); }
+const DAVIT_SQL_MSG = "The davit tables aren't in this database yet — run Davit_Arm_Masters_2026-10-25.sql first.";
+function davitCodeFor(key, liftType){
+  return liftType==="Basket" ? davitCode({liftType:"Basket", nb:key.nb})
+    : davitCode({liftType:"Cover", stdCode:DAVIT_STD_CODE[key.std]||key.std, ratingCode:davitRatingCode(key.std,key.rating), nb:key.nb});
+}
+async function davitFindMaster(key, liftType){
+  const k = davitResolveKey(key);
+  const code = davitCodeFor(k, liftType);
+  const { data, error } = await sb.from("davit_master_tbl").select("*").eq("davit_code",code).limit(1);
+  if(error) throw new Error(davitTableMissing(error) ? DAVIT_SQL_MSG : error.message);
+  if(data && data.length) return { row:data[0], code, exact:true, key:k };
+  let qy = sb.from("davit_master_tbl").select("*").eq("lift_type",liftType);
+  if(liftType==="Cover") qy = qy.eq("standard",k.std).eq("rating",String(k.rating));
+  const { data:all } = await qy;
+  const want = davitNbNum(k.nb);
+  const cand = (all||[]).filter(r=>davitNbNum(r.nb)>=want).sort((a,b)=>davitNbNum(a.nb)-davitNbNum(b.nb));
+  if(cand.length) return { row:cand[0], code:cand[0].davit_code, exact:false, key:k, wanted:code };
+  return { row:null, code, exact:false, key:k, wanted:code };
+}
+async function davitPricedLines(masterRow){
+  const { data:bomRows, error } = await sb.from("davit_bom_tbl").select("*").eq("davit_id",masterRow.id).order("line_no");
+  if(error) throw new Error(davitTableMissing(error) ? DAVIT_SQL_MSG : error.message);
+  const specs = Array.from(new Set((bomRows||[]).map(b=>b.material_spec).filter(Boolean)));
+  let rates = [];
+  if(specs.length){ const { data:rr } = await sb.from("material_rates").select("id,material_spec,material_grade,rate,rate_effective_date").in("material_spec",specs); rates = rr||[]; }
+  const norm = s=>String(s||"").trim().toLowerCase();
+  return (bomRows||[]).map(b=>{
+    const cands = rates.filter(r=>norm(r.material_spec)===norm(b.material_spec) && norm(r.material_grade)===norm(b.grade) && Number(r.rate)>0)
+      .sort((x,y)=>String(y.rate_effective_date||"").localeCompare(String(x.rate_effective_date||"")) || (Number(y.id)||0)-(Number(x.id)||0));
+    const rate = cands.length ? Number(cands[0].rate) : 0;
+    const qty = Number(b.qty_required)||0, sf = Number(b.sf)||3.1;
+    return { sub_assembly:b.sub_assembly, component:b.component||"Davit Arm", material_shape:b.material_shape||"",
+      material_spec:b.material_spec, grade:b.grade||"", cutting_plan_layout_size:b.cutting_plan_layout_size||"",
+      cutting_plan_qty:Number(b.cutting_plan_qty)||0, cutting_plan_uom:b.cutting_plan_uom||"",
+      qty_required:qty, uom:b.uom, rate, cost:r2(qty*rate), sf, sales_price:r2(qty*rate*sf) };
+  });
+}
+// The datasheet line follows the Sl No: "Included in Price" when davit lines exist.
+function davitDatasheetValue(lines){ return (lines||[]).some(isDavitLine) ? "Included in Price" : "Not Required"; }
+async function davitSyncDatasheet(ref, slNo, on){
+  const { data } = await sb.from("datasheets").select("id,field_values").eq("reference_number",ref).eq("item_sl_no",slNo);
+  for(const ds of (data||[])){
+    const fv = {...(ds.field_values||{}), davit_arm: on ? "Included in Price" : "Not Required"};
+    await sb.from("datasheets").update({ field_values:fv }).eq("id",ds.id);
+  }
+}
+// Sets (or clears) the davit on one Sl No. Old davit lines are always removed
+// first, so the Sl No can never carry two davits.
+async function applyDavitToSl({ ref, slNo, option, user, reason }){
+  const { data:ests, error:eErr } = await sb.from("estimates").select("*").eq("reference_number",ref).eq("item_sl_no",slNo).limit(1);
+  if(eErr) throw eErr;
+  const est = ests && ests[0];
+  if(!est) throw new Error("Sl No "+slNo+" of "+ref+" was not found.");
+  const { data:lines } = await sb.from("estimate_lines").select("*").eq("reference_number",ref).eq("item_sl_no",slNo).order("sl_no");
+  const own = (lines||[]).filter(l=>!isDavitLine(l)), old = (lines||[]).filter(isDavitLine);
+  const first = own[0]||{};
+  const size = first.size || "";
+  const by = user?.username||"unknown", now = new Date().toISOString();
+  for(const l of old){
+    const { error } = await sb.from("estimate_lines").delete().eq("reference_number",ref).eq("item_sl_no",slNo).eq("sl_no",l.sl_no);
+    if(error) throw error;
+  }
+  const base = { davit_for_size:size||null, davit_for_model:est.model||first.model||null, davit_set_by:by, davit_set_at:now };
+  if(!option || option==="Not Required"){
+    const { error:uErr } = await sb.from("estimates").update({ ...base, davit_option:option||null, davit_code:null, davit_cover_key:null, davit_flag:null }).eq("id",est.id);
+    if(uErr) throw new Error(davitTableMissing(uErr)||/davit_/i.test(uErr.message||"") ? DAVIT_SQL_MSG : uErr.message);
+    await davitSyncDatasheet(ref, slNo, false);
+    if(old.length) await logAudit("UPDATE","estimate_lines",ref+"-"+slNo,"Davit arm removed ("+old.length+" line(s))",by,null,null);
+    return { inserted:0, message: old.length ? "Davit arm removed from Sl No "+slNo+"." : "Davit arm: Not Required." };
+  }
+  const liftType = option==="Lifts basket" ? "Basket" : "Cover";
+  const key = davitCoverKeyFromLines(own, est.model, size);
+  const found = await davitFindMaster(key, liftType);
+  if(!found.row){
+    const msg = "No davit design for "+found.code+" — make one in Engineering Calc → Davit Arm Design Generator and Save to master.";
+    await sb.from("estimates").update({ ...base, davit_option:option, davit_code:null, davit_cover_key:davitKeyText(found.key), davit_flag:msg }).eq("id",est.id);
+    return { inserted:0, message:msg, missing:true };
+  }
+  const priced = await davitPricedLines(found.row);
+  const maxSl = own.reduce((m,l)=>Math.max(m, Number(l.sl_no)||0), 0);
+  const rows = priced.map((p,i)=>({ reference_number:ref, item_sl_no:slNo, sl_no:maxSl+i+1, estimate_id:est.id,
+    model:est.model||first.model||null, item:first.item||null, size:size||null, ...p,
+    is_direct_price:false, price_source:"davit", pricelist_ref:found.row.davit_code, added_by:by }));
+  if(rows.length){ const { error:iErr } = await sb.from("estimate_lines").insert(rows); if(iErr) throw iErr; }
+  const noRate = rows.filter(r=>!(Number(r.rate)>0)).length;
+  const flag = reason || (!found.exact ? "Nearest davit used: "+found.row.davit_code+" (no design for "+found.wanted+")" : null);
+  await sb.from("estimates").update({ ...base, davit_option:option, davit_code:found.row.davit_code, davit_cover_key:davitKeyText(found.key), davit_flag:flag }).eq("id",est.id);
+  await davitSyncDatasheet(ref, slNo, true);
+  await logAudit("UPDATE","estimate_lines",ref+"-"+slNo,"Davit arm "+found.row.davit_code+" added ("+rows.length+" line(s), "+option+")",by,null,null);
+  return { inserted:rows.length, code:found.row.davit_code, exact:found.exact, validated:!!found.row.validated, noRate,
+    message:"Davit arm "+found.row.davit_code+" added to Sl No "+slNo+" — "+rows.length+" line(s)"+(noRate?(", "+noRate+" without a rate"):"")+
+            (found.exact?"":" (nearest size: no design for "+found.wanted+")")+(found.row.validated?"":". Design not yet validated by engineering.") };
+}
+// A Sl No re-saved from the Estimator: the davit lines are kept as they were
+// (hand edits included) when model, line size and cover are unchanged; when
+// any of them changed the davit is regenerated and the Sl No is flagged.
+async function davitStashBeforeResave(ref, slNo){
+  try{
+    const { data:ests } = await sb.from("estimates").select("*").eq("reference_number",ref).eq("item_sl_no",slNo).limit(1);
+    const { data:lines } = await sb.from("estimate_lines").select("*").eq("reference_number",ref).eq("item_sl_no",slNo);
+    return { est:(ests&&ests[0])||null, lines:(lines||[]).filter(isDavitLine) };
+  }catch(e){ return null; }
+}
+async function davitRestoreAfterResave({ ref, slNo, stash, user }){
+  if(!stash || !stash.est || !stash.est.davit_option || stash.est.davit_option==="Not Required") return null;
+  const { data:ests } = await sb.from("estimates").select("*").eq("reference_number",ref).eq("item_sl_no",slNo).limit(1);
+  const est = ests && ests[0]; if(!est) return null;
+  const { data:lines } = await sb.from("estimate_lines").select("*").eq("reference_number",ref).eq("item_sl_no",slNo).order("sl_no");
+  const own = (lines||[]).filter(l=>!isDavitLine(l));
+  const size = (own[0]&&own[0].size)||"";
+  const keyNow = davitKeyText(davitResolveKey(davitCoverKeyFromLines(own, est.model, size)));
+  const n = s=>String(s||"").trim().toLowerCase();
+  const same = n(est.model)===n(stash.est.davit_for_model) && n(size)===n(stash.est.davit_for_size) && n(keyNow)===n(stash.est.davit_cover_key);
+  if(same && stash.lines.length){
+    const maxSl = own.reduce((m,l)=>Math.max(m, Number(l.sl_no)||0), 0);
+    const rows = stash.lines.sort((a,b)=>(a.sl_no||0)-(b.sl_no||0)).map((l,i)=>{ const { id, ...rest } = l; return { ...rest, sl_no:maxSl+i+1, estimate_id:est.id }; });
+    const { error } = await sb.from("estimate_lines").insert(rows);
+    if(error) throw error;
+    return { kept:rows.length };
+  }
+  if(stash.lines.length){
+    try{
+      await sb.from("revision_changes").insert({ revision_ref:ref, area:"Davit Arm", item_sl_no:slNo, field_name:"davit lines",
+        old_value:JSON.stringify(stash.lines.map(l=>({ sub:l.sub_assembly, spec:l.material_spec, grade:l.grade, qty:l.qty_required, uom:l.uom, rate:l.rate, sf:l.sf }))),
+        new_value:"regenerated for "+(est.model||"")+" "+size, changed_by:user?.username||"unknown" });
+    }catch(e){ /* history is best-effort */ }
+  }
+  const reason = "Davit lines regenerated - check (made for "+(stash.est.davit_for_model||"?")+" "+(stash.est.davit_for_size||"?")+
+                 ", now "+(est.model||"?")+" "+(size||"?")+")";
+  return await applyDavitToSl({ ref, slNo, option:stash.est.davit_option, user, reason });
+}
+// Basket weight from the Sl No's own filter lines (kg lines + sheet areas).
+function davitBasketWeightFromLines(lines){
+  let kg = 0;
+  (lines||[]).filter(l=>!isDavitLine(l) && /filter/i.test(String(l.component||""))).forEach(l=>{
+    const q = Number(l.qty_required)||0, u = String(l.uom||"").toLowerCase();
+    if(/^kg/.test(u)) kg += q;
+    else if(/sq/.test(u)){
+      const t = (String(l.material_spec||"").match(/x\s*([\d.]+)\s*mm\s*thk/i)||[])[1];
+      const perSqft = t ? Number(t)*7.9*0.6/10.764 : (/mesh/i.test(String(l.material_shape||l.material_spec||"")) ? 0.06 : 0.5);
+      kg += q*perSqft;
+    }
+  });
+  return Math.round(kg*10)/10;
+}
+
+// ---------------- Davit Arm Design Generator ----------------
+// Two ways in: Engineering Calc → Davit Arm Design Generator (free, or linked
+// to a quote / contract Sl No by choice), and Options & Testing → Davit Arm on
+// any Sl No of a quote or contract (linked, pre-filled).
+const DAVIT_STD_LIST = ["ASME B16.5","ASME B16.47 Series A","ASME B16.47 Series B","BS 10 Table E","AWWA C207"];
+function davitCanSaveMaster(user){ return !!user && ["admin","super_admin","technical_head"].includes(user.role); }
+function DavitCalculator({ user, link, onApplied }){
+  const linked = !!(link && link.ref);
+  const [covers,setCovers] = useState([]);
+  const [tableErr,setTableErr] = useState("");
+  const [companies,setCompanies] = useState([]);
+  const [companyId,setCompanyId] = useState("");
+  const [f,setF] = useState({ linkType: linked ? (link.mode==="contract"?"Contract":"Quote") : "Free", ref: linked?link.ref:"", slNo: linked?String(link.slNo):"",
+    liftType: (link && link.option==="Lifts basket") ? "Basket" : "Cover", std:"ASME B16.5", rating:"150", nb:"",
+    manualKg:"", useManual:false, mastHeight:"", reach:"", spacing:"500", loadFactor:"", nd:"2.0", fy:"240", sch:"80", note:"" });
+  const [msg,setMsg] = useState(""); const [busy,setBusy] = useState(false);
+  const [history,setHistory] = useState([]); const [calcNo,setCalcNo] = useState("");
+  const [markValidated,setMarkValidated] = useState(false);
+  const set = (k,v)=>{ setF(d=>({...d,[k]:v})); if(msg) setMsg(""); };
+
+  const loadHistory = useCallback(async()=>{
+    let qy = sb.from("davit_calc_tbl").select("*").order("created_at",{ascending:false}).limit(60);
+    if(linked) qy = qy.eq("reference_number",link.ref).eq("item_sl_no",Number(link.slNo));
+    const { data, error } = await qy;
+    if(!error) setHistory(data||[]);
+  },[linked, link && link.ref, link && link.slNo]);
+  useEffect(()=>{ (async()=>{
+    const { data, error } = await sb.from("davit_cover_weight_tbl").select("*").order("standard").order("rating");
+    if(error){ setTableErr(davitTableMissing(error) ? DAVIT_SQL_MSG : error.message); return; }
+    setCovers(data||[]);
+    const { data:c } = await sb.from("company_master").select("id,company_name,logo_data").order("company_name");
+    setCompanies(c||[]); if((c||[]).length===1) setCompanyId(String(c[0].id));
+    // pre-fill from the Sl No's own cover line
+    if(linked){
+      const own = (link.lines||[]).filter(l=>!isDavitLine(l));
+      const k = davitResolveKey(davitCoverKeyFromLines(own, link.model, link.size));
+      const basketKg = davitBasketWeightFromLines(own);
+      setF(d=>({...d, std:k.std, rating:String(k.rating), nb:k.nb, keySource:k.source,
+                     manualKg: d.liftType==="Basket" && basketKg>0 ? String(basketKg) : d.manualKg,
+                     useManual: d.liftType==="Basket" && basketKg>0 ? true : d.useManual }));
+    }
+    loadHistory();
+  })(); },[]);
+
+  const ratingsFor = std=> Array.from(new Set(covers.filter(c=>c.standard===std).map(c=>c.rating)));
+  const nbsFor = (std,rating)=> covers.filter(c=>c.standard===std && String(c.rating)===String(rating)).map(c=>c.nb)
+                                      .sort((a,b)=>davitNbNum(a)-davitNbNum(b));
+  const cover = covers.find(c=>c.standard===f.std && String(c.rating)===String(f.rating) && String(c.nb).toLowerCase()===String(f.nb).toLowerCase());
+  const nbNum = davitNbNum(f.nb);
+  const autoKg = f.liftType==="Basket" ? davitBasketWeightGuess(nbNum) : (cover ? Number(cover.weight_kg) : 0);
+  const liftedKg = f.useManual && Number(f.manualKg)>0 ? Number(f.manualKg) : autoKg;
+  const inputs = { liftType:f.liftType, liftedKg, coverOdMm: cover ? Number(cover.od_mm) : nbNum*1.35, nb:f.nb,
+    mastHeightMm:Number(f.mastHeight)||undefined, reachMm:Number(f.reach)||undefined, bracketSpacingMm:Number(f.spacing)||undefined,
+    loadFactor:Number(f.loadFactor)||undefined, nd:Number(f.nd)||undefined, fy:Number(f.fy)||undefined, sch:f.sch };
+  const d = (f.nb && liftedKg>0) ? davitDesign(inputs) : null;
+  const code = f.nb ? davitCodeFor({ std:f.std, rating:f.rating, nb:String(f.nb).toLowerCase() }, f.liftType) : "";
+  const fx = (v,n=1)=> (isFinite(v)?Number(v):0).toLocaleString("en-IN",{minimumFractionDigits:n,maximumFractionDigits:n});
+  const ok = (a,b)=> a<=b ? "OK" : "FAILS";
+
+  const resultRows = ()=>{
+    if(!d) return [];
+    const a = d.inputs.allow;
+    return [
+      ["INPUT","Lift type",d.inputs.liftType+(d.inputs.liftType==="Cover"?" (bolted cover)":" (hinged cover: basket only)"),"",""],
+      ["INPUT","Lifted weight  Wl",fx(d.inputs.liftedKg)+" kg  ("+(f.useManual?"entered":(f.liftType==="Basket"?"basket estimate":(f.std+" "+f.rating+" "+f.nb+" blind")))+")","",""],
+      ["INPUT","Safe working load  SWL = Wl x LF",fx(d.inputs.liftedKg)+" x "+fx(d.inputs.loadFactor,2)+" = "+fx(d.swlKg)+" kg","",""],
+      ["INPUT","Design basis","ASME BTH-1 Cat A, Nd = "+fx(d.inputs.nd,1)+", Fy = "+fx(d.inputs.fy,0)+" MPa (A106 Gr B)","Fb = Fy/Nd = "+fx(a)+" MPa",""],
+      ["GEOMETRY","Reach  R = OD/2 + clearance + socket OD/2",fx(d.inputs.coverOdMm/2,0)+" + "+fx(d.inputs.clearanceMm,0)+" + "+fx(d.socket.od/2,0)+" = "+fx(d.R,0)+" mm","",""],
+      ["GEOMETRY","Mast height above top bracket  h",fx(d.h,0)+" mm","",""],
+      ["GEOMETRY","Bracket spacing  s",fx(d.s,0)+" mm","",""],
+      ["ARM / MAST","Design load  W = SWL x g",fx(d.W/1000,2)+" kN","",""],
+      ["ARM / MAST","Bending moment  M = W x R",fx(d.M/1e6,3)+" kNm","",""],
+      ["ARM / MAST","Pipe selected",d.arm.nb+" "+d.arm.sch+" (OD "+fx(d.arm.od,1)+" x "+fx(d.arm.t,2)+" mm), Z = "+fx(d.arm.Z/1000,1)+" cm3","",""],
+      ["ARM / MAST","Combined stress  W/A + M/Z",fx(d.arm.sigA,1)+" + "+fx(d.arm.sigB,1)+" = "+fx(d.arm.sig,1)+" MPa",fx(a)+" MPa",ok(d.arm.sig,a)],
+      ["ARM / MAST","Tip deflection  WR3/3EI + WR2h/EI",fx(d.arm.defl,1)+" mm","(R+h)/150 = "+fx(d.arm.deflLim,1)+" mm",ok(d.arm.defl,d.arm.deflLim)],
+      ["ARM / MAST","Arm + mast length (incl. bend allowance)",fx(d.arm.lenM,2)+" m","",""],
+      ["SOCKET","Socket pipe",d.socket.nb+" Sch 80 x "+d.socket.len+" long","",""],
+      ["SOCKET","Bracket couple  F = M / s",fx(d.bracket.F/1000,2)+" kN","",""],
+      ["SOCKET","Bearing on socket  F / (OD x L)",fx(d.socket.bearing,1)+" MPa","0.9Fy/Nd = "+fx(d.socket.bearingAllow,1)+" MPa",ok(d.socket.bearing,d.socket.bearingAllow)],
+      ["BRACKETS","Gussets 2 per bracket, "+d.bracket.hg+" high, projection "+fx(d.bracket.proj,0),"t = "+d.bracket.tg+" mm, stress "+fx(d.bracket.sigG,1)+" MPa",fx(a)+" MPa",ok(d.bracket.sigG,a)],
+      ["BRACKETS","Fillet weld to pad (4 x "+d.bracket.hg+" long)","throat needed "+fx(d.bracket.throatReq,2)+" mm -> leg "+d.bracket.weldLeg+" mm","0.6Fexx/(1.2Nd) = "+fx(d.bracket.wAllow,0)+" MPa","OK"],
+      ["BRACKETS","Reinforcing pads (2 nos)",d.bracket.padW+" x "+d.bracket.padH+" x "+d.bracket.padT+" mm","",d.bracket.F>10000?"CHECK WRC 537":"OK"],
+      ["LIFTING SCREW","M"+d.screw.d+" (As "+d.screw.As+" mm2), tension W/As",fx(d.screw.stress,1)+" MPa","0.4Fy = "+fx(d.screw.allow,0)+" MPa",ok(d.screw.stress,d.screw.allow)],
+      ["LIFTING SCREW","Thread shear in nut (L "+fx(d.screw.nutLen,0)+")",fx(d.screw.threadShear,1)+" MPa","0.4Fy = "+fx(d.screw.allow,0)+" MPa",ok(d.screw.threadShear,d.screw.allow)],
+      ["ANCHOR BAR","Bar "+d.anchor.bw+" wide, span "+d.anchor.b+", M = Wb/4","t = "+d.anchor.t+" mm, stress "+fx(d.anchor.sig,1)+" MPa",fx(a)+" MPa",ok(d.anchor.sig,a)],
+      ["LIFTING LUG","Lug t "+d.lug.t+", hole "+d.lug.dh+", R "+d.lug.R+": tension / bearing / tear-out",fx(d.lug.ten,1)+" / "+fx(d.lug.brg,1)+" / "+fx(d.lug.shr,1)+" MPa",
+         fx(a)+" / "+fx(1.25*d.inputs.fy/d.inputs.nd)+" / "+fx(0.6*d.inputs.fy/d.inputs.nd)+" MPa",
+         (d.lug.ten<=a && d.lug.brg<=1.25*d.inputs.fy/d.inputs.nd && d.lug.shr<=0.6*d.inputs.fy/d.inputs.nd)?"OK":"FAILS"],
+      ["LOCKING PIN","Accidental push 10% W at R, at collar radius","F = "+fx(d.pin.F/1000,2)+" kN -> pin dia "+d.pin.d+" mm","",""],
+      ["TEST","Proof load test 1.25 x SWL",fx(d.proofKg,0)+" kg","",""],
+    ];
+  };
+  const bom = d ? davitBomLines(d) : [];
+
+  const makePdf = ()=>{
+    if(!d){ setMsg("Pick the cover (or enter a weight) first."); return; }
+    const company = companies.find(c=>String(c.id)===String(companyId));
+    if(!company){ setMsg("Pick the issuing company first — the letterhead comes from that record."); return; }
+    try{
+      generatePDF({ title:"Davit Arm Design Calculation", refNumber:(calcNo||"Draft")+" — "+code,
+        description:[f.linkType!=="Free" && f.ref ? (f.linkType+" "+f.ref+(f.slNo?" Sl No "+f.slNo:"")) : "Free calculation",
+                     link && link.model ? ("Model "+link.model) : "", link && link.size ? ("Line size "+String(link.size).replace(/nb$/i,"NB")) : ""].filter(Boolean).join("   |   "),
+        createdBy:user?.username||"", createdAt:new Date().toISOString(),
+        headers:["Section","Check","Value","Limit","Result"], rows:[...resultRows(), ...bom.map(b=>["BOM",b.sub_assembly,b.material_spec+" / "+b.grade,fx(b.qty_required,2)+" "+b.uom,b.cutting_plan_layout_size])],
+        company, filename:"Davit_"+(calcNo||code||"calc").replace(/[^A-Za-z0-9]+/g,"_")+".pdf" });
+    }catch(e){ setMsg("Could not build the PDF: "+e.message); }
+  };
+  const nextCalcNo = async()=>{
+    const yy = String(new Date().getFullYear()).slice(-2);
+    const { data } = await sb.from("davit_calc_tbl").select("calc_no").like("calc_no","DAVC-"+yy+"-%").order("calc_no",{ascending:false}).limit(1);
+    const last = data && data[0] ? Number(String(data[0].calc_no).split("-")[2])||0 : 0;
+    return "DAVC-"+yy+"-"+String(last+1).padStart(4,"0");
+  };
+  const saveCalc = async(savedToMaster)=>{
+    if(!d){ setMsg("Nothing to save yet."); return null; }
+    if(f.linkType!=="Free" && (!f.ref || !f.slNo)){ setMsg("A "+f.linkType.toLowerCase()+" calculation needs the reference number and Sl No."); return null; }
+    setBusy(true);
+    try{
+      const no = calcNo || await nextCalcNo();
+      const row = { calc_no:no, link_type:f.linkType, reference_number:f.linkType==="Free"?null:f.ref.trim(), item_sl_no:f.linkType==="Free"?null:Number(f.slNo),
+        line_size:link&&link.size||null, model:link&&link.model||null, davit_code:code,
+        inputs:{...f, liftedKg, coverOdMm:inputs.coverOdMm}, results:{...d, bom}, saved_to_master:!!savedToMaster, created_by:user?.username||"unknown", updated_at:new Date().toISOString() };
+      let error;
+      if(calcNo){ ({ error } = await sb.from("davit_calc_tbl").update(row).eq("calc_no",calcNo)); }
+      else { ({ error } = await sb.from("davit_calc_tbl").insert(row)); }
+      if(error) throw new Error(davitTableMissing(error) ? DAVIT_SQL_MSG : error.message);
+      setCalcNo(no); await loadHistory(); setMsg("Saved as "+no+".");
+      return no;
+    }catch(e){ setMsg("Save failed: "+e.message); return null; }
+    finally{ setBusy(false); }
+  };
+  const saveToMaster = async(applyAfter)=>{
+    if(!davitCanSaveMaster(user)){ noPermission("save a davit design to the master",{roles:["admin","super_admin","technical_head"]}); return; }
+    if(!d){ setMsg("Nothing to save yet."); return; }
+    if(!d.ok && !confirm("This design FAILS a check. Save it to the master anyway?")) return;
+    setBusy(true);
+    try{
+      const row = { davit_code:code, lift_type:f.liftType, standard:f.liftType==="Basket"?null:f.std, rating:f.liftType==="Basket"?null:String(f.rating),
+        nb:String(f.nb).toLowerCase(), lifted_weight_kg:r2(liftedKg), load_factor:d.inputs.loadFactor, swl_kg:r2(d.swlKg), reach_mm:Math.round(d.R),
+        mast_height_mm:Math.round(d.h), bracket_spacing_mm:d.s, arm_pipe:d.arm.nb, arm_schedule:d.arm.sch, arm_od_mm:d.arm.od, arm_thk_mm:d.arm.t,
+        moment_knm:r2(d.M/1e6), bending_stress_mpa:r2(d.arm.sig), allowable_mpa:r2(d.inputs.allow), tip_deflection_mm:r2(d.arm.defl),
+        deflection_limit_mm:r2(d.arm.deflLim), socket_pipe:d.socket.nb, gusset_thk_mm:d.bracket.tg, pad_thk_mm:d.bracket.padT, weld_leg_mm:d.bracket.weldLeg,
+        lifting_screw:"M"+d.screw.d, pin_dia_mm:d.pin.d, lug_thk_mm:d.lug.t, anchor_bar_thk_mm:d.anchor.t, bracket_force_kn:r2(d.bracket.F/1000),
+        proof_load_kg:d.proofKg, warnings:d.warnings.join(" | ")||null, updated_by:user?.username||"unknown", updated_at:new Date().toISOString(),
+        validated: markValidated, validated_by: markValidated ? (user?.username||null) : null, validated_at: markValidated ? new Date().toISOString() : null };
+      const { data:ex, error:exErr } = await sb.from("davit_master_tbl").select("id").eq("davit_code",code).limit(1);
+      if(exErr) throw new Error(davitTableMissing(exErr) ? DAVIT_SQL_MSG : exErr.message);
+      let id;
+      if(ex && ex.length){ id = ex[0].id; const { error } = await sb.from("davit_master_tbl").update(row).eq("id",id); if(error) throw error; }
+      else { const { data:ins, error } = await sb.from("davit_master_tbl").insert({...row, created_by:user?.username||"unknown"}).select("id").single(); if(error) throw error; id = ins.id; }
+      const { error:dErr } = await sb.from("davit_bom_tbl").delete().eq("davit_id",id); if(dErr) throw dErr;
+      const { error:iErr } = await sb.from("davit_bom_tbl").insert(bom.map((b,i)=>({ davit_id:id, line_no:i+1, ...b }))); if(iErr) throw iErr;
+      const no = await saveCalc(true);
+      await logAudit("UPDATE","davit_master_tbl",code,"Davit design saved to master from "+(no||"calculator"),user?.username||"unknown",null,row);
+      let extra = "";
+      if(applyAfter && linked){
+        if(link.locked){ extra = " Not applied: "+link.locked; }
+        else {
+          const res = await applyDavitToSl({ ref:link.ref, slNo:Number(link.slNo), option:f.liftType==="Basket"?"Lifts basket":"Lifts cover", user });
+          extra = " "+res.message;
+          if(onApplied) await onApplied(res);
+        }
+      }
+      setMsg("Saved to master as "+code+"."+extra);
+    }catch(e){ setMsg("Save to master failed: "+e.message); }
+    finally{ setBusy(false); }
+  };
+  const openHistory = (hrow)=>{
+    const inp = hrow.inputs||{};
+    setF(d=>({...d, ...inp})); setCalcNo(hrow.calc_no); setMsg("Opened "+hrow.calc_no+".");
+  };
+
+  const lab = (t,w)=>h("label",{style:{fontSize:12,width:w||190,color:colors.muted}},t);
+  const row = (...kids)=>h("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:6}},...kids);
+  const inp = (k,ph,w)=>h("input",{value:f[k]||"",onChange:e=>set(k,e.target.value),placeholder:ph||"",style:{...inputStyle,padding:"5px 7px",fontSize:12.5,width:w||120}});
+  const sel = (k,opts,onCh)=>h("select",{value:f[k],onChange:e=>{ set(k,e.target.value); if(onCh) onCh(e.target.value); },style:{...inputStyle,padding:"5px 7px",fontSize:12.5,width:200}},
+      opts.map(o=>h("option",{key:o,value:o},o)));
+  const stColor = s=> s==="OK" ? "#0f6e56" : (s ? "#a3312a" : colors.muted);
+
+  return h("div",{style:{padding:linked?"4px 2px":"20px 24px",maxWidth:1100}},
+    !linked && h("div",{style:{fontWeight:700,fontSize:16,marginBottom:6}},"Davit Arm Design Generator"),
+    h("div",{style:{fontSize:11.5,color:colors.mutedLight,marginBottom:14}},
+      "ASME BTH-1 Design Category A. The arm and mast are one bent pipe carrying M = W x reach; the brackets take M as a couple F = M / s. ",
+      "Bolted cover: the davit lifts the cover. Hinged cover: the hinge carries the cover, the davit lifts the basket only."),
+    tableErr && h("div",{style:{background:"#fdecea",border:"1px solid #e8b4ae",color:"#a32b1c",borderRadius:6,padding:"8px 11px",fontSize:12,marginBottom:12}},tableErr),
+    h("div",{style:{display:"flex",gap:28,flexWrap:"wrap"}},
+      h("div",{style:{flex:"1 1 360px"}},
+        h("div",{style:{fontSize:12,fontWeight:600,marginBottom:8}},"Link"),
+        row(lab("Calculation for"), linked ? h("span",{style:{fontSize:12.5,fontWeight:600}},f.linkType+" "+f.ref+" · Sl No "+f.slNo) : sel("linkType",["Free","Quote","Contract"])),
+        !linked && f.linkType!=="Free" && row(lab(f.linkType+" number / Sl No"), inp("ref",f.linkType==="Quote"?"e.g. FXDS260084":"e.g. 260152",150), inp("slNo","Sl No",60)),
+        linked && link.model && row(lab("Traced to"), h("span",{style:{fontSize:12}},(link.model||"")+" · "+String(link.size||"").replace(/nb$/i,"NB"))),
+        h("div",{style:{fontSize:12,fontWeight:600,margin:"12px 0 8px"}},"What the davit lifts"),
+        row(lab("Lift"), sel("liftType",["Cover","Basket"])),
+        f.liftType==="Cover"
+          ? h(React.Fragment,null,
+              row(lab("Cover standard"), sel("std",DAVIT_STD_LIST,v=>{ const r=ratingsFor(v); set("rating",r[0]||""); set("nb",""); })),
+              row(lab("Rating"), sel("rating",ratingsFor(f.std).length?ratingsFor(f.std):[f.rating],()=>set("nb","")) ),
+              row(lab("Cover size"), sel("nb",[""].concat(nbsFor(f.std,f.rating)))),
+              cover && row(lab("Cover (blind) from master"), h("span",{style:{fontSize:12}},fx(cover.weight_kg)+" kg, OD "+fx(cover.od_mm,0)+" mm"+(cover.validated?"":"  (not validated)"))))
+          : h(React.Fragment,null,
+              row(lab("Body / cover size"), h("input",{value:f.nb,onChange:e=>set("nb",e.target.value),list:"davit_nbs",placeholder:"e.g. 800nb",style:{...inputStyle,padding:"5px 7px",fontSize:12.5,width:120}}),
+                  h("datalist",{id:"davit_nbs"},Array.from(new Set(covers.map(c=>c.nb))).map(x=>h("option",{key:x,value:x})))),
+              row(lab("Basket weight estimate"), h("span",{style:{fontSize:12}},fx(davitBasketWeightGuess(nbNum),0)+" kg"))),
+        f.keySource && h("div",{style:{fontSize:10.5,color:colors.mutedLight,margin:"-2px 0 8px 198px"}},"From "+f.keySource),
+        row(lab("Use my own lifted weight"), h("input",{type:"checkbox",checked:!!f.useManual,onChange:e=>set("useManual",e.target.checked)}), f.useManual && inp("manualKg","kg",80)),
+        h("div",{style:{fontSize:12,fontWeight:600,margin:"12px 0 8px"}},"Geometry and basis (blank = automatic)"),
+        row(lab("Mast height above top bracket"), inp("mastHeight","auto",80), h("span",{style:{fontSize:11,color:colors.mutedLight}},"mm")),
+        row(lab("Reach (mast to cover centre)"), inp("reach","auto",80), h("span",{style:{fontSize:11,color:colors.mutedLight}},"mm")),
+        row(lab("Bracket spacing"), inp("spacing","500",80), h("span",{style:{fontSize:11,color:colors.mutedLight}},"mm")),
+        row(lab("Load factor"), inp("loadFactor",f.liftType==="Basket"?"1.25":"1.15",80)),
+        row(lab("Design factor Nd / Fy"), inp("nd","2.0",60), inp("fy","240",60), h("span",{style:{fontSize:11,color:colors.mutedLight}},"MPa")),
+        row(lab("Pipe schedule"), sel("sch",["80","40"])),
+        h("div",{style:{fontSize:12,fontWeight:600,margin:"12px 0 8px"}},"PDF"),
+        row(lab("Issuing company (letterhead)"), h("select",{value:companyId,onChange:e=>setCompanyId(e.target.value),style:{...inputStyle,padding:"5px 7px",fontSize:12.5,width:200}},
+          h("option",{value:""},"Pick a company…"), companies.map(c=>h("option",{key:c.id,value:c.id},c.company_name))))
+      ),
+      h("div",{style:{flex:"1 1 560px"}},
+        h("div",{style:{display:"flex",alignItems:"center",gap:8,marginBottom:8}},
+          h("div",{style:{fontSize:12,fontWeight:600}},"Results"),
+          code && h("span",{style:{fontSize:11,fontWeight:600,background:"#eef2fb",color:"#2b4a9e",padding:"2px 8px",borderRadius:4}},code),
+          calcNo && h("span",{style:{fontSize:11,color:colors.mutedLight}},calcNo),
+          d && h("span",{style:{marginLeft:"auto",fontSize:11.5,fontWeight:700,color:d.ok?"#0f6e56":"#a3312a"}}, d.ok ? "Design passes" : "Design FAILS a check")),
+        !d ? h("div",{style:{fontSize:12,color:colors.mutedLight}},"Pick the cover size (or enter a weight) to see the design.")
+          : h("div",{style:{maxHeight:460,overflow:"auto",border:"1px solid "+colors.border,borderRadius:6}},
+              h("table",null,
+                h("thead",null,h("tr",{style:{background:"#f4f2ea"}},["Section","Check","Value","Limit","Result"].map(t=>h("th",{key:t,style:{textAlign:"left",fontSize:11,padding:"5px 6px",color:colors.muted}},t)))),
+                h("tbody",null,resultRows().map((r,i)=>h("tr",{key:i,style:{borderBottom:"1px solid "+colors.border}},
+                  h("td",{style:{fontSize:10.5,padding:"4px 6px",color:colors.mutedLight,whiteSpace:"nowrap"}},r[0]),
+                  h("td",{style:{fontSize:11.5,padding:"4px 6px"}},r[1]),
+                  h("td",{style:{fontSize:11.5,padding:"4px 6px"}},r[2]),
+                  h("td",{style:{fontSize:11,padding:"4px 6px",color:colors.muted}},r[3]),
+                  h("td",{style:{fontSize:11,padding:"4px 6px",fontWeight:700,color:stColor(r[4])}},r[4])))))),
+        d && d.warnings.length>0 && h("div",{style:{background:"#fff4d6",border:"1px solid #e0c48a",color:"#854f0b",borderRadius:6,padding:"8px 11px",fontSize:11.5,marginTop:10}},d.warnings.join(" ")),
+        d && h("div",{style:{marginTop:12}},
+          h("div",{style:{fontSize:12,fontWeight:600,marginBottom:6}},"Davit Arm BOM lines (component Davit Arm)"),
+          h("table",null,h("tbody",null,bom.map((b,i)=>h("tr",{key:i,style:{borderBottom:"1px solid "+colors.border}},
+            h("td",{style:{fontSize:11.5,padding:"3px 6px"}},b.sub_assembly),
+            h("td",{style:{fontSize:11.5,padding:"3px 6px"}},b.material_spec),
+            h("td",{style:{fontSize:11,padding:"3px 6px",color:colors.muted}},b.grade),
+            h("td",{style:{fontSize:11.5,padding:"3px 6px",textAlign:"right"}},fx(b.qty_required,2)+" "+b.uom),
+            h("td",{style:{fontSize:10.5,padding:"3px 6px",color:colors.mutedLight}},b.cutting_plan_layout_size)))))),
+        h("div",{style:{marginTop:14,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}},
+          h("button",{onClick:makePdf,disabled:!d,style:btnPrimary},"Generate PDF"),
+          h("button",{onClick:()=>saveCalc(false),disabled:!d||busy,style:btnSmall},busy?"Saving…":"Save calculation"),
+          davitCanSaveMaster(user) && h("button",{onClick:()=>saveToMaster(false),disabled:!d||busy,style:btnSmall},"Save to master"),
+          davitCanSaveMaster(user) && linked && h("button",{onClick:()=>saveToMaster(true),disabled:!d||busy,style:btnSmall},"Save to master & apply to this Sl No"),
+          davitCanSaveMaster(user) && h("label",{style:{fontSize:11.5,display:"flex",alignItems:"center",gap:4}},
+            h("input",{type:"checkbox",checked:markValidated,onChange:e=>setMarkValidated(e.target.checked)}),"mark the master row validated")),
+        msg && h("div",{style:{fontSize:11.5,color:/fail|need|pick|nothing|not /i.test(msg)?colors.danger:"#0f6e56",marginTop:8}},msg)
+      )
+    ),
+    h("div",{style:{marginTop:20}},
+      h("div",{style:{fontSize:12,fontWeight:600,marginBottom:6}},linked ? "Calculations for this Sl No" : "Recent davit calculations"),
+      history.length===0 ? h("div",{style:{fontSize:11.5,color:colors.mutedLight}},"None yet.")
+        : h("table",null,h("tbody",null,history.map(x=>h("tr",{key:x.id,style:{borderBottom:"1px solid "+colors.border}},
+            h("td",{style:{fontSize:11.5,padding:"4px 6px",fontWeight:600}},x.calc_no),
+            h("td",{style:{fontSize:11.5,padding:"4px 6px"}},x.davit_code||""),
+            h("td",{style:{fontSize:11.5,padding:"4px 6px"}},x.link_type+(x.reference_number?" "+x.reference_number+" · Sl No "+x.item_sl_no:"")),
+            h("td",{style:{fontSize:11,padding:"4px 6px",color:colors.muted}},(x.created_by||"")+" · "+fmtDMY(x.created_at)+(x.saved_to_master?" · saved to master":"")),
+            h("td",{style:{padding:"4px 6px"}},h("button",{onClick:()=>openHistory(x),style:btnSmall},"Open")))))))
+  );
+}
+
+// Options & Testing → Davit Arm, on any Sl No of a quote or a contract.
+function DavitSlPanel({ user, refNo, slNo, mode, lines, locked, onChanged }){
+  const [est,setEst] = useState(null);
+  const [opt,setOpt] = useState("Not Required");
+  const [busy,setBusy] = useState(false);
+  const [msg,setMsg] = useState("");
+  const [showCalc,setShowCalc] = useState(false);
+  const load = useCallback(async()=>{
+    const { data, error } = await sb.from("estimates").select("*").eq("reference_number",refNo).eq("item_sl_no",slNo).limit(1);
+    if(error){ setMsg(error.message); return; }
+    const e = data && data[0]; setEst(e||null);
+    if(e) setOpt(e.davit_option || ((lines||[]).some(isDavitLine) ? "Lifts cover" : "Not Required"));
+  },[refNo, slNo]);
+  useEffect(()=>{ load(); },[load]);
+  const own = (lines||[]).filter(l=>!isDavitLine(l));
+  const item = ((own.find(l=>l.item)||{}).item) || (est&&est.description) || "";
+  const davitLines = (lines||[]).filter(isDavitLine);
+  const sales = davitLines.reduce((s,l)=>s+(Number(l.sales_price)||0),0);
+  const apply = async()=>{
+    if(locked){ alert(locked); return; }
+    setBusy(true); setMsg("");
+    try{
+      const res = await applyDavitToSl({ ref:refNo, slNo, option:opt, user });
+      setMsg(res.message); await load(); if(onChanged) await onChanged();
+    }catch(e){ setMsg("Failed: "+e.message); }
+    finally{ setBusy(false); }
+  };
+  const clearFlag = async()=>{
+    if(!est) return;
+    await sb.from("estimates").update({ davit_flag:null }).eq("id",est.id);
+    await logAudit("UPDATE","estimates",refNo+"-"+slNo,"Davit flag cleared: "+(est.davit_flag||""),user?.username||"unknown",null,null);
+    await load();
+  };
+  const kv = (k,v)=>h("div",{style:{display:"flex",gap:8,fontSize:12,padding:"3px 0"}},h("span",{style:{width:150,color:colors.muted}},k),h("span",null,v));
+  return h("div",null,
+    !isDavitItem(item) && h("div",{style:{fontSize:11.5,color:colors.mutedLight,marginBottom:10}},
+      "Davit arm is offered on strainer families. This Sl No is "+(item||"not a catalogue item")+" — it can still be set if needed."),
+    est && h("div",{style:{marginBottom:12}},
+      kv("Davit arm", est.davit_option || "not asked yet"),
+      kv("Davit code", est.davit_code || "—"),
+      kv("Made for", (est.davit_for_model||"—")+" · "+String(est.davit_for_size||"—").replace(/nb$/i,"NB")),
+      kv("Cover read as", est.davit_cover_key || "—"),
+      kv("Lines / sales", davitLines.length+" line(s) · ₹"+fmt2(sales)),
+      est.davit_flag && h("div",{style:{background:"#fff4d6",border:"1px solid #e0c48a",color:"#854f0b",borderRadius:6,padding:"7px 10px",fontSize:11.5,marginTop:6,display:"flex",gap:8,alignItems:"center"}},
+        h("span",{style:{flex:1}},"⚠ "+est.davit_flag),
+        h("button",{onClick:clearFlag,style:{...btnSmall,fontSize:11}},"Checked — clear flag"))),
+    h("div",{style:{display:"flex",gap:8,alignItems:"center",marginBottom:8}},
+      h("select",{value:opt,onChange:e=>setOpt(e.target.value),style:{...inputStyle,padding:"6px 8px",fontSize:12.5,width:300}},
+        h("option",{value:"Not Required"},"Not Required"),
+        h("option",{value:"Lifts cover"},"Required — lifts the cover (bolted cover)"),
+        h("option",{value:"Lifts basket"},"Required — lifts the basket only (hinged cover)")),
+      h("button",{onClick:apply,disabled:busy,style:{...btnPrimary,padding:"7px 14px",fontSize:12.5}},busy?"Working…":"Apply")),
+    locked && h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:6}},locked),
+    msg && h("div",{style:{fontSize:11.5,color:/fail|no davit|not /i.test(msg)?colors.danger:"#0f6e56",marginBottom:8}},msg),
+    h("div",{style:{fontSize:11,color:colors.muted,borderTop:"1px solid "+colors.border,paddingTop:8,marginTop:6}},
+      "The davit is found from this Sl No’s Cover Flange line and recorded against its model and line size. Its lines (component Davit Arm) are priced like any BOM line and can be edited; if the model, size or cover changes on a re-save, they are regenerated and the Sl No is flagged. The datasheet shows Davit Arm — Included in Price / Not Required under Accessories & Options."),
+    h("button",{onClick:()=>setShowCalc(true),style:{...btnSmall,marginTop:10}},"📐 Open Davit Arm Design Generator for this Sl No"),
+    showCalc && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:20}},
+      h("div",{style:{background:"#fff",borderRadius:8,padding:"16px 20px",width:1180,maxWidth:"100%",maxHeight:"92vh",overflow:"auto"}},
+        h("div",{style:{display:"flex",alignItems:"center",marginBottom:6}},
+          h("div",{style:{fontWeight:700,fontSize:14}},"Davit Arm Design Generator — "+refNo+" · Sl No "+slNo),
+          h("button",{onClick:()=>setShowCalc(false),style:{...btnSmall,marginLeft:"auto"}},"Close")),
+        h(DavitCalculator,{ user, link:{ mode, ref:refNo, slNo, model:(est&&est.model)||(own[0]&&own[0].model)||"", size:(own[0]&&own[0].size)||"", lines, option:opt, locked },
+          onApplied: async()=>{ await load(); if(onChanged) await onChanged(); } })))
+  );
+}
+
+/* ==== 257 — CONNECTIONS & ELEMENT (every strainer family) ===================
+   The model BOM masters stay as they are (slip-on ends, BS 10 Table E cover).
+   This form changes the QUOTE's BOM lines only: each flange line picks its
+   spec from every flange in the spec master (same "Flange-450nb-ANSI B16.5
+   150 LBS-WNRF" format as the BOM), the cover bolting and gasket follow the
+   cover flange, the drain / vent can be made flanged, and the perforated
+   sheet / mesh specs can be changed. Mandatory on a new flanged strainer Sl
+   No (Order Quantity window); screwed / socket-weld ends never need it.
+   Choices are kept on the Sl No (estimates.conn_choices) and applied again
+   after a re-save or Refresh BOM. */
+const CONN_SQL_MSG = "Connections & Element needs its SQL first (Connections_Element_2026-10-25.sql).";
+const CONN_DEFAULT_ROLES = [
+  ["*","Connection Flange","end_flange"],["*","Inlet Flange","end_flange"],["*","Outlet Flange","end_flange"],["*","End Flange","end_flange"],
+  ["*","Top Body Flange","body_flange"],["*","Body Flange","body_flange"],
+  ["*","Cover Flange","cover_flange"],
+  ["Fastners","Bolt","cover_bolt"],["Fasteners","Bolt","cover_bolt"],["Fastners","Stud Bolt","cover_bolt"],["Fasteners","Stud Bolt","cover_bolt"],
+  ["Fastners","Nut","cover_nut"],["Fasteners","Nut","cover_nut"],
+  ["Fastners","Washers","cover_washer"],["Fasteners","Washers","cover_washer"],["Fastners","Washer","cover_washer"],["Fasteners","Washer","cover_washer"],
+  ["*","Cover Seal","cover_gasket"],["*","Cover Gasket","cover_gasket"],["Seal","Gasket","cover_gasket"],
+  ["*","Drain Coupling","drain"],["*","Drain Plug","drain"],["*","Drain Pipe","drain"],["*","Drain Flange","drain"],["*","Drain Blind","drain"],
+  ["*","Drain Bolt","drain"],["*","Drain Nut","drain"],["*","Drain Gasket","drain"],["*","Drain Washer","drain"],["Cover Assembly","Drain","drain"],
+  ["*","Vent Coupling","vent"],["*","Vent Plug","vent"],["*","Vent Pipe","vent"],["*","Vent Flange","vent"],["*","Vent Blind","vent"],
+  ["*","Vent Bolt","vent"],["*","Vent Nut","vent"],["*","Vent Gasket","vent"],["*","Vent Washer","vent"],
+  ["*","Outer Filter Element","perforated"],["*","Inner Filter Element","mesh"],
+].map(([component,sub_assembly,role])=>({component,sub_assembly,role}));
+const CONN_ROLE_LABEL = { end_flange:"Inlet / outlet flange", body_flange:"Body (top) flange", cover_flange:"Cover flange", other_flange:"Other flange" };
+const connNorm = s=>String(s||"").trim().toLowerCase().replace(/\s+/g," ");
+function isConnItem(item){ return /strainer|diffuser/i.test(String(item||"")); }
+function connRoleOf(l, roles){
+  const c=connNorm(l.component), s=connNorm(l.sub_assembly);
+  const list = roles && roles.length ? roles : CONN_DEFAULT_ROLES;
+  const exact = list.find(r=>connNorm(r.sub_assembly)===s && connNorm(r.component)===c);
+  if(exact) return exact.role;
+  const any = list.find(r=>connNorm(r.sub_assembly)===s && (r.component==="*"||!r.component));
+  return any ? any.role : null;
+}
+function connIsFlangeSpec(spec){ return /^flange\s*-/i.test(String(spec||"").trim()); }
+// A Sl No is "flanged" when its inlet / outlet are flange lines. Screwed and
+// socket-weld strainers have none, and never need this form.
+function connIsFlanged(lines, roles){
+  return (lines||[]).some(l=>connRoleOf(l,roles)==="end_flange" && connIsFlangeSpec(l.material_spec));
+}
+const CONN_NB_NPS = {15:"1/2",20:"3/4",25:"1",32:"1-1/4",40:"1-1/2",50:"2",65:"2-1/2",80:"3",90:"3-1/2",100:"4",125:"5",150:"6",200:"8",250:"10",300:"12",350:"14",400:"16",450:"18",500:"20",550:"22",600:"24"};
+const CONN_INCH = {15:'1/2"',20:'3/4"',25:'1"',32:'1-1/4"',40:'1-1/2"',50:'2"',65:'2-1/2"',80:'3"',100:'4"'};
+function connParseFlange(spec){
+  const s=String(spec||"").trim();
+  const m=s.match(/^flange\s*-\s*([\d.]+)\s*nb\s*-\s*(.*)$/i); if(!m) return null;
+  const nb=Number(m[1]), rest=m[2].toUpperCase();
+  let standard=null, series=null;
+  if(/B\s*16\.47/.test(rest)){ standard="ASME B16.47"; series=/SERIES\s*B/.test(rest)?"B":(/SERIES\s*A/.test(rest)?"A":null); }
+  else if(/B\s*16\.5\b/.test(rest)) standard="ASME B16.5";
+  else if(/B\s*16\.36/.test(rest)) standard="ASME B16.36";
+  else if(/BS\s*10/.test(rest)) standard="BS 10";
+  else if(/DIN/.test(rest)) standard="DIN";
+  else if(/AWWA/.test(rest)) standard="AWWA";
+  const r=rest.match(/(\d{3,4})\s*(LBS|LB|#)/);
+  const t=rest.match(/(SORF|SOFF|WNRF|WNFF|WNRTJ|BLRF|BLFF|BLRTJ|SWRF|SWFF|LJRF|LJFF)/);
+  const tab=rest.match(/TAB\s*([A-Z])\b/), pn=rest.match(/PN\s*(\d+)/);
+  return { nb, standard, series, rating:r?r[1]:null, type:t?t[1]:null, table:tab?tab[1]:null, pn:pn?pn[1]:null, raw:s };
+}
+// Words the datasheet uses, e.g. "ANSI B16.5 150LBS WNRF".
+function connDatasheetWords(p, withType){
+  if(!p) return "";
+  let w="";
+  if(p.standard==="ASME B16.5") w="ANSI B16.5 "+p.rating+"LBS";
+  else if(p.standard==="ASME B16.47") w="ANSI B16.47"+(p.series?" SERIES "+p.series:"")+" "+p.rating+"LBS";
+  else if(p.standard==="BS 10") w="BS 10 TAB "+(p.table||"");
+  else if(p.standard==="DIN") w="DIN PN "+(p.pn||"");
+  else w=p.raw.replace(/^flange\s*-\s*[\d.]+\s*nb\s*-\s*/i,"");
+  return withType && p.type ? w+" "+p.type : w;
+}
+function connNbOf(spec){ const m=String(spec||"").match(/([\d.]+)\s*nb/i); return m?Number(m[1]):null; }
+// Flange Chart row for a parsed flange (ASME B16.5 by NB, B16.47 Series A by NPS).
+function connChartRow(p, chart, wantType){
+  if(!p||!p.rating) return null;
+  let rows=[];
+  if(p.standard==="ASME B16.5") rows=(chart||[]).filter(r=>r.standard==="ASME B16.5" && String(r.class_rating)===String(p.rating) && connNorm(r.nb)===p.nb+"nb");
+  else if(p.standard==="ASME B16.47" && p.series!=="B") rows=(chart||[]).filter(r=>r.standard==="ASME B16.47" && String(r.class_rating)===String(p.rating) && String(r.nps)===String(Math.round(p.nb/25)));
+  if(!rows.length) return null;
+  return rows.find(r=>r.flange_type===wantType) || rows.find(r=>r.flange_type==="BLRF") || rows[0];
+}
+// Blind thickness: the davit cover-weight table first (it has every standard),
+// then the Flange Chart.
+function connThickness(p, ctx, chartRow){
+  if(!p) return null;
+  const std = p.standard==="ASME B16.47" ? "ASME B16.47 Series "+(p.series||"A") : p.standard==="BS 10" ? "BS 10 Table "+(p.table||"E") : p.standard;
+  const rating = p.standard==="BS 10" ? "Table "+(p.table||"E") : String(p.rating||"");
+  const cw = (ctx.coverW||[]).find(c=>connNorm(c.standard)===connNorm(std) && connNorm(c.rating)===connNorm(rating) && connNorm(c.nb)===p.nb+"nb");
+  if(cw && Number(cw.thickness_mm)>0) return Number(cw.thickness_mm);
+  return chartRow && Number(chartRow.flange_thickness)>0 ? Number(chartRow.flange_thickness) : null;
+}
+function connGasketThk(spec){ const m=String(spec||"").match(/([\d.]+)\s*mm/i); if(m) return Number(m[1]); return /spiral|spw/i.test(String(spec||""))?4.5:3; }
+function connIsSpiral(spec){ return /spiral|spw|sp\.?\s*wound/i.test(String(spec||"")); }
+function connPickSpec(list, prefix, wantLen){
+  const cands=(list||[]).map(s=>{ const m=s.match(new RegExp("^"+prefix.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"(\\d+)$","i")); return m?{s,len:Number(m[1])}:null; }).filter(Boolean);
+  if(wantLen==null) return (list||[]).find(s=>s.toLowerCase().startsWith(prefix.toLowerCase()))||null;
+  const ok=cands.filter(c=>c.len>=wantLen).sort((a,b)=>a.len-b.len);
+  return ok.length?ok[0].s:null;
+}
+// Stud bolting for one flange joint, the Bolting Calculator's way (stud,
+// two nuts, ~2 pitches beyond each nut, rounded up to 5 mm; A193 B7 7.85).
+function connBolting(pFlange, pMate, gasketSpec, ctx, withWashers){
+  const row = connChartRow(pFlange, ctx.chart, "BLRF");
+  if(!row) return { error:"no Flange Chart data for "+(pFlange?pFlange.raw:"?") };
+  const n = Number(row.no_of_bolts)||0;
+  const d = row.bolt_size_metric_equiv || nearestMetricStud(Number(row.bolt_hole_dia)||0);
+  const dmm = parseFloat(String(d).replace(/^M/i,""))||0;
+  const nut = (ctx.nuts||[]).find(x=>x.thread_size===d);
+  const nutH = nut?Number(nut.height):dmm*0.84, pitch = nut?Number(nut.pitch):(dmm>=24?3:2.5), af = nut?Number(nut.across_flats):dmm*1.5;
+  const T1 = connThickness(pFlange, ctx, row) || 0, T2 = connThickness(pMate||pFlange, ctx, row) || T1;
+  if(!(T1>0)) return { error:"no thickness on file for "+pFlange.raw };
+  const G = connGasketThk(gasketSpec), W = withWashers ? Math.max(2, Math.round(dmm*0.16)) : 0;
+  const len = Math.ceil(boltLengthFormula("stud", T1, T2, G, nutH, W, pitch*2)/5)*5;
+  const studKg = Math.PI*Math.pow(dmm/2,2)*len*7.85e-6;
+  const nutKg = Math.max(0, (Math.sqrt(3)/2)*af*af - Math.PI*Math.pow(dmm/2,2))*nutH*7.85e-6;
+  const washerKg = withWashers ? (Math.PI/4)*(Math.pow(2*dmm,2)-Math.pow(1.08*dmm,2))*W*7.85e-6 : 0;
+  const boltSpec = connPickSpec(ctx.boltSpecs, "Bolt-Metric-"+d+"-", len) || ("Bolt-Metric-"+d+"-"+len);
+  const nutSpec = connPickSpec(ctx.nutSpecs, "Nut-Metric-"+d+"-") || ("Nut-Metric-"+d);
+  const washerSpec = connPickSpec(ctx.washerSpecs, "Washer-Metric-"+d+"-") || ("Washer-Metric-"+d);
+  return { n, d, len, T1, T2, G, od:Number(row.od)||0, validated:!!row.validated,
+    studKg:r2(studKg*n), nutKg:r2(nutKg*2*n), washerKg:r2(washerKg*2*n), boltSpec, nutSpec, washerSpec };
+}
+let CONN_CTX = null;
+async function connLoadCtx(force){
+  if(CONN_CTX && !force) return CONN_CTX;
+  const safe = async(p)=>{ try{ return await p; }catch(e){ return []; } };
+  const [rolesRes, chart, nuts, coverW, specs] = await Promise.all([
+    sb.from("conn_role_tbl").select("*"),
+    safe(fetchAll("flange_std_tbl","*")),
+    safe(fetchAll("iso4032_nut_tbl","*")),
+    safe(fetchAll("davit_cover_weight_tbl","standard,rating,nb,od_mm,thickness_mm")),
+    safe(fetchAll("material_spec","material_spec,material_shape")),
+  ]);
+  const roles = (rolesRes && !rolesRes.error && rolesRes.data && rolesRes.data.length) ? rolesRes.data : CONN_DEFAULT_ROLES;
+  const names = (specs||[]).map(s=>String(s.material_spec||"").trim()).filter(Boolean);
+  const by = re=>Array.from(new Set(names.filter(n=>re.test(n)))).sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
+  CONN_CTX = { roles, rolesFromMaster: roles!==CONN_DEFAULT_ROLES, chart:chart||[], nuts:nuts||[], coverW:coverW||[],
+    flangeSpecs:by(/^flange\s*-/i), gasketSpecs:by(/^gasket/i), perfSpecs:by(/^perforated/i), meshSpecs:by(/^mesh/i),
+    boltSpecs:by(/^bolt-/i), nutSpecs:by(/^nut-/i), washerSpecs:by(/^washer-/i), pipeSpecs:by(/^pipe-/i),
+    specSet:new Set(names.map(connNorm)) };
+  return CONN_CTX;
+}
+// Stable key per line within one Sl No: component‖sub-assembly‖n.
+function connKeys(lines){
+  const seen={};
+  return (lines||[]).map(l=>{ const b=(l.component||"")+"‖"+(l.sub_assembly||""); seen[b]=(seen[b]||0)+1; return b+"‖"+seen[b]; });
+}
+// The form's starting values, read from the lines themselves.
+function connDefaults(lines, ctx){
+  const keys=connKeys(lines), flanges={}; let gasket="", perforated="", mesh="";
+  const drain={mode:"asBom",spec:""}, vent={mode:"asBom",spec:""};
+  (lines||[]).forEach((l,i)=>{
+    const role=connRoleOf(l,ctx.roles);
+    if(connIsFlangeSpec(l.material_spec) && role!=="drain" && role!=="vent") flanges[keys[i]]=l.material_spec;
+    if(role==="cover_gasket" && !gasket) gasket=l.material_spec||"";
+    if(role==="perforated" && !perforated) perforated=l.material_spec||"";
+    if(role==="mesh" && !mesh) mesh=l.material_spec||"";
+    if(role==="drain" && connIsFlangeSpec(l.material_spec) && !/BL/i.test((connParseFlange(l.material_spec)||{}).type||"")){ drain.mode="flanged"; drain.spec=l.material_spec; }
+    if(role==="vent" && connIsFlangeSpec(l.material_spec) && !/BL/i.test((connParseFlange(l.material_spec)||{}).type||"")){ vent.mode="flanged"; vent.spec=l.material_spec; }
+  });
+  return { flanges, gasket, perforated, mesh, drain, vent };
+}
+function connBlindOf(spec, ctx){
+  const p=connParseFlange(spec); if(!p||!p.type) return null;
+  const want = p.type.replace(/^(SO|WN|SW|LJ)/,"BL");
+  const exact = String(spec).replace(new RegExp(p.type+"(?![A-Z])"), want);
+  const hit = (ctx.flangeSpecs||[]).find(s=>connNorm(s)===connNorm(exact));
+  if(hit) return hit;
+  return (ctx.flangeSpecs||[]).find(s=>{ const q=connParseFlange(s); return q && q.nb===p.nb && q.standard===p.standard && q.rating===p.rating && q.series===p.series && q.type===want; }) || exact;
+}
+// The quote BOM after the choices. Pure: no database calls.
+function connTransform(lines, choices, ctx){
+  const out=[], flags=[], changes=[], removed=[], added=[];
+  const keys=connKeys(lines), ch=choices||{};
+  const missing = spec=>spec && !ctx.specSet.has(connNorm(spec));
+  let coverChanged=false, coverSpec=null, bodySpec=null, gasketSpec=null;
+  const firstGrade = role=>{ const l=(lines||[]).find(x=>connRoleOf(x,ctx.roles)===role && x.grade); return l?l.grade:""; };
+  const sf0 = Number(((lines||[]).find(l=>Number(l.sf)>0)||{}).sf)||3.1;
+  const base = (lines||[])[0]||{};
+  // A nozzle already made flanged with the same flange is left alone (hand edits kept).
+  const already = (w, spec)=>(lines||[]).some(l=>connRoleOf(l,ctx.roles)===w && connNorm(l.sub_assembly)===w+" flange" && connNorm(l.material_spec)===connNorm(spec));
+  const drainOn = ch.drain && ch.drain.mode==="flanged" && ch.drain.spec && !already("drain", ch.drain.spec);
+  const ventOn = ch.vent && ch.vent.mode==="flanged" && ch.vent.spec && !already("vent", ch.vent.spec);
+  (lines||[]).forEach((l,i)=>{
+    const role=connRoleOf(l,ctx.roles); const k=keys[i];
+    if((role==="drain" && drainOn) || (role==="vent" && ventOn)){ removed.push(l); return; }
+    let n={...l}; const before=l.material_spec;
+    if(connIsFlangeSpec(l.material_spec) && role!=="drain" && role!=="vent" && ch.flanges && ch.flanges[k] && connNorm(ch.flanges[k])!==connNorm(l.material_spec)){
+      n.material_spec=ch.flanges[k]; n.material_shape="Flange";
+      if(role==="cover_flange") coverChanged=true;
+      if(role==="body_flange") coverChanged=true;
+    }
+    if(role==="cover_gasket" && ch.gasket && connNorm(ch.gasket)!==connNorm(l.material_spec)){ n.material_spec=ch.gasket; n.material_shape="Gasket"; coverChanged=true; }
+    if(role==="perforated" && ch.perforated && connNorm(ch.perforated)!==connNorm(l.material_spec)){ n.material_spec=ch.perforated; }
+    if(role==="mesh" && ch.mesh && connNorm(ch.mesh)!==connNorm(l.material_spec)){ n.material_spec=ch.mesh; }
+    if(role==="cover_flange" && connIsFlangeSpec(n.material_spec)) coverSpec=n.material_spec;
+    if(role==="body_flange" && connIsFlangeSpec(n.material_spec)) bodySpec=n.material_spec;
+    if(role==="cover_gasket") gasketSpec=n.material_spec;
+    n.__connRole=role; n.__connKey=k; n.__specBefore=before;
+    out.push(n);
+  });
+  // cover joint: bolting and gasket follow the cover flange
+  if(coverSpec && (coverChanged || ch.recalcBolting)){
+    const pc=connParseFlange(coverSpec), pb=connParseFlange(bodySpec)||pc;
+    const hasW = out.some(l=>l.__connRole==="cover_washer");
+    const b = connBolting(pc, pb, gasketSpec, ctx, hasW);
+    if(b.error) flags.push("Cover bolting NOT recalculated: "+b.error+" — check the Bolt / Nut lines by hand.");
+    else {
+      if(!b.validated) flags.push("Flange Chart row for "+pc.raw+" is not validated yet — bolting is from it.");
+      out.forEach(l=>{
+        const kg = String(l.uom||"").toLowerCase()==="kg";
+        if(l.__connRole==="cover_bolt"){ l.material_spec=b.boltSpec; l.qty_required = kg?b.studKg:b.n; l.__note=b.n+" studs "+b.d+" x "+b.len+" (T "+r2(b.T1)+"+"+r2(b.T2)+", gasket "+b.G+")"; }
+        if(l.__connRole==="cover_nut"){ l.material_spec=b.nutSpec; l.qty_required = kg?b.nutKg:2*b.n; }
+        if(l.__connRole==="cover_washer"){ l.material_spec=b.washerSpec; l.qty_required = kg?b.washerKg:2*b.n; }
+        if(l.__connRole==="cover_gasket"){
+          if(connIsSpiral(l.material_spec)){ l.uom="Nos"; l.qty_required=1; }
+          else if(b.od>0 && /sq/i.test(String(l.uom||""))){ l.qty_required = r2(Math.pow(b.od/1000,2)*10.7639); }
+        }
+      });
+    }
+  }
+  // drain / vent made flanged: pipe stub, flange, blind, gasket, studs, nuts
+  const nozzle = (which, spec)=>{
+    const comp = which==="Drain" ? "Drain" : "Vent Assembly";
+    const p=connParseFlange(spec); const nb=p?p.nb:connNbOf(spec);
+    const blind=connBlindOf(spec, ctx);
+    const gSpec = gasketSpec && connIsSpiral(gasketSpec) ? gasketSpec : (ctx.gasketSpecs.find(s=>/3(\.0)?\s*mm/i.test(s))||"Gasket-3.0mm");
+    const b = connBolting(p, connParseFlange(blind), gSpec, ctx, false);
+    const pipeSpec = connPickSpec(ctx.pipeSpecs, "Pipe-"+nb+"nb") || ("Pipe-"+nb+"nb");
+    const mk = (sub, shape, mspec, qty, uom, grade)=>({ reference_number:base.reference_number, item_sl_no:base.item_sl_no, estimate_id:base.estimate_id,
+      model:base.model, item:base.item, size:base.size, component:comp, sub_assembly:sub, material_shape:shape, material_spec:mspec, grade:grade||"",
+      qty_required:qty, uom, rate:0, cost:0, sf:sf0, sales_price:0, cutting_plan_layout_size:"", cutting_plan_qty:0, cutting_plan_uom:"",
+      is_direct_price:false, validation_status:null, __connRole:which.toLowerCase(), __added:true });
+    const rows=[ mk(which+" Pipe","Pipe",pipeSpec,0.15,"Metres",""),
+      mk(which+" Flange","Flange",spec,1,"Nos",firstGrade("end_flange")||firstGrade("body_flange")),
+      mk(which+" Blind","Flange",blind,1,"Nos",firstGrade("cover_flange")||firstGrade("end_flange")) ];
+    const pipeGrade = ((lines||[]).find(x=>connNorm(x.sub_assembly)==="connection pipe" && x.grade)||{}).grade || "";
+    rows[0].grade = pipeGrade;
+    if(connIsSpiral(gSpec)) rows.push(mk(which+" Gasket","Gasket",gSpec,1,"Nos",firstGrade("cover_gasket")));
+    else rows.push(mk(which+" Gasket","Gasket",gSpec, b.od>0?r2(Math.pow(b.od/1000,2)*10.7639):0.3,"Sqft",firstGrade("cover_gasket")));
+    if(b.error) flags.push(which+" bolting not calculated: "+b.error+" — add the studs by hand.");
+    else {
+      rows.push(mk(which+" Bolt","Bolt",b.boltSpec,b.studKg,"Kg",firstGrade("cover_bolt")));
+      rows.push(mk(which+" Nut","Nut",b.nutSpec,b.nutKg,"Kg",firstGrade("cover_nut")));
+      rows[rows.length-2].__note=b.n+" studs "+b.d+" x "+b.len;
+    }
+    return rows;
+  };
+  if(drainOn) nozzle("Drain", ch.drain.spec).forEach(r=>{ out.push(r); added.push(r); });
+  if(ventOn) nozzle("Vent", ch.vent.spec).forEach(r=>{ out.push(r); added.push(r); });
+  out.forEach(l=>{
+    if(l.__added) return;
+    const orig=(lines||[])[keys.indexOf(l.__connKey)]||{};
+    const specCh = connNorm(orig.material_spec)!==connNorm(l.material_spec);
+    const qtyCh = Number(orig.qty_required)!==Number(l.qty_required) || String(orig.uom||"")!==String(l.uom||"");
+    if(specCh||qtyCh) changes.push({ line:l, from:orig, specChanged:specCh });
+  });
+  [...changes.map(c=>c.line), ...added].forEach(l=>{ if(missing(l.material_spec)) flags.push("Spec not in the spec master: "+l.material_spec+" ("+l.sub_assembly+") — add it before pricing."); });
+  return { lines:out, changes, removed, added, flags:Array.from(new Set(flags)), coverChanged };
+}
+// Rates for the changed / added lines (spec + grade, latest), then cost and sales.
+async function connPrice(result){
+  const todo=[...result.changes.filter(c=>c.specChanged).map(c=>c.line), ...result.added];
+  const specs=Array.from(new Set(todo.map(l=>l.material_spec).filter(Boolean)));
+  let rates=[];
+  if(specs.length){ const { data } = await sb.from("material_rates").select("id,material_spec,material_grade,rate,rate_effective_date").in("material_spec",specs); rates=data||[]; }
+  const noRate=[];
+  todo.forEach(l=>{
+    const c=rates.filter(r=>connNorm(r.material_spec)===connNorm(l.material_spec) && connNorm(r.material_grade)===connNorm(l.grade) && Number(r.rate)>0)
+      .sort((x,y)=>String(y.rate_effective_date||"").localeCompare(String(x.rate_effective_date||"")) || (Number(y.id)||0)-(Number(x.id)||0));
+    l.rate = c.length?Number(c[0].rate):0;
+    if(!c.length) noRate.push(l.material_spec+" / "+(l.grade||"no grade"));
+  });
+  [...result.changes.map(c=>c.line), ...result.added].forEach(l=>{ const q=Number(l.qty_required)||0, r=Number(l.rate)||0, sf=Number(l.sf)||0; l.cost=r2(q*r); l.sales_price=r2(q*r*sf); });
+  if(noRate.length) result.flags.push("No rate yet for: "+Array.from(new Set(noRate)).join("; ")+" — priced at 0 until a rate is added.");
+  return result;
+}
+function connStrip(l){ const n={...l}; Object.keys(n).forEach(k=>{ if(k.startsWith("__")) delete n[k]; }); delete n.id; delete n.created_at; return n; }
+// Datasheet words from the lines (Nozzle & Connection, Cover, Filter).
+function connDatasheetValues(lines, roles){
+  const v={}; const L=lines||[];
+  const role = l=>connRoleOf(l,roles);
+  const end=L.find(l=>role(l)==="end_flange" && connIsFlangeSpec(l.material_spec));
+  if(end){ const p=connParseFlange(end.material_spec); v.inlet_connection=connDatasheetWords(p,true); v.outlet_connection=v.inlet_connection; }
+  const cov=L.find(l=>role(l)==="cover_flange" && connIsFlangeSpec(l.material_spec));
+  if(cov) v.cover_standard=connDatasheetWords(connParseFlange(cov.material_spec),false);
+  ["drain","vent"].forEach(w=>{
+    const fl=L.find(l=>role(l)===w && connIsFlangeSpec(l.material_spec) && !/^BL/.test((connParseFlange(l.material_spec)||{}).type||""));
+    if(fl){ const p=connParseFlange(fl.material_spec); v[w+"_size"]=p.nb+"NB"; v[w+"_standard"]=connDatasheetWords(p,true)+" With Blind"; return; }
+    const cp=L.find(l=>role(l)===w && /coupling/i.test(l.material_shape||l.material_spec||""));
+    if(cp){ const m=String(cp.material_spec||"").match(/coupling\s*-\s*([\d.\/\s]+)"\s*-?\s*(NPT|BSP)/i); if(m){ const inch=m[1].trim(); v[w+"_standard"]=inch+'" -'+m[2].toUpperCase()+(m[2].toUpperCase()==="NPT"?" (F)":"(F)")+" With Plug";
+      const nb=Object.keys(CONN_INCH).find(k=>CONN_INCH[k]===inch+'"'); if(nb) v[w+"_size"]=nb+"NB"; } }
+  });
+  const perf=L.find(l=>role(l)==="perforated"); if(perf) v.outer_filter_element_size=perf.material_spec;
+  const mesh=L.find(l=>role(l)==="mesh"); if(mesh) v.inner_filter_element_size=mesh.material_spec;
+  return v;
+}
+async function connSyncDatasheet(ref, slNo, lines, roles){
+  const vals=connDatasheetValues(lines, roles);
+  const { data } = await sb.from("datasheets").select("id,field_values").eq("reference_number",ref).eq("item_sl_no",slNo);
+  for(const ds of (data||[])) await sb.from("datasheets").update({ field_values:{...(ds.field_values||{}), ...vals} }).eq("id",ds.id);
+}
+function connSummary(ch){
+  if(!ch) return "";
+  const f=Object.values(ch.flanges||{}); const parts=[];
+  if(f.length) parts.push(Array.from(new Set(f.map(s=>String(s).replace(/^flange\s*-\s*/i,"")))).join(", "));
+  if(ch.drain&&ch.drain.mode==="flanged") parts.push("drain "+String(ch.drain.spec).replace(/^flange\s*-\s*/i,""));
+  if(ch.vent&&ch.vent.mode==="flanged") parts.push("vent "+String(ch.vent.spec).replace(/^flange\s*-\s*/i,""));
+  if(ch.gasket) parts.push(ch.gasket);
+  return parts.join(" · ");
+}
+// Writes a result onto a saved Sl No: changed lines updated in place, removed
+// lines deleted, new lines added after the last Sl No line.
+async function connWriteToSl({ ref, slNo, est, current, result, choices, user, note }){
+  const by=user?.username||"unknown";
+  for(const c of result.changes){
+    const l=c.line;
+    const { error } = await byLine(sb.from("estimate_lines").update({ material_spec:l.material_spec, material_shape:l.material_shape||"", qty_required:l.qty_required, uom:l.uom, rate:l.rate, cost:l.cost, sales_price:l.sales_price }), l);
+    if(error) throw error;
+  }
+  for(const l of result.removed){ const { error } = await byLine(sb.from("estimate_lines").delete(), l); if(error) throw error; }
+  if(result.added.length){
+    const maxSl=(current||[]).reduce((m,l)=>Math.max(m,Number(l.sl_no)||0),0);
+    const rows=result.added.map((l,i)=>({...connStrip(l), reference_number:ref, item_sl_no:slNo, sl_no:maxSl+i+1, estimate_id:est?est.id:(l.estimate_id||null), added_by:by}));
+    const { error } = await sb.from("estimate_lines").insert(rows); if(error) throw error;
+  }
+  const upd={ conn_choices:{...choices, confirmed:true, by, at:new Date().toISOString()}, conn_flag:null, conn_set_by:by, conn_set_at:new Date().toISOString() };
+  const { error:eErr } = await sb.from("estimates").update(upd).eq("reference_number",ref).eq("item_sl_no",slNo);
+  if(eErr) throw new Error(/conn_/.test(eErr.message||"")?CONN_SQL_MSG:eErr.message);
+  if(result.changes.length||result.removed.length||result.added.length){
+    try{
+      await sb.from("revision_changes").insert({ revision_ref:ref, area:"Connections", item_sl_no:slNo, field_name:"connection lines",
+        old_value:JSON.stringify([...result.changes.map(c=>({sub:c.from.sub_assembly, spec:c.from.material_spec, qty:c.from.qty_required, uom:c.from.uom})), ...result.removed.map(l=>({sub:l.sub_assembly, spec:l.material_spec, qty:l.qty_required, removed:true}))]),
+        new_value:JSON.stringify([...result.changes.map(c=>({sub:c.line.sub_assembly, spec:c.line.material_spec, qty:c.line.qty_required, uom:c.line.uom})), ...result.added.map(l=>({sub:l.sub_assembly, spec:l.material_spec, qty:l.qty_required, added:true}))]),
+        changed_by:by });
+    }catch(e){ /* history is best-effort */ }
+  }
+  await logAudit("UPDATE","estimate_lines",ref+"-"+slNo,"Connections & Element"+(note?" ("+note+")":"")+": "+result.changes.length+" changed, "+result.added.length+" added, "+result.removed.length+" removed. "+connSummary(choices),by,null,null);
+}
+// Applies choices to a saved Sl No (Options & Testing, re-save, Refresh BOM).
+async function connApplyToSl({ ref, slNo, choices, user, note }){
+  const ctx=await connLoadCtx();
+  const { data:ests } = await sb.from("estimates").select("*").eq("reference_number",ref).eq("item_sl_no",slNo).limit(1);
+  const est=ests&&ests[0]; if(!est) throw new Error("Sl No "+slNo+" of "+ref+" was not found.");
+  const { data:all } = await sb.from("estimate_lines").select("*").eq("reference_number",ref).eq("item_sl_no",slNo).order("sl_no");
+  const own=(all||[]).filter(l=>!isDavitLine(l));
+  const result=await connPrice(connTransform(own, choices, ctx));
+  await connWriteToSl({ ref, slNo, est, current:all, result, choices, user, note });
+  const { data:after } = await sb.from("estimate_lines").select("*").eq("reference_number",ref).eq("item_sl_no",slNo).order("sl_no");
+  await connSyncDatasheet(ref, slNo, after||[], ctx.roles);
+  let davitMsg="";
+  if(result.coverChanged && est.davit_option && est.davit_option!=="Not Required"){
+    try{ const r=await applyDavitToSl({ ref, slNo, option:est.davit_option, user, reason:"Davit made again - the cover flange changed" }); davitMsg=" Davit: "+r.message; }
+    catch(e){ davitMsg=" Davit NOT made again: "+e.message; }
+  }
+  return { result, message:"Connections applied: "+result.changes.length+" line(s) changed, "+result.added.length+" added, "+result.removed.length+" removed."+davitMsg, flags:result.flags };
+}
+// Re-save from the Estimator: the choices are applied again when the model is
+// the same; a different model clears them and flags the Sl No.
+async function connStashBeforeResave(ref, slNo){
+  try{ const { data } = await sb.from("estimates").select("model,conn_choices").eq("reference_number",ref).eq("item_sl_no",slNo).limit(1); return data&&data[0]&&data[0].conn_choices ? data[0] : null; }
+  catch(e){ return null; }
+}
+async function connRestoreAfterResave({ ref, slNo, stash, model, user }){
+  if(!stash || !stash.conn_choices) return null;
+  if(String(stash.model||"")!==String(model||"")){
+    await sb.from("estimates").update({ conn_choices:null, conn_flag:"Connections must be set again - the model changed ("+(stash.model||"?")+" to "+(model||"?")+")" }).eq("reference_number",ref).eq("item_sl_no",slNo);
+    return { message:"Connections cleared (model changed) — set them again from Options & Testing → Connections." };
+  }
+  const r=await connApplyToSl({ ref, slNo, choices:stash.conn_choices, user, note:"re-applied after a re-save" });
+  return { message:r.message };
+}
+
+// The form. Works on any list of lines (the Order Quantity cart, or a saved Sl No).
+function ConnectionsEditor({ lines, title, initial, required, busyText, onApply, onCancel }){
+  const [ctx,setCtx]=useState(CONN_CTX);
+  const [ch,setCh]=useState(null);
+  const [def,setDef]=useState(null);
+  const [err,setErr]=useState("");
+  useEffect(()=>{ let off=false; connLoadCtx().then(c=>{ if(off) return; setCtx(c); const d=connDefaults(lines,c); setDef(d); setCh(initial ? {...d, ...initial, flanges:{...d.flanges, ...(initial.flanges||{})}, drain:{...d.drain,...(initial.drain||{})}, vent:{...d.vent,...(initial.vent||{})}} : d); }).catch(e=>setErr(e.message)); return ()=>{ off=true; }; },[]);
+  if(err) return h("div",{style:{color:colors.danger,fontSize:12}},err);
+  if(!ctx||!ch||!def) return h("div",{style:{fontSize:12,color:colors.mutedLight,padding:20}},"Loading flange, bolt and spec masters…");
+  const keys=connKeys(lines);
+  const res=connTransform(lines, ch, ctx);
+  // Red only for a NEW value that is not in the spec master; what the BOM already has is accepted.
+  const bad = (s, cur)=>!!s && connNorm(s)!==connNorm(cur||"") && !ctx.specSet.has(connNorm(s));
+  const listId = n=>"conn-dl-"+n;
+  const dl = (n, arr)=>h("datalist",{id:listId(n)}, arr.map(s=>h("option",{key:s,value:s})));
+  const inp = (val, set, list, w, cur)=>h("input",{value:val||"", list:listId(list), onChange:e=>set(e.target.value), style:{...inputStyle,padding:"5px 7px",fontSize:12,width:w||"100%",boxSizing:"border-box",borderColor:bad(val,cur)?colors.danger:undefined}});
+  const flangeRows=(lines||[]).map((l,i)=>({l,k:keys[i],role:connRoleOf(l,ctx.roles)})).filter(x=>connIsFlangeSpec(x.l.material_spec) && x.role!=="drain" && x.role!=="vent");
+  const drainLines=(lines||[]).filter(l=>connRoleOf(l,ctx.roles)==="drain"), ventLines=(lines||[]).filter(l=>connRoleOf(l,ctx.roles)==="vent");
+  const hasRole = r=>(lines||[]).some(l=>connRoleOf(l,ctx.roles)===r);
+  const setF=(k,v)=>setCh({...ch, flanges:{...ch.flanges,[k]:v}});
+  const anyBad = flangeRows.some(x=>bad(ch.flanges[x.k], x.l.material_spec)) || bad(ch.gasket,def.gasket) || bad(ch.perforated,def.perforated) || bad(ch.mesh,def.mesh) ||
+    (ch.drain.mode==="flanged" && (!ch.drain.spec||bad(ch.drain.spec,def.drain.spec))) || (ch.vent.mode==="flanged" && (!ch.vent.spec||bad(ch.vent.spec,def.vent.spec)));
+  const th = t=>h("th",{style:{textAlign:"left",fontSize:10.5,color:colors.mutedLight,fontWeight:600,padding:"4px 6px",borderBottom:"1px solid "+colors.border}},t);
+  const td = (c,st)=>h("td",{style:{fontSize:12,padding:"5px 6px",borderBottom:"1px solid "+colors.border,verticalAlign:"middle",...(st||{})}},c);
+  const sec = t=>h("div",{style:{fontSize:12.5,fontWeight:700,margin:"14px 0 6px"}},t);
+  const nozzleRow=(label, key, cur)=>h("div",{style:{display:"flex",gap:10,alignItems:"center",marginBottom:6}},
+    h("div",{style:{width:60,fontSize:12,fontWeight:600}},label),
+    h("label",{style:{fontSize:12,display:"flex",gap:4,alignItems:"center"}},h("input",{type:"radio",checked:ch[key].mode!=="flanged",onChange:()=>setCh({...ch,[key]:{...ch[key],mode:"asBom"}})}),"As in BOM: "+(cur.map(l=>l.material_spec).join(" + ")||"none")),
+    h("label",{style:{fontSize:12,display:"flex",gap:4,alignItems:"center"}},h("input",{type:"radio",checked:ch[key].mode==="flanged",onChange:()=>setCh({...ch,[key]:{...ch[key],mode:"flanged"}})}),"Flanged:"),
+    ch[key].mode==="flanged" && inp(ch[key].spec, v=>setCh({...ch,[key]:{...ch[key],spec:v}}), "flange", 360, def[key].spec));
+  return h("div",null,
+    dl("flange",ctx.flangeSpecs), dl("gasket",ctx.gasketSpecs), dl("perf",ctx.perfSpecs), dl("mesh",ctx.meshSpecs),
+    title && h("div",{style:{fontWeight:700,fontSize:14,marginBottom:2}},title),
+    h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:8}},
+      "The model master is not changed — only this Sl No’s BOM lines. Pick every flange from the list (all flanges in the spec master). Cover studs, nuts and gasket follow the cover flange by themselves."+(required?" Required for a flanged strainer.":"")),
+    sec("Flanges"),
+    flangeRows.length ? h("table",{style:{width:"100%",borderCollapse:"collapse"}},
+      h("thead",null,h("tr",null,th("Line"),th("Qty"),th("In the BOM now"),th("Use"))),
+      h("tbody",null, flangeRows.map(x=>h("tr",{key:x.k},
+        td(h("div",null,h("div",{style:{fontWeight:600}},x.l.sub_assembly),h("div",{style:{fontSize:10.5,color:colors.mutedLight}},CONN_ROLE_LABEL[x.role]||x.l.component))),
+        td(String(x.l.qty_required||"")+" "+(x.l.uom||"")),
+        td(x.l.material_spec,{color:colors.muted,fontSize:11.5}),
+        td(inp(ch.flanges[x.k], v=>setF(x.k,v), "flange", null, x.l.material_spec),{width:"46%"}))))) :
+      h("div",{style:{fontSize:12,color:colors.mutedLight}},"No flange lines in this BOM (screwed / socket-weld ends) — nothing to set here."),
+    hasRole("cover_gasket") && h(React.Fragment,null, sec("Cover gasket"), inp(ch.gasket, v=>setCh({...ch,gasket:v}), "gasket", 420, def.gasket)),
+    (drainLines.length>0 || ventLines.length>0 || flangeRows.length>0) && sec("Drain and vent"),
+    (drainLines.length>0 || flangeRows.length>0) && nozzleRow("Drain","drain",drainLines),
+    (ventLines.length>0) && nozzleRow("Vent","vent",ventLines),
+    (hasRole("perforated")||hasRole("mesh")) && sec("Filter element"),
+    hasRole("perforated") && h("div",{style:{display:"flex",gap:8,alignItems:"center",marginBottom:6}},h("div",{style:{width:110,fontSize:12}},"Perforated sheet"),inp(ch.perforated, v=>setCh({...ch,perforated:v}), "perf", 420, def.perforated)),
+    hasRole("mesh") && h("div",{style:{display:"flex",gap:8,alignItems:"center",marginBottom:6}},h("div",{style:{width:110,fontSize:12}},"Mesh"),inp(ch.mesh, v=>setCh({...ch,mesh:v}), "mesh", 420, def.mesh)),
+    sec("What changes in the BOM"),
+    (res.changes.length+res.added.length+res.removed.length)===0 ? h("div",{style:{fontSize:12,color:colors.mutedLight}},"No change — the BOM stays as it is.") :
+      h("table",{style:{width:"100%",borderCollapse:"collapse"}},
+        h("thead",null,h("tr",null,th("Line"),th("From"),th("To"),th(""))),
+        h("tbody",null,
+          res.changes.map((c,i)=>h("tr",{key:"c"+i}, td(c.line.sub_assembly), td((c.from.material_spec||"")+" · "+(c.from.qty_required||"")+" "+(c.from.uom||""),{color:colors.muted,fontSize:11.5}), td(c.line.material_spec+" · "+c.line.qty_required+" "+(c.line.uom||""),{fontSize:11.5}), td(c.line.__note||"",{fontSize:10.5,color:colors.mutedLight}))),
+          res.removed.map((l,i)=>h("tr",{key:"r"+i}, td(l.sub_assembly), td(l.material_spec,{color:colors.muted,fontSize:11.5}), td("removed",{color:colors.danger,fontSize:11.5}), td(""))),
+          res.added.map((l,i)=>h("tr",{key:"a"+i}, td(l.sub_assembly), td("new",{color:"#0f6e56",fontSize:11.5}), td(l.material_spec+" · "+l.qty_required+" "+l.uom,{fontSize:11.5}), td(l.__note||"",{fontSize:10.5,color:colors.mutedLight}))))),
+    res.flags.length>0 && h("div",{style:{background:"#fff4d6",border:"1px solid #e0c48a",color:"#854f0b",borderRadius:6,padding:"7px 10px",fontSize:11.5,marginTop:10}}, res.flags.map((f,i)=>h("div",{key:i},"⚠ "+f))),
+    anyBad && h("div",{style:{fontSize:11.5,color:colors.danger,marginTop:8}},"A spec in red is not in the spec master — pick it from the list."),
+    h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}},
+      onCancel && h("button",{onClick:onCancel,style:btnSmall},"Cancel"),
+      h("button",{disabled:anyBad||!!busyText,onClick:()=>onApply(ch, res, ctx),style:{...btnPrimary,opacity:(anyBad||busyText)?0.55:1}}, busyText || "Confirm connections")));
+}
+// Options & Testing → Connections, on any Sl No of a quote or a contract.
+function ConnectionsSlPanel({ user, refNo, slNo, lines, locked, onChanged }){
+  const [est,setEst]=useState(null);
+  const [busy,setBusy]=useState("");
+  const [msg,setMsg]=useState(""); const [flags,setFlags]=useState([]);
+  const [roles,setRoles]=useState(CONN_CTX?CONN_CTX.roles:CONN_DEFAULT_ROLES);
+  const load=useCallback(async()=>{
+    const { data } = await sb.from("estimates").select("*").eq("reference_number",refNo).eq("item_sl_no",slNo).limit(1);
+    setEst((data&&data[0])||null);
+    try{ const c=await connLoadCtx(); setRoles(c.roles); }catch(e){}
+  },[refNo,slNo]);
+  useEffect(()=>{ load(); },[load]);
+  const own=(lines||[]).filter(l=>!isDavitLine(l));
+  const flanged=connIsFlanged(own, roles);
+  const apply=async(ch)=>{
+    if(locked){ alert(locked); return; }
+    setBusy("Applying…"); setMsg(""); setFlags([]);
+    try{ const r=await connApplyToSl({ ref:refNo, slNo, choices:ch, user }); setMsg(r.message); setFlags(r.flags||[]); await load(); if(onChanged) await onChanged(); }
+    catch(e){ setMsg("Failed: "+e.message); }
+    finally{ setBusy(""); }
+  };
+  const clearFlag=async()=>{ await sb.from("estimates").update({ conn_flag:null }).eq("reference_number",refNo).eq("item_sl_no",slNo); await load(); };
+  return h("div",null,
+    h("div",{style:{fontSize:12,marginBottom:8}},
+      h("b",null, flanged ? "Flanged strainer" : "No flanged ends (screwed / socket-weld)"), " · ",
+      est && est.conn_choices ? "set by "+(est.conn_set_by||"?")+" on "+fmtDMY(est.conn_set_at) : (flanged ? h("span",{style:{color:colors.danger}},"not set yet") : "optional")),
+    est && est.conn_flag && h("div",{style:{background:"#fff4d6",border:"1px solid #e0c48a",color:"#854f0b",borderRadius:6,padding:"7px 10px",fontSize:11.5,marginBottom:8,display:"flex",gap:8,alignItems:"center"}},
+      h("span",{style:{flex:1}},"⚠ "+est.conn_flag), h("button",{onClick:clearFlag,style:{...btnSmall,fontSize:11}},"Checked — clear flag")),
+    locked && h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:6}},locked),
+    msg && h("div",{style:{fontSize:11.5,color:/fail|not /i.test(msg)?colors.danger:"#0f6e56",marginBottom:6}},msg),
+    flags.length>0 && h("div",{style:{fontSize:11,color:"#854f0b",marginBottom:6}},flags.map((f,i)=>h("div",{key:i},"⚠ "+f))),
+    h(ConnectionsEditor,{ key:((est&&est.conn_set_at)||"new")+"|"+own.length+"|"+own.reduce((n,l)=>n+String(l.material_spec||"").length+(Number(l.qty_required)||0),0), lines:own, initial:est&&est.conn_choices, required:flanged, busyText:busy, onApply:apply }));
+}
+// After an Order Quantity save: the choices made in the window go on the Sl No.
+async function connAfterGateSave({ ref, slNo, choices, user }){
+  if(!choices) return;
+  const by=user?.username||"unknown";
+  const { error } = await sb.from("estimates").update({ conn_choices:{...choices, confirmed:true, by, at:new Date().toISOString()}, conn_flag:null, conn_set_by:by, conn_set_at:new Date().toISOString() }).eq("reference_number",ref).eq("item_sl_no",slNo);
+  if(error) throw new Error(/conn_/.test(error.message||"")?CONN_SQL_MSG:error.message);
+  const { data:after } = await sb.from("estimate_lines").select("*").eq("reference_number",ref).eq("item_sl_no",slNo);
+  const c=await connLoadCtx(); await connSyncDatasheet(ref, slNo, after||[], c.roles);
+  await logAudit("UPDATE","estimates",ref+"-"+slNo,"Connections & Element set with the Sl No: "+connSummary(choices),by,null,null);
+}
+
 function EngineeringCalcs({ user }) {
   const [calcType,setCalcType]=useState("cylindrical");
   const [code,setCode]=useState("D1");
@@ -52422,6 +53702,7 @@ function App() {
     tab==="bolting_calc"?h("div",null,h(BoltingCalculator,{user}),h(BoltingCalcHistoryViewer,{user})):
     tab==="flange_chart"?h(FlangeChart,{user}):
     tab==="free_area_calc"?h(FreeAreaCalculator,{user}):
+    tab==="davit_calc"?h(DavitCalculator,{user}):   // 256
     tab==="major_projects"?h(MajorProjectsScreen,{user,
       onCreateQuoteFromAllocation:(ref,allocationId,prefillCustomerName)=>{ setPendingNewSlNo({reference_number:ref,item_sl_no:1,linked_allocation_id:allocationId,prefillCustomerName}); setTab("estimator"); },
       onOpenQuote:(ref,slNo)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo});setTab("saved");},
