@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-24T11:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-25T03:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -543,6 +543,12 @@ const IS_LEVAFLOW_SITE = /levaflow/i.test([APP_SETTINGS.instanceLabel, APP_SETTI
 function canSeeValvePrice(user){ return !IS_LEVAFLOW_SITE || (user && (user.role==="admin" || user.role==="super_admin")); }
 if(APP_SETTINGS.appTitle){ try{ document.title = String(APP_SETTINGS.appTitle); }catch(e){} }
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+// 252: Supabase switches row-level security ON for new tables made in the SQL editor; the app then can't write there.
+(function(){ try{ const a0 = window.alert && window.alert.bind(window); if(!a0 || window.__rlsAlert) return; window.__rlsAlert = true;
+  window.alert = function(msg){ const t = String(msg==null?"":msg);
+    if(/row-level security/i.test(t)){ const m = /table\s+"([^"]+)"/i.exec(t);
+      return a0("The database refused this save: row-level security is switched on for the table "+(m?"\""+m[1]+"\" ":"")+"with no rule, so the app can't write there.\n\nWhat to do: an admin runs fix_rls_new_tables_2026-10-24.sql in Supabase (on this company), then try again. Nothing was saved.\n\n(Database message: "+t.slice(0,300)+")"); }
+    return a0(msg); }; }catch(e){} })();
 
 // ---- DATES: dd/mm/yyyy EVERYWHERE (2 Oct, build 114) ------------------
 // Every date the app SHOWS goes through these, so it reads 02/10/2026 on
@@ -16572,7 +16578,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const ctIncotermsCode = ctData ? detectIncotermCode(ctData.incoterms) : null;
   const ctMismatch = !!(ctPriceBasisCode && ctIncotermsCode && ctPriceBasisCode!==ctIncotermsCode);
   // 185: a Sale Order's terms lock once the O.A has gone (any Stage past Draft); amend with a reason
-  const ctLocked = mode==="contract" && !!contractInfo && !!contractInfo.status && contractInfo.status!=="Draft" && !ctAmend && !String(quoteExportRef||"").includes("-Rev-");
+  const ctLocked = mode==="contract" && !!contractInfo && !soBeforeOa(contractInfo.status) && !ctAmend && !String(quoteExportRef||"").includes("-Rev-");   // 251: only once the O.A is sent (Draft / Open stay editable)
   const attemptSaveCommercialTerms=()=>{
     const missing = CT_REQUIRED_FIELDS.filter(([key])=>!(mode==="contract" && key==="validity")).filter(([key])=>!String(ctData?.[key]||"").trim()).map(([,label])=>label);
     // Packing and Forwarding — checks the real fields it's actually
@@ -18782,7 +18788,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           alert("The Order Acceptance of "+contractInfo.contract_number+" can't be generated yet.\n\n"+pending.map((x,i)=>(i+1)+". "+x.t+"\n   What to do: "+x.fix).join("\n\n")+(user?.role==="super_admin"?"\n\nAs a super admin you can also Waive approvals… on the Sale Order.":""));
           return;
         }
-        if(contractInfo.status==="Draft"){
+        if(soBeforeOa(contractInfo.status)){   // 251: Open is before the O.A too
           watermark = await resolveContractDraftWatermark();
           // Flag for O.A Sent (27-28 Aug) — offered right alongside the
           // Draft watermark decision, same moment: generating this PDF
@@ -29903,6 +29909,9 @@ const MANUAL_SECTIONS = [
       {"key": "purchase_rules_petty", "title": "Purchase rules: petty purchases and quantity tolerance", "tag": "Purchase", "blocks": [{"type": "p", "text": "Setup → Purchase → Purchase Rules holds three things: the petty-purchase limit (₹5,000 a bill), the petty-cash holders, and how much over the PO quantity a supplier may bill for each shape. Only a Super Admin changes them; every change is logged."}, {"type": "h3", "text": "Quantity tolerance"}, {"type": "bullets", "items": ["A PO for 1 m of pipe may come as 1.01 m. With a 5% tolerance on Pipe, the bill saves with no reason and no alert; the row says ✓ within the 5% tolerance, and the PO line closes as billed.", "Above the tolerance a reason is needed and the Purchase Manager is told, as before. The check on the bill total allows the same extra money.", "Counted units (Nos, Sets, Pairs, Lot, Job…) are always exact. A price above the PO rate always needs a reason — the tolerance covers quantity only.", "⬇ Excel for Purchase to fill gives every shape with its tolerance; Purchase fills it, and ⬆ Import the filled Excel shows the changes before they are applied. A shape not in the shape master is skipped, never added."]}, {"type": "h3", "text": "Petty purchases"}, {"type": "bullets", "items": ["Stores → Petty cash → Petty Purchases. A petty-cash holder enters a slip for each small buy: shop, what, kind of spend, why, the contract or a cost head, the amount and the bill photo / Drive link. Nothing above the limit — that needs a PO.", "Raw material, bought-out items for an order and anything that goes into the product always need a PO.", "Flags: three or more slips from one shop in 7 days (a split bill?), close to the limit, over the monthly cap (the Super Admins are told), no bill link.", "The Purchase Manager reviews or rejects the slips. Accounts tops the holder back up by the reviewed slips that have a bill link, and types the voucher number of the top-up.", "In Accounts → Purchase voucher, a bill with No PO that is within the petty limit needs no reason and is not sent to the Purchase Manager."]}]},
       {"key": "sales_from_einvoice", "title": "Sales from the tax invoice, modes, remarks and notes against the bill", "tag": "Accounts", "blocks": [{"type": "p", "text": "A sale reaches the books only after its e-invoice. Accounts → Vouchers → Sales opens on the tax invoices issued in the app (IRN entered) that are not yet in the books."}, {"type": "h3", "text": "Posting a sale"}, {"type": "bullets", "items": ["Invoices not yet in the books: click Post. The voucher fills from the invoice — customer, each Sl No with HSN, quantity and rate, P&F, freight, insurance, GST, round-off — with the same number and date, and the IRN on the voucher. Only the ledger of each row is chosen. Check it and click Post to the books.", "Waiting for the e-invoice lists invoices at Draft or Ready for IRN. They can't be posted until the IRN is entered in Tax Invoices.", "Type a contract number to see its invoices. If nothing is waiting, the sale comes from the DC → Tax Invoice.", "No contract is only for scrap, the sale of an asset and other sundry sales (and a stock sale for now). It needs the reason, the details, the Scrap DC number for scrap, and the IRN, Ack No and Ack date. E-invoice not applicable (a buyer with no GSTIN) only by the Finance Director or a Super Admin.", "Recording an IRN cancellation in Tax Invoices cancels the posted sales voucher with it."]}, {"type": "h3", "text": "Receipts, journals and notes"}, {"type": "bullets", "items": ["Receipt: Mode is a list with TT (Telegraphic Transfer). + Add new mode adds one (name, what its reference is called, Receipt / Payment).", "Receipt and Journal (and Debit / Credit Notes): each line has a Remarks box. The remark shows under that line in the ledger and in the voucher.", "Debit Note / Credit Note: Against the original bill lists the party's bills in the books with what can still be noted. Tick one, or type an FFS-era bill. Pick the reason. A note can't take off more than is left on that bill."]}, {"type": "h3", "text": "Legacy contracts"}, {"type": "p", "text": "For an old contract partly despatched on FFS invoices, the quantity shipped before the app is loaded once. The DC shows it as +n before the app and offers only the true balance."}]},
       {"key": "maker_approver_lists", "title": "Your lists for documents: not sent, waiting approval, to send — and the approver's list", "tag": "Tasks", "blocks": [{"type": "p", "text": "Every task board now shows a document's life as separate lists, beside your task lists. A document sits in one list at a time and moves by itself as each step happens."}, {"type": "h3", "text": "If you make the document (for example a PO)"}, {"type": "bullets", "items": ["⚠ Not sent for approval: Drafts you saved. Nobody can approve them yet. Open it and press Send for approval.", "⏳ Waiting approval: what you sent, and whose post has it. Red after 2 days.", "📤 Approved — to send: approved POs, and PIs and tax invoices to send. Open it, make the PDF, send it, press Mark as sent. The countdown shows the days left; at 0 it is stale and your PDFs are blocked.", "After Mark as sent it moves to Completed (Today / Week / Month). These send cards no longer sit among Tasks Assigned, Today's or Overdue."]}, {"type": "h3", "text": "If you approve it (for example the Purchase Manager)"}, {"type": "bullets", "items": ["✅ Approvals pending: open and approve, as before.", "↩ Sent back after approval: what you approved that the maker has not sent yet, with the owner and the days left. Read-only. It leaves your board when the maker marks it sent. A super admin sees all of them."]}, {"type": "h3", "text": "90-day clean-up"}, {"type": "p", "text": "A completed task card is deleted 90 days after it was completed. Its summary and full history are kept for KPIs (time to approve, time to send, stale count). The documents themselves are never deleted."}]},
+      {"key": "so_terms_lock_mtc_lines", "title": "Sale Order: when the terms lock, and MTC & AVL lines from the BOM", "tag": "Order Status", "blocks": [{"type": "p", "text": "A Sale Order starts at Stage Open. Its Commercial Terms can be changed until the O.A is sent. From O.A Sent onwards they are locked: use Amend terms… with a reason; every change is kept in Revision History."}, {"type": "bullets", "items": ["Generating the O.A while the Stage is Open (or Draft) offers the Draft watermark and asks whether to mark the Stage O.A Sent.", "MTC & AVL lists each shape / component of the Sale Order's BOM once. + Line adds one that was left out: pick the shape from the BOM, then the component under it. Pairs already on the list are not offered, and Save refuses a duplicate.", "If the Sale Order has no BOM with shapes (price-list or direct-price items), MTC & AVL lists one line per Sl No, Whole item, with its own MTC and AVL."]}, {"type": "warn", "text": "MTC & AVL saves only after structure_mtc_avl_gateways_2026-10-23.sql has been run on the company. Until then Save says so."}]},
+      {"key": "bill_po_footer_service", "title": "Purchase bill: PO footer charges and Service POs", "tag": "Accounts", "blocks": [{"type": "p", "text": "Accounts → Vouchers → Purchase, Against PO. The PO value now includes the PO footer — the transport, P&F or loading printed at the foot of an FFS PO."}, {"type": "bullets", "items": ["PO value and Left to bill count the footer. Example SPO/0190: items 10,000 + transport 2,000 = 12,000 before GST (14,160 with GST).", "Fill items from PO brings the item lines and one charge line, PO footer charges, with what is still to bill on the footer. If this bill takes only part of it, change the amount; the rest stays to bill. Pick the ledger of the charge (e.g. Freight Inward).", "A Service PO has no GRN. Its lines fill with what is left on the PO and no reason is asked per row. A bill above the PO still asks why, and the Purchase Manager is told.", "If a save is refused with \"row-level security\", an admin runs fix_rls_new_tables_2026-10-24.sql in Supabase and you try again."]}]},
+      {"key": "doc_board_lanes", "title": "Document Control: the stage lists, and By contract as lanes", "tag": "Order Status", "blocks": [{"type": "p", "text": "The board's lists, left to right: Status to confirm · Initial submission pending · Code 3 — resubmit · Submitted — awaiting code · Code 2 — production clear · Code 2 — production hold · Code 1 — all approved · Code 1 — submitted for info · Non Critical."}, {"type": "bullets", "items": ["Initial submission pending: requested and never sent. Code 3 — resubmit: returned by the client with comments. A card moves between them by itself when it is sent or a Code 3 reply is logged.", "By contract: one band per live contract. On the left: the contract, its work order and despatch state, how many documents are approved, the Full Hold count and a small count per stage. The stage lists run across the band.", "Hide empty lists drops stage lists with nothing in the bands shown. ▾ fold shrinks a contract to its counts; Fold all / Open all for every band. Tick Task cards to add the contract's task cards as the last column.", "The Show filter (e.g. Not clear — Full Hold open, Work order released) and the other filters choose which bands are shown.", "Cards are opened, sent and replied to from the card as before. To move a card by dragging, use By stage."]}]},
       {
         "key": "doc_hold_change",
         "title": "Document Control table: grouped by contract, and changing one document's hold",
@@ -30437,6 +30446,9 @@ const MANUAL_SECTIONS = [
 // English text with a note. Screen and button names stay in English on purpose,
 // so they match what is on the screen. Not proofread — small errors accepted.
 const MANUAL_TA = {
+ "doc_board_lanes": {"title":"Document Control: stage lists, By contract lanes ஆக","tag":"Order Status","blocks":[{"type":"p","text":"Board-இன் lists, இடமிருந்து வலம்: Status to confirm · Initial submission pending · Code 3 — resubmit · Submitted — awaiting code · Code 2 — production clear · Code 2 — production hold · Code 1 — all approved · Code 1 — submitted for info · Non Critical."},{"type":"bullets","items":["Initial submission pending: கேட்கப்பட்டு இதுவரை அனுப்பப்படாதவை. Code 3 — resubmit: client comments-உடன் திருப்பி அனுப்பியவை. அனுப்பியதும் அல்லது Code 3 reply பதிந்ததும் card தானாக நகரும்.","By contract: ஒவ்வொரு live contract-க்கும் ஒரு band. இடதுபுறம்: contract, work order, despatch நிலை, எத்தனை documents approved, Full Hold எண்ணிக்கை, ஒவ்வொரு stage-க்கும் சிறிய எண்ணிக்கை. Stage lists band முழுவதும் வரிசையாக.","Hide empty lists — காட்டப்படும் bands-இல் எதுவும் இல்லாத lists மறையும். ▾ fold ஒரு contract-ஐ எண்ணிக்கைகளாகச் சுருக்கும்; Fold all / Open all அனைத்துக்கும். Task cards tick செய்தால் contract-இன் task cards கடைசி column-ஆக வரும்.","Show filter (உதா. Not clear — Full Hold open, Work order released) மற்ற filters எந்த bands காட்டப்படும் என்பதைத் தேர்வு செய்யும்.","Cards-ஐ முன்பு போலவே card-இலிருந்தே திறக்கலாம், அனுப்பலாம், reply பதியலாம். இழுத்து நகர்த்த By stage பயன்படுத்துங்கள்."]}],"en_sig":"17d03627"},
+ "bill_po_footer_service": {"title":"Purchase bill: PO footer charges, Service POs","tag":"Accounts","blocks":[{"type":"p","text":"Accounts → Vouchers → Purchase, Against PO. PO value-இல் இப்போது PO footer-உம் சேரும் — FFS PO-வின் கீழே அச்சிடப்பட்ட transport, P&F, loading."},{"type":"bullets","items":["PO value, Left to bill இரண்டும் footer-ஐக் கணக்கிடும். உதா. SPO/0190: items 10,000 + transport 2,000 = GST-க்கு முன் 12,000 (GST உடன் 14,160).","Fill items from PO, item lines-உடன் PO footer charges என்ற ஒரு charge line-ஐ, footer-இல் இன்னும் bill செய்ய வேண்டிய தொகையுடன் கொண்டுவரும். இந்த bill ஒரு பகுதியை மட்டும் எடுத்தால் தொகையை மாற்றுங்கள்; மீதி bill செய்ய இருக்கும். Charge-இன் ledger-ஐத் தேர்ந்தெடுங்கள் (உதா. Freight Inward).","Service PO-க்கு GRN இல்லை. PO-வில் மீதமுள்ளதுடன் lines நிரம்பும்; ஒவ்வொரு row-க்கும் காரணம் கேட்காது. PO-வை விட அதிகமான bill இன்னும் காரணம் கேட்கும், Purchase Manager-க்குத் தெரிவிக்கப்படும்.","\"row-level security\" என்று save மறுக்கப்பட்டால், admin Supabase-இல் fix_rls_new_tables_2026-10-24.sql run செய்து, மீண்டும் முயற்சிக்கவும்."]}],"en_sig":"bbfd96a6"},
+ "so_terms_lock_mtc_lines": {"title":"Sale Order: terms எப்போது lock ஆகும், BOM-இலிருந்து MTC & AVL lines","tag":"Order Status","blocks":[{"type":"p","text":"ஒரு Sale Order Stage Open-இல் தொடங்கும். O.A அனுப்பப்படும் வரை அதன் Commercial Terms-ஐ மாற்றலாம். O.A Sent முதல் lock ஆகும்: காரணத்துடன் Amend terms… பயன்படுத்துங்கள்; ஒவ்வொரு மாற்றமும் Revision History-இல் இருக்கும்."},{"type":"bullets","items":["Stage Open (அல்லது Draft) ஆக இருக்கும்போது O.A உருவாக்கினால், Draft watermark தேர்வும், Stage-ஐ O.A Sent எனக் குறிக்கலாமா என்ற கேள்வியும் வரும்.","MTC & AVL, Sale Order BOM-இன் ஒவ்வொரு shape / component-ஐயும் ஒருமுறை காட்டும். + Line விடுபட்ட ஒன்றைச் சேர்க்கும்: BOM-இலிருந்து shape, பின் அதன் கீழ் உள்ள component. ஏற்கனவே பட்டியலில் உள்ளவை காட்டப்படாது; நகல் இருந்தால் Save ஏற்காது.","Sale Order-இல் shape உள்ள BOM இல்லையெனில் (price-list / direct-price items), MTC & AVL ஒவ்வொரு Sl No-க்கும் ஒரு line (Whole item), அதன் MTC, AVL உடன் காட்டும்."]},{"type":"warn","text":"structure_mtc_avl_gateways_2026-10-23.sql அந்த company-இல் run செய்த பிறகுதான் MTC & AVL save ஆகும். அதுவரை Save அதைச் சொல்லும்."}],"en_sig":"b0682ab7"},
  "maker_approver_lists": {"title":"ஆவணங்களுக்கான உங்கள் பட்டியல்கள்: அனுப்பாதவை, ஒப்புதலுக்குக் காத்திருப்பவை, அனுப்ப வேண்டியவை — ஒப்புதல் அளிப்பவரின் பட்டியல்","tag":"Tasks","blocks":[{"type":"p","text":"ஒவ்வொரு task board-இலும் ஒரு ஆவணத்தின் நிலை தனித்தனி பட்டியல்களாகக் காட்டப்படும். ஒரு ஆவணம் ஒரே நேரத்தில் ஒரு பட்டியலில் மட்டும் இருக்கும்; ஒவ்வொரு படி முடிந்ததும் தானாக நகரும்."},{"type":"h3","text":"நீங்கள் ஆவணத்தை உருவாக்குபவர் என்றால் (உதா. PO)"},{"type":"bullets","items":["⚠ Not sent for approval: நீங்கள் save செய்த Drafts. இன்னும் யாரும் ஒப்புதல் அளிக்க முடியாது. திறந்து Send for approval அழுத்துங்கள்.","⏳ Waiting approval: நீங்கள் அனுப்பியவை, எந்த post-இடம் உள்ளது. 2 நாட்களுக்குப் பிறகு சிவப்பு.","📤 Approved — to send: ஒப்புதல் பெற்ற POs, அனுப்ப வேண்டிய PIs, tax invoices. திறந்து, PDF உருவாக்கி, அனுப்பி, Mark as sent அழுத்துங்கள். மீதமுள்ள நாட்கள் காட்டப்படும்; 0 ஆனால் stale, உங்கள் PDFs தடுக்கப்படும்.","Mark as sent ஆன பிறகு Completed (Today / Week / Month)-க்குச் செல்லும். இந்த அனுப்பும் cards இனி Tasks Assigned, Today's, Overdue-இல் வராது."]},{"type":"h3","text":"நீங்கள் ஒப்புதல் அளிப்பவர் என்றால் (உதா. Purchase Manager)"},{"type":"bullets","items":["✅ Approvals pending: முன்பு போலவே திறந்து ஒப்புதல் அளியுங்கள்.","↩ Sent back after approval: நீங்கள் ஒப்புதல் அளித்து, உருவாக்கியவர் இன்னும் அனுப்பாதவை — owner, மீதமுள்ள நாட்களுடன். படிக்க மட்டும். உருவாக்கியவர் Mark as sent செய்ததும் உங்கள் board-இலிருந்து மறையும். Super admin அனைத்தையும் பார்ப்பார்."]},{"type":"h3","text":"90 நாள் சுத்தம்"},{"type":"p","text":"முடிந்த task card, முடிந்து 90 நாட்களுக்குப் பிறகு நீக்கப்படும். அதன் சுருக்கமும் முழு history-உம் KPIs-க்காக (ஒப்புதல் நேரம், அனுப்பும் நேரம், stale எண்ணிக்கை) வைக்கப்படும். ஆவணங்கள் ஒருபோதும் நீக்கப்படாது."}],"en_sig":"95ca2a65"},
  "sales_from_einvoice": {"title":"Tax invoice-இலிருந்து sales, modes, remarks, bill-க்கு எதிரான notes","tag":"Accounts","blocks":[{"type":"p","text":"E-invoice ஆன பிறகுதான் ஒரு sale books-இல் வரும். Accounts → Vouchers → Sales திறக்கும்போது app-இல் issue ஆன (IRN பதிந்த), இன்னும் books-இல் வராத tax invoices காட்டப்படும்."},{"type":"h3","text":"Sale-ஐ post செய்தல்"},{"type":"bullets","items":["Invoices not yet in the books: Post அழுத்துங்கள். Voucher invoice-இலிருந்து நிரம்பும் — customer, ஒவ்வொரு Sl No-உம் HSN, அளவு, rate, P&F, freight, insurance, GST, round-off — அதே எண், தேதி, voucher-இல் IRN. ஒவ்வொரு row-இன் ledger மட்டும் தேர்ந்தெடுக்கலாம். சரிபார்த்து Post to the books அழுத்துங்கள்.","Waiting for the e-invoice: Draft அல்லது Ready for IRN நிலையில் உள்ள invoices. Tax Invoices-இல் IRN பதியும் வரை post செய்ய முடியாது.","Contract எண் type செய்தால் அதன் invoices வரும். எதுவும் இல்லையெனில் sale DC → Tax Invoice வழியாக வரும்.","No contract: scrap, asset விற்பனை, மற்ற sundry sales (தற்போது stock sale-உம்) மட்டும். காரணம், விவரம், scrap-க்கு Scrap DC எண், IRN, Ack No, Ack date தேவை. E-invoice not applicable (GSTIN இல்லாத வாங்குபவர்) Finance Director அல்லது Super Admin மட்டும்.","Tax Invoices-இல் IRN cancellation பதிந்தால், post ஆன sales voucher-உம் cancel ஆகும்."]},{"type":"h3","text":"Receipts, journals, notes"},{"type":"bullets","items":["Receipt: Mode ஒரு பட்டியல், TT (Telegraphic Transfer) உட்பட. + Add new mode புதியதைச் சேர்க்கும் (பெயர், அதன் reference பெயர், Receipt / Payment).","Receipt, Journal (Debit / Credit Notes-உம்): ஒவ்வொரு line-க்கும் Remarks. Ledger-இலும் voucher-இலும் அந்த line-இன் கீழ் காட்டும்.","Debit Note / Credit Note: Against the original bill — party-இன் bills, இன்னும் note செய்யக்கூடிய தொகையுடன். ஒன்றைத் tick செய்யுங்கள், அல்லது FFS கால bill-ஐ type செய்யுங்கள். காரணத்தைத் தேர்ந்தெடுங்கள். Bill-இல் மீதமுள்ளதை விட அதிகமாக note போக முடியாது."]},{"type":"h3","text":"பழைய contracts"},{"type":"p","text":"FFS invoices-இல் பகுதி despatch ஆன பழைய contract-க்கு, app-க்கு முன் அனுப்பிய அளவு ஒருமுறை load செய்யப்படும். DC அதை +n before the app எனக் காட்டி, உண்மையான மீதியை மட்டும் தரும்."}],"en_sig":"3452e651"},
  "purchase_rules_petty": {"title":"Purchase rules: petty purchases, அளவு tolerance","tag":"Purchase","blocks":[{"type":"p","text":"Setup → Purchase → Purchase Rules-இல் மூன்று விஷயங்கள்: petty-purchase வரம்பு (ஒரு bill-க்கு ₹5,000), petty-cash வைத்திருப்பவர்கள், ஒவ்வொரு shape-க்கும் PO அளவை விட எவ்வளவு அதிகம் supplier bill செய்யலாம். Super Admin மட்டுமே மாற்ற முடியும்; ஒவ்வொரு மாற்றமும் பதிவாகும்."},{"type":"h3","text":"அளவு tolerance"},{"type":"bullets","items":["1 m pipe-க்கான PO-க்கு 1.01 m வரலாம். Pipe-க்கு 5% tolerance இருந்தால், bill காரணம் இல்லாமல், alert இல்லாமல் save ஆகும்; row-இல் ✓ within the 5% tolerance எனக் காட்டும், PO line billed என மூடப்படும்.","Tolerance-க்கு மேல் என்றால் முன்பு போலவே காரணம் தேவை, Purchase Manager-க்குத் தெரிவிக்கப்படும். Bill மொத்தத் தொகை சரிபார்ப்பும் அதே கூடுதல் தொகையை அனுமதிக்கும்.","எண்ணும் அலகுகள் (Nos, Sets, Pairs, Lot, Job…) எப்போதும் சரியாக இருக்க வேண்டும். PO rate-ஐ விட அதிக விலைக்கு எப்போதும் காரணம் தேவை — tolerance அளவுக்கு மட்டுமே.","⬇ Excel for Purchase to fill ஒவ்வொரு shape-ஐயும் அதன் tolerance-உடன் தரும்; Purchase நிரப்பும், ⬆ Import the filled Excel மாற்றங்களைக் காட்டிய பின் apply செய்யும். Shape master-இல் இல்லாத shape தவிர்க்கப்படும், சேர்க்கப்படாது."]},{"type":"h3","text":"Petty purchases"},{"type":"bullets","items":["Stores → Petty cash → Petty Purchases. Petty-cash வைத்திருப்பவர் ஒவ்வொரு சிறிய வாங்குதலுக்கும் slip போடுவார்: கடை, என்ன, செலவு வகை, ஏன், contract அல்லது cost head, தொகை, bill photo / Drive link. வரம்புக்கு மேல் எதுவும் இல்லை — அதற்கு PO தேவை.","Raw material, order-க்கான bought-out items, product-க்குள் போகும் எதற்கும் எப்போதும் PO தேவை.","Flags: ஒரே கடையிலிருந்து 7 நாளில் மூன்று அல்லது அதற்கு மேல் slips (bill பிரிப்பா?), வரம்புக்கு அருகில், மாத வரம்புக்கு மேல் (Super Admins-க்குத் தெரிவிக்கப்படும்), bill link இல்லை.","Purchase Manager slips-ஐ review அல்லது reject செய்வார். Bill link உள்ள reviewed slips-க்கு Accounts top-up செய்து, top-up voucher எண்ணைப் பதிவார்.","Accounts → Purchase voucher-இல், petty வரம்புக்குள் உள்ள No PO bill-க்குக் காரணம் தேவையில்லை, Purchase Manager-க்கு அனுப்பப்படாது."]}],"en_sig":"19c04aae"},
@@ -33328,6 +33340,9 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"25 Oct 2026 (253)", summary:"Built on 2026-10-25T03:30:00Z, on top of 2026-10-24T13:30:00Z. No new SQL. DOCUMENT CONTROL BOARD: lists named and ordered as the team uses them — Status to confirm · Initial submission pending · Code 3 — resubmit · Submitted — awaiting code · Code 2 — production clear · Code 2 — production hold · Code 1 — all approved · Code 1 — submitted for info · (Non Critical and lists a Super Admin added). Not submitted is shown as two lists: never sent, and returned with comments (Code 3); underneath it is one list, so chasing, task cards and the production release work as before. The Table summary (screen and PDF) counts them apart. BY CONTRACT is now lanes: one band per live contract with its work-order and despatch tags, approved / Full Hold count and a count per stage; the stage lists run across; the contract stays on the left when scrolling sideways and the list names stay on top when scrolling down. Hide empty lists (remembered on this computer), ▾ fold / Fold all, Task cards as the last column when ticked. The Show filter and the other filters cut the bands." },
+  { date:"24 Oct 2026 (252)", summary:"Built on 2026-10-24T13:30:00Z, on top of 2026-10-24T12:30:00Z. No new SQL (run fix_rls_new_tables_2026-10-24.sql on both companies after any structure SQL). PURCHASE BILL AGAINST PO: an FFS PO\u2019s footer charges (transport, P&F, loading — FFS keeps them as one total) now count in the PO value and in Left to bill, so a correct bill no longer shows as over the PO (e.g. SPO/0190: 10,000 + 2,000 transport = 12,000 + GST 2,160 = 14,160). Fill items from PO adds one charge line, PO footer charges, with what is still to bill on the footer; Accounts changes the amount for a part bill and picks the ledger. A Service PO has no GRN: it fills with what is left on the PO and asks no reason per row; the over-the-PO check and the Purchase Manager notice stay. ROW-LEVEL SECURITY: when the database refuses a save because a new table has row-level security on, the message now says so and names fix_rls_new_tables_2026-10-24.sql, instead of asking to run the structure SQL again." },
+  { date:"24 Oct 2026 (251)", summary:"Built on 2026-10-24T12:30:00Z, on top of 2026-10-24T11:00:00Z. No new SQL (structure_mtc_avl_gateways_2026-10-23.sql is needed on both companies if not run yet). COMMERCIAL TERMS on a Sale Order lock only once the O.A is sent (Stage O.A Sent or later). A Sale Order is created at Stage Open; Open and Draft are before the O.A, so their terms stay editable — before this build every Sale Order was locked from the start. Generating the O.A at Open now also gives the Draft watermark choice and offers Mark Stage as O.A Sent. MTC & AVL: + Line picks the shape from this Sale Order\u2019s BOM and then the component under it (dropdowns, no typing); a shape / component already on the list is not offered; shape + component is the key and Save refuses a duplicate or a pair not in the BOM. A Sale Order with no shaped BOM lines (price-list / direct-price items) lists one line per Sl No, Whole item, each with its MTC and AVL." },
   { date:"24 Oct 2026 (250)", summary:"Built on 2026-10-24T11:00:00Z, on top of 2026-10-23T17:30:00Z. NEEDS SQL: structure_task_lists_purge_2026-10-24.sql (BOTH companies). MAKER LISTS on every task board, one list per stage: ⚠ Not sent for approval (Draft POs — replaces the yellow box, shown from day 0), ⏳ Waiting approval (what this person sent, with whom it waits), 📤 Approved — to send (every open send step: approved PO, PI, tax invoice; countdown to stale; opens the PO / document). The send cards no longer sit among Tasks Assigned / Overdue / Today; they still close by themselves on Mark as sent and then show in Completed (Today / Week / Month). APPROVER: ↩ Sent back after approval — read-only list of what the approver\u2019s post approved and the maker has not sent yet, owner and countdown shown; it leaves when the maker marks it sent (super admin: all). CLEAN-UP: completed task cards are deleted 90 days after completion, once a day (database function task_purge_90d, scheduled nightly when pg_cron is on, also started by the first sign-in of the day); each card\u2019s summary and full history are kept in task_archive_tbl for KPIs." },
   { date:"23 Oct 2026 (249 Nandhini)", summary:"Built on 2026-10-23T17:30:00Z, on top of 2026-10-23T17:00:00Z. NEEDS SQL: structure_nandhini_2026-10-23.sql (BOTH companies; it also creates the modes list if structure_pay_modes was not run). SALES GATEWAY (your SOP — a sale reaches the books only after its e-invoice): Accounts → Vouchers → Sales opens on Invoices not yet in the books (tax invoices issued in the app with the IRN entered, not yet posted) and Waiting for the e-invoice (Draft / Ready for IRN, no Post button). Post fills the Sales voucher from the invoice — customer ledger (matched by GSTIN / name), each Sl No with HSN, qty, rate, P&F, freight, insurance, GST, round-off, export at the invoice rate — same number and date, IRN and Ack on the voucher; only the ledger per row is chosen; one click by Accounts. Contract box filters; nothing waiting points to DCs / Tax Invoices. No contract (scrap, asset, other sundry, stock sale for now) is the only typed sale: reason and details, Scrap DC no. for scrap, IRN + Ack No + Ack date required, or E-invoice not applicable (Finance Director / Super Admin only; Super Admins told); a typed sale for a customer with an open contract needs the Finance Director or a Super Admin. Recording an IRN cancellation cancels the posted sales voucher. Invoice & PI Register shows In books / To post for app invoices. Daily reminder to Accounts: issued invoices not posted after 3 days, Ready for IRN after 24 h. LEGACY CONTRACTS: shipped before the app (so_shipped_before_tbl, loaded by SQL from the FFS invoices) comes off the DC balance and the direct-invoice balance, shown as +n before the app. RECEIPT: modes are a list (TT added) with + Add new mode (name, reference label, Receipt / Payment); Remarks on each line. JOURNAL / DEBIT / CREDIT view: Remarks on each line. Remarks show under the line in the ledger and the voucher. DEBIT / CREDIT NOTE: against the original bill / invoice — pick from the party\u2019s bills in the books (value, earlier notes, can still be noted) or type an FFS-era one; reason from a list; a note can\u2019t take off more than is left." },
   { date:"23 Oct 2026 (248)", summary:"Built on 2026-10-23T17:00:00Z, on top of 2026-10-23T16:30:00Z. NEEDS SQL: structure_purchase_rules_2026-10-23.sql (BOTH companies). PURCHASE RULES (Setup → Purchase → Purchase Rules; Super Admins change, every change logged): petty-purchase limit per bill (₹5,000), monthly cap per petty-cash holder (₹25,000, 0 = none), the petty-cash holders and their floats, and the QUANTITY TOLERANCE BY SHAPE (% over the PO quantity a supplier may bill — e.g. 1.01 m pipe against 1 m). ⬇ Excel for Purchase to fill / ⬆ Import the filled Excel (shapes not in the master are skipped, never added). Counted units (Nos, Sets, Pairs, Lot, Job…) are always exact; lines without a shape use their own %. PURCHASE BILL: a quantity within the tolerance saves with no reason or alert (row shows ✓ within the x% tolerance) and the bill-over-PO check allows the same extra money; above it a reason is needed as before. A price above the PO rate always needs a reason. No PO bills within the petty limit need no reason and are not sent to the Purchase Manager. PETTY PURCHASES (Stores → Petty cash; also in the Accounts gateway): holders enter slips (PP/0001/26-27) up to the limit — shop, what, kind of spend, why, contract or cost head, amount, bill photo / Drive link; flags for possible split bills (3+ slips from one shop in 7 days), close to the limit, over the monthly cap (Super Admins told), no bill link. The Purchase Manager reviews or rejects (reminded once a week of slips waiting); Accounts tops the holder up by the reviewed slips with a bill link, giving the voucher number of the top-up." },
@@ -40990,6 +41005,17 @@ async function mtcContext(cn){
   return out;
 }
 // The contract's components from its BOM (the Sale Order's estimate lines): one row per Shape + Component
+// 251: a Sale Order is created at Stage "Open" — before the O.A, the same as Draft
+function soBeforeOa(st){ const x = String(st||"").trim().toLowerCase(); return !x || x==="draft" || x==="open" || x==="pending"; }
+// 251: a contract with no shaped BOM lines (price-list / direct-price items): one MTC line per Sl No, the whole item
+async function mtcItemRows(cn){
+  try{ const { data } = await sb.from("estimates").select("item_sl_no,description,model").eq("reference_number",String(cn)).order("item_sl_no");
+    const seen = new Set(); const out = [];
+    (data||[]).forEach(e=>{ const n = e.item_sl_no; if(n==null || seen.has(String(n))) return; seen.add(String(n));
+      const what = String(e.description||e.model||"").replace(/\s+/g," ").trim();
+      out.push({ shape:"Whole item", component:"Sl "+n+(what?" — "+(what.length>90?what.slice(0,90)+"…":what):""), sl_nos:[n], whole:true }); });
+    return out; }catch(e){ return []; }
+}
 async function mtcBomRows(cn){
   const { data } = await sb.from("estimate_lines").select("item_sl_no,material_shape,component,sub_assembly").eq("reference_number",cn);
   const m = new Map();
@@ -41108,12 +41134,13 @@ function SoMtcAvlDialog({ ctx, cn, user, can, onClose, onSaved }){
   const [d,setD] = useState(null); const [busy,setBusy] = useState(false); const [err,setErr] = useState(""); const [shapes,setShapes] = useState([]); const [ovr,setOvr] = useState(null);
   const key = (x)=> euNorm(x.shape)+"|"+euNorm(x.component);
   useEffect(()=>{ (async()=>{
-    const bom = await mtcBomRows(cn).catch(()=>[]); const cm = ctx.cm||{};
+    let bom = await mtcBomRows(cn).catch(()=>[]); const cm = ctx.cm||{};
+    let whole = false; if(!bom.length){ bom = await mtcItemRows(cn); whole = bom.length>0; }   // 251
     const mtc = cm.mtc || ctx.mtc || ""; const vendor = cm.vendor_rule || ctx.vendor || "";
     const saved = cm.lines||[];
     const lines = bom.map(b=>{ const s = saved.find(x=>key(x)===key(b)); return s ? { ...s, sl_nos:b.sl_nos, gone:false } : { shape:b.shape, component:b.component, sl_nos:b.sl_nos, mtc: mtc==="3.1 & 3.2" ? "" : mtc, avl: mtcDefAvl(vendor) }; });
     saved.filter(s=>!bom.some(b=>key(b)===key(s))).forEach(s=>lines.push({ ...s, gone:!s.manual }));
-    setD({ mtc, vendor, link: cm.avl_link || ctx.avlLink || "", lines, bomCount:bom.length });
+    setD({ mtc, vendor, link: cm.avl_link || ctx.avlLink || "", lines, bomCount:bom.length, bom, whole });
     try{ const { data } = await sb.from("materials_shape").select("shape").order("shape"); setShapes((data||[]).map(r=>r.shape).filter(Boolean)); }catch(e){}
   })(); },[]);
   const ro = !can;
@@ -41126,6 +41153,10 @@ function SoMtcAvlDialog({ ctx, cn, user, can, onClose, onSaved }){
   if(!d) return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",zIndex:1400,display:"flex",alignItems:"center",justifyContent:"center"}}, h("div",{style:{background:"#fff",padding:20,borderRadius:8}},"Opening…"));
   const mixed = d.mtc==="3.1 & 3.2";
   const live = d.lines.filter(l=>!l.gone);
+  const usedKeys = (skip)=> new Set(d.lines.filter((l,j)=>!l.gone && j!==skip && String(l.shape||"").trim() && String(l.component||"").trim()).map(key));   // 251
+  const freePairs = (skip)=>{ const u = usedKeys(skip); return (d.bom||[]).filter(b=>!u.has(key(b))); };
+  const freeShapes = (skip)=> Array.from(new Set(freePairs(skip).map(b=>b.shape)));
+  const freeComps = (skip, shape)=> freePairs(skip).filter(b=>euNorm(b.shape)===euNorm(shape)).map(b=>b.component);
   const need = d.vendor==="As per AVL" || live.some(l=>l.avl==="As per AVL attached");
   const missing = mixed ? live.filter(l=>!l.mtc).length : 0;
   const cm = ctx.cm||{}; const left = cm.avl_missing_since && !cm.avl_link ? avlDaysLeft(cm) : null;
@@ -41135,6 +41166,10 @@ function SoMtcAvlDialog({ ctx, cn, user, can, onClose, onSaved }){
     if(!d.vendor){ setErr("Pick the vendor rule: As per AVL or Any vendor."); return; }
     if(missing){ setErr("MTC is 3.1 & 3.2: pick the MTC of every line ("+missing+" still to fill)."); return; }
     if(live.some(l=>l.manual && (!String(l.shape||"").trim() || !String(l.component||"").trim()))){ setErr("A line you added needs its shape and its component."); return; }
+    { const seen = new Set(); const dup = live.find(l=>{ const k = key(l); if(seen.has(k)) return true; seen.add(k); return false; });   // 251: shape + component is the key
+      if(dup){ setErr("“"+dup.shape+" / "+dup.component+"” is listed twice. Remove one."); return; }
+      const bad = live.find(l=>l.manual && !(d.bom||[]).some(b=>key(b)===key(l)));
+      if(bad){ setErr("“"+bad.shape+" / "+bad.component+"” is not in this Sale Order's BOM. Pick the shape and component from the lists."); return; } }
     const link = String(d.link||"").trim();
     if(link && !confirmDocumentLink(link, "AVL file link")) return;
     if(need && !link && !confirm("The AVL link is required at the Sale Order stage.\n\nSave without it? You have "+AVL_GRACE_DAYS+" days. After that the app makes no PDFs for you until the link is filled (or a super admin gives you a PDF unblock code).")) return;
@@ -41201,10 +41236,12 @@ function SoMtcAvlDialog({ ctx, cn, user, can, onClose, onSaved }){
         h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:720}},
           h("thead",null,h("tr",null, ["Shape","Component","Sl Nos","MTC","AVL",""].map((x,i)=>h("th",{key:i,style:th},x)))),
           h("tbody",null,
-            !d.lines.length ? h("tr",null,h("td",{colSpan:6,style:{...td,color:colors.muted}},"No BOM lines with a Shape on this contract yet. Add the components by hand (+ Line), or fill the BOM and open this again.")) : null,
+            !d.lines.length ? h("tr",null,h("td",{colSpan:6,style:{...td,color:colors.muted}},"Nothing on this Sale Order yet: no BOM lines with a shape and no Sl Nos. Fill the Sale Order and open this again.")) : null,
             d.lines.map((l,i)=>h("tr",{key:i,style:{opacity:l.gone?0.5:1}},
-              h("td",{style:{...td,fontWeight:700}}, l.manual && !ro ? h("select",{value:l.shape||"",onChange:e=>setLine(i,{ shape:e.target.value }),style:inp}, h("option",{value:""},"— shape —"), shapes.map(s=>h("option",{key:s,value:s},s))) : l.shape),
-              h("td",{style:td}, l.manual && !ro ? h("input",{value:l.component||"",onChange:e=>setLine(i,{ component:e.target.value }),placeholder:"Component",style:inp}) : l.component, l.gone ? h("div",{style:{fontSize:10.5,color:colors.danger}},"Not in the BOM now — dropped when you save") : null),
+              h("td",{style:{...td,fontWeight:700}}, l.manual && !ro ? h("select",{"data-testid":"so-mtc-shape-"+i,value:l.shape||"",onChange:e=>setLine(i,{ shape:e.target.value, component:"", sl_nos:[] }),style:inp}, h("option",{value:""},"— shape from the BOM —"),
+                  Array.from(new Set([...(l.shape?[l.shape]:[]), ...freeShapes(i)])).map(s=>h("option",{key:s,value:s},s))) : l.shape),
+              h("td",{style:td}, l.manual && !ro ? h("select",{"data-testid":"so-mtc-comp-"+i,value:l.component||"",disabled:!l.shape,onChange:e=>{ const v = e.target.value; const b = (d.bom||[]).find(x=>euNorm(x.shape)===euNorm(l.shape) && euNorm(x.component)===euNorm(v)); setLine(i,{ component:v, sl_nos:b?b.sl_nos:[] }); },style:inp}, h("option",{value:""},l.shape?"— component —":"— pick the shape first —"),
+                  Array.from(new Set([...(l.component?[l.component]:[]), ...freeComps(i, l.shape)])).map(c=>h("option",{key:c,value:c},c))) : l.component, l.gone ? h("div",{style:{fontSize:10.5,color:colors.danger}},"Not in the BOM now — dropped when you save") : null),
               h("td",{style:{...td,color:colors.muted,fontSize:11.5}}, (l.sl_nos||[]).length ? (l.sl_nos||[]).join(", ") : (l.manual?"added by hand":"—")),
               h("td",{style:{...td,whiteSpace:"nowrap"}}, mixed
                 ? h("select",{"data-testid":"so-mtc-line-"+i,value:l.mtc||"",disabled:ro||l.gone,onChange:e=>setLine(i,{ mtc:e.target.value }),style:{...inp,borderColor:!l.mtc&&!l.gone?"#c47a00":colors.border}}, h("option",{value:""},"— pick —"), ["3.1","3.2","Not critical"].map(o=>h("option",{key:o,value:o},o)))
@@ -41217,8 +41254,9 @@ function SoMtcAvlDialog({ ctx, cn, user, can, onClose, onSaved }){
                 : h("select",{value:l.avl||"",disabled:ro||l.gone,onChange:e=>setLine(i,{ avl:e.target.value }),style:inp}, h("option",{value:""},"— pick —"), AVL_LINE_OPTS.map(o=>h("option",{key:o,value:o},o)))),
               h("td",{style:{...td,width:30}}, l.manual && !ro ? h("button",{title:"Remove this line",onClick:()=>setD(x=>({ ...x, lines:x.lines.filter((_,j)=>j!==i) })),style:{...btnSmall,padding:"1px 7px"}},"×") : null)))))),
       h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginTop:10}},
-        !ro ? h("button",{onClick:()=>setD(x=>({ ...x, lines:[...x.lines,{ shape:"", component:"", sl_nos:[], mtc: x.mtc==="3.1 & 3.2" ? "" : x.mtc, avl: mtcDefAvl(x.vendor), manual:true }] })),style:btnSmall},"+ Line") : null,
-        h("span",{style:{fontSize:11.5,color:colors.muted}}, d.bomCount+" component line"+(d.bomCount===1?"":"s")+" from the BOM"+(cm.saved_at?" · last saved "+fmtDMY(cm.saved_at)+(cm.saved_by?" by "+cm.saved_by:""):" · not saved yet")),
+        !ro ? h("button",{onClick:()=>{ if(!freePairs(-1).length) return; setD(x=>({ ...x, lines:[...x.lines,{ shape:"", component:"", sl_nos:[], mtc: x.mtc==="3.1 & 3.2" ? "" : x.mtc, avl: mtcDefAvl(x.vendor), manual:true }] })); },disabled:!freePairs(-1).length,
+          title: freePairs(-1).length ? "Add a shape / component of this Sale Order's BOM" : "Every shape / component of the BOM is already listed",style:{...btnSmall,opacity:freePairs(-1).length?1:0.5}},"+ Line") : null,
+        h("span",{style:{fontSize:11.5,color:colors.muted}}, d.whole ? d.bomCount+" Sl No"+(d.bomCount===1?"":"s")+" — no BOM with shapes on this order, so one line per Sl No (the whole item)" : d.bomCount+" component line"+(d.bomCount===1?"":"s")+" from the BOM"+(cm.saved_at?" · last saved "+fmtDMY(cm.saved_at)+(cm.saved_by?" by "+cm.saved_by:""):" · not saved yet")),
         h("span",{style:{flex:1}}),
         err ? h("span",{style:{color:colors.danger,fontSize:12}},err) : null,
         !ro ? h("button",{"data-testid":"so-mtc-save",onClick:save,disabled:busy,style:btnPrimary},busy?"Saving…":"Save") : null),
@@ -56331,15 +56369,24 @@ function docDueOk(k, it, today){
   return true;
 }
 const docCtSort = (a,b)=> String(a).length-String(b).length || String(a).localeCompare(String(b));
-const DOC_LISTS = [
+const DOC_LISTS = [   // 253: names and order as the team uses them (keys unchanged)
   { key:"confirm", label:"Status to confirm",                     short:"To confirm",    color:"#6f7377", bg:"#eceeef", sub:"Loaded from the old files. Set the status (Trello, Phase 2.1, or the Document Controller). No task card, chase or alert until then — but it counts in the Full Hold check." },   // 175/178
   { key:"our",    label:"Not submitted — our action",              short:"Not submitted", color:"#a3312a", bg:"#fdecea", sub:"Requested and not yet sent, or returned for resubmission." },
-  { key:"client", label:"Submitted — client action pending",       short:"Submitted",     color:"#b8860b", bg:"#fff4d6", sub:"We sent it; waiting for the client's code. Chased after "+DOC_CHASE_DAYS+" days." },
-  { key:"phold",  label:"Code 2 — Production Hold",                short:"Production Hold", color:"#b4520f", bg:"#fcebdc", sub:"Client approved with a hold. A Full Hold document here holds the production release." },   // 175
-  { key:"code2",  label:"Code 2 — proceed, resubmission outstanding", short:"Code 2",     color:"#6b4fa0", bg:"#efeaf8", sub:"Client lets us proceed; a corrected copy is still owed or awaited." },
-  { key:"info",   label:"Code 1 — submit for info",                     short:"Code 1 · info", color:"#0f7a5c", bg:"#eaf6f0", sub:"Fully approved. Send the final copy for information; nothing comes back, no chase. Counts as approved." },   // 214
-  { key:"done",   label:"All approved",                                 short:"All approved",  color:"#0f7a5c", bg:"#e4f3ed", sub:"Code 1 / All Cleared / For Info — no action left." },
+  { key:"client", label:"Submitted — awaiting code",               short:"Submitted",     color:"#b8860b", bg:"#fff4d6", sub:"We sent it; waiting for the client's code. Chased after "+DOC_CHASE_DAYS+" days." },
+  { key:"code2",  label:"Code 2 — production clear",               short:"Code 2 clear",  color:"#6b4fa0", bg:"#efeaf8", sub:"Approved with comments; production goes on. A corrected copy is still owed or awaited." },
+  { key:"phold",  label:"Code 2 — production hold",                short:"Code 2 hold",   color:"#b4520f", bg:"#fcebdc", sub:"Approved with comments and a hold. A Full Hold document here holds the production release." },   // 175
+  { key:"done",   label:"Code 1 — all approved",                   short:"Code 1",        color:"#0f7a5c", bg:"#e4f3ed", sub:"Code 1 / All Cleared / For Info — no action left." },
+  { key:"info",   label:"Code 1 — submitted for info",             short:"Code 1 · info", color:"#1f7a8c", bg:"#e6f3f5", sub:"Fully approved. The final copy goes for information; nothing comes back, no chase. Counts as approved." },   // 214
 ];
+// 253: on the board, "Not submitted — our action" shows as two lists: never sent / returned (Code 3). Same list underneath.
+function docSentBefore(it){ return (it && it.revs || []).some(r=>r.direction==="Out" && !r.legacy_unsent); }
+const DOC_OUR_SPLIT = [
+  { key:"our_init", base:"our", label:"Initial submission pending", short:"Initial pending", color:"#a3312a", bg:"#fdecea", sub:"Requested and never sent to the client." },
+  { key:"our_c3",   base:"our", label:"Code 3 — resubmit",          short:"Code 3",          color:"#c2406d", bg:"#fbe8ef", sub:"Returned by the client with comments. Revise and resubmit." } ];
+function docVBase(it){ return it.list==="our" ? (docSentBefore(it) ? "our_c3" : "our_init") : it.list; }
+function DOC_VLISTS(){ return DOC_LISTS.flatMap(L=> L.key==="our" ? DOC_OUR_SPLIT : [L]); }
+function docViewLists(){ return docStageLists().flatMap(L=> L.key==="our" ? DOC_OUR_SPLIT : [L]); }
+function docViewFilter(L){ return L.base ? (it=>it.list==="our" && !it.sub && docVBase(it)===L.key) : docCustomOf(L.key) ? (it=>it.sub===L.key) : (it=>it.list===L.key && !it.sub); }
 // 183: lists a Super Admin adds (doc_board_list_tbl). Each is a stage of its own on the board, the tiles and the
 // reports, but behaves like one of the built-in lists (its "base") for chasing, task cards and production release.
 let DOC_CUSTOM = [];
@@ -57129,6 +57176,8 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
   const [hx,setHx] = useState({ mode:"none", full:false });
   const [woF,setWoF] = useState("");   // 236: work order release filter; 239: the Show filter
   const [desp,setDesp] = useState({}); const [ctTasks,setCtTasks] = useState([]); const [showTasks,setShowTasks] = useState(true); const [canAddCard,setCanAddCard] = useState(false);   // 239
+  const [laneHide,setLaneHide] = useState(()=>{ try{ return localStorage.getItem("docLaneHide")==="1"; }catch(e){ return false; } });   // 253
+  const [laneFold,setLaneFold] = useState({});
   useEffect(()=>{ let dead = false; taskCanAddLinked(user).then(v=>{ if(!dead) setCanAddCard(v); }); return ()=>{ dead = true; }; },[user && user.username]);   // 233: revision history in the PDFs — none | sum | det; full = reasons and names on the client version
   const [fold,setFold] = useState({});       // 211: folded contracts in the All (list) view
   const [dd,setDd] = useState({});           // 211: the due date being changed on a card
@@ -57225,12 +57274,55 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
         f:it=>it.ct===c }; });
   };
   const columns = view==="contract" ? ctCols() : view==="stage"
-    ? docStageLists().map(L=>({ key:"s:"+L.key, label:L.label, color:L.color, sub:L.sub, f: docCustomOf(L.key) ? (it=>it.sub===L.key) : (it=>it.list===L.key && !it.sub), list:L.key, custom:!!docCustomOf(L.key) }))   // 183
+    ? docViewLists().map(L=>({ key:"s:"+L.key, label:L.label, color:L.color, sub:L.sub, f: docViewFilter(L), list:L.base||L.key, custom:!!docCustomOf(L.key) }))   // 183; 253: Not submitted split in two
     : [{ key:"p:", label:"📥 Unassigned", color:"#8a6a1f", sub:"New requests and returns land here. Drag onto a person to hand out.", f:it=>!it.owner && !docParked(it), pile:true, person:"" },
        ...people.map(p=>({ key:"p:"+p, label:p+(data.dcNames.includes(p)?" · Document Controller":""), color:"#2a6db0", sub:"", f:it=>it.owner===p, person:p }))];
   const itemByKey = (k)=> data.items.find(it=>it.key===k);
   const outOf = (it)=> [...it.revs].reverse().find(r=>r.direction==="Out")||null;
   const inOf = (it)=> [...it.revs].reverse().find(r=>r.direction==="In")||null;
+  // 253: By contract — one band per contract, the stage lists across
+  const docLanes = ()=>{
+    const stl = docViewLists();
+    const laneItems = columns.map(C=>vis.filter(C.f));
+    const cols = laneHide ? stl.filter(L=>laneItems.some(xs=>xs.some(docViewFilter(L)))) : stl;
+    const W = 205, LW = 232;
+    const anyOpen = columns.some(C=>!laneFold[C.ct]);
+    const gridCols = LW+"px repeat("+cols.length+","+W+"px)"+(showTasks?" "+W+"px":"");
+    const hdr = (key, label, sub, bg, fg, n)=> h("div",{key,style:{position:"sticky",top:0,zIndex:2,background:bg,color:fg,padding:"7px 8px",fontWeight:700,fontSize:11.5,borderBottom:"2px solid "+colors.border,borderRight:"1px solid "+colors.border,lineHeight:1.25}},
+      h("div",{style:{display:"flex",gap:6}}, h("span",{style:{flex:1}},label), n!=null ? h("span",{style:{background:"rgba(255,255,255,.7)",borderRadius:9,padding:"0 6px"}},n) : null),
+      sub ? h("div",{title:sub,style:{fontWeight:400,fontSize:10,opacity:.85,marginTop:2}},String(sub).split(/\.\s/)[0].replace(/\.$/,"")) : null);
+    const cells = [];
+    cells.push(h("div",{key:"corner",style:{position:"sticky",left:0,top:0,zIndex:3,background:"#fff",padding:"7px 8px",fontWeight:700,fontSize:12,borderBottom:"2px solid "+colors.border,borderRight:"2px solid "+colors.border}},"Contract · "+columns.length));
+    cols.forEach(L=>{ const f = docViewFilter(L); cells.push(hdr("h:"+L.key, L.label, L.sub, L.bg||"#eef3f8", L.color||"#2a6fb0", laneItems.reduce((a,xs)=>a+xs.filter(f).length,0))); });
+    if(showTasks) cells.push(hdr("h:tasks","Task cards","The contract's own task cards","#efe8fb","#5b3f8f",null));
+    columns.forEach((C,i)=>{ const xs = laneItems[i]; const fold = !!laneFold[C.ct];
+      cells.push(h("div",{key:"l:"+C.key,"data-testid":"doc-lane",style:{position:"sticky",left:0,zIndex:1,background:"#fff",padding:8,borderRight:"2px solid "+colors.border,borderBottom:"2px solid "+colors.border,display:"flex",flexDirection:"column",gap:4}},
+        h("div",{style:{background:C.color,color:"#fff",borderRadius:6,padding:"5px 8px",fontWeight:700,fontSize:12}},C.label),
+        woTagEl(C.ct), despTagEl(C.ct),
+        h("div",{style:{fontSize:10.5,color:colors.muted,lineHeight:1.35}},C.sub),
+        h("div",{style:{display:"flex",flexWrap:"wrap",gap:3}}, stl.map(L=>{ const n = xs.filter(docViewFilter(L)).length; return n ? h("span",{key:L.key,title:L.label,style:{fontSize:9.5,fontWeight:700,borderRadius:8,padding:"0 5px",background:L.bg||"#eef3f8",color:L.color||"#2a6fb0"}},n) : null; })),
+        h("div",{style:{display:"flex",gap:5,flexWrap:"wrap"}},
+          h("button",{style:{...btnSmall,fontSize:10.5,padding:"1px 7px"},"data-testid":"doc-lane-fold",onClick:()=>setLaneFold(f=>({ ...f, [C.ct]:!fold }))}, fold ? "▸ open" : "▾ fold"),
+          data.soBy[C.ct] && onOpenContract ? h("button",{style:{...btnSmall,fontSize:10.5,padding:"1px 7px"},onClick:()=>onOpenContract(data.soBy[C.ct])},"Open contract →") : null)));
+      cols.forEach(L=>{ const ys = xs.filter(docViewFilter(L)).sort(cmpDue);
+        cells.push(h("div",{key:"c:"+C.key+":"+L.key,style:{padding:6,borderRight:"1px solid "+colors.border,borderBottom:"2px solid "+colors.border,background:"#f7f8f6",minWidth:0}},
+          fold ? (ys.length ? h("div",{style:{fontSize:11,fontWeight:700,color:L.color||colors.muted,textAlign:"center"}},ys.length) : null)
+               : ys.length ? ys.map(card) : h("div",{style:{fontSize:11,color:colors.mutedLight,textAlign:"center",padding:"10px 0"}},"—"))); });
+      if(showTasks){ const ts = tasksOfCt(C.ct);
+        cells.push(h("div",{key:"t:"+C.key,style:{padding:6,borderBottom:"2px solid "+colors.border,background:"#faf8fd",minWidth:0}},
+          fold ? (ts.length ? h("div",{style:{fontSize:11,fontWeight:700,color:"#5b3f8f",textAlign:"center"}},ts.length) : null) : ts.map(taskCardEl),
+          !fold && canAddCard ? h("button",{"data-testid":"doc-add-card",onClick:()=>appNewCard({ link_kind:"contract", link_ref:C.ct, ref:C.ct, customer:(data.soBy[C.ct]||{}).customer_name||ctClientOf(C.ct)||"" },{ label:"\u2190 Back to the Order Status board", kind:"tab", tab:"doc_board" }),
+            style:{width:"100%",border:"1px dashed "+colors.border,background:"transparent",color:colors.muted,borderRadius:7,padding:"5px",fontSize:11.5,cursor:"pointer"}},"+ Add a card") : null)); }
+    });
+    if(!columns.length) cells.push(h("div",{key:"none",style:{gridColumn:"1 / -1",padding:16,color:colors.muted}},"No contract matches this filter."));
+    return h("div",{"data-testid":"doc-lanes"},
+      h("div",{style:{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap",fontSize:11.5,margin:"0 0 6px"}},
+        h("label",{style:{display:"inline-flex",gap:4,alignItems:"center",cursor:"pointer"}}, h("input",{type:"checkbox",checked:laneHide,"data-testid":"doc-lane-hide",onChange:e=>{ const v = e.target.checked; setLaneHide(v); try{ localStorage.setItem("docLaneHide", v?"1":"0"); }catch(x){} }}), "Hide empty lists"),
+        h("button",{style:{...btnSmall,fontSize:11},onClick:()=>{ const o = {}; if(anyOpen) columns.forEach(C=>{ o[C.ct] = true; }); setLaneFold(o); }}, anyOpen ? "▾ Fold all" : "▸ Open all"),
+        h("span",{style:{color:colors.muted}},"One band per contract; the stage lists run across. The contract stays on the left as you scroll sideways.")),
+      h("div",{style:{overflow:"auto",maxHeight:"calc(100vh - 250px)",border:"1px solid "+colors.border,borderRadius:8,background:"#fff"}},
+        h("div",{style:{display:"grid",gridTemplateColumns:gridCols,minWidth:"max-content",alignItems:"stretch"}}, ...cells)));
+  };
   const fullHoldOpen = (xs)=> xs.filter(it=>it.hold==="Full Hold" && !["code2","info","done"].includes(it.list)).length;   // 178: Status to confirm counts (holds the contract until set)
 
   // ---- assign ----
@@ -57498,9 +57590,9 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
       doc.text("Printed "+fmtDMYTime(new Date().toISOString())+" by "+(me||user?.username||""), W-12, 41, {align:"right"});
       const sg = (tbl.grp==="none"||tbl.grp==="stage") ? "owner" : tbl.grp; const sf = GRP[sg][1]; const sk = Array.from(new Set(rows.map(sf))).sort();
       const cnt = f=>rows.filter(f).length;
-      doc.autoTable({ startY:45, head:[[GRP[sg][0], ...DOC_LISTS.map(l=>l.short), "Total", "Overdue", "Full Hold open"]],
-        body:[...sk.map(k=>[k, ...DOC_LISTS.map(l=>cnt(it=>sf(it)===k&&it.list===l.key)||""), cnt(it=>sf(it)===k), cnt(it=>sf(it)===k&&it.late)||"", fullHoldOpen(rows.filter(it=>sf(it)===k))||""]),
-          [{content:"Total",styles:{fontStyle:"bold"}}, ...DOC_LISTS.map(l=>cnt(it=>it.list===l.key)), rows.length, cnt(it=>it.late), fullHoldOpen(rows)]],
+      doc.autoTable({ startY:45, head:[[GRP[sg][0], ...DOC_VLISTS().map(l=>l.short), "Total", "Overdue", "Full Hold open"]],
+        body:[...sk.map(k=>[k, ...DOC_VLISTS().map(l=>cnt(it=>sf(it)===k&&docVBase(it)===l.key)||""), cnt(it=>sf(it)===k), cnt(it=>sf(it)===k&&it.late)||"", fullHoldOpen(rows.filter(it=>sf(it)===k))||""]),
+          [{content:"Total",styles:{fontStyle:"bold"}}, ...DOC_VLISTS().map(l=>cnt(it=>docVBase(it)===l.key)), rows.length, cnt(it=>it.late), fullHoldOpen(rows)]],
         theme:"grid", headStyles:{ fillColor:[244,242,234], textColor:[28,31,26], fontStyle:"bold", fontSize:8, lineColor:[216,212,197], lineWidth:0.2 }, bodyStyles:{ fontSize:8, lineColor:[216,212,197], lineWidth:0.2 }, margin:{left:12,right:12} });
       const body = [];
       const groups = tbl.grp==="none" ? [""] : Array.from(new Set(rows.map(g))).sort();
@@ -57560,9 +57652,9 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
       h("div",{key:"g",style:{display:"flex",gap:6,flexWrap:"wrap",margin:"8px 0",alignItems:"center"}}, h("span",{style:{fontSize:11.5,color:colors.muted}},"Group by"),
         Object.entries(GRP).map(([k,v])=>h("span",{key:k,onClick:()=>setTbl(t=>({...t,grp:k})),style:{border:"1px solid "+(tbl.grp===k?colors.text:colors.border),background:tbl.grp===k?colors.text:"#fff",color:tbl.grp===k?"#fff":colors.text,borderRadius:14,padding:"3px 10px",fontSize:11.5,cursor:"pointer"}},v[0]))),
       h("div",{key:"s",style:{overflowX:"auto",marginBottom:12}}, h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:640}},
-        h("thead",null,h("tr",null,h("th",{style:th},GRP[sg][0]),DOC_LISTS.map(l=>h("th",{key:l.key,style:{...th,textAlign:"right"}},l.short)),h("th",{style:{...th,textAlign:"right"}},"Total"),h("th",{style:{...th,textAlign:"right",color:"#a3312a"}},"Overdue"),h("th",{style:{...th,textAlign:"right"}},"Full Hold open"))),
-        h("tbody",null, sKeys.map(k=>h("tr",{key:k},h("td",{style:td},k),DOC_LISTS.map(l=>h("td",{key:l.key,style:tdn},cnt(it=>sf(it)===k&&it.list===l.key)||"·")),h("td",{style:{...tdn,fontWeight:700}},cnt(it=>sf(it)===k)),h("td",{style:{...tdn,color:"#a3312a"}},cnt(it=>sf(it)===k&&it.late)||"·"),h("td",{style:tdn},fullHoldOpen(rows0.filter(it=>sf(it)===k))||"·"))),
-          h("tr",null,h("td",{style:{...td,fontWeight:700,borderTop:"2px solid "+colors.text}},"Total"),DOC_LISTS.map(l=>h("td",{key:l.key,style:{...tdn,fontWeight:700,borderTop:"2px solid "+colors.text}},cnt(it=>it.list===l.key))),h("td",{style:{...tdn,fontWeight:700,borderTop:"2px solid "+colors.text}},rows0.length),h("td",{style:{...tdn,fontWeight:700,color:"#a3312a",borderTop:"2px solid "+colors.text}},cnt(it=>it.late)),h("td",{style:{...tdn,fontWeight:700,borderTop:"2px solid "+colors.text}},fullHoldOpen(rows0)))))),
+        h("thead",null,h("tr",null,h("th",{style:th},GRP[sg][0]),DOC_VLISTS().map(l=>h("th",{key:l.key,style:{...th,textAlign:"right"}},l.short)),h("th",{style:{...th,textAlign:"right"}},"Total"),h("th",{style:{...th,textAlign:"right",color:"#a3312a"}},"Overdue"),h("th",{style:{...th,textAlign:"right"}},"Full Hold open"))),
+        h("tbody",null, sKeys.map(k=>h("tr",{key:k},h("td",{style:td},k),DOC_VLISTS().map(l=>h("td",{key:l.key,style:tdn},cnt(it=>sf(it)===k&&docVBase(it)===l.key)||"·")),h("td",{style:{...tdn,fontWeight:700}},cnt(it=>sf(it)===k)),h("td",{style:{...tdn,color:"#a3312a"}},cnt(it=>sf(it)===k&&it.late)||"·"),h("td",{style:tdn},fullHoldOpen(rows0.filter(it=>sf(it)===k))||"·"))),
+          h("tr",null,h("td",{style:{...td,fontWeight:700,borderTop:"2px solid "+colors.text}},"Total"),DOC_VLISTS().map(l=>h("td",{key:l.key,style:{...tdn,fontWeight:700,borderTop:"2px solid "+colors.text}},cnt(it=>docVBase(it)===l.key))),h("td",{style:{...tdn,fontWeight:700,borderTop:"2px solid "+colors.text}},rows0.length),h("td",{style:{...tdn,fontWeight:700,color:"#a3312a",borderTop:"2px solid "+colors.text}},cnt(it=>it.late)),h("td",{style:{...tdn,fontWeight:700,borderTop:"2px solid "+colors.text}},fullHoldOpen(rows0)))))),
       h("div",{key:"a",style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",background:"#eef3f1",borderRadius:6,padding:"7px 9px",marginBottom:8,fontSize:12}},
         h("span",{style:{color:colors.muted}},picked.length+" ticked — assign to"),
         h("select",{value:tbl.to,onChange:e=>setTbl(t=>({...t,to:e.target.value})),style:{fontSize:12,padding:"4px 6px",borderRadius:4,border:"1px solid "+colors.border}}, h("option",{value:""},"— pick —"), h("option",{value:"__pile"},"Unassigned pile"), people.map(p=>h("option",{key:p,value:p},p))),
@@ -58533,7 +58625,7 @@ function DocControlScreen({ user, company, initialPanel, onOpenContract, onOpenT
       h("button",{style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700},onClick:()=>setPanel("letters")},"✉ Chase letters ("+drafts.length+")"),
       h("button",{style:btnSmall,onClick:()=>{ setRep({ct: mode==="one"?curCt:"all", ext:false}); setPanel("report"); }},"📄 Report by contract"),
       onOpenContract && mode==="one" && data.soBy[curCt] ? h("button",{style:btnSmall,onClick:()=>onOpenContract(data.soBy[curCt])},"Open contract →") : null),
-    tileDef && tileDef.d ? null : view==="list" ? docListView() : h("div",{style:{overflowX:"auto",paddingBottom:10}},   // 174: a delivery tile shows its contract list instead; 211: All (list)
+    tileDef && tileDef.d ? null : view==="list" ? docListView() : view==="contract" ? docLanes() : h("div",{style:{overflowX:"auto",paddingBottom:10}},   // 253: By contract = lanes   // 174: a delivery tile shows its contract list instead; 211: All (list)
       h("div",{style:{display:"flex",gap:10,alignItems:"flex-start"}},
         columns.map(C=>{
           const ys = vis.filter(C.f).sort(view==="contract" ? cmpDue : cmp);   // 233: contract lists by due date
@@ -66610,15 +66702,19 @@ async function pbLoad(){
 // one PO: value, received, billed and what is left — all before GST (basic), except "net"
 function pbPoState(D, p, skipVoucherId){
   const ls = D.L[p.po_no]||[]; const links = (D.K[p.po_no]||[]).filter(x=>x.voucher_id!==skipVoucherId);
-  const basic = p.total_amt!=null && !ls.length ? Number(p.total_amt)||0 : r2(ls.reduce((a,l)=>a+purLineAmt(l).amt,0));
+  const svc = p.po_kind==="SPO";   // 252: a Service PO has no GRN — billed straight against the PO
+  // 252: an FFS PO keeps its footer (transport, P&F, loading…) as one figure, total_addition; an app PO has charge lines instead
+  const foot = (p.source==="FFS" || p.source==="Register") && !ls.some(l=>l.line_kind==="charge") ? r2(Number(p.total_addition)||0) : 0;
+  const footBilled = r2(links.filter(x=>Number(x.po_sl)===0).reduce((a,x)=>a+(Number(x.amount)||0),0));
+  const basic = r2((p.total_amt!=null && !ls.length ? Number(p.total_amt)||0 : r2(ls.reduce((a,l)=>a+purLineAmt(l).amt,0))) + foot);
   const whole = links.some(x=>x.po_sl==null && x.source==="Old bill");   // an old FFS bill matched the whole PO
   const billed = whole ? basic : r2(links.reduce((a,x)=>a+(Number(x.amount)||0),0));
-  const anyRec = ls.some(l=>l.received_qty!=null);
+  const anyRec = !svc && ls.some(l=>l.received_qty!=null);
   const received = r2(ls.reduce((a,l)=>{ if(l.line_kind==="charge") return a; const u = pbLineUnit(l); const q = l.received_qty!=null ? Number(l.received_qty)||0 : 0; return a + (l.source==="FFS" && l.amount!=null && Number(l.qty) ? Number(l.amount)*q/Number(l.qty) : q*u.f*(Number(l.rate)||0)); },0));
   const lines = ls.map(l=>{ const u = pbLineUnit(l); const mine = links.filter(x=>x.po_sl===l.sl);
     const billedQ = whole ? (Number(l.qty)||0)*u.f : r2(mine.reduce((a,x)=>a+(Number(x.qty)||0),0));
     const billedA = whole ? purLineAmt(l).amt : r2(mine.reduce((a,x)=>a+(Number(x.amount)||0),0));
-    const total = (Number(l.qty)||0)*u.f; const rec = l.received_qty!=null ? (Number(l.received_qty)||0)*u.f : null;
+    const total = (Number(l.qty)||0)*u.f; const rec = !svc && l.received_qty!=null ? (Number(l.received_qty)||0)*u.f : null;   // 252
     const rate = l.source==="FFS" && l.amount!=null && total ? r2(Number(l.amount)/total) : (Number(l.rate)||0);
     const tolPct = prTolPct(D.R, l);   // 248
     return { l, u, tolPct, tolQ: r2(((rec!=null ? rec : total))*tolPct/100), total:r2(total), rec: rec==null ? null : r2(rec), billedQ, billedA, rate, left: r2((rec!=null ? rec : total) - billedQ), leftA: r2(purLineAmt(l).amt - billedA) }; });
@@ -66627,7 +66723,7 @@ function pbPoState(D, p, skipVoucherId){
   const days = lastGrn ? Math.floor((Date.now()-new Date(lastGrn+"T00:00:00").getTime())/86400000) : null;
   const inr = String(p.currency||"INR").toUpperCase()==="INR";
   const tolAmt = r2(lines.reduce((a,x)=>a + (x.l.line_kind==="charge" ? 0 : purLineAmt(x.l).amt*x.tolPct/100),0));   // 248: the extra money the quantity tolerance allows
-  return { p, basic, billed, left: r2(basic-billed), tolAmt, received: anyRec ? received : null, lines, grn, lastGrn, days, inr, links,
+  return { p, basic, billed, left: r2(basic-billed), tolAmt, received: anyRec ? received : null, lines, grn, lastGrn, days, inr, links, svc, foot, footBilled, footLeft: whole ? 0 : r2(foot-footBilled),
     vouchers: Array.from(new Set(links.map(x=>x.voucher_no).filter(Boolean))) };
 }
 function pbBilledChip(st){
@@ -66678,9 +66774,9 @@ function PbPoPicker({ s, D, supplierName, editingId, onPick, onFill, onNoPo, lab
             h("td",{style:accTd}, h("input",{type:"checkbox",checked:on,readOnly:true})),
             h("td",{style:{ ...accTd, fontFamily:"monospace", fontWeight:on?700:400 }}, st.p.po_no, st.p.po_kind==="SPO"?h("span",{style:{fontSize:10,color:"#0c447c",marginLeft:4}},"Service"):null),
             h("td",{style:accTd}, fmtDMY(st.p.po_date)), h("td",{style:accTd}, st.p.contract_ref||"—"),
-            h("td",{style:tdn}, cur+purMoney(st.basic)), h("td",{style:tdn}, st.received==null ? "—" : cur+purMoney(st.received)),
+            h("td",{style:tdn}, cur+purMoney(st.basic), st.foot ? h("div",{style:{fontSize:10.5,color:colors.muted}},"incl. PO footer "+purMoney(st.foot)) : null), h("td",{style:tdn}, st.svc ? h("span",{style:{color:colors.muted}},"service") : st.received==null ? "—" : cur+purMoney(st.received)),
             h("td",{style:tdn}, cur+purMoney(st.billed)), h("td",{style:{ ...tdn, fontWeight:700 }}, cur+purMoney(st.left)),
-            h("td",{style:accTd}, st.grn.length ? st.grn.map(g=>g.grn_no).join(", ") : h("span",{style:{color:colors.muted}}, st.received ? "received" : "no GRN"))); }),
+            h("td",{style:accTd}, st.svc && !st.grn.length ? h("span",{style:{fontSize:10.5,fontWeight:700,color:"#0f6e56"}},"Service — no GRN") : st.grn.length ? st.grn.map(g=>g.grn_no).join(", ") : h("span",{style:{color:colors.muted}}, st.received ? "received" : "no GRN"))); }),
         !mine.length ? h("tr",null, h("td",{colSpan:9,style:{ ...accTd, color:colors.muted }}, "This supplier has no open PO in the Purchase Register"+(s.kind==="service"?"":" (goods)")+". If the bill really has no PO, tick No PO and say why.")) : null,
         h("tr",{style:{background:s.noPo?"#fff4d6":undefined}},
           h("td",{style:accTd}, h("input",{type:"checkbox",checked:!!s.noPo,onChange:e=>onNoPo(e.target.checked)})),
@@ -66690,7 +66786,7 @@ function PbPoPicker({ s, D, supplierName, editingId, onPick, onFill, onNoPo, lab
             : h("span",{style:{color:colors.muted}}, pLim>0 ? "up to "+accInr(pLim,0)+" (petty purchase): no reason needed · above it: reason required and the Purchase Manager is told" : "reason required (petty purchase, freight, emergency buy…) — the Purchase Manager is told")))))),
     s.poPick.length ? h("div",{style:{marginTop:8,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},
       h("button",{style:btnPrimary,onClick:()=>onFill(mine.filter(st=>s.poPick.includes(st.p.po_no)))},"Fill items from PO"),
-      h("span",{style:{fontSize:11.5,color:colors.muted}},"brings each line with its HSN, GST % and the quantity received but not yet billed (or not yet billed, if nothing is received in the app); edit to what the bill shows.")) : null);
+      h("span",{style:{fontSize:11.5,color:colors.muted}},"brings each line with its HSN, GST % and the quantity received but not yet billed (or not yet billed, if nothing is received in the app), and the PO footer charges (transport, P&F…) still to bill — change the amount if this bill takes only part; a Service PO fills straight. Edit to what the bill shows.")) : null);
 }
 // checks on a bill against its POs; rows carry po_no / po_sl / po_rate / po_gst / po_left
 function pbChecks(s, k, D, editingId){
@@ -66954,8 +67050,9 @@ function AccPurchaseEntry({ user, A, C, editing, onDone, onClose, onOpenVoucher,
       items.push({ ...accPurchBlankItem(C), desc:pbLineText(l), hsn:String(l.hsn||"").replace(/\D/g,"").slice(0,8), qty:String(q), unit:ln.u.unit,
         rate: st.inr ? String(ln.rate) : "", gst:gg, reason: gg ? "As per "+st.p.po_no : "", po_no:st.p.po_no, po_sl:l.sl }); }));
     pass(false);
+    sts.forEach(st=>{ if(st.footLeft>0.005) charges.push({ ...accPurchBlankCharge(), desc:"PO footer charges (transport, P&F…) — "+st.p.po_no, amt:String(st.footLeft), po_no:st.p.po_no, po_sl:0 }); });   // 252
     if(!items.length){ pass(true);
-      if(items.length) alert("Nothing received on these PO lines is waiting to be billed, so the rows are filled with the PO quantities not yet billed. Each row will ask why (e.g. goods arrived, GRN pending), or correct it."); }
+      if(items.length && !sts.every(st=>st.svc)) alert("Nothing received on these PO lines is waiting to be billed, so the rows are filled with the PO quantities not yet billed. Each row will ask why (e.g. goods arrived, GRN pending), or correct it."); }
     if(!items.length && !charges.length){ alert("Nothing is left to bill on these PO lines: everything is already billed. Type the rows by hand if the bill is right, and say why."); return; }
     setS(x=>{ const keep = x.rows.filter(r=>!(r.po_no && sts.some(st=>st.p.po_no===r.po_no)) && (r.kind!=="item" || String(r.desc||"").trim() || String(r.rate||"").trim()));
       const n = { ...x, rows:[...keep.filter(r=>r.kind==="item"), ...items, ...keep.filter(r=>r.kind!=="item"), ...charges] };
