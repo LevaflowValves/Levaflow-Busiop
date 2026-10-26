@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-25T19:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-26T09:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -7163,6 +7163,8 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
   const [orderQtyGateDavit,setOrderQtyGateDavit]=useState("Not Required");   // 256
   const [orderQtyGateConn,setOrderQtyGateConn]=useState(null);   // 257 {choices, flags}
   const [showGateConn,setShowGateConn]=useState(false);   // 257
+  const [orderQtyGateElem,setOrderQtyGateElem]=useState(null);   // 258 {choices, flags}
+  const [showGateElem,setShowGateElem]=useState(false);   // 258
   // Datasheet Yes/No — same gate, only shown when the cart being saved
   // contains a Direct Price line (a real catalog Sl No never gets asked
   // this; the requirement stays hard for those). null = unanswered.
@@ -8698,7 +8700,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
         // line, so the user confirms it instead of typing it twice.
         setOrderQtyGateInput(dpOnlyCart && dpTypedQty>=1 ? String(dpTypedQty) : "");
         setDatasheetChoice(null);
-        setOrderQtyGateTag(""); setOrderQtyGateLocation(""); setOrderQtyGateEnq(""); setOrderQtyGateConn(null); setShowGateConn(false);
+        setOrderQtyGateTag(""); setOrderQtyGateLocation(""); setOrderQtyGateEnq(""); setOrderQtyGateConn(null); setShowGateConn(false); setOrderQtyGateElem(null); setShowGateElem(false);
         connLoadCtx().catch(()=>{});   // 257: roles / flange lists ready for the window
         return false;
       }
@@ -8810,8 +8812,8 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     const hasDirectPrice = gateCart.some(l=>l.is_direct_price===true && l.price_source!=="pricelist");
     const ok = await saveReference(orderQtyGate.cartOverride, Number(orderQtyGateInput), hasDirectPrice && datasheetChoice==="no");
     // 257 — Connections & Element chosen in this window go on the Sl No
-    if(ok && orderQtyGateConn){
-      try{ await connAfterGateSave({ ref:refNumber, slNo:Number(itemSlNo), choices:orderQtyGateConn.choices, user }); }
+    if(ok && (orderQtyGateConn || orderQtyGateElem)){   // 258 — connections and perforated sheet & mesh
+      try{ await connAfterGateSave({ ref:refNumber, slNo:Number(itemSlNo), conn:orderQtyGateConn, elem:orderQtyGateElem, user }); }
       catch(cErr){ alert("Saved, but the connection choices were not recorded: "+cErr.message+"\n\nThe BOM lines are saved as chosen. Run the SQL, then confirm them again from Options & Testing \u2192 Connections."); }
     }
     // 256 — Davit arm, asked with the Sl No (strainer families only)
@@ -8832,7 +8834,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     setOrderQtyGateSaving(false);
     if(ok){
       setOrderQtyGate(null); setOrderQtyGateInput(""); setDatasheetChoice(null);
-      setOrderQtyGateTag(""); setOrderQtyGateLocation(""); setOrderQtyGateEnq(""); setOrderQtyGateDavit("Not Required"); setOrderQtyGateConn(null); setShowGateConn(false);
+      setOrderQtyGateTag(""); setOrderQtyGateLocation(""); setOrderQtyGateEnq(""); setOrderQtyGateDavit("Not Required"); setOrderQtyGateConn(null); setShowGateConn(false); setOrderQtyGateElem(null); setShowGateElem(false);
       setShowSave(false); setSaveMaximised(true);
       if(holdingNewSlNo) await afterNewSlNoSave();
     }
@@ -9842,13 +9844,16 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
       const gateIsStrainer = isConnItem((gateCart[0]&&gateCart[0].item)||"");   // 257
       const connRequired = gateIsStrainer && connIsFlanged(gateCart, CONN_CTX?CONN_CTX.roles:CONN_DEFAULT_ROLES);
       const connOk = !connRequired || !!orderQtyGateConn;
+      const elemRequired = gateIsStrainer && connElemNeeded(gateCart, CONN_CTX?CONN_CTX.roles:CONN_DEFAULT_ROLES);   // 258
+      const elemOk = !elemRequired || !!orderQtyGateElem;
+      const gateCast = gateIsStrainer && !connRequired && connIsCast(gateCart);
       return h("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.65)",zIndex:1200,display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}},
       h("div",{style:{background:"#fff",borderRadius:8,width:340,maxWidth:"92vw",padding:"20px 22px"}},
         h("div",{style:{fontSize:14,fontWeight:700,marginBottom:6}},"Order Quantity"),
         h("div",{style:{fontSize:12,color:colors.muted,marginBottom:14}},"Enter the order quantity before saving."),
         h("input",{type:"number",min:1,step:1,value:orderQtyGateInput,autoFocus:true,
           onChange:e=>setOrderQtyGateInput(e.target.value),
-          onKeyDown:e=>{ if(e.key==="Enter" && qtyOk && dsOk && connOk && !orderQtyGateSaving) confirmOrderQtyGate(); },
+          onKeyDown:e=>{ if(e.key==="Enter" && qtyOk && dsOk && connOk && elemOk && !orderQtyGateSaving) confirmOrderQtyGate(); },
           placeholder:"units", style:{...inputStyle,width:"100%",fontSize:15,padding:"9px 10px",marginBottom:6}}),
         !qtyOk && orderQtyGateInput!=="" && h("div",{style:{fontSize:11,color:colors.danger,marginBottom:6}},"Must be 1 or more."),
         h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginBottom:14}},"Required — must be 1 or more."),
@@ -9867,18 +9872,31 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
           h("input",{type:"text",value:orderQtyGateLocation,onChange:e=>setOrderQtyGateLocation(e.target.value),placeholder:"optional",style:{...inputStyle,width:"100%",padding:"6px 8px",fontSize:12.5,boxSizing:"border-box"}})
         ),
         gateIsStrainer && h("div",{style:{marginBottom:14}},   // 257
-          h("label",{style:{display:"block",fontSize:10.5,color:colors.mutedLight,marginBottom:3}},"Connections & Element"+(connRequired?" \u2014 required":" (optional)")),
+          h("label",{style:{display:"block",fontSize:10.5,color:colors.mutedLight,marginBottom:3}},"Connections"+(connRequired?" \u2014 required":" (optional)")),
           h("div",{style:{display:"flex",gap:8,alignItems:"center"}},
             h("span",{style:{flex:1,fontSize:11.5,color:orderQtyGateConn?"#0f6e56":(connRequired?colors.danger:colors.muted)}},
-              orderQtyGateConn ? "\u2713 "+(connSummary(orderQtyGateConn.choices)||"checked, no change") : (connRequired ? "Not set \u2014 flanges, cover bolting, drain / vent, element" : "Screwed / socket-weld ends \u2014 not needed")),
+              orderQtyGateConn ? "\u2713 "+(connSummary(orderQtyGateConn.choices)||"checked, no change") : (connRequired ? "Not set \u2014 flanges, cover gasket, drain / vent" : gateCast ? "Cast body \u2014 ends are part of the casting, not needed" : "Screwed / socket-weld ends \u2014 not needed")),
             h("button",{onClick:()=>setShowGateConn(true),style:{...btnSmall,fontSize:11.5}},orderQtyGateConn?"Change":"Set")),
           orderQtyGateConn && orderQtyGateConn.flags && orderQtyGateConn.flags.length>0 && h("div",{style:{fontSize:10.5,color:"#854f0b",marginTop:4}},orderQtyGateConn.flags.length+" point(s) to check \u2014 open Change to see them.")
         ),
         showGateConn && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",zIndex:1300,display:"flex",alignItems:"center",justifyContent:"center",padding:20}},
           h("div",{style:{background:"#fff",borderRadius:8,padding:"16px 20px",width:980,maxWidth:"100%",maxHeight:"90vh",overflow:"auto"}},
-            h(ConnectionsEditor,{ lines:gateCart, title:"Connections & Element \u2014 "+((gateCart[0]&&gateCart[0].model)||""), required:connRequired,
+            h(ConnectionsEditor,{ lines:gateCart, title:"Connections \u2014 "+((gateCart[0]&&gateCart[0].model)||""), required:connRequired,
               initial:orderQtyGateConn&&orderQtyGateConn.choices, onCancel:()=>setShowGateConn(false),
               onApply: async(ch,res)=>{ await connPrice(res); setOrderQtyGate({...orderQtyGate, cartOverride:res.lines.map(connStrip)}); setOrderQtyGateConn({choices:ch, flags:res.flags}); setShowGateConn(false); } }))),
+        gateIsStrainer && h("div",{style:{marginBottom:14}},   // 258
+          h("label",{style:{display:"block",fontSize:10.5,color:colors.mutedLight,marginBottom:3}},"Perforated sheet & mesh"+(elemRequired?" \u2014 required":" (optional)")),
+          h("div",{style:{display:"flex",gap:8,alignItems:"center"}},
+            h("span",{style:{flex:1,fontSize:11.5,color:orderQtyGateElem?"#0f6e56":(elemRequired?colors.danger:colors.muted)}},
+              orderQtyGateElem ? "\u2713 "+([orderQtyGateElem.choices.perforated, connNorm(orderQtyGateElem.choices.mesh)==="none"?"no mesh":orderQtyGateElem.choices.mesh].filter(Boolean).join(" + ")||"checked") : (elemRequired ? "Not set \u2014 pick the perforated sheet and the mesh" : "No perforated sheet / mesh line \u2014 not needed")),
+            elemRequired && h("button",{onClick:()=>setShowGateElem(true),style:{...btnSmall,fontSize:11.5}},orderQtyGateElem?"Change":"Set")),
+          orderQtyGateElem && orderQtyGateElem.flags && orderQtyGateElem.flags.length>0 && h("div",{style:{fontSize:10.5,color:"#854f0b",marginTop:4}},orderQtyGateElem.flags.length+" point(s) to check \u2014 open Change to see them.")
+        ),
+        showGateElem && h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",zIndex:1300,display:"flex",alignItems:"center",justifyContent:"center",padding:20}},
+          h("div",{style:{background:"#fff",borderRadius:8,padding:"16px 20px",width:820,maxWidth:"100%",maxHeight:"90vh",overflow:"auto"}},
+            h(ElementEditor,{ lines:gateCart, title:"Perforated sheet & mesh \u2014 "+((gateCart[0]&&gateCart[0].model)||""), required:elemRequired,
+              initial:orderQtyGateElem&&orderQtyGateElem.choices, onCancel:()=>setShowGateElem(false),
+              onApply: async(ch,res)=>{ await connPrice(res); setOrderQtyGate({...orderQtyGate, cartOverride:res.lines.map(connStrip)}); setOrderQtyGateElem({choices:ch, flags:res.flags}); setShowGateElem(false); } }))),
         isDavitItem((gateCart[0]&&gateCart[0].item)||"") && h("div",{style:{marginBottom:14}},   // 256
           h("label",{style:{display:"block",fontSize:10.5,color:colors.mutedLight,marginBottom:3}},"Davit arm"),
           h("select",{value:orderQtyGateDavit,onChange:e=>setOrderQtyGateDavit(e.target.value),style:{...inputStyle,width:"100%",padding:"6px 8px",fontSize:12.5,boxSizing:"border-box"}},
@@ -9897,8 +9915,8 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
         ),
         h("button",{
           onClick:confirmOrderQtyGate,
-          disabled:!qtyOk||!dsOk||!connOk||orderQtyGateSaving,
-          style:{...btnPrimary,width:"100%",padding:"10px",opacity:(!qtyOk||!dsOk||!connOk||orderQtyGateSaving)?0.55:1}
+          disabled:!qtyOk||!dsOk||!connOk||!elemOk||orderQtyGateSaving,
+          style:{...btnPrimary,width:"100%",padding:"10px",opacity:(!qtyOk||!dsOk||!connOk||!elemOk||orderQtyGateSaving)?0.55:1}
         },orderQtyGateSaving?h(React.Fragment,null,h("i",{className:"ti ti-hourglass hourglass-spin","aria-hidden":"true",style:{marginRight:6}}),"Saving…"):"Confirm & Save")
       )
       );
@@ -18930,11 +18948,31 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       alert("Could not start PDF generation: "+e.message);
     }
   };
-  const generateQuotePdf = async(testingMode="separate", watermark=false, summarised=false, template="classic")=>{
+  // 260: PREVIEW DRAFT on a Sale Order — to read and check before approvals.
+  // Only the customer's PO must be attached (that gate stays); the approvals,
+  // extra-price and document prompts are skipped; always DRAFT — NOT APPROVED,
+  // no code to remove it, no "mark O.A Sent", not counted as a generated O.A.
+  const attemptPreviewDraftSo = async()=>{
+    if(!quoteExportRef || mode!=="contract") return;
+    try{
+      const reqs = await fetchDocumentRequirements(quoteExportRef);
+      const poReq = outstandingMandatory(reqs).find(isPoDocRequirement);
+      if(poReq){ alert("Can't preview yet — the customer's PO is not attached.\n\nWhat to do: open Documents on this order and add the PO against \""+poReq.category+"\"."); return; }
+      const currCurrency = quoteHeaderRow?.currency||"INR";
+      if(currCurrency!=="INR" && !(Number(quoteHeaderRow?.conversion_rate)>0)){ alert("Can't preview — the currency is "+currCurrency+" but no conversion rate is set. Enter 1 "+currCurrency+" = ? INR in the header first."); return; }
+      if(!headerCustomerCountry.trim()){ alert("Can't preview — this customer has no country on file. Add one in CRM → Customers first."); return; }
+      const psChoice = await askPriceSummary();
+      if(!psChoice) return;
+      priceSummaryChoiceRef.current = psChoice;
+      const testingMode = await resolveTestingMode(quoteExportRef, user?.username);
+      generateQuotePdf(testingMode, true, summaryMode, "classic", true);
+    }catch(e){ console.error("Preview draft failed", e); alert("Could not start the draft preview: "+e.message); }
+  };
+  const generateQuotePdf = async(testingMode="separate", watermark=false, summarised=false, template="classic", draftPreview=false)=>{
     if(!quoteExportRef) return;
     setGeneratingQuotePdf(true);
     try {
-      const readinessCheck = await checkQuoteReadiness(quoteExportRef);
+      const readinessCheck = draftPreview ? { ready:true, missing:[] } : await checkQuoteReadiness(quoteExportRef);
       // Admin/super admin bypass this gate entirely — same standing rule as
       // the missingHeaderFieldsForPdf gate above (isAdminOrAbove skips it
       // there too): their PDF is always the clean, final one, dirty quote
@@ -18956,7 +18994,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       let priceWatermark = false, priceSlNos = [];
       {
         const pl = await priceCheckPendingLines(quoteExportRef);
-        if(pl.length && isAdminOrAbove && confirm(quoteExportRef+" has "+pl.length+" price"+(pl.length===1?"":"s")+" not checked yet:\n"+priceLinesText(pl)+"\n\nOK = approve "+(pl.length===1?"it":"them")+" in your name and print the clean PDF\nCancel = print with the PRICE NOT CHECKED watermark")){
+        if(pl.length && isAdminOrAbove && !draftPreview && confirm(quoteExportRef+" has "+pl.length+" price"+(pl.length===1?"":"s")+" not checked yet:\n"+priceLinesText(pl)+"\n\nOK = approve "+(pl.length===1?"it":"them")+" in your name and print the clean PDF\nCancel = print with the PRICE NOT CHECKED watermark")){
           const r = await priceCheckValidate(quoteExportRef, pl, user?.username||"unknown", "by Admin on Generate PDF", user?.username);
           if(!r.ok){ alert(r.reason); setGeneratingQuotePdf(false); return; }
           refreshReadiness(quoteExportRef);
@@ -20099,6 +20137,13 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
             doc.setFillColor(251,236,235); doc.rect(0, ph-7, pw, 7, "F");
             doc.setFontSize(7.5); doc.setTextColor(163,49,42);
             doc.text("PRICE NOT CHECKED – NOT FOR ISSUE · prices on Sl No "+priceSlNos.join(", ")+" not checked by an Admin · printed "+stamp+" by "+(user?.username||""), pw/2, ph-2.6, {align:"center"});
+          } else if(draftPreview){
+            // 260: draft preview — never issued
+            doc.setFontSize(54); doc.setTextColor(230,195,190);
+            doc.text(["DRAFT","NOT APPROVED"], pw/2, ph/2, {angle:35, align:"center"});
+            doc.setFillColor(251,236,235); doc.rect(0, ph-7, pw, 7, "F");
+            doc.setFontSize(7.5); doc.setTextColor(163,49,42);
+            doc.text("DRAFT PREVIEW – NOT APPROVED – NOT FOR ISSUE · printed "+stamp+" by "+(user?.username||""), pw/2, ph-2.6, {align:"center"});
           } else {
             doc.setFontSize(60);
             doc.setTextColor(230,195,190); // light, faded — no opacity plugin dependency, just a pale color
@@ -20127,16 +20172,17 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         offerEnclosures.forEach((e,i)=>{ const L=enclLoaded[i]; if(e.filePath && L && L.error) problems.push("Enclosure "+(e.docNumber||"")+" Rev "+e.rev+": "+L.error); });
         if(problems.length) alert("The PDF is ready, but these files could not be merged in and are left out:\n\n"+problems.join("\n")+"\n\nA password-protected or damaged PDF is the usual cause. Send it separately, or upload a clean copy and generate again.");
       }
-      return await mergeLoadedPdfPages(doc, pdfMergeInsertions, { footerText: quoteExportRef, watermark: watermark||priceWatermark, watermarkText: priceWatermark ? "PRICE NOT CHECKED" : "DRAFT" });
+      return await mergeLoadedPdfPages(doc, pdfMergeInsertions, { footerText: quoteExportRef, watermark: watermark||priceWatermark, watermarkText: priceWatermark ? "PRICE NOT CHECKED" : draftPreview ? "DRAFT – NOT APPROVED" : "DRAFT" });
       }; // end buildDoc
 
       const doc = await buildDoc({});
       setPdfPreview({
-        doc, filename:quoteExportRef.replace(/\s+/g,"_")+"_Quote.pdf",
+        doc, filename:quoteExportRef.replace(/\s+/g,"_")+(draftPreview?"_DRAFT_PREVIEW":"")+"_Quote.pdf",
         buildDoc,
         quickEditDefaults: mode==="contract" ? { customerName, delivery: terms.delivery_term||"—" } : { customerName, delivery: terms.delivery_term||"—", validity: terms.validity||"—" }
       });
-      await logAudit("EXPORT","estimates",quoteExportRef,"Generated compiled quote PDF for "+quoteExportRef,user?.username||"unknown",null,null);
+      if(draftPreview) await logAudit("READ","estimates",quoteExportRef,"Draft preview of Sale Order "+quoteExportRef+" (not for issue)",user?.username||"unknown",null,null);
+      else await logAudit("EXPORT","estimates",quoteExportRef,"Generated compiled quote PDF for "+quoteExportRef,user?.username||"unknown",null,null);
     } catch(e){
       console.error("Generate quote PDF failed", e);
       alert("Could not generate the PDF: "+e.message);
@@ -20633,6 +20679,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     {key:"out",cap:"Output",row:2,items:[
       {id:"gen",label:generatingQuotePdf?"Generating…":(isSO?"Generate Sale Order":"Generate Quote PDF"),icon:"file-type-pdf",color:"#1f2320",
         onClick:attemptGenerateQuotePdf,why:noOpen||(!quoteExportRef?"The "+docWord+" is still loading.":null)||(generatingQuotePdf?"Already generating.":null)},
+      ...(isSO?[{id:"prevdraft",label:"Preview draft",icon:"eye",color:"#8a5a00",title:"Read and check the Sale Order before approvals — always DRAFT – NOT APPROVED, never for issue. Needs the customer's PO attached.",
+        onClick:attemptPreviewDraftSo,why:noOpen||(!quoteExportRef?"The "+docWord+" is still loading.":null)||(generatingQuotePdf?"Already generating.":null)}]:[]),
       {id:"sds",label:"Summarised datasheets",icon:summaryMode?"square-check":"square",color:summaryMode?"#1d5fa8":"#9a978c",active:summaryMode,
         title:"When ticked, the PDF uses summarised datasheets",onClick:()=>setSummaryMode(v=>!v),why:noOpen}
     ]},
@@ -20965,6 +21013,9 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               ),
               h("div",{style:{flex:1}}, renderReadinessBar(readiness.categories, {height:34, doneLabel: generatingQuotePdf?"Generating…":(mode==="contract"?"✓ Generate Sale Order":"✓ Generate Quote PDF"), onClick: (quoteExportRef&&!generatingQuotePdf)?attemptGenerateQuotePdf:undefined}))
             ),
+            mode==="contract" && h("div",{style:{marginTop:8,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}},   // 260
+              h("button",{onClick:attemptPreviewDraftSo,disabled:!quoteExportRef||generatingQuotePdf,style:{...btnSmall,fontSize:11.5,color:"#8a5a00",borderColor:"#e0c48a",background:"#fff8e1"}},"Preview draft"),
+              h("span",{style:{fontSize:10,color:colors.mutedLight}},"to read and check before approvals — DRAFT – NOT APPROVED, never for issue; needs the customer's PO attached")),
             pdfGenCounts.total>0 && h("div",{style:{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginTop:8,paddingTop:8,borderTop:"1px solid #eceae0"}},
               h("div",{style:{fontSize:11,color:colors.text}},h("strong",null,pdfGenCounts.total),h("span",{style:{color:colors.mutedLight}}," generated")),
               pdfGenCounts.byUser.map(u=>h("span",{key:u.user,style:{fontSize:10.5,background:"#f4f2ea",borderRadius:5,padding:"3px 8px"}},u.user+" "+u.count))
@@ -22858,7 +22909,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       )
     ),
     showOptionsTesting && h("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.55)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}},
-      h("div",{style:{background:"#fff",borderRadius:8,padding:"20px 24px",width:optionsTestingTab==="connections"?980:560,maxWidth:"100%",maxHeight:"85vh",overflow:"auto"}},
+      h("div",{style:{background:"#fff",borderRadius:8,padding:"20px 24px",width:(optionsTestingTab==="connections"||optionsTestingTab==="element")?980:560,maxWidth:"100%",maxHeight:"85vh",overflow:"auto"}},
         h("div",{style:{fontWeight:700,fontSize:14,marginBottom:2}},"Options & Testing — Sl No "+(openRef&&openRef.item_sl_no)),
         h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:14}},"Both fold into this Sl No's own unit price (total ÷ qty). Shown as labels only on the Datasheet — no cost breakdown there."),
         h("div",{style:{display:"flex",gap:6,marginBottom:14,borderBottom:"1px solid "+colors.border}},
@@ -22866,7 +22917,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           h("button",{onClick:()=>setOptionsTestingTab("testing"),style:{fontSize:12,padding:"7px 14px",border:"none",borderBottom:optionsTestingTab==="testing"?"2px solid "+colors.accent:"2px solid transparent",background:"none",fontWeight:optionsTestingTab==="testing"?700:400,color:optionsTestingTab==="testing"?colors.accent:colors.muted,cursor:"pointer"}},"Testing (NDE)"),
           h("button",{onClick:()=>setOptionsTestingTab("compliance"),style:{fontSize:12,padding:"7px 14px",border:"none",borderBottom:optionsTestingTab==="compliance"?"2px solid "+colors.accent:"2px solid transparent",background:"none",fontWeight:optionsTestingTab==="compliance"?700:400,color:optionsTestingTab==="compliance"?colors.accent:colors.muted,cursor:"pointer"}},"Compliance"),
           h("button",{onClick:()=>setOptionsTestingTab("davit"),style:{fontSize:12,padding:"7px 14px",border:"none",borderBottom:optionsTestingTab==="davit"?"2px solid "+colors.accent:"2px solid transparent",background:"none",fontWeight:optionsTestingTab==="davit"?700:400,color:optionsTestingTab==="davit"?colors.accent:colors.muted,cursor:"pointer"}},"Davit Arm"),
-          h("button",{onClick:()=>setOptionsTestingTab("connections"),style:{fontSize:12,padding:"7px 14px",border:"none",borderBottom:optionsTestingTab==="connections"?"2px solid "+colors.accent:"2px solid transparent",background:"none",fontWeight:optionsTestingTab==="connections"?700:400,color:optionsTestingTab==="connections"?colors.accent:colors.muted,cursor:"pointer"}},"Connections")
+          h("button",{onClick:()=>setOptionsTestingTab("connections"),style:{fontSize:12,padding:"7px 14px",border:"none",borderBottom:optionsTestingTab==="connections"?"2px solid "+colors.accent:"2px solid transparent",background:"none",fontWeight:optionsTestingTab==="connections"?700:400,color:optionsTestingTab==="connections"?colors.accent:colors.muted,cursor:"pointer"}},"Connections"),
+          h("button",{onClick:()=>setOptionsTestingTab("element"),style:{fontSize:12,padding:"7px 14px",border:"none",borderBottom:optionsTestingTab==="element"?"2px solid "+colors.accent:"2px solid transparent",background:"none",fontWeight:optionsTestingTab==="element"?700:400,color:optionsTestingTab==="element"?colors.accent:colors.muted,cursor:"pointer"}},"Perforated sheet & mesh")
         ),
 
         optionsTestingTab==="options" ? h("div",null,
@@ -22925,6 +22977,9 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
 
         optionsTestingTab==="connections" && openRef ? h(ConnectionsSlPanel,{ user, refNo:openRef.reference_number, slNo:openRef.item_sl_no, lines:openLines,   // 257
           locked: mode==="contract" ? ((soEd && soEd.all) ? "" : soMsg()) : (quoteAnyNonDraft() ? "This quote has left Draft \u2014 start an amendment to change the connections." : ""),
+          onChanged: async()=>{ await refreshAll(); const { data } = await sb.from("estimate_lines").select("*").eq("reference_number",openRef.reference_number).eq("item_sl_no",openRef.item_sl_no).order("sl_no"); setOpenLines(data||[]); } }) : null,
+        optionsTestingTab==="element" && openRef ? h(ElementSlPanel,{ user, refNo:openRef.reference_number, slNo:openRef.item_sl_no, lines:openLines,   // 258
+          locked: mode==="contract" ? ((soEd && soEd.all) ? "" : soMsg()) : (quoteAnyNonDraft() ? "This quote has left Draft \u2014 start an amendment to change the perforated sheet or mesh." : ""),
           onChanged: async()=>{ await refreshAll(); const { data } = await sb.from("estimate_lines").select("*").eq("reference_number",openRef.reference_number).eq("item_sl_no",openRef.item_sl_no).order("sl_no"); setOpenLines(data||[]); } }) : null,
         optionsTestingTab==="davit" && openRef ? h(DavitSlPanel,{ user, refNo:openRef.reference_number, slNo:openRef.item_sl_no, mode, lines:openLines,   // 256
           locked: mode==="contract" ? ((soEd && soEd.all) ? "" : soMsg()) : (quoteAnyNonDraft() ? "This quote has left Draft \u2014 start an amendment to change the davit arm." : ""),
@@ -28771,7 +28826,7 @@ const MANUAL_SECTIONS = [
   {
     "group": "Estimator",
     "articles": [
-      {"key": "connections_element", "title": "Connections & Element: inlet, outlet, cover, drain, vent and filter specs on a strainer Sl No", "tag": "Estimator / Quotes", "blocks": [{"type": "p", "text": "The model BOM masters stay as they are: slip-on end flanges and a BS 10 Table E cover. When the customer wants something else (weld neck ends, an ASME cover, flanged drain and vent, a different perforated sheet or mesh), only that Sl No's BOM lines are changed, here. The flange, stud, gasket and drain lines change together, so the cost cannot be missed."}, {"type": "steps", "items": ["New strainer Sl No with flanged ends: the Order Quantity window shows Connections & Element \u2014 required. Press Set, pick each flange, check what changes, then Confirm connections. Confirm & Save stays off until this is done.", "Screwed and socket-weld strainers have no flange lines; for them the form is optional.", "Existing Sl No of a quote or contract: Options & Testing \u2192 Connections. Change and Confirm connections; the lines are updated straight away."]}, {"type": "bullets", "items": ["Each flange line (inlet / outlet, body flange, cover) has a list of every flange in the spec master, in the same format as the BOM, e.g. Flange-450nb-ANSI B16.5 150 LBS-WNRF. A spec that is not in the master shows red.", "Cover studs, nuts and washers are worked out again from the Flange Chart (number, size, length rounded up to 5 mm, kg), the cover gasket area from the flange OD. A spiral wound gasket becomes 1 Nos.", "Drain / Vent: As in BOM, or Flanged \u2014 the coupling and plug are replaced by a pipe stub, flange, blind, gasket, studs and nuts.", "Perforated sheet and mesh: pick the spec; the quantity stays.", "New or changed lines are priced from Material Rates (spec + grade). Anything without a rate, a missing spec or a flange the Flange Chart does not cover (BS 10, B16.47 Series B, DIN) is listed in yellow \u2014 check those lines by hand.", "The datasheet's Inlet / Outlet Connection, Cover Standard, Drain / Vent and filter element sizes follow the lines."]}, {"type": "p", "text": "The choices are kept on the Sl No. A re-save from the Estimator with the same model and Refresh BOM apply them again. A different model clears them and flags the Sl No \u201cConnections must be set again\u201d. If the cover flange changes and the Sl No has a davit arm, the davit is made again for the new cover."}, {"type": "tip", "text": "Which BOM line is which (inlet flange, cover bolting, drain...) comes from Setup \u2192 Connections: BOM line roles. A model whose lines have other names needs a row there."}]},
+      {"key": "connections_element", "title": "Connections, perforated sheet & mesh: inlet, outlet, cover, drain, vent and filter specs on a strainer Sl No", "tag": "Estimator / Quotes", "blocks": [{"type": "p", "text": "The model BOM masters stay as they are: slip-on end flanges and a BS 10 Table E cover. What the customer wants (weld neck ends, an ASME cover, flanged drain and vent, a perforated sheet and mesh) is set on each Sl No, and only that Sl No's BOM lines change. The flange, stud, gasket and drain lines change together, so the cost cannot be missed. There are two forms: Connections, and Perforated sheet & mesh."}, {"type": "steps", "items": ["New strainer Sl No: the Order Quantity window has two rows, Connections (when the BOM has flange lines) and Perforated sheet & mesh. Press Set on each.", "Both forms open blank. Pick every flange, the cover gasket, drain and vent in Connections; pick the perforated sheet and the mesh in the other. Nothing is copied in from the BOM, so nothing is left by chance.", "Confirm & Save (and Enter) stay off until both are confirmed. Each form lists what is still to fill.", "Screwed and socket-weld strainers have no flange lines, and cast bodies have their end flanges in the casting: for them Connections is not needed.", "Existing Sl No of a quote or contract: Options & Testing \u2192 Connections, or \u2192 Perforated sheet & mesh. A Sl No with nothing saved opens blank; once confirmed, the choices load back the next time."]}, {"type": "bullets", "items": ["Each flange line (inlet / outlet, body flange, cover) has a list of every flange in the spec master, in the same format as the BOM, e.g. Flange-450nb-ANSI B16.5 150 LBS-WNRF. A spec that is not in the master shows red. The model's own spec is shown beside it for reference.", "Cover studs, nuts and washers are worked out again from the Flange Chart (number, size, length rounded up to 5 mm, kg), the cover gasket area from the flange OD. A spiral wound gasket becomes 1 Nos.", "Drain / Vent: As in BOM, or Flanged \u2014 the coupling and plug are replaced by a pipe stub, flange, blind, gasket, studs and nuts.", "Perforated sheet and mesh: pick both from the spec master; the quantity stays. Mesh can be None (the mesh line is taken out). A mesh picked where the model has none is added with the perforated sheet's area and grade \u2014 check that line.", "New or changed lines are priced from Material Rates (spec + grade). Anything without a rate, a missing spec or a flange the Flange Chart does not cover (BS 10, B16.47 Series B, DIN) is listed in yellow \u2014 check those lines by hand.", "The datasheet's Inlet / Outlet Connection, Cover Standard, Drain / Vent and filter element sizes follow the lines."]}, {"type": "p", "text": "The choices are kept on the Sl No. A re-save from the Estimator with the same model and Refresh BOM apply them again. A different model clears them and flags the Sl No \u201cConnections must be set again\u201d. If the cover flange changes and the Sl No has a davit arm, the davit is made again for the new cover."}, {"type": "tip", "text": "Which BOM line is which (inlet flange, cover bolting, drain...) comes from Setup \u2192 Connections: BOM line roles. A model whose lines have other names needs a row there. Perforated sheet and mesh lines are also found by their spec (Perforated\u2026, Mesh\u2026)."}]},
       {
         "key": "direct_price_line",
         "title": "Direct Price lines and Pending Validation",
@@ -30544,7 +30599,7 @@ const MANUAL_SECTIONS = [
 // English text with a note. Screen and button names stay in English on purpose,
 // so they match what is on the screen. Not proofread — small errors accepted.
 const MANUAL_TA = {
- "connections_element": {"title": "Connections & Element: strainer Sl No-இல் inlet, outlet, cover, drain, vent, filter specs", "tag": "Estimator / Quotes", "blocks": [{"type": "p", "text": "Model BOM masters அப்படியே இருக்கும்: slip-on end flanges, BS 10 Table E cover. Customer வேறு கேட்டால் (weld neck ends, ASME cover, flanged drain, vent, வேறு perforated sheet அல்லது mesh), அந்த Sl No-இன் BOM lines மட்டும் இங்கே மாற்றப்படும். Flange, stud, gasket, drain lines ஒன்றாக மாறுவதால் cost தவறாது."}, {"type": "steps", "items": ["Flanged ends உள்ள புதிய strainer Sl No: Order Quantity window-இல் Connections & Element — required வரும். Set அழுத்தி, ஒவ்வொரு flange-ஐயும் தேர்வு செய்து, என்ன மாறுகிறது என்று பார்த்து, Confirm connections. இது முடியும் வரை Confirm & Save வேலை செய்யாது.", "Screwed, socket-weld strainers-க்கு flange lines இல்லை; அவற்றுக்கு இந்த form கட்டாயமில்லை.", "ஏற்கனவே உள்ள quote அல்லது contract Sl No: Options & Testing → Connections. மாற்றி Confirm connections; lines உடனே மாறும்."]}, {"type": "bullets", "items": ["ஒவ்வொரு flange line-க்கும் (inlet / outlet, body flange, cover) spec master-இல் உள்ள எல்லா flanges-உம் BOM format-இல் பட்டியலாக வரும், உதா. Flange-450nb-ANSI B16.5 150 LBS-WNRF. Master-இல் இல்லாத spec சிவப்பில் காட்டும்.", "Cover studs, nuts, washers Flange Chart-இலிருந்து மீண்டும் கணக்கிடப்படும் (எண்ணிக்கை, size, 5 mm-க்கு round up செய்த நீளம், kg); cover gasket area flange OD-இலிருந்து. Spiral wound gasket 1 Nos ஆகும்.", "Drain / Vent: As in BOM, அல்லது Flanged — coupling, plug-க்குப் பதிலாக pipe stub, flange, blind, gasket, studs, nuts.", "Perforated sheet, mesh: spec-ஐத் தேர்வு செய்யுங்கள்; quantity மாறாது.", "புதிய / மாறிய lines Material Rates-இலிருந்து (spec + grade) விலை பெறும். Rate இல்லாதவை, master-இல் இல்லாத spec, Flange Chart-இல் இல்லாத flange (BS 10, B16.47 Series B, DIN) மஞ்சளில் பட்டியலிடப்படும் — அவற்றைக் கையால் சரிபாருங்கள்.", "Datasheet-இன் Inlet / Outlet Connection, Cover Standard, Drain / Vent, filter element sizes lines-ஐப் பின்பற்றும்."]}, {"type": "p", "text": "தேர்வுகள் Sl No-இல் வைக்கப்படும். அதே model-உடன் Estimator-இலிருந்து re-save, Refresh BOM இரண்டும் அவற்றை மீண்டும் போடும். Model மாறினால் அவை நீக்கப்பட்டு Sl No-க்கு “Connections must be set again” flag வரும். Cover flange மாறி Sl No-இல் davit arm இருந்தால், புதிய cover-க்கு davit மீண்டும் உருவாக்கப்படும்."}, {"type": "tip", "text": "எந்த BOM line எது (inlet flange, cover bolting, drain...) என்பது Setup → Connections: BOM line roles-இலிருந்து. Lines வேறு பெயரில் உள்ள model-க்கு அங்கே ஒரு row தேவை."}], "en_sig": "299d4a11"},
+ "connections_element": {"title": "Connections, perforated sheet & mesh: strainer Sl No-இல் inlet, outlet, cover, drain, vent, filter specs", "tag": "Estimator / Quotes", "blocks": [{"type": "p", "text": "Model BOM masters அப்படியே இருக்கும்: slip-on end flanges, BS 10 Table E cover. Customer கேட்பது (weld neck ends, ASME cover, flanged drain, vent, perforated sheet, mesh) ஒவ்வொரு Sl No-இலும் அமைக்கப்படும்; அந்த Sl No-இன் BOM lines மட்டும் மாறும். Flange, stud, gasket, drain lines ஒன்றாக மாறுவதால் cost தவறாது. இரண்டு forms உள்ளன: Connections, Perforated sheet & mesh."}, {"type": "steps", "items": ["புதிய strainer Sl No: Order Quantity window-இல் இரண்டு rows — Connections (BOM-இல் flange lines இருந்தால்), Perforated sheet & mesh. ஒவ்வொன்றிலும் Set அழுத்தவும்.", "இரண்டு forms-உம் காலியாகத் திறக்கும். Connections-இல் ஒவ்வொரு flange, cover gasket, drain, vent-ஐத் தேர்வு செய்யுங்கள்; மற்றதில் perforated sheet, mesh-ஐத் தேர்வு செய்யுங்கள். BOM-இலிருந்து எதுவும் தானாக வராது, அதனால் எதுவும் கவனிக்காமல் விடப்படாது.", "இரண்டும் confirm ஆகும் வரை Confirm & Save (Enter-உம்) வேலை செய்யாது. ஒவ்வொரு form-உம் இன்னும் நிரப்ப வேண்டியவற்றைக் காட்டும்.", "Screwed, socket-weld strainers-க்கு flange lines இல்லை; cast bodies-இல் end flanges casting-இன் பகுதி: அவற்றுக்கு Connections தேவையில்லை.", "ஏற்கனவே உள்ள quote அல்லது contract Sl No: Options & Testing → Connections, அல்லது → Perforated sheet & mesh. எதுவும் சேமிக்காத Sl No காலியாகத் திறக்கும்; confirm செய்தபின் அடுத்த முறை தேர்வுகள் மீண்டும் வரும்."]}, {"type": "bullets", "items": ["ஒவ்வொரு flange line-க்கும் (inlet / outlet, body flange, cover) spec master-இல் உள்ள எல்லா flanges-உம் BOM format-இல் பட்டியலாக வரும், உதா. Flange-450nb-ANSI B16.5 150 LBS-WNRF. Master-இல் இல்லாத spec சிவப்பில் காட்டும். Model-இன் spec பக்கத்தில் குறிப்புக்காகக் காட்டப்படும்.", "Cover studs, nuts, washers Flange Chart-இலிருந்து மீண்டும் கணக்கிடப்படும் (எண்ணிக்கை, size, 5 mm-க்கு round up செய்த நீளம், kg); cover gasket area flange OD-இலிருந்து. Spiral wound gasket 1 Nos ஆகும்.", "Drain / Vent: As in BOM, அல்லது Flanged — coupling, plug-க்குப் பதிலாக pipe stub, flange, blind, gasket, studs, nuts.", "Perforated sheet, mesh: இரண்டையும் spec master-இலிருந்து தேர்வு செய்யுங்கள்; quantity மாறாது. Mesh None ஆகலாம் (mesh line நீக்கப்படும்). Model-இல் mesh இல்லாதபோது mesh தேர்வு செய்தால், perforated sheet-இன் area, grade-உடன் புதிய line சேர்க்கப்படும் — அந்த line-ஐச் சரிபாருங்கள்.", "புதிய / மாறிய lines Material Rates-இலிருந்து (spec + grade) விலை பெறும். Rate இல்லாதவை, master-இல் இல்லாத spec, Flange Chart-இல் இல்லாத flange (BS 10, B16.47 Series B, DIN) மஞ்சளில் பட்டியலிடப்படும் — அவற்றைக் கையால் சரிபாருங்கள்.", "Datasheet-இன் Inlet / Outlet Connection, Cover Standard, Drain / Vent, filter element sizes lines-ஐப் பின்பற்றும்."]}, {"type": "p", "text": "தேர்வுகள் Sl No-இல் வைக்கப்படும். அதே model-உடன் Estimator-இலிருந்து re-save, Refresh BOM இரண்டும் அவற்றை மீண்டும் போடும். Model மாறினால் அவை நீக்கப்பட்டு Sl No-க்கு “Connections must be set again” flag வரும். Cover flange மாறி Sl No-இல் davit arm இருந்தால், புதிய cover-க்கு davit மீண்டும் உருவாக்கப்படும்."}, {"type": "tip", "text": "எந்த BOM line எது (inlet flange, cover bolting, drain...) என்பது Setup → Connections: BOM line roles-இலிருந்து. Lines வேறு பெயரில் உள்ள model-க்கு அங்கே ஒரு row தேவை. Perforated sheet, mesh lines அவற்றின் spec-ஆலும் (Perforated…, Mesh…) கண்டுபிடிக்கப்படும்."}], "en_sig": "c641107d"},
  "davit_arm": {"title": "Davit Arm: ஒவ்வொரு strainer Sl No-க்கும் ஒரு option, Davit Arm Design Generator", "tag": "Engineering Calc", "blocks": [{"type": "p", "text": "Davit arm ஒருபோதும் model அல்ல. அது Sl No-இல் கேட்கப்படும் ஒரு பதில்: Not Required, Required — lifts the cover (bolted cover), அல்லது Required — lifts the basket only (hinged cover). தேவை என்றால் app அந்த Sl No-இன் BOM-இல் Davit Arm component-ஐச் சேர்க்கும் — mast & arm, socket, guide brackets, gussets, reinforcing pads, lifting screw, nut, handwheel, anchor bar, lifting lug, locking pin — மற்ற lines போலவே Material Rates-இலிருந்து விலை."}, {"type": "steps", "items": ["புதிய strainer Sl No: Order Quantity window-இல் Davit arm கேட்கப்படும். பதிலைத் தேர்வு செய்து Confirm & Save.", "ஏற்கனவே உள்ள Sl No (quote அல்லது contract): Sl No-ஐத் திறந்து Options & Testing → Davit Arm. பதிலைத் தேர்வு செய்து Apply.", "Davit அந்த Sl No-இன் Cover Flange line-இலிருந்து (standard, rating, cover size) கண்டுபிடிக்கப்படும். Flange cover line இல்லையென்றால் line size-ஐயும் model-இல் உள்ள rating-ஐயும் எடுத்துக்கொண்டு அதைச் சொல்லும்.", "Datasheet-இல் Accessories & Options கீழ் Davit Arm — Included in Price அல்லது Not Required. இது Sl No-ஐத் தானே பின்பற்றும்; type செய்ய வேண்டாம்."]}, {"type": "p", "text": "Davit அந்த Sl No-இன் model, line size-க்கு எதிராகப் பதிவு செய்யப்படும். Estimator-இலிருந்து அதே model, size, cover-உடன் மீண்டும் save செய்தால், davit lines கை மாற்றங்களுடன் அப்படியே திரும்ப வைக்கப்படும். மூன்றில் ஏதாவது மாறியிருந்தால், davit lines master-இலிருந்து மீண்டும் உருவாக்கப்படும், பழையவை revision history-இல் வைக்கப்படும், Sl No-க்கு “Davit lines regenerated - check” flag வரும். பார்த்து முடித்ததும் Options & Testing → Davit Arm-இல் Checked — clear flag அழுத்தவும்."}, {"type": "h3", "text": "Davit Arm Design Generator"}, {"type": "p", "text": "இரண்டு வழிகள்: Engineering Calc → Davit Arm Design Generator (தனிக் கணக்கு, அல்லது number type செய்து quote / contract Sl No-உடன் இணைத்து), மற்றும் எந்த Sl No-இலும் Options & Testing → Davit Arm → Open Davit Arm Design Generator — அது அந்த Sl No-உடன் இணைந்து, விவரங்கள் நிரப்பப்பட்டுத் திறக்கும்."}, {"type": "bullets", "items": ["அடிப்படை: ASME BTH-1 Design Category A, yield மீது design factor 2.0 (A106 Gr B, 240 MPa), cover-க்கு load factor 1.15, basket-க்கு 1.25, proof load = 1.25 x safe working load.", "Arm-உம் mast-உம் ஒரே வளைத்த pipe: moment = load x reach. கணக்குடன் காட்டப்படும் checks: pipe stress, tip deflection, socket bearing, gussets, welds, reinforcing pads, lifting screw, thread, anchor bar, lifting lug, locking pin.", "10 kN-க்கு மேல் bracket force இருந்தால் local shell stress check (WRC 537) என flag செய்யப்படும்.", "Generate PDF தேர்ந்தெடுத்த company letterhead-இல் கணக்கை அச்சிடும். Save calculation அதை DAVC-26-0001 என number செய்து அதன் link-உடன் வைக்கும்."]}, {"type": "p", "text": "Save to master (Admin, Super Admin, Technical Head) design-ஐயும் அதன் BOM lines-ஐயும் davit code-இன் கீழ் master-இல் எழுதும் — உதாரணம் DAV-B16.5-CL150-450nb-C (cover தூக்கும்) அல்லது DAV-800nb-B (basket தூக்கும்). Sl No-இலிருந்து Save to master & apply to this Sl No அந்த Sl No-இலும் புதிய lines-ஐ வைக்கும்."}, {"type": "tip", "text": "Masters Setup-இல் உள்ளன: Davit: Cover Weights, Davit: Designs, Davit: BOM lines. 150NB முதல் 1200NB வரை ASME B16.5, ASME B16.47 Series A, B, BS 10 Table E, AWWA C207-க்கு seed செய்யப்பட்டு, அனைத்தும் not validated எனக் குறிக்கப்பட்டுள்ளன. Engineering “Engineering check - Davit Arm masters” task card-இலிருந்து validate செய்யும்."}], "en_sig": "7500703d"},
  "doc_board_lanes": {"title":"Document Control: stage lists, By contract lanes ஆக","tag":"Order Status","blocks":[{"type":"p","text":"Board-இன் lists, இடமிருந்து வலம்: Status to confirm · Initial submission pending · Code 3 — resubmit · Submitted — awaiting code · Code 2 — production clear · Code 2 — production hold · Code 1 — all approved · Code 1 — submitted for info · Non Critical."},{"type":"bullets","items":["Initial submission pending: கேட்கப்பட்டு இதுவரை அனுப்பப்படாதவை. Code 3 — resubmit: client comments-உடன் திருப்பி அனுப்பியவை. அனுப்பியதும் அல்லது Code 3 reply பதிந்ததும் card தானாக நகரும்.","By contract: ஒவ்வொரு live contract-க்கும் ஒரு band. இடதுபுறம்: contract, work order, despatch நிலை, எத்தனை documents approved, Full Hold எண்ணிக்கை, ஒவ்வொரு stage-க்கும் சிறிய எண்ணிக்கை. Stage lists band முழுவதும் வரிசையாக.","Hide empty lists — காட்டப்படும் bands-இல் எதுவும் இல்லாத lists மறையும். ▾ fold ஒரு contract-ஐ எண்ணிக்கைகளாகச் சுருக்கும்; Fold all / Open all அனைத்துக்கும். Task cards tick செய்தால் contract-இன் task cards கடைசி column-ஆக வரும்.","Show filter (உதா. Not clear — Full Hold open, Work order released) மற்ற filters எந்த bands காட்டப்படும் என்பதைத் தேர்வு செய்யும்.","Cards-ஐ முன்பு போலவே card-இலிருந்தே திறக்கலாம், அனுப்பலாம், reply பதியலாம். இழுத்து நகர்த்த By stage பயன்படுத்துங்கள்."]}],"en_sig":"17d03627"},
  "bill_po_footer_service": {"title":"Purchase bill: PO footer charges, Service POs","tag":"Accounts","blocks":[{"type":"p","text":"Accounts → Vouchers → Purchase, Against PO. PO value-இல் இப்போது PO footer-உம் சேரும் — FFS PO-வின் கீழே அச்சிடப்பட்ட transport, P&F, loading."},{"type":"bullets","items":["PO value, Left to bill இரண்டும் footer-ஐக் கணக்கிடும். உதா. SPO/0190: items 10,000 + transport 2,000 = GST-க்கு முன் 12,000 (GST உடன் 14,160).","Fill items from PO, item lines-உடன் PO footer charges என்ற ஒரு charge line-ஐ, footer-இல் இன்னும் bill செய்ய வேண்டிய தொகையுடன் கொண்டுவரும். இந்த bill ஒரு பகுதியை மட்டும் எடுத்தால் தொகையை மாற்றுங்கள்; மீதி bill செய்ய இருக்கும். Charge-இன் ledger-ஐத் தேர்ந்தெடுங்கள் (உதா. Freight Inward).","Service PO-க்கு GRN இல்லை. PO-வில் மீதமுள்ளதுடன் lines நிரம்பும்; ஒவ்வொரு row-க்கும் காரணம் கேட்காது. PO-வை விட அதிகமான bill இன்னும் காரணம் கேட்கும், Purchase Manager-க்குத் தெரிவிக்கப்படும்.","\"row-level security\" என்று save மறுக்கப்பட்டால், admin Supabase-இல் fix_rls_new_tables_2026-10-24.sql run செய்து, மீண்டும் முயற்சிக்கவும்."]}],"en_sig":"bbfd96a6"},
@@ -33440,6 +33495,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"26 Oct 2026 (260)", summary:"Built on 2026-10-26T09:00:00Z, on top of 2026-10-26T08:30:00Z. No SQL. (1) MTC & AVL ERRORS: every message that says to run structure_mtc_avl_gateways_2026-10-23.sql (Sale Order MTC & AVL save and open, End User Rules, Contract Register save, a 3.1 & 3.2 PO) now also shows the database\u2019s own words: the message, its code, details, hint and which database (Flometriq and Levaflow are separate), and says when the cause is something else (a row-level security refusal is named as such, with fix_rls_new_tables_2026-10-24.sql). (2) PREVIEW DRAFT on a Sale Order (Output ribbon, and under the Generate Sale Order box): read and check the Order Acceptance before the approvals. The customer\u2019s PO must still be attached; approvals and the extra-price / document prompts are not asked. Every page prints DRAFT \u2013 NOT APPROVED with a red band (DRAFT PREVIEW \u2013 NOT APPROVED \u2013 NOT FOR ISSUE, date, user); there is no code to remove it, it does not offer to mark O.A Sent and it is not counted as a generated O.A. Generate Sale Order keeps all its gates." },
+  { date:"26 Oct 2026 (259)", summary:"Built on 2026-10-26T08:30:00Z, on top of 2026-10-25T19:00:00Z. No SQL. PERFORATED SHEET & MESH \u2014 now a separate form: its own row in the Order Quantity window and its own tab in Options & Testing (next to Connections). Both forms start BLANK on a Sl No with nothing saved: every flange, the cover gasket, drain / vent, perforated sheet and mesh are picked by the user; nothing is copied in from the BOM. Once confirmed they load back next time. Mandatory on a new strainer Sl No: Connections when it has flange lines, Perforated sheet & mesh when it has a perforated sheet or mesh line; Confirm & Save and Enter stay off until both are done, and the form lists what is still to fill. Mesh can be None (the mesh line is taken out); a mesh picked where the model has none is added with the perforated sheet\u2019s area and grade (flagged). Perforated sheet and mesh lines are found by their spec as well as by the sub-assembly name. Cast bodies (e.g. YCP) now say the ends are part of the casting instead of screwed / socket-weld. Choices saved before this build (offer SQL, 25 Oct) count as set. Davit: a successful Apply message is no longer shown in red." },
   { date:"25 Oct 2026 (258)", summary:"Built on 2026-10-25T19:00:00Z, on top of 2026-10-25T18:00:00Z. No SQL. QUOTE PDF \u2014 when the notes do not fit on the Commercial Terms page they go on their own page, ANNEXURE - IB NOTES. In the Classic frame that table started too high, so its Sl No / Note header and first row printed over the annexure title and frame line. It now starts below the title, the same as Commercial Terms." },
   { date:"25 Oct 2026 (257)", summary:"Built on 2026-10-25T18:00:00Z, on top of 2026-10-25T16:00:00Z. NEEDS SQL FIRST: Connections_Element_2026-10-25.sql (both databases, Flometriq and Levaflow). CONNECTIONS & ELEMENT \u2014 the model masters stay slip-on / BS 10 Table E; only the quote BOM changes. A new flanged strainer Sl No cannot be saved from the Order Quantity window until its connections are confirmed (screwed / socket-weld ends: optional). Each flange line (inlet / outlet, body, cover) picks from every flange in the spec master, in the BOM format. Cover studs, nuts, washers are recalculated from the Flange Chart (count, size, length, kg) and the cover gasket from the flange OD (spiral wound = 1 Nos); drain / vent can be made flanged (pipe stub, flange, blind, gasket, studs, nuts); perforated sheet and mesh specs can be changed. Changed and new lines are priced from Material Rates; missing specs, missing rates and flanges the chart does not cover are listed. Choices kept on the Sl No (estimates.conn_choices): applied again after an Estimator re-save with the same model and after Refresh BOM; a different model clears them and flags the Sl No. Existing Sl Nos: Options & Testing \u2192 Connections. Datasheet Inlet / Outlet Connection, Cover Standard, Drain / Vent, filter element sizes follow the lines. A cover change remakes the davit arm. Setup: Connections: BOM line roles." },
   { date:"25 Oct 2026 (256)", summary:"Built on 2026-10-25T16:00:00Z, on top of 2026-10-25T08:30:00Z. NEEDS SQL FIRST: Davit_Arm_Masters_2026-10-25.sql on the Flometriq database, Davit_Arm_Masters_Levaflow_2026-10-25.sql on the Levaflow database. DAVIT ARM \u2014 AN OPTION ON EVERY STRAINER SL NO, NEVER A MODEL: the Order Quantity window of a new strainer Sl No asks Davit arm (Not Required / lifts the cover / lifts the basket); existing Sl Nos of quotes and contracts get Options & Testing \u2192 Davit Arm. The davit is found from the Sl No\u2019s Cover Flange line (standard, rating, cover size) in davit_master_tbl and its lines (component Davit Arm, 12 sub-assemblies) come from davit_bom_tbl, priced from Material Rates. Recorded against the Sl No\u2019s model and line size: an Estimator re-save with the same model, size and cover keeps the davit lines as they were (hand edits included); otherwise they are regenerated, the old lines go to revision history and the Sl No is flagged. Refresh BOM leaves davit lines alone. Datasheet: Davit Arm \u2014 Included in Price / Not Required under Accessories & Options, following the Sl No. DAVIT ARM DESIGN GENERATOR (Engineering Calc, and from any Sl No): ASME BTH-1 Cat A, arm/mast pipe, deflection, socket bearing, gussets, welds, pads (WRC 537 flag above 10 kN), lifting screw, anchor bar, lug, locking pin, proof load; PDF, saved calculations DAVC-YY-NNNN (free or linked to a quote / contract Sl No), Save to master (admin, super admin, technical head). Setup masters: Davit: Cover Weights / Designs / BOM lines. BFP models count as Fabricated." },
@@ -41055,6 +41112,24 @@ const AVL_OPTS = ["As per AVL","Any vendor"];
 const AVL_LINE_OPTS = ["As per AVL attached","Any vendor"];
 const AVL_GRACE_DAYS = 3;
 const MTC_SQL = "structure_mtc_avl_gateways_2026-10-23.sql";
+// 260: the database's own words with every MTC / AVL "run the SQL" message, so a
+// wrong guess can be seen for what it is (which table / column, code, database).
+function dbErrDetail(e){
+  if(!e) return "";
+  const p=[String(e.message||e)];
+  if(e.code) p.push("code "+e.code);
+  if(e.details) p.push(String(e.details));
+  if(e.hint) p.push("hint: "+e.hint);
+  let db=""; try{ db=String(SUPABASE_URL||"").replace(/^https?:\/\//,"").split(".")[0]; }catch(x){}
+  return "Database said: "+p.join(" · ")+(db?" [database "+db+"]":"");
+}
+function mtcErrMsg(e, what){
+  try{ console.error("MTC / AVL "+(what||"save")+" failed", e); }catch(x){}
+  const t=String((e&&(e.message||e))||"")+" "+String((e&&e.code)||"");
+  if(/row-level security|42501/i.test(t)) return "The database refused this: row-level security is on for the table. Run fix_rls_new_tables_2026-10-24.sql on this company (if this table is not in it, tell the app admin). "+dbErrDetail(e);
+  return (mtcNoSql(e) ? "Looks like "+MTC_SQL+" is not in this database yet (Flometriq and Levaflow are separate — run it on each). If it was run in the last minute, wait and try again. "
+                      : "Could not "+(what||"save")+". ") + dbErrDetail(e);
+}
 const PUR_STAGE_REQ = "3.2 inspection release";
 const mtcNoSql = (e)=> !!e && /end_user_rules_tbl|contract_mtc_tbl|vendor_rule|avl_link|does not exist|schema cache|42P01|PGRST205/i.test(String((e && (e.message||e.code))||e));
 const mtcIs32 = (m)=> !!m && (m.type==="3.2" || m.type==="3.1 & 3.2");
@@ -41074,8 +41149,8 @@ let EU_RULES = { at:0, rows:[], nosql:false };
 async function euRulesLoad(force){
   if(!force && EU_RULES.at && Date.now()-EU_RULES.at<60000) return EU_RULES;
   try{ const { data, error } = await sb.from("end_user_rules_tbl").select("*").order("end_user");
-    EU_RULES = error ? { at:Date.now(), rows:[], nosql:mtcNoSql(error) } : { at:Date.now(), rows:(data||[]), nosql:false }; }
-  catch(e){ EU_RULES = { at:Date.now(), rows:[], nosql:true }; }
+    EU_RULES = error ? { at:Date.now(), rows:[], nosql:mtcNoSql(error), err:error } : { at:Date.now(), rows:(data||[]), nosql:false }; }
+  catch(e){ EU_RULES = { at:Date.now(), rows:[], nosql:true, err:e }; }
   return EU_RULES;
 }
 const euNorm = (s)=> String(s||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
@@ -41101,7 +41176,7 @@ async function mtcContext(cn){
     sb.from("estimates").select("end_user_name,item_sl_no").eq("reference_number",cn).order("item_sl_no").limit(1).then(r=>((r && r.data)||[])[0]||null, ()=>null),
     sb.from("contract_mtc_tbl").select("*").eq("contract_number",cn).maybeSingle().then(r=> r && r.error ? { __err:r.error } : ((r && r.data)||null), e=>({ __err:e })),
     euRulesLoad() ]);
-  out.cr = cr; out.cm = cm && cm.__err ? null : cm; out.nosql = !!R.nosql || !!(cm && cm.__err && mtcNoSql(cm.__err)); out.rules = R.rows||[];
+  out.cr = cr; out.cm = cm && cm.__err ? null : cm; out.nosql = !!R.nosql || !!(cm && cm.__err && mtcNoSql(cm.__err)); out.nosqlErr = (cm && cm.__err) || R.err || null; out.rules = R.rows||[];
   out.endUser = (cr && cr.end_user) || (est && est.end_user_name) || (out.cm && out.cm.end_user) || "";
   out.rule = euRuleFor(out.endUser, out.rules);
   out.mtc = (out.cm && out.cm.mtc) || (cr && cr.material_cert) || (out.rule && out.rule.default_mtc) || "";
@@ -41230,7 +41305,7 @@ function SoMtcAvlChip({ contractInfo, user, onChanged }){
     tone = miss ? (left>0 ? "warn" : "bad") : "ok"; }
   const t = MTC_TONE[tone];
   return h("span",{style:{display:"inline-flex"}},
-    h("button",{"data-testid":"so-mtc-avl",onClick:()=>{ if(ctx.nosql){ alert("MTC & AVL needs "+MTC_SQL+" (both companies)."); return; } setOpen(true); },
+    h("button",{"data-testid":"so-mtc-avl",onClick:()=>{ if(ctx.nosql){ alert("MTC & AVL can't open.\n\n"+mtcErrMsg(ctx.nosqlErr, "open MTC & AVL")); return; } setOpen(true); },
       title:"MTC and vendor (AVL) for each component — the Technical Head fills it; Everything else is approved after it",
       style:{...btnSmall,fontSize:11,padding:"3px 9px",background:t[0],color:t[1],borderColor:t[1],fontWeight:700}}, label),
     open ? h(SoMtcAvlDialog,{ ctx, cn, user, can, onClose:()=>setOpen(false), onSaved:async()=>{ setOpen(false); await load(); onChanged && onChanged(); } }) : null);
@@ -41289,7 +41364,7 @@ function SoMtcAvlDialog({ ctx, cn, user, can, onClose, onSaved }){
         avl_owner: need && !link ? (waiting && cm.avl_owner ? cm.avl_owner : (me||user.username)) : null,
         avl_owner_user: need && !link ? (waiting && cm.avl_owner_user ? cm.avl_owner_user : user.username) : null };
       const { error } = await sb.from("contract_mtc_tbl").upsert(row,{ onConflict:"contract_number" });
-      if(error){ setErr(mtcNoSql(error) ? "Run "+MTC_SQL+" first (both companies)." : "Could not save: "+error.message); return; }
+      if(error){ setErr(mtcErrMsg(error, "save MTC & AVL")); return; }
       const ch = [];
       if(String(cm.mtc||"")!==d.mtc) ch.push("MTC "+(cm.mtc||"—")+" → "+d.mtc);
       if(String(cm.vendor_rule||"")!==d.vendor) ch.push("Vendor "+(cm.vendor_rule||"—")+" → "+d.vendor);
@@ -41379,7 +41454,7 @@ function EndUserRulesScreen({ user }){
   const th = { textAlign:"left", padding:"6px 8px", fontSize:11, color:"#4c6a61", background:"#eef6f3", borderBottom:"2px solid #0f7a5c", whiteSpace:"nowrap" };
   const td = { padding:"6px 8px", borderBottom:"1px solid "+colors.border, fontSize:12.5, verticalAlign:"top" };
   if(!R) return h("div",{style:{padding:16}},"Loading…");
-  if(R.nosql) return h("div",{style:{padding:16,maxWidth:760}}, h("h3",null,"End User Rules"), mtcMsgBox({ tone:"warn", text:"Run "+MTC_SQL+" (both companies) to set up End User Rules. Until then the app tells everyone “no rules” and carries on." }));
+  if(R.nosql) return h("div",{style:{padding:16,maxWidth:760}}, h("h3",null,"End User Rules"), mtcMsgBox({ tone:"warn", text:"End User Rules can't load. Until this is fixed the app tells everyone “no rules” and carries on. "+mtcErrMsg(R.err, "load End User Rules") }));
   const blank = { end_user:"", group_name:"", match_words:"", default_mtc:"", vendor_rule:"", avl_link:"", stages:[], notes:"", active:true };
   const rows = R.rows.filter(r=>!q || euNorm([r.end_user,r.group_name,r.match_words].join(" ")).includes(euNorm(q)));
   const save = async()=>{
@@ -49298,7 +49373,7 @@ function DavitSlPanel({ user, refNo, slNo, mode, lines, locked, onChanged }){
         h("option",{value:"Lifts basket"},"Required — lifts the basket only (hinged cover)")),
       h("button",{onClick:apply,disabled:busy,style:{...btnPrimary,padding:"7px 14px",fontSize:12.5}},busy?"Working…":"Apply")),
     locked && h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:6}},locked),
-    msg && h("div",{style:{fontSize:11.5,color:/fail|no davit|not /i.test(msg)?colors.danger:"#0f6e56",marginBottom:8}},msg),
+    msg && h("div",{style:{fontSize:11.5,color:/^Failed|^No davit|NOT /.test(msg)?colors.danger:"#0f6e56",marginBottom:8}},msg),
     h("div",{style:{fontSize:11,color:colors.muted,borderTop:"1px solid "+colors.border,paddingTop:8,marginTop:6}},
       "The davit is found from this Sl No’s Cover Flange line and recorded against its model and line size. Its lines (component Davit Arm) are priced like any BOM line and can be edited; if the model, size or cover changes on a re-save, they are regenerated and the Sl No is flagged. The datasheet shows Davit Arm — Included in Price / Not Required under Accessories & Options."),
     h("button",{onClick:()=>setShowCalc(true),style:{...btnSmall,marginTop:10}},"📐 Open Davit Arm Design Generator for this Sl No"),
@@ -49318,8 +49393,9 @@ function DavitSlPanel({ user, refNo, slNo, mode, lines, locked, onChanged }){
    spec from every flange in the spec master (same "Flange-450nb-ANSI B16.5
    150 LBS-WNRF" format as the BOM), the cover bolting and gasket follow the
    cover flange, the drain / vent can be made flanged, and the perforated
-   sheet / mesh specs can be changed. Mandatory on a new flanged strainer Sl
-   No (Order Quantity window); screwed / socket-weld ends never need it.
+   sheet / mesh specs can be changed. 26 Oct 2026: perforated sheet & mesh
+   are a separate form / tab, both forms start blank and are mandatory on a
+   new strainer Sl No (connections only when it has flange lines).
    Choices are kept on the Sl No (estimates.conn_choices) and applied again
    after a re-save or Refresh BOM. */
 const CONN_SQL_MSG = "Connections & Element needs its SQL first (Connections_Element_2026-10-25.sql).";
@@ -49346,7 +49422,12 @@ function connRoleOf(l, roles){
   const exact = list.find(r=>connNorm(r.sub_assembly)===s && connNorm(r.component)===c);
   if(exact) return exact.role;
   const any = list.find(r=>connNorm(r.sub_assembly)===s && (r.component==="*"||!r.component));
-  return any ? any.role : null;
+  if(any) return any.role;
+  // 258: element lines found by their spec too, whatever the sub-assembly is called
+  const sp=String(l.material_spec||"").trim();
+  if(/^perforated/i.test(sp)) return "perforated";
+  if(/^mesh\b/i.test(sp)) return "mesh";
+  return null;
 }
 function connIsFlangeSpec(spec){ return /^flange\s*-/i.test(String(spec||"").trim()); }
 // A Sl No is "flanged" when its inlet / outlet are flange lines. Screwed and
@@ -49354,6 +49435,15 @@ function connIsFlangeSpec(spec){ return /^flange\s*-/i.test(String(spec||"").tri
 function connIsFlanged(lines, roles){
   return (lines||[]).some(l=>connRoleOf(l,roles)==="end_flange" && connIsFlangeSpec(l.material_spec));
 }
+// 258 helpers
+const CONN_NONE = "None";
+function connIsCast(lines){ return (lines||[]).some(l=>/casting/i.test(String(l.material_spec||"")+" "+String(l.material_shape||"")) && /body|cover/i.test(String(l.component||"")+" "+String(l.sub_assembly||""))); }
+// A saved choice counts as set when it says so; older ones (offer SQL, build 18:00) by "confirmed".
+function connHasConn(ch){ return !!ch && (ch.connSet===true || (ch.connSet===undefined && ch.confirmed===true)); }
+function connHasElem(ch){ return !!ch && (ch.elemSet===true || (ch.elemSet===undefined && ch.confirmed===true && !!(ch.perforated||ch.mesh))); }
+function connPartConn(ch){ if(!ch) return null; return { flanges:ch.flanges||{}, gasket:ch.gasket||"", drain:ch.drain||{mode:"",spec:""}, vent:ch.vent||{mode:"",spec:""} }; }
+function connPartElem(ch){ if(!ch) return null; return { perforated:ch.perforated||"", mesh:ch.mesh||"" }; }
+function connElemNeeded(lines, roles){ return (lines||[]).some(l=>{ const r=connRoleOf(l,roles); return r==="perforated"||r==="mesh"; }); }
 const CONN_NB_NPS = {15:"1/2",20:"3/4",25:"1",32:"1-1/4",40:"1-1/2",50:"2",65:"2-1/2",80:"3",90:"3-1/2",100:"4",125:"5",150:"6",200:"8",250:"10",300:"12",350:"14",400:"16",450:"18",500:"20",550:"22",600:"24"};
 const CONN_INCH = {15:'1/2"',20:'3/4"',25:'1"',32:'1-1/4"',40:'1-1/2"',50:'2"',65:'2-1/2"',80:'3"',100:'4"'};
 function connParseFlange(spec){
@@ -49498,6 +49588,7 @@ function connTransform(lines, choices, ctx){
   (lines||[]).forEach((l,i)=>{
     const role=connRoleOf(l,ctx.roles); const k=keys[i];
     if((role==="drain" && drainOn) || (role==="vent" && ventOn)){ removed.push(l); return; }
+    if(role==="mesh" && ch.mesh && connNorm(ch.mesh)===connNorm(CONN_NONE)){ removed.push(l); return; }
     let n={...l}; const before=l.material_spec;
     if(connIsFlangeSpec(l.material_spec) && role!=="drain" && role!=="vent" && ch.flanges && ch.flanges[k] && connNorm(ch.flanges[k])!==connNorm(l.material_spec)){
       n.material_spec=ch.flanges[k]; n.material_shape="Flange";
@@ -49506,7 +49597,7 @@ function connTransform(lines, choices, ctx){
     }
     if(role==="cover_gasket" && ch.gasket && connNorm(ch.gasket)!==connNorm(l.material_spec)){ n.material_spec=ch.gasket; n.material_shape="Gasket"; coverChanged=true; }
     if(role==="perforated" && ch.perforated && connNorm(ch.perforated)!==connNorm(l.material_spec)){ n.material_spec=ch.perforated; }
-    if(role==="mesh" && ch.mesh && connNorm(ch.mesh)!==connNorm(l.material_spec)){ n.material_spec=ch.mesh; }
+    if(role==="mesh" && ch.mesh && connNorm(ch.mesh)!==connNorm(CONN_NONE) && connNorm(ch.mesh)!==connNorm(l.material_spec)){ n.material_spec=ch.mesh; }
     if(role==="cover_flange" && connIsFlangeSpec(n.material_spec)) coverSpec=n.material_spec;
     if(role==="body_flange" && connIsFlangeSpec(n.material_spec)) bodySpec=n.material_spec;
     if(role==="cover_gasket") gasketSpec=n.material_spec;
@@ -49562,6 +49653,12 @@ function connTransform(lines, choices, ctx){
   };
   if(drainOn) nozzle("Drain", ch.drain.spec).forEach(r=>{ out.push(r); added.push(r); });
   if(ventOn) nozzle("Vent", ch.vent.spec).forEach(r=>{ out.push(r); added.push(r); });
+  // a mesh picked where the model has none: added with the perforated sheet's area and grade
+  if(ch.mesh && connNorm(ch.mesh)!==connNorm(CONN_NONE) && !(lines||[]).some(l=>connRoleOf(l,ctx.roles)==="mesh")){
+    const perf=(lines||[]).find(l=>connRoleOf(l,ctx.roles)==="perforated");
+    if(perf){ const r={...connStrip(perf), material_spec:ch.mesh, material_shape:"Mesh", sub_assembly:"Inner Filter Element", rate:0, cost:0, sales_price:0, __connRole:"mesh", __added:true, __note:"same area as the perforated sheet"};
+      out.push(r); added.push(r); flags.push("Mesh line added with the perforated sheet's area and grade ("+(perf.grade||"no grade")+") — check both."); }
+  }
   out.forEach(l=>{
     if(l.__added) return;
     const orig=(lines||[])[keys.indexOf(l.__connKey)]||{};
@@ -49621,6 +49718,8 @@ function connSummary(ch){
   if(ch.drain&&ch.drain.mode==="flanged") parts.push("drain "+String(ch.drain.spec).replace(/^flange\s*-\s*/i,""));
   if(ch.vent&&ch.vent.mode==="flanged") parts.push("vent "+String(ch.vent.spec).replace(/^flange\s*-\s*/i,""));
   if(ch.gasket) parts.push(ch.gasket);
+  if(ch.perforated) parts.push(ch.perforated);
+  if(ch.mesh) parts.push(connNorm(ch.mesh)==="none"?"no mesh":ch.mesh);
   return parts.join(" · ");
 }
 // Writes a result onto a saved Sl No: changed lines updated in place, removed
@@ -49685,76 +49784,132 @@ async function connRestoreAfterResave({ ref, slNo, stash, model, user }){
   return { message:r.message };
 }
 
-// The form. Works on any list of lines (the Order Quantity cart, or a saved Sl No).
+// The forms. Both start BLANK on a Sl No that has no saved choice (26 Oct 2026):
+// every field is picked by the user, nothing is copied in from the BOM. A saved
+// choice is loaded back next time. Connections (flanges, cover gasket, drain,
+// vent) and Element (perforated sheet, mesh) are separate forms and separate
+// tabs, but both live in estimates.conn_choices (connSet / elemSet).
+function connBlankConn(lines){
+  const keys=connKeys(lines), flanges={};
+  (lines||[]).forEach((l,i)=>{ if(connIsFlangeSpec(l.material_spec)) flanges[keys[i]]=""; });
+  return { flanges, gasket:"", drain:{mode:"",spec:""}, vent:{mode:"",spec:""} };
+}
+function connTh(t){ return h("th",{style:{textAlign:"left",fontSize:10.5,color:colors.mutedLight,fontWeight:600,padding:"4px 6px",borderBottom:"1px solid "+colors.border}},t); }
+function connTd(c,st){ return h("td",{style:{fontSize:12,padding:"5px 6px",borderBottom:"1px solid "+colors.border,verticalAlign:"middle",...(st||{})}},c); }
+function connSec(t){ return h("div",{style:{fontSize:12.5,fontWeight:700,margin:"14px 0 6px"}},t); }
+// "What changes in the BOM" + the yellow points, shared by both forms.
+function connChangesView(res){
+  return h(React.Fragment,null,
+    connSec("What changes in the BOM"),
+    (res.changes.length+res.added.length+res.removed.length)===0 ? h("div",{style:{fontSize:12,color:colors.mutedLight}},"No change yet — the BOM stays as it is.") :
+      h("table",{style:{width:"100%",borderCollapse:"collapse"}},
+        h("thead",null,h("tr",null,connTh("Line"),connTh("From"),connTh("To"),connTh(""))),
+        h("tbody",null,
+          res.changes.map((c,i)=>h("tr",{key:"c"+i}, connTd(c.line.sub_assembly), connTd((c.from.material_spec||"")+" · "+(c.from.qty_required||"")+" "+(c.from.uom||""),{color:colors.muted,fontSize:11.5}), connTd(c.line.material_spec+" · "+c.line.qty_required+" "+(c.line.uom||""),{fontSize:11.5}), connTd(c.line.__note||"",{fontSize:10.5,color:colors.mutedLight}))),
+          res.removed.map((l,i)=>h("tr",{key:"r"+i}, connTd(l.sub_assembly), connTd(l.material_spec,{color:colors.muted,fontSize:11.5}), connTd("removed",{color:colors.danger,fontSize:11.5}), connTd(""))),
+          res.added.map((l,i)=>h("tr",{key:"a"+i}, connTd(l.sub_assembly), connTd("new",{color:"#0f6e56",fontSize:11.5}), connTd(l.material_spec+" · "+l.qty_required+" "+l.uom,{fontSize:11.5}), connTd(l.__note||"",{fontSize:10.5,color:colors.mutedLight}))))),
+    res.flags.length>0 && h("div",{style:{background:"#fff4d6",border:"1px solid #e0c48a",color:"#854f0b",borderRadius:6,padding:"7px 10px",fontSize:11.5,marginTop:10}}, res.flags.map((f,i)=>h("div",{key:i},"⚠ "+f))));
+}
 function ConnectionsEditor({ lines, title, initial, required, busyText, onApply, onCancel }){
   const [ctx,setCtx]=useState(CONN_CTX);
   const [ch,setCh]=useState(null);
   const [def,setDef]=useState(null);
   const [err,setErr]=useState("");
-  useEffect(()=>{ let off=false; connLoadCtx().then(c=>{ if(off) return; setCtx(c); const d=connDefaults(lines,c); setDef(d); setCh(initial ? {...d, ...initial, flanges:{...d.flanges, ...(initial.flanges||{})}, drain:{...d.drain,...(initial.drain||{})}, vent:{...d.vent,...(initial.vent||{})}} : d); }).catch(e=>setErr(e.message)); return ()=>{ off=true; }; },[]);
+  useEffect(()=>{ let off=false; connLoadCtx().then(c=>{ if(off) return; setCtx(c); setDef(connDefaults(lines,c)); const b=connBlankConn(lines);
+    setCh(initial ? {...b, ...initial, flanges:{...b.flanges, ...(initial.flanges||{})}, drain:{...b.drain,...(initial.drain||{})}, vent:{...b.vent,...(initial.vent||{})}} : b); }).catch(e=>setErr(e.message)); return ()=>{ off=true; }; },[]);
   if(err) return h("div",{style:{color:colors.danger,fontSize:12}},err);
   if(!ctx||!ch||!def) return h("div",{style:{fontSize:12,color:colors.mutedLight,padding:20}},"Loading flange, bolt and spec masters…");
   const keys=connKeys(lines);
-  const res=connTransform(lines, ch, ctx);
-  // Red only for a NEW value that is not in the spec master; what the BOM already has is accepted.
+  const res=connTransform(lines, connPartConn(ch), ctx);
+  // Red only for a value that is not in the spec master (what the BOM already has is accepted).
   const bad = (s, cur)=>!!s && connNorm(s)!==connNorm(cur||"") && !ctx.specSet.has(connNorm(s));
-  const listId = n=>"conn-dl-"+n;
-  const dl = (n, arr)=>h("datalist",{id:listId(n)}, arr.map(s=>h("option",{key:s,value:s})));
-  const inp = (val, set, list, w, cur)=>h("input",{value:val||"", list:listId(list), onChange:e=>set(e.target.value), style:{...inputStyle,padding:"5px 7px",fontSize:12,width:w||"100%",boxSizing:"border-box",borderColor:bad(val,cur)?colors.danger:undefined}});
+  const inp = (val, set, list, w, cur, ph)=>h("input",{value:val||"", list:"conn-dl-"+list, placeholder:ph||"pick from the list…", onChange:e=>set(e.target.value), style:{...inputStyle,padding:"5px 7px",fontSize:12,width:w||"100%",boxSizing:"border-box",borderColor:bad(val,cur)?colors.danger:undefined}});
   const flangeRows=(lines||[]).map((l,i)=>({l,k:keys[i],role:connRoleOf(l,ctx.roles)})).filter(x=>connIsFlangeSpec(x.l.material_spec) && x.role!=="drain" && x.role!=="vent");
   const drainLines=(lines||[]).filter(l=>connRoleOf(l,ctx.roles)==="drain"), ventLines=(lines||[]).filter(l=>connRoleOf(l,ctx.roles)==="vent");
   const hasRole = r=>(lines||[]).some(l=>connRoleOf(l,ctx.roles)===r);
+  const showDrain = drainLines.length>0 || flangeRows.length>0, showVent = ventLines.length>0;
   const setF=(k,v)=>setCh({...ch, flanges:{...ch.flanges,[k]:v}});
-  const anyBad = flangeRows.some(x=>bad(ch.flanges[x.k], x.l.material_spec)) || bad(ch.gasket,def.gasket) || bad(ch.perforated,def.perforated) || bad(ch.mesh,def.mesh) ||
+  const anyBad = flangeRows.some(x=>bad(ch.flanges[x.k], x.l.material_spec)) || bad(ch.gasket,def.gasket) ||
     (ch.drain.mode==="flanged" && (!ch.drain.spec||bad(ch.drain.spec,def.drain.spec))) || (ch.vent.mode==="flanged" && (!ch.vent.spec||bad(ch.vent.spec,def.vent.spec)));
-  const th = t=>h("th",{style:{textAlign:"left",fontSize:10.5,color:colors.mutedLight,fontWeight:600,padding:"4px 6px",borderBottom:"1px solid "+colors.border}},t);
-  const td = (c,st)=>h("td",{style:{fontSize:12,padding:"5px 6px",borderBottom:"1px solid "+colors.border,verticalAlign:"middle",...(st||{})}},c);
-  const sec = t=>h("div",{style:{fontSize:12.5,fontWeight:700,margin:"14px 0 6px"}},t);
-  const nozzleRow=(label, key, cur)=>h("div",{style:{display:"flex",gap:10,alignItems:"center",marginBottom:6}},
+  const toFill = required ? [
+    ...flangeRows.filter(x=>!String(ch.flanges[x.k]||"").trim()).map(x=>x.l.sub_assembly),
+    ...(hasRole("cover_gasket") && !String(ch.gasket||"").trim() ? ["Cover gasket"] : []),
+    ...(showDrain && !ch.drain.mode ? ["Drain"] : []),
+    ...(showVent && !ch.vent.mode ? ["Vent"] : []) ] : [];
+  const nozzleRow=(label, key, cur)=>h("div",{style:{display:"flex",gap:10,alignItems:"center",marginBottom:6,flexWrap:"wrap"}},
     h("div",{style:{width:60,fontSize:12,fontWeight:600}},label),
-    h("label",{style:{fontSize:12,display:"flex",gap:4,alignItems:"center"}},h("input",{type:"radio",checked:ch[key].mode!=="flanged",onChange:()=>setCh({...ch,[key]:{...ch[key],mode:"asBom"}})}),"As in BOM: "+(cur.map(l=>l.material_spec).join(" + ")||"none")),
+    h("label",{style:{fontSize:12,display:"flex",gap:4,alignItems:"center"}},h("input",{type:"radio",checked:ch[key].mode==="asBom",onChange:()=>setCh({...ch,[key]:{...ch[key],mode:"asBom"}})}),"As in BOM: "+(cur.map(l=>l.material_spec).join(" + ")||"none")),
     h("label",{style:{fontSize:12,display:"flex",gap:4,alignItems:"center"}},h("input",{type:"radio",checked:ch[key].mode==="flanged",onChange:()=>setCh({...ch,[key]:{...ch[key],mode:"flanged"}})}),"Flanged:"),
     ch[key].mode==="flanged" && inp(ch[key].spec, v=>setCh({...ch,[key]:{...ch[key],spec:v}}), "flange", 360, def[key].spec));
+  const cast = !flangeRows.length && connIsCast(lines);
   return h("div",null,
-    dl("flange",ctx.flangeSpecs), dl("gasket",ctx.gasketSpecs), dl("perf",ctx.perfSpecs), dl("mesh",ctx.meshSpecs),
+    h("datalist",{id:"conn-dl-flange"}, ctx.flangeSpecs.map(s=>h("option",{key:s,value:s}))),
+    h("datalist",{id:"conn-dl-gasket"}, ctx.gasketSpecs.map(s=>h("option",{key:s,value:s}))),
     title && h("div",{style:{fontWeight:700,fontSize:14,marginBottom:2}},title),
     h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:8}},
-      "The model master is not changed — only this Sl No’s BOM lines. Pick every flange from the list (all flanges in the spec master). Cover studs, nuts and gasket follow the cover flange by themselves."+(required?" Required for a flanged strainer.":"")),
-    sec("Flanges"),
+      "The model master is not changed — only this Sl No’s BOM lines. Pick every flange from the list (all flanges in the spec master). Cover studs, nuts and gasket follow the cover flange by themselves."+
+      (initial?"":" Every field starts blank — pick each one.")+(required?" Required for a flanged strainer.":"")),
+    connSec("Flanges"),
     flangeRows.length ? h("table",{style:{width:"100%",borderCollapse:"collapse"}},
-      h("thead",null,h("tr",null,th("Line"),th("Qty"),th("In the BOM now"),th("Use"))),
+      h("thead",null,h("tr",null,connTh("Line"),connTh("Qty"),connTh("In the BOM now"),connTh("Use"))),
       h("tbody",null, flangeRows.map(x=>h("tr",{key:x.k},
-        td(h("div",null,h("div",{style:{fontWeight:600}},x.l.sub_assembly),h("div",{style:{fontSize:10.5,color:colors.mutedLight}},CONN_ROLE_LABEL[x.role]||x.l.component))),
-        td(String(x.l.qty_required||"")+" "+(x.l.uom||"")),
-        td(x.l.material_spec,{color:colors.muted,fontSize:11.5}),
-        td(inp(ch.flanges[x.k], v=>setF(x.k,v), "flange", null, x.l.material_spec),{width:"46%"}))))) :
-      h("div",{style:{fontSize:12,color:colors.mutedLight}},"No flange lines in this BOM (screwed / socket-weld ends) — nothing to set here."),
-    hasRole("cover_gasket") && h(React.Fragment,null, sec("Cover gasket"), inp(ch.gasket, v=>setCh({...ch,gasket:v}), "gasket", 420, def.gasket)),
-    (drainLines.length>0 || ventLines.length>0 || flangeRows.length>0) && sec("Drain and vent"),
-    (drainLines.length>0 || flangeRows.length>0) && nozzleRow("Drain","drain",drainLines),
-    (ventLines.length>0) && nozzleRow("Vent","vent",ventLines),
-    (hasRole("perforated")||hasRole("mesh")) && sec("Filter element"),
-    hasRole("perforated") && h("div",{style:{display:"flex",gap:8,alignItems:"center",marginBottom:6}},h("div",{style:{width:110,fontSize:12}},"Perforated sheet"),inp(ch.perforated, v=>setCh({...ch,perforated:v}), "perf", 420, def.perforated)),
-    hasRole("mesh") && h("div",{style:{display:"flex",gap:8,alignItems:"center",marginBottom:6}},h("div",{style:{width:110,fontSize:12}},"Mesh"),inp(ch.mesh, v=>setCh({...ch,mesh:v}), "mesh", 420, def.mesh)),
-    sec("What changes in the BOM"),
-    (res.changes.length+res.added.length+res.removed.length)===0 ? h("div",{style:{fontSize:12,color:colors.mutedLight}},"No change — the BOM stays as it is.") :
-      h("table",{style:{width:"100%",borderCollapse:"collapse"}},
-        h("thead",null,h("tr",null,th("Line"),th("From"),th("To"),th(""))),
-        h("tbody",null,
-          res.changes.map((c,i)=>h("tr",{key:"c"+i}, td(c.line.sub_assembly), td((c.from.material_spec||"")+" · "+(c.from.qty_required||"")+" "+(c.from.uom||""),{color:colors.muted,fontSize:11.5}), td(c.line.material_spec+" · "+c.line.qty_required+" "+(c.line.uom||""),{fontSize:11.5}), td(c.line.__note||"",{fontSize:10.5,color:colors.mutedLight}))),
-          res.removed.map((l,i)=>h("tr",{key:"r"+i}, td(l.sub_assembly), td(l.material_spec,{color:colors.muted,fontSize:11.5}), td("removed",{color:colors.danger,fontSize:11.5}), td(""))),
-          res.added.map((l,i)=>h("tr",{key:"a"+i}, td(l.sub_assembly), td("new",{color:"#0f6e56",fontSize:11.5}), td(l.material_spec+" · "+l.qty_required+" "+l.uom,{fontSize:11.5}), td(l.__note||"",{fontSize:10.5,color:colors.mutedLight}))))),
-    res.flags.length>0 && h("div",{style:{background:"#fff4d6",border:"1px solid #e0c48a",color:"#854f0b",borderRadius:6,padding:"7px 10px",fontSize:11.5,marginTop:10}}, res.flags.map((f,i)=>h("div",{key:i},"⚠ "+f))),
+        connTd(h("div",null,h("div",{style:{fontWeight:600}},x.l.sub_assembly),h("div",{style:{fontSize:10.5,color:colors.mutedLight}},CONN_ROLE_LABEL[x.role]||x.l.component))),
+        connTd(String(x.l.qty_required||"")+" "+(x.l.uom||"")),
+        connTd(x.l.material_spec,{color:colors.muted,fontSize:11.5}),
+        connTd(inp(ch.flanges[x.k], v=>setF(x.k,v), "flange", null, x.l.material_spec),{width:"46%"}))))) :
+      h("div",{style:{fontSize:12,color:colors.mutedLight}}, cast ? "Cast body — the end flanges are part of the casting. Nothing to set here." : "No flange lines in this BOM (screwed / socket-weld ends) — nothing to set here."),
+    hasRole("cover_gasket") && h(React.Fragment,null, connSec("Cover gasket"), h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:4}},"In the BOM now: "+(def.gasket||"—")), inp(ch.gasket, v=>setCh({...ch,gasket:v}), "gasket", 420, def.gasket)),
+    (showDrain||showVent) && connSec("Drain and vent"),
+    showDrain && nozzleRow("Drain","drain",drainLines),
+    showVent && nozzleRow("Vent","vent",ventLines),
+    connChangesView(res),
     anyBad && h("div",{style:{fontSize:11.5,color:colors.danger,marginTop:8}},"A spec in red is not in the spec master — pick it from the list."),
+    toFill.length>0 && h("div",{style:{fontSize:11.5,color:colors.danger,marginTop:8}},"Still to fill: "+toFill.join(", ")+"."),
     h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}},
       onCancel && h("button",{onClick:onCancel,style:btnSmall},"Cancel"),
-      h("button",{disabled:anyBad||!!busyText,onClick:()=>onApply(ch, res, ctx),style:{...btnPrimary,opacity:(anyBad||busyText)?0.55:1}}, busyText || "Confirm connections")));
+      h("button",{disabled:anyBad||toFill.length>0||!!busyText,onClick:()=>onApply(connPartConn(ch), res, ctx),style:{...btnPrimary,opacity:(anyBad||toFill.length||busyText)?0.55:1}}, busyText || "Confirm connections")));
 }
-// Options & Testing → Connections, on any Sl No of a quote or a contract.
-function ConnectionsSlPanel({ user, refNo, slNo, lines, locked, onChanged }){
+// Perforated sheet & mesh. Mesh can be "None" (the mesh line is taken out);
+// a mesh picked where the model has none is added with the perforated sheet's area.
+function ElementEditor({ lines, title, initial, required, busyText, onApply, onCancel }){
+  const [ctx,setCtx]=useState(CONN_CTX);
+  const [ch,setCh]=useState(initial ? {perforated:initial.perforated||"", mesh:initial.mesh||""} : {perforated:"", mesh:""});
+  const [err,setErr]=useState("");
+  useEffect(()=>{ let off=false; connLoadCtx().then(c=>{ if(!off) setCtx(c); }).catch(e=>setErr(e.message)); return ()=>{ off=true; }; },[]);
+  if(err) return h("div",{style:{color:colors.danger,fontSize:12}},err);
+  if(!ctx) return h("div",{style:{fontSize:12,color:colors.mutedLight,padding:20}},"Loading the spec master…");
+  const perfLine=(lines||[]).find(l=>connRoleOf(l,ctx.roles)==="perforated"), meshLine=(lines||[]).find(l=>connRoleOf(l,ctx.roles)==="mesh");
+  const res=connTransform(lines, connPartElem(ch), ctx);
+  const isNone = s=>connNorm(s)==="none";
+  const bad = (s, cur)=>!!s && !isNone(s) && connNorm(s)!==connNorm(cur||"") && !ctx.specSet.has(connNorm(s));
+  const badPerf = isNone(ch.perforated) || bad(ch.perforated, perfLine&&perfLine.material_spec), badMesh = bad(ch.mesh, meshLine&&meshLine.material_spec);
+  const meshNeeded = !!(perfLine||meshLine);
+  const toFill = required ? [ ...(perfLine && !String(ch.perforated||"").trim() ? ["Perforated sheet"] : []), ...(meshNeeded && !String(ch.mesh||"").trim() ? ["Mesh (a spec, or None)"] : []) ] : [];
+  const row=(label, line, val, set, list, isBad, note)=>h("div",{style:{marginBottom:12}},
+    h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},
+      h("div",{style:{width:120,fontSize:12,fontWeight:600}},label),
+      h("input",{value:val||"", list:"conn-dl-"+list, placeholder:"pick from the list…", onChange:e=>set(e.target.value), style:{...inputStyle,padding:"5px 7px",fontSize:12,width:460,maxWidth:"100%",boxSizing:"border-box",borderColor:isBad?colors.danger:undefined}})),
+    h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginLeft:128,marginTop:3}}, (line ? "In the BOM now: "+line.material_spec+" · "+(line.qty_required||"")+" "+(line.uom||"")+" · "+(line.grade||"no grade") : "Not in the BOM")+(note?" — "+note:"")));
+  return h("div",null,
+    h("datalist",{id:"conn-dl-perf"}, ctx.perfSpecs.map(s=>h("option",{key:s,value:s}))),
+    h("datalist",{id:"conn-dl-mesh"}, [CONN_NONE, ...ctx.meshSpecs].map(s=>h("option",{key:s,value:s}))),
+    title && h("div",{style:{fontWeight:700,fontSize:14,marginBottom:2}},title),
+    h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:12}},
+      "Only this Sl No’s BOM lines change; the quantity stays. Pick both from the spec master."+(initial?"":" Both start blank — pick each one.")+(required?" Required for every strainer.":"")),
+    !perfLine && !meshLine ? h("div",{style:{fontSize:12,color:colors.mutedLight}},"No perforated sheet or mesh line in this BOM — nothing to set here.") :
+    h(React.Fragment,null,
+      perfLine && row("Perforated sheet", perfLine, ch.perforated, v=>setCh({...ch,perforated:v}), "perf", badPerf),
+      row("Mesh", meshLine, ch.mesh, v=>setCh({...ch,mesh:v}), "mesh", badMesh, meshLine ? "pick None to take the mesh out" : "pick a mesh to add one (same area as the perforated sheet), or None")),
+    connChangesView(res),
+    (badPerf||badMesh) && h("div",{style:{fontSize:11.5,color:colors.danger,marginTop:8}},"A spec in red is not in the spec master — pick it from the list."),
+    toFill.length>0 && h("div",{style:{fontSize:11.5,color:colors.danger,marginTop:8}},"Still to fill: "+toFill.join(", ")+"."),
+    h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}},
+      onCancel && h("button",{onClick:onCancel,style:btnSmall},"Cancel"),
+      h("button",{disabled:badPerf||badMesh||toFill.length>0||!!busyText,onClick:()=>onApply(connPartElem(ch), res, ctx),style:{...btnPrimary,opacity:(badPerf||badMesh||toFill.length||busyText)?0.55:1}}, busyText || "Confirm perforated sheet & mesh")));
+}
+// Shared by the two Options & Testing tabs.
+function useConnEst(refNo, slNo){
   const [est,setEst]=useState(null);
-  const [busy,setBusy]=useState("");
-  const [msg,setMsg]=useState(""); const [flags,setFlags]=useState([]);
   const [roles,setRoles]=useState(CONN_CTX?CONN_CTX.roles:CONN_DEFAULT_ROLES);
   const load=useCallback(async()=>{
     const { data } = await sb.from("estimates").select("*").eq("reference_number",refNo).eq("item_sl_no",slNo).limit(1);
@@ -49762,36 +49917,76 @@ function ConnectionsSlPanel({ user, refNo, slNo, lines, locked, onChanged }){
     try{ const c=await connLoadCtx(); setRoles(c.roles); }catch(e){}
   },[refNo,slNo]);
   useEffect(()=>{ load(); },[load]);
+  return { est, roles, load };
+}
+function connMsgView(msg, flags){
+  return h(React.Fragment,null,
+    msg && h("div",{style:{fontSize:11.5,color:/Fail|NOT /.test(msg)?colors.danger:"#0f6e56",marginBottom:6}},msg),
+    flags.length>0 && h("div",{style:{fontSize:11,color:"#854f0b",marginBottom:6}},flags.map((f,i)=>h("div",{key:i},"⚠ "+f))));
+}
+// Options & Testing → Connections, on any Sl No of a quote or a contract.
+function ConnectionsSlPanel({ user, refNo, slNo, lines, locked, onChanged }){
+  const { est, roles, load } = useConnEst(refNo, slNo);
+  const [busy,setBusy]=useState("");
+  const [msg,setMsg]=useState(""); const [flags,setFlags]=useState([]);
   const own=(lines||[]).filter(l=>!isDavitLine(l));
-  const flanged=connIsFlanged(own, roles);
+  const flanged=connIsFlanged(own, roles), cast=!flanged && connIsCast(own);
+  const saved=est&&est.conn_choices, isSet=connHasConn(saved);
   const apply=async(ch)=>{
     if(locked){ alert(locked); return; }
     setBusy("Applying…"); setMsg(""); setFlags([]);
-    try{ const r=await connApplyToSl({ ref:refNo, slNo, choices:ch, user }); setMsg(r.message); setFlags(r.flags||[]); await load(); if(onChanged) await onChanged(); }
+    try{ const r=await connApplyToSl({ ref:refNo, slNo, choices:{...(saved||{}), ...ch, connSet:true, elemSet:connHasElem(saved)}, user }); setMsg(r.message); setFlags(r.flags||[]); await load(); if(onChanged) await onChanged(); }
     catch(e){ setMsg("Failed: "+e.message); }
     finally{ setBusy(""); }
   };
   const clearFlag=async()=>{ await sb.from("estimates").update({ conn_flag:null }).eq("reference_number",refNo).eq("item_sl_no",slNo); await load(); };
+  if(!est) return h("div",{style:{fontSize:12,color:colors.mutedLight}},"Loading…");
   return h("div",null,
     h("div",{style:{fontSize:12,marginBottom:8}},
-      h("b",null, flanged ? "Flanged strainer" : "No flanged ends (screwed / socket-weld)"), " · ",
-      est && est.conn_choices ? "set by "+(est.conn_set_by||"?")+" on "+fmtDMY(est.conn_set_at) : (flanged ? h("span",{style:{color:colors.danger}},"not set yet") : "optional")),
-    est && est.conn_flag && h("div",{style:{background:"#fff4d6",border:"1px solid #e0c48a",color:"#854f0b",borderRadius:6,padding:"7px 10px",fontSize:11.5,marginBottom:8,display:"flex",gap:8,alignItems:"center"}},
+      h("b",null, flanged ? "Flanged strainer" : cast ? "Cast body (ends part of the casting)" : "No flanged ends (screwed / socket-weld)"), " · ",
+      isSet ? "set by "+(est.conn_set_by||saved.by||"?")+" on "+fmtDMY(est.conn_set_at||saved.at) : (flanged ? h("span",{style:{color:colors.danger}},"not set yet") : "optional")),
+    est.conn_flag && h("div",{style:{background:"#fff4d6",border:"1px solid #e0c48a",color:"#854f0b",borderRadius:6,padding:"7px 10px",fontSize:11.5,marginBottom:8,display:"flex",gap:8,alignItems:"center"}},
       h("span",{style:{flex:1}},"⚠ "+est.conn_flag), h("button",{onClick:clearFlag,style:{...btnSmall,fontSize:11}},"Checked — clear flag")),
     locked && h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:6}},locked),
-    msg && h("div",{style:{fontSize:11.5,color:/fail|not /i.test(msg)?colors.danger:"#0f6e56",marginBottom:6}},msg),
-    flags.length>0 && h("div",{style:{fontSize:11,color:"#854f0b",marginBottom:6}},flags.map((f,i)=>h("div",{key:i},"⚠ "+f))),
-    h(ConnectionsEditor,{ key:((est&&est.conn_set_at)||"new")+"|"+own.length+"|"+own.reduce((n,l)=>n+String(l.material_spec||"").length+(Number(l.qty_required)||0),0), lines:own, initial:est&&est.conn_choices, required:flanged, busyText:busy, onApply:apply }));
+    connMsgView(msg, flags),
+    h(ConnectionsEditor,{ key:((est.conn_set_at)||"new")+"|"+own.length+"|"+own.reduce((n,l)=>n+String(l.material_spec||"").length+(Number(l.qty_required)||0),0),
+      lines:own, initial:isSet?connPartConn(saved):null, required:flanged, busyText:busy, onApply:apply }));
+}
+// Options & Testing → Perforated sheet & mesh.
+function ElementSlPanel({ user, refNo, slNo, lines, locked, onChanged }){
+  const { est, roles, load } = useConnEst(refNo, slNo);
+  const [busy,setBusy]=useState("");
+  const [msg,setMsg]=useState(""); const [flags,setFlags]=useState([]);
+  const own=(lines||[]).filter(l=>!isDavitLine(l));
+  const saved=est&&est.conn_choices, isSet=connHasElem(saved), needed=connElemNeeded(own, roles);
+  const apply=async(ch)=>{
+    if(locked){ alert(locked); return; }
+    setBusy("Applying…"); setMsg(""); setFlags([]);
+    try{ const r=await connApplyToSl({ ref:refNo, slNo, choices:{...(saved||{}), ...ch, elemSet:true, elemAt:new Date().toISOString(), connSet:connHasConn(saved)}, user, note:"perforated sheet & mesh" }); setMsg(r.message.replace(/^Connections applied/,"Perforated sheet & mesh applied")); setFlags(r.flags||[]); await load(); if(onChanged) await onChanged(); }
+    catch(e){ setMsg("Failed: "+e.message); }
+    finally{ setBusy(""); }
+  };
+  if(!est) return h("div",{style:{fontSize:12,color:colors.mutedLight}},"Loading…");
+  return h("div",null,
+    h("div",{style:{fontSize:12,marginBottom:8}},
+      h("b",null,"Perforated sheet & mesh"), " · ",
+      isSet ? "set by "+(saved.by||est.conn_set_by||"?")+(saved.elemAt||est.conn_set_at?" on "+fmtDMY(saved.elemAt||est.conn_set_at):"") : (needed ? h("span",{style:{color:colors.danger}},"not set yet") : "nothing to set")),
+    locked && h("div",{style:{fontSize:11,color:colors.mutedLight,marginBottom:6}},locked),
+    connMsgView(msg, flags),
+    h(ElementEditor,{ key:((est.conn_set_at)||"new")+"|"+own.length+"|"+own.reduce((n,l)=>n+String(l.material_spec||"").length,0),
+      lines:own, initial:isSet?connPartElem(saved):null, required:needed, busyText:busy, onApply:apply }));
 }
 // After an Order Quantity save: the choices made in the window go on the Sl No.
-async function connAfterGateSave({ ref, slNo, choices, user }){
-  if(!choices) return;
-  const by=user?.username||"unknown";
-  const { error } = await sb.from("estimates").update({ conn_choices:{...choices, confirmed:true, by, at:new Date().toISOString()}, conn_flag:null, conn_set_by:by, conn_set_at:new Date().toISOString() }).eq("reference_number",ref).eq("item_sl_no",slNo);
+// conn / elem are the window's {choices} for each form (either may be null).
+async function connAfterGateSave({ ref, slNo, conn, elem, user }){
+  if(!conn && !elem) return;
+  const by=user?.username||"unknown", at=new Date().toISOString();
+  const choices={ ...(conn?conn.choices:{}), ...(elem?{...elem.choices, elemAt:at}:{}), connSet:!!conn, elemSet:!!elem };
+  const { error } = await sb.from("estimates").update({ conn_choices:{...choices, confirmed:true, by, at}, conn_flag:null, conn_set_by:by, conn_set_at:at }).eq("reference_number",ref).eq("item_sl_no",slNo);
   if(error) throw new Error(/conn_/.test(error.message||"")?CONN_SQL_MSG:error.message);
   const { data:after } = await sb.from("estimate_lines").select("*").eq("reference_number",ref).eq("item_sl_no",slNo);
   const c=await connLoadCtx(); await connSyncDatasheet(ref, slNo, after||[], c.roles);
-  await logAudit("UPDATE","estimates",ref+"-"+slNo,"Connections & Element set with the Sl No: "+connSummary(choices),by,null,null);
+  await logAudit("UPDATE","estimates",ref+"-"+slNo,"Connections / perforated sheet & mesh set with the Sl No: "+connSummary(choices),by,null,null);
 }
 
 function EngineeringCalcs({ user }) {
@@ -55631,7 +55826,7 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
     try{
       const t = purCalc(po, lines); const now = new Date().toISOString();
       const anyMtc = (po.mtc||{}).type==="3.1 & 3.2" || lines.some(l=>l.mtc);   // 237
-      if(anyMtc){ const pr = await sb.from("po_register_items").select("mtc").limit(1); if(pr.error) throw new Error("Run "+MTC_SQL+" first (both companies): a 3.1 & 3.2 PO keeps the MTC of each line."); }
+      if(anyMtc){ const pr = await sb.from("po_register_items").select("mtc").limit(1); if(pr.error) throw new Error("A 3.1 & 3.2 PO keeps the MTC of each line, and that could not be checked. "+mtcErrMsg(pr.error, "check the PO line MTC")); }
       const head = { vendor_name:po.vendor_name, po_date:po.po_date, po_kind:po.po_kind, source:"App", stage:"Draft", status:"Draft", contract_ref:po.contract_ref||null, vendor_contact:po.vendor_contact||null,
         vendor_quote_ref:po.vendor_quote_ref||null, vendor_quote_date:po.vendor_quote_date||null, delivery_by:po.delivery_by||null, deliver_to:po.deliver_to||null, currency:cur, fx_rate:cur==="INR"?null:(Number(po.fx_rate)||null),
         gst_mode:po.gst_mode||"intra", terms:po.terms||{}, notes:po.notes||null,
@@ -72520,7 +72715,7 @@ function ContractRegisterDrawer({ c, user, canEdit, onClose, onSaved, onOpenQuot
         payment_terms:d.pay||null, freight:d.freight||null, incoterm:d.inco||null, end_user:d.endUser||null });
     }
     const { error } = await sb.from("contract_register_tbl").upsert(row,{ onConflict:"contract_number" });
-    if(error){ setBusy(false); setMsg(/quote/.test(error.message) ? "That quotation number is already on another contract." : /vendor_rule|avl_link/.test(error.message||"") ? "Run "+MTC_SQL+" first (both companies) — the Contract Register needs its Vendor and AVL link columns." : "Could not save: "+error.message); return; }
+    if(error){ setBusy(false); setMsg(/quote/.test(error.message) ? "That quotation number is already on another contract." : /vendor_rule|avl_link/.test(error.message||"") ? "The Contract Register needs its Vendor and AVL link columns. "+mtcErrMsg(error, "save the contract") : "Could not save. "+dbErrDetail(error)); return; }
     // lines
     if(!app){
       const before = JSON.stringify(c.lines.map(l=>[l.d,l.q,l.r,l.v,l.due||""])); const after = JSON.stringify(d.lines.map(l=>[l.d,l.q===""?null:l.q,l.r===""?null:l.r,l.v,l.due||""]));
