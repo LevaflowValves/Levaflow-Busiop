@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-26T09:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-27T03:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -81,6 +81,16 @@ const { useState, useMemo, useCallback, useRef, useEffect, createElement: h } = 
 // while typing) only accepts a value that's actually in the options list —
 // anything else reverts to the last valid value. Pass limitToList:false for
 // fields that should behave like free text (Limit To List = No).
+// 261: a filter box — type part of a name, the list drops down; empty = no filter
+function FilterCombo({ label, value, onChange, options, width }){
+  return h("div",{style:{display:"flex",flexDirection:"column",gap:2}},
+    h("label",{style:{fontSize:10,color:colors.muted,fontWeight:600}},label),
+    h("div",{style:{display:"flex",alignItems:"center",gap:2}},
+      h(LimitToListCombo,{value:value||"",onChange:v=>onChange(v),options:options||[],limitToList:false,placeholder:"All",style:{...inputStyle,padding:"5px 7px",fontSize:12,width:width||150}}),
+      value ? h("button",{onClick:()=>onChange(""),title:"Clear",style:{border:"none",background:"none",cursor:"pointer",color:colors.mutedLight,fontSize:14,padding:"0 4px"}},"\u00d7") : null));
+}
+const fltHas = (v, f)=> !f || String(v||"").toLowerCase().includes(String(f).toLowerCase().trim());
+const abc = (a,b)=> String(a||"").localeCompare(String(b||""),undefined,{sensitivity:"base",numeric:true});
 function LimitToListCombo({ value, onChange, options, placeholder, style, disabled, limitToList=true, onBlur, invalidMessage }){
   const [typed,setTyped] = useState(value||"");
   useEffect(()=>{ setTyped(value||""); },[value]);
@@ -4282,6 +4292,8 @@ function MasterEditor({ tableKey, user }) {
   const [error,setError]=useState(""); const [search,setSearch]=useState("");
   const [editingId,setEditingId]=useState(null); const [editDraft,setEditDraft]=useState({});
   const [adding,setAdding]=useState(false); const [desNew,setDesNew] = useState(null);   // 243
+  const [ef,setEf]=useState({ name:"", department:"", designation:"", status:"" });   // 261: Employees filters
+  const [empNext,setEmpNext]=useState("");   // 261: the code a new employee will get, shown greyed
   const [addDraft,setAddDraft]=useState({});
   const [page,setPage]=useState(0); const pageSize=50;
   const [cascadeOptions,setCascadeOptions]=useState({}); // col -> options[]
@@ -4845,7 +4857,7 @@ function MasterEditor({ tableKey, user }) {
           .range(page*MR_PAGE_SIZE, page*MR_PAGE_SIZE+MR_PAGE_SIZE-1);
         if(err) throw err; setRows(data||[]); setMrAllRatesTotal(count||0);
       } else {
-        if(search.trim()){
+        if(search.trim() && tableKey!=="employee_tbl"){
           const s = search.trim();
           const textCols = tableDef.columns.filter(c=>!NUMERIC_COLS.has(c));
           if(!textCols.length){ setRows([]); }
@@ -4855,6 +4867,9 @@ function MasterEditor({ tableKey, user }) {
               .order("id",{ascending:true}).limit(200);
             if(err) throw err; setRows(data||[]);
           }
+        } else if(tableKey==="employee_tbl"){   // 261: every employee, A–Z, filtered on screen
+          const all = await fetchAll("employee_tbl","*");
+          setRows([...(all||[])].sort((a,b)=>abc(a.employee_name,b.employee_name)));
         } else {
           const { data, error:err } = await sb.from(tableKey).select("*").order("id",{ascending:true}).range(page*pageSize,page*pageSize+pageSize-1);
           if(err) throw err; setRows(data||[]);
@@ -5037,6 +5052,8 @@ function MasterEditor({ tableKey, user }) {
         h("button",{onClick:()=>setDesNew(null),title:"Cancel",style:{...btnSmall,fontSize:11,padding:"3px 6px"}},"✕"))
     : h("button",{"data-t":"desig-new-link",onClick:()=>setDesNew({v:""}),style:{background:"none",border:"none",padding:"3px 0 0",cursor:"pointer",font:"inherit",fontSize:11,fontWeight:700,color:"#0f7a5c",textAlign:"left"}},"+ Add new designation");
   const renderAddField=(col)=>{
+    if(tableKey==="employee_tbl" && col==="employee_code")   // 261: given automatically — shown, not typed
+      return h("input",{value:empNext||"…",readOnly:true,tabIndex:-1,title:"Given automatically when you save",style:{...inputStyle,padding:"6px 8px",fontSize:12,background:"#eeece4",color:colors.muted,cursor:"not-allowed"}});
     if(tableKey==="employee_tbl" && col==="designation" && !renderAddField.__in){ renderAddField.__in = true; try{ return h("div",{style:{display:"flex",flexDirection:"column"}}, renderAddField(col), desigAddBox()); } finally { renderAddField.__in = false; } }   // 243
     const cascadeDef=tableDef.cascade?.find(c=>c.col===col);
     const isFree=!cascadeDef||(tableDef.freeText||[]).includes(col);
@@ -5064,7 +5081,18 @@ function MasterEditor({ tableKey, user }) {
     return h("input",{type:isNumeric?"number":"text",autoComplete:"off",value:addDraft[col]??"",onChange:e=>setAddDraft(d=>({...d,[col]:e.target.value})),style:{...inputStyle,padding:"6px 8px",fontSize:12},placeholder:col.replace(/_/g," ")+"…"});
   };
 
-  const filteredRows = useMemo(()=>{ if(!search) return rows; const s=search.toLowerCase(); return rows.filter(r=>tableDef.columns.some(c=>hHas(r[c]??"", s))); },[rows,search,tableDef]);
+  const filteredRows = useMemo(()=>{
+    let out = rows;
+    if(search){ const s=search.toLowerCase(); out = out.filter(r=>tableDef.columns.some(c=>hHas(r[c]??"", s))); }
+    if(tableKey==="employee_tbl"){   // 261: filters, then A–Z by name
+      out = out.filter(r=>fltHas(r.employee_name, ef.name) && fltHas(r.department, ef.department) && fltHas(r.designation, ef.designation) && fltHas(r.status, ef.status));
+      out = [...out].sort((a,b)=>abc(a.employee_name,b.employee_name));
+    }
+    return out; },[rows,search,tableDef,tableKey,ef]);
+  useEffect(()=>{   // 261: the next employee code, worked out when the Add form opens
+    if(!(adding && tableKey==="employee_tbl")) return;
+    sb.from("employee_tbl").select("employee_code").then(({data})=>setEmpNext(empNextCode((data||[]).map(r=>r.employee_code))));
+  },[adding, tableKey]);
 
   const mrFilteredRows = useMemo(()=>{
     if(tableKey!=="material_rates") return [];
@@ -5289,6 +5317,13 @@ function MasterEditor({ tableKey, user }) {
         h("button",{onClick:()=>{ if(tableKey==="material_rates" && !canEditMR){ noPermission("add material rates"); return; } setAdding(v=>!v);setAddDraft({});},style:permBtnStyle(tableKey!=="material_rates"||canEditMR,btnPrimary)},"+ "+addLabel)
       )
     ),
+    tableKey==="employee_tbl" && h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end",marginBottom:12,padding:"10px 12px",background:"#fff",border:"1px solid "+colors.border,borderRadius:6}},   // 261
+      h(FilterCombo,{label:"Employee name",value:ef.name,onChange:v=>setEf(f=>({...f,name:v})),options:rows.map(r=>r.employee_name).filter(Boolean).sort(abc),width:200}),
+      h(FilterCombo,{label:"Department",value:ef.department,onChange:v=>setEf(f=>({...f,department:v})),options:Array.from(new Set(rows.map(r=>r.department).filter(Boolean))).sort(abc),width:170}),
+      h(FilterCombo,{label:"Designation",value:ef.designation,onChange:v=>setEf(f=>({...f,designation:v})),options:Array.from(new Set(rows.map(r=>r.designation).filter(Boolean))).sort(abc),width:170}),
+      h(FilterCombo,{label:"Status",value:ef.status,onChange:v=>setEf(f=>({...f,status:v})),options:Array.from(new Set(rows.map(r=>r.status).filter(Boolean))).sort(abc),width:120}),
+      Object.values(ef).some(Boolean) && h("button",{onClick:()=>setEf({ name:"", department:"", designation:"", status:"" }),style:{...btnSmall,fontSize:11.5}},"Clear filters"),
+      h("span",{style:{fontSize:11.5,color:colors.muted,marginLeft:"auto"}},filteredRows.length+" of "+rows.length+" employees")),
     // Cascading add form
     adding&&tableKey==="material_rates"&&h("div",{style:{padding:"14px 16px",background:"#fff8e1",border:"1px solid #f0c060",borderRadius:8,marginBottom:14}},
       h("div",{style:{fontWeight:600,fontSize:12,color:"#7a5000",marginBottom:10}},"New rate"),
@@ -5329,7 +5364,8 @@ function MasterEditor({ tableKey, user }) {
         tableDef.columns.map(col=>h("div",{key:col,style:{display:"flex",flexDirection:"column",gap:3,minWidth:120,flex:1}},
           h("label",{style:{fontSize:10,color:colors.muted,fontWeight:500}},
             colLabel(col),
-            ((tableDef.cascade?.find(c=>c.col===col)&&!(tableDef.freeText||[]).includes(col))||(tableDef.constOptions||{})[col])&&h("span",{style:{color:"#1c8c75",marginLeft:4,fontSize:9}},"▼ list")
+            ((tableDef.cascade?.find(c=>c.col===col)&&!(tableDef.freeText||[]).includes(col))||(tableDef.constOptions||{})[col])&&h("span",{style:{color:"#1c8c75",marginLeft:4,fontSize:9}},"▼ list"),
+            tableKey==="employee_tbl" && col==="employee_code" && h("span",{style:{color:colors.mutedLight,marginLeft:4,fontSize:9}},"auto")
           ),
           renderAddField(col)
         )),
@@ -5411,7 +5447,7 @@ function MasterEditor({ tableKey, user }) {
           h("th",{style:{padding:"8px 10px",width:120}},"")
         )),
         h("tbody",null,
-          adding&&h("tr",{style:{background:"#fbf6e8"}},
+          adding&&tableKey!=="employee_tbl"&&h("tr",{style:{background:"#fbf6e8"}},   // 261: Employees use the Add form above only
             h("td",null),
             tableDef.columns.map(c=>h("td",{key:c,style:{padding:"6px 8px"}},
               renderGenericCascadeField(c,addDraft[c],v=>setAddDraft(d=>({...d,[c]:v})))
@@ -5455,12 +5491,12 @@ function MasterEditor({ tableKey, user }) {
         )
       )
     ),
-    !(tableKey==="bom"&&bomModelFilter) && !(tableKey!=="material_rates"&&search.trim()) && h("div",{style:{display:"flex",justifyContent:"center",alignItems:"center",gap:10,marginTop:14}},
+    !(tableKey==="bom"&&bomModelFilter) && tableKey!=="employee_tbl" && !(tableKey!=="material_rates"&&search.trim()) && h("div",{style:{display:"flex",justifyContent:"center",alignItems:"center",gap:10,marginTop:14}},
       h("button",{onClick:()=>setPage(p=>Math.max(0,p-1)),disabled:page===0,style:btnSecondary},"Previous"),
       h("span",{style:{fontSize:12,color:colors.muted,padding:"8px 0"}},tableKey==="material_rates"?("Page "+(page+1)+" of "+Math.max(1,Math.ceil(mrAllRatesTotal/MR_PAGE_SIZE))+"  ("+mrAllRatesTotal+" total)"):("Page "+(page+1))),
       h("button",{onClick:()=>setPage(p=>p+1),disabled:tableKey==="material_rates"?((page+1)*MR_PAGE_SIZE>=mrAllRatesTotal):(rows.length<pageSize),style:btnSecondary},"Next")
     ),
-    tableKey!=="material_rates" && search.trim() && h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:-8,marginBottom:10}},"Search results (capped at 200) — clear the search to go back to normal paging."),
+    tableKey!=="material_rates" && tableKey!=="employee_tbl" && search.trim() && h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:-8,marginBottom:10}},"Search results (capped at 200) — clear the search to go back to normal paging."),
     pendingDeleteIds && h("div",{style:{position:"fixed",inset:0,background:"rgba(20,20,20,0.55)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}},
       h("div",{style:{background:"#fff",borderRadius:8,width:380,padding:"20px 22px"}},
         h("div",{style:{fontSize:14,fontWeight:700,marginBottom:8}},"Deletion approval required"),
@@ -5788,10 +5824,14 @@ function UsersEditor({ user }) {
   const [resetTarget,setResetTarget]=useState(null); // row being reset
   const [resetVal,setResetVal]=useState("");
   const [roleEd,setRoleEd]=useState(null);   // 158: {row, role, why, ask, busy} — Super Admin changes a user's role, with a reason
+  const [uf,setUf]=useState({ emp:"", user:"", role:"", status:"", company:"" });   // 261: filters
   const load = useCallback(async()=>{ setLoading(true); const {data}=await sb.from("app_users").select("*").order("id"); setRows(data||[]); setLoading(false); },[]);
   useEffect(()=>{load();},[load]);
   useEffect(()=>{ (async()=>{ const {data}=await sb.from("company_master").select("id,company_name").order("company_name"); setCompanies(data||[]); })(); },[]);
   useEffect(()=>{ sb.from("employee_tbl").select("employee_name").order("employee_name").then(({data})=>setEmployeeOptions((data||[]).map(r=>r.employee_name).filter(Boolean))); },[]);
+  const usrPass = r=> fltHas(r.employee_name, uf.emp) && fltHas(r.username, uf.user) && fltHas(r.role, uf.role)
+    && (!uf.status || (uf.status==="Inactive" ? r.is_active===false : uf.status==="Active" ? r.is_active!==false : true))
+    && fltHas((companies.find(c=>c.id===r.company_id)||{}).company_name, uf.company);   // 261
   const setUserEmployee=async(id,employeeName)=>{
     await sb.from("app_users").update({employee_name:employeeName||null}).eq("id",id);
     setRows(rs=>rs.map(r=>r.id===id?{...r,employee_name:employeeName||null}:r));
@@ -5846,10 +5886,19 @@ function UsersEditor({ user }) {
       ),
       h("button",{onClick:addUser,style:btnSecondary},"Save"),h("button",{onClick:()=>setAdding(false),style:btnSecondary},"Cancel")
     ),
+    // 261: filters (type part of a name; the list drops down) and A–Z by username
+    h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-end",marginBottom:12,padding:"10px 12px",background:"#fff",border:"1px solid "+colors.border,borderRadius:6}},
+      h(FilterCombo,{label:"Employee",value:uf.emp,onChange:v=>setUf(f=>({...f,emp:v})),options:Array.from(new Set(rows.map(r=>r.employee_name).filter(Boolean))).sort(abc),width:180}),
+      h(FilterCombo,{label:"Username",value:uf.user,onChange:v=>setUf(f=>({...f,user:v})),options:rows.map(r=>r.username).filter(Boolean).sort(abc)}),
+      h(FilterCombo,{label:"Role",value:uf.role,onChange:v=>setUf(f=>({...f,role:v})),options:Array.from(new Set(rows.map(r=>r.role).filter(Boolean))).sort(abc),width:130}),
+      isSuperAdmin && h(FilterCombo,{label:"Status",value:uf.status,onChange:v=>setUf(f=>({...f,status:v})),options:["Active","Inactive"],width:100}),
+      h(FilterCombo,{label:"Company",value:uf.company,onChange:v=>setUf(f=>({...f,company:v})),options:companies.map(c=>c.company_name),width:200}),
+      Object.values(uf).some(Boolean) && h("button",{onClick:()=>setUf({ emp:"", user:"", role:"", status:"", company:"" }),style:{...btnSmall,fontSize:11.5}},"Clear filters"),
+      h("span",{style:{fontSize:11.5,color:colors.muted,marginLeft:"auto"}},(()=>{ const n=rows.filter(r=>usrPass(r)).length; return n+" of "+rows.length+" users"; })())),
     loading?h("div",{style:{color:colors.mutedLight}},"Loading…"):
     h("table",{style:{fontSize:13,maxWidth:900}},
       h("thead",null,h("tr",{style:{borderBottom:"2px solid "+colors.dark,textAlign:"left"}},h("th",{style:{padding:"8px 10px"}},"Username"),h("th",{style:{padding:"8px 10px"}},"Employee"),h("th",{style:{padding:"8px 10px"}},"Role"),isSuperAdmin&&h("th",{style:{padding:"8px 10px"}},"Password"),isSuperAdmin&&h("th",{style:{padding:"8px 10px"}},"Status"),h("th",{style:{padding:"8px 10px"}},"Company (used on their PDFs)"),h("th",{style:{padding:"8px 10px"}},""  ))),
-      h("tbody",null,rows.map(r=>h("tr",{key:r.id,style:{borderBottom:"1px solid #eceae0"}},
+      h("tbody",null,rows.filter(r=>usrPass(r)).sort((a,b)=>abc(a.username,b.username)).map(r=>h("tr",{key:r.id,style:{borderBottom:"1px solid #eceae0"}},
         h("td",{style:{padding:"8px 10px"}},r.username),
         h("td",{style:{padding:"8px 10px"}},
           isSuperAdmin
@@ -33495,6 +33544,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"27 Oct 2026 (262)", summary:"Built on 2026-10-27T03:00:00Z, on top of 2026-10-27T02:00:00Z. No SQL. An old FFS PO or Service PO (Purchase Register, PDF on click, and the totals box on the PO) shows its footer as \u201cCharges (transport / P&F / loading as per FFS)\u201d instead of a bare \u201cCharges\u201d. FFS gave the app only the footer total, not its name, so the line now says what it can contain. App-made POs are unchanged: each charge line prints with its own name." },
+  { date:"27 Oct 2026 (261)", summary:"Built on 2026-10-27T02:00:00Z, on top of 2026-10-26T09:00:00Z. No SQL. USERS (Admin \u2192 Users): listed A\u2013Z by username; a filter bar \u2014 Employee, Username, Role, Status (super admin), Company \u2014 type part of a name and the list drops down; Clear filters; a count of users shown. EMPLOYEES (Setup \u2192 Employees): every employee on one page, A\u2013Z by name (no more pages of 50 in the order they were added); filters for Employee name, Department, Designation, Status, the same way; Search still works across all columns. Add Employee: the Employee code box shows the code the new employee will get (e.g. EMP-0031), greyed and marked auto \u2014 it can\u2019t be typed into; the code is still worked out again at Save, so two people adding at once never clash. The second, inline add row in the table (with a blank code box) is gone for Employees; the Add Employee form above the table is the one way in." },
   { date:"26 Oct 2026 (260)", summary:"Built on 2026-10-26T09:00:00Z, on top of 2026-10-26T08:30:00Z. No SQL. (1) MTC & AVL ERRORS: every message that says to run structure_mtc_avl_gateways_2026-10-23.sql (Sale Order MTC & AVL save and open, End User Rules, Contract Register save, a 3.1 & 3.2 PO) now also shows the database\u2019s own words: the message, its code, details, hint and which database (Flometriq and Levaflow are separate), and says when the cause is something else (a row-level security refusal is named as such, with fix_rls_new_tables_2026-10-24.sql). (2) PREVIEW DRAFT on a Sale Order (Output ribbon, and under the Generate Sale Order box): read and check the Order Acceptance before the approvals. The customer\u2019s PO must still be attached; approvals and the extra-price / document prompts are not asked. Every page prints DRAFT \u2013 NOT APPROVED with a red band (DRAFT PREVIEW \u2013 NOT APPROVED \u2013 NOT FOR ISSUE, date, user); there is no code to remove it, it does not offer to mark O.A Sent and it is not counted as a generated O.A. Generate Sale Order keeps all its gates." },
   { date:"26 Oct 2026 (259)", summary:"Built on 2026-10-26T08:30:00Z, on top of 2026-10-25T19:00:00Z. No SQL. PERFORATED SHEET & MESH \u2014 now a separate form: its own row in the Order Quantity window and its own tab in Options & Testing (next to Connections). Both forms start BLANK on a Sl No with nothing saved: every flange, the cover gasket, drain / vent, perforated sheet and mesh are picked by the user; nothing is copied in from the BOM. Once confirmed they load back next time. Mandatory on a new strainer Sl No: Connections when it has flange lines, Perforated sheet & mesh when it has a perforated sheet or mesh line; Confirm & Save and Enter stay off until both are done, and the form lists what is still to fill. Mesh can be None (the mesh line is taken out); a mesh picked where the model has none is added with the perforated sheet\u2019s area and grade (flagged). Perforated sheet and mesh lines are found by their spec as well as by the sub-assembly name. Cast bodies (e.g. YCP) now say the ends are part of the casting instead of screwed / socket-weld. Choices saved before this build (offer SQL, 25 Oct) count as set. Davit: a successful Apply message is no longer shown in red." },
   { date:"25 Oct 2026 (258)", summary:"Built on 2026-10-25T19:00:00Z, on top of 2026-10-25T18:00:00Z. No SQL. QUOTE PDF \u2014 when the notes do not fit on the Commercial Terms page they go on their own page, ANNEXURE - IB NOTES. In the Classic frame that table started too high, so its Sl No / Note header and first row printed over the annexure title and frame line. It now starts below the title, the same as Commercial Terms." },
@@ -54668,7 +54719,7 @@ async function purPdf(poIn, linesIn, vendorIn){
   y = doc.lastAutoTable.finalY + 1.5;
   if(y > H-80){ doc.addPage(); y = 15; }
   const tot = [["Basic value", purMoney(T.basic,cur)]];
-  if(T.add) tot.push(["Charges", purMoney(T.add,cur)]);
+  if(T.add) tot.push([po.source==="FFS" ? "Charges (transport / P&F / loading as per FFS)" : "Charges", purMoney(T.add,cur)]);   // 262
   if(T.ded) tot.push(["Deductions", "- "+purMoney(T.ded,cur)]);
   if(T.cgst) tot.push(["CGST", purMoney(T.cgst,cur)]); if(T.sgst) tot.push(["SGST", purMoney(T.sgst,cur)]); if(T.igst) tot.push(["IGST", purMoney(T.igst,cur)]);
   if(!T.cgst && !T.sgst && !T.igst && T.tax) tot.push(["GST", purMoney(T.tax,cur)]);
@@ -55998,7 +56049,7 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
       l, k==="docs" && openReqN ? h("span",{style:{fontSize:10,marginLeft:5,borderRadius:8,padding:"0 6px",background:"#fff4d6",color:"#854f0b"}},openReqN) : null,
       k==="amd" && Number(po.rev)>0 ? h("span",{style:{fontSize:10,marginLeft:5,color:"#8a5200"}},"Amd "+po.rev) : null)));
   const totalsBox = ()=> h("div",{style:{flex:"0 0 320px",background:"#faf9f4",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px",fontSize:12.5}},
-    [["Basic value",T.basic],["Charges",T.add],...(T.cgst||T.sgst?[["CGST",T.cgst],["SGST",T.sgst]]:[]),...(T.igst?[["IGST",T.igst]]:[]),...(!T.cgst&&!T.sgst&&!T.igst&&T.tax?[["GST",T.tax]]:[]),...(T.round?[["Round off",T.round]]:[])].map(([k,v])=>
+    [["Basic value",T.basic],[po.source==="FFS" ? "Charges (transport / P&F / loading as per FFS)" : "Charges",T.add],...(T.cgst||T.sgst?[["CGST",T.cgst],["SGST",T.sgst]]:[]),...(T.igst?[["IGST",T.igst]]:[]),...(!T.cgst&&!T.sgst&&!T.igst&&T.tax?[["GST",T.tax]]:[]),...(T.round?[["Round off",T.round]]:[])].map(([k,v])=>
       h("div",{key:k,style:{display:"flex",justifyContent:"space-between",padding:"2px 0"}}, h("span",null,k), h("span",{style:{fontFamily:"monospace"}},purMoney(v,cur)))),
     h("div",{style:{display:"flex",justifyContent:"space-between",padding:"6px 0 0",marginTop:4,borderTop:"1px solid "+colors.border,fontWeight:700}}, h("span",null,"Total ("+cur+")"), h("span",{style:{fontFamily:"monospace"}},purMoney(T.net,cur))),
     h("div",{style:{fontSize:11,color:colors.muted,marginTop:4}}, invAmountWords(T.net, cur)),
