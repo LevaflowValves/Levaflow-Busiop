@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-28T02:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-28T03:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -4023,7 +4023,8 @@ function QuoteStageTrack({ referenceNumber, customerName, current, changedAt, ch
       setBusy(true);
       try{
         if((current||"")==="Won" && st!=="Won"){
-          const { data: so } = await sb.from("sale_order_tbl").select("contract_number").eq("quote_reference_number",referenceNumber).maybeSingle();
+          const { data: soList } = await sb.from("sale_order_tbl").select("contract_number").eq("quote_reference_number",referenceNumber).limit(1);
+          const so = (soList||[])[0];
           if(so){ alert("Can't move "+referenceNumber+" out of Won \u2014 Sale Order "+so.contract_number+" was raised from it. Cancel the Sale Order first."); return; }
           if(!confirm("Move "+referenceNumber+" from Won back to "+st+"?\n\nThe PO details and the FSE credit already captured stay on record.")) return;
         }
@@ -14401,6 +14402,21 @@ function ActionRibbon({ tab, groups, top, onHeight }){
   );
 }
 
+// ---- 2026-10-28T03:00:00Z: ONE QUOTE, MANY SALE ORDERS ("Multiple POs" / rate contract) ----
+// quote_multi_po_tbl (one row per quote family) holds the tick and the Close / Reopen. No balancing, no checks:
+// each Sale Order gets every Sl No and the user trims it to the PO.
+const qmpBase = (ref)=> String(ref||"").replace(/-Rev-\d+$/,"");
+const qmpDmy = (iso)=>{ if(!iso) return ""; const d = new Date(iso); return isNaN(d) ? "" : String(d.getDate()).padStart(2,"0")+"/"+String(d.getMonth()+1).padStart(2,"0")+"/"+d.getFullYear(); };
+async function qmpGet(ref){ if(!ref) return null; const { data, error } = await sb.from("quote_multi_po_tbl").select("*").eq("base_ref",qmpBase(ref)).limit(1); return error ? null : ((data && data[0]) || null); }
+async function qmpSosOf(ref){ if(!ref) return []; const { data } = await sb.from("sale_order_tbl").select("*").eq("quote_reference_number",ref).order("contract_number"); return data || []; }
+async function qmpCanCreate(ref){
+  const sos = await qmpSosOf(ref); if(!sos.length) return { ok:true, sos };
+  const m = await qmpGet(ref);
+  if(!m || !m.multi_po) return { ok:false, sos, why:"Sale Order "+sos[0].contract_number+" already exists for quote "+ref+".\n\nIf the client will send more POs against this quote, tick “Multiple POs” on the quote first." };
+  if(m.closed_at) return { ok:false, sos, why:"Quote "+ref+" was closed for new POs on "+qmpDmy(m.closed_at)+" by "+(m.closed_by||"—")+(m.close_reason?" (“"+m.close_reason+"”)":"")+". Only the Super Admin can reopen it." };
+  return { ok:true, sos, multi:true };
+}
+async function qmpOpenRateContracts(){ const { data, error } = await sb.from("quote_multi_po_tbl").select("base_ref,multi_po,closed_at"); if(error) return null; return new Set((data||[]).filter(r=>r.multi_po && !r.closed_at).map(r=>r.base_ref)); }
 function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, onGoToTab, onNewSlNo, mode, contractInfo, onContractInfoChanged, onOpenContract, cameFromQuotesReport, onBackToQuotesReport }) {
   // mode: "quote" (default) | "contract". When "contract", this exact
   // same screen is a Sale Order — the underlying data lives in the same
@@ -15028,14 +15044,51 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       if(onOpenContract) onOpenContract(newContract);
     } catch(e){ alert("Couldn't create the Sale Order: "+e.message); }
   };
+  const [qmp,setQmp] = useState(null);            // Multiple POs record of this quote
+  const [qmpSos,setQmpSos] = useState([]);        // Sale Orders made from this quote
+  const [soQmp,setSoQmp] = useState(null);        // on a Sale Order: its quote's Multiple POs record
+  const qmpReload = async()=>{ if(!refFilter || mode==="contract"){ setQmp(null); setQmpSos([]); return; } const [m, so] = await Promise.all([ qmpGet(refFilter), qmpSosOf(refFilter) ]); setQmp(m); setQmpSos(so); };
+  useEffect(()=>{ qmpReload(); },[refFilter, mode]);
+  useEffect(()=>{ let dead = false; const q = mode==="contract" && contractInfo && contractInfo.quote_reference_number; if(!q){ setSoQmp(null); return; } qmpGet(q).then(m=>{ if(!dead) setSoQmp(m); }); return ()=>{ dead = true; }; },[mode, contractInfo && contractInfo.quote_reference_number]);
+  // a Sale Order from a Multiple-POs quote, still before its OA: anyone editing it may remove Sl Nos to suit the PO
+  const soTrimOk = mode==="contract" && !!contractInfo && soBeforeOa(contractInfo.status) && !!(soQmp && soQmp.multi_po);
+  const qmpSave = async (patch, auditText)=>{
+    const row = { base_ref:qmpBase(refFilter), ...patch };
+    const { error } = await sb.from("quote_multi_po_tbl").upsert(row, { onConflict:"base_ref" });
+    if(error){ alert(/quote_multi_po_tbl/.test(error.message||"") ? "Run the SQL quote_multiple_po_2026-10-28.sql first — the Multiple POs table is not there yet." : "Could not save: "+error.message); return false; }
+    try{ await logAudit("UPDATE","quote_multi_po_tbl",qmpBase(refFilter),auditText,user?.username||"unknown",qmp,row); }catch(e){}
+    await qmpReload(); return true;
+  };
+  const qmpToggle = async ()=>{
+    const on = !!(qmp && qmp.multi_po);
+    if(on && qmpSos.length>1){ alert("This quote already has "+qmpSos.length+" Sale Orders ("+qmpSos.map(s=>s.contract_number).join(", ")+").\n\nUse “Close — no more POs” instead of unticking."); return; }
+    if(!on && !confirm("Mark "+refFilter+" as Multiple POs?\n\nThe client may send several POs against this quote. Create Sale Order can then be used once per PO — each Sale Order gets every Sl No, and you remove the ones that PO doesn’t have and set its quantities.")) return;
+    await qmpSave({ multi_po:!on, set_by:user?.username||"", set_at:new Date().toISOString() }, (on?"Multiple POs unticked on ":"Multiple POs ticked on ")+refFilter);
+  };
+  const qmpClose = async ()=>{
+    const why = prompt("Close "+refFilter+" for new POs?\n\nNo more Sale Orders can be made from it; the ones already made carry on. Give the reason (e.g. Rate contract period over):","");
+    if(why===null) return; if(!why.trim()){ alert("Give the reason, so the team knows why it was closed."); return; }
+    await qmpSave({ multi_po:true, closed_at:new Date().toISOString(), closed_by:user?.username||"", close_reason:why.trim() }, "Closed for new POs: "+refFilter+" — "+why.trim());
+  };
+  const qmpReopen = async ()=>{
+    if(user?.role!=="super_admin"){ alert("Only the Super Admin can reopen a closed rate contract."); return; }
+    const why = prompt("Reopen "+refFilter+" for new POs? Give the reason:",""); if(why===null) return; if(!why.trim()){ alert("Give the reason."); return; }
+    await qmpSave({ multi_po:true, closed_at:null, closed_by:null, close_reason:null, reopened_at:new Date().toISOString(), reopened_by:user?.username||"", reopen_reason:why.trim() }, "Reopened for new POs: "+refFilter+" — "+why.trim());
+  };
   const createSaleOrderFromQuote = async()=>{
     if(!refFilter || !quoteHeaderRow) return;
     if(quoteHeaderRow.quote_status!=="Won"){
       alert("Can't create a Sale Order yet — this Quote's status is \""+(quoteHeaderRow.quote_status||"Draft")+"\". It needs to be Won first.");
       return;
     }
-    const { data: existing } = await sb.from("sale_order_tbl").select("*").eq("quote_reference_number",refFilter).maybeSingle();
-    if(existing){
+    const { data: existingList } = await sb.from("sale_order_tbl").select("*").eq("quote_reference_number",refFilter).order("contract_number");
+    const existing = (existingList||[])[0] || null;
+    const mpo = existing ? await qmpGet(refFilter) : null;
+    if(existing && mpo && mpo.multi_po){   // 2026-10-28: Multiple POs — a new Sale Order for the next PO
+      if(mpo.closed_at){ alert("Quote "+refFilter+" was closed for new POs on "+qmpDmy(mpo.closed_at)+" by "+(mpo.closed_by||"\u2014")+(mpo.close_reason?" (\u201c"+mpo.close_reason+"\u201d)":"")+".\n\nIts Sale Orders: "+(existingList||[]).map(x=>x.contract_number).join(", ")+"."); return; }
+      if(!confirm("Quote "+refFilter+" already has Sale Order"+((existingList||[]).length>1?"s ":" ")+(existingList||[]).map(x=>x.contract_number).join(", ")+".\n\nMake another Sale Order for a new PO? It gets every Sl No of the quote \u2014 remove the ones this PO doesn\u2019t have and set the quantities.")) return;
+    }
+    else if(existing){
       // Older contracts, created before 20 Sep, get the PO requirement the
       // first time anyone opens them this way.
       await ensurePoDocumentRequirement(existing.contract_number, user?.username);
@@ -18019,12 +18072,12 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     finally { setDeletingSlNo(null); }
   };
   const deleteSlNo=async(ref)=>{
-    if(!isAdmin){ noPermission("delete quotes",{roles:["admin","super_admin"]}); return; }
+    if(!isAdmin && !soTrimOk){ noPermission("delete quotes",{roles:["admin","super_admin"]}); return; }
     const ok=confirm("Delete "+ref.reference_number+" \u00b7 Sl No "+ref.item_sl_no+(ref.model?" (\u201c"+ref.model+"\u201d)":"")+"?\n\nThis removes this Sl No and all of its BOM lines. This cannot be undone.");
     if(!ok) return;
     // Once a Sl No isn't Draft, deleting it needs a Super-Admin-issued delete
     // code — being an Admin alone is no longer enough (stricter than edits).
-    if(ref.quote_status && ref.quote_status!=="Draft" && user.role!=="super_admin"){
+    if(ref.quote_status && ref.quote_status!=="Draft" && user.role!=="super_admin" && !soTrimOk){
       setAuthGate({requiredType:"delete",action:()=>doDeleteSlNo(ref)});
       return;
     }
@@ -20739,6 +20792,12 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     {key:"next",cap:"Next step",row:2,items:[
       {id:"so",label:"Create Sale Order",icon:"file-invoice",color:"#185fa5",onClick:createSaleOrderFromQuote,
         why:noOpen||(isSO?"You're already on the Sale Order.":null)||(!quoteHeaderRow?"The header is still loading.":null)},
+      ...(!isSO ? [{id:"mpo",label:"Multiple POs",icon:(qmp&&qmp.multi_po)?"square-check":"square",color:(qmp&&qmp.multi_po)?"#1d5fa8":"#9a978c",active:!!(qmp&&qmp.multi_po),
+        title:"The client may send several POs against this quote (rate contract) \u2014 Create Sale Order can then be used once per PO",onClick:qmpToggle,
+        why:noOpen||(!quoteHeaderRow?"The header is still loading.":null)||(qmp&&qmp.closed_at?"Closed for new POs \u2014 Reopen first.":null)}] : []),
+      ...(!isSO && qmp && qmp.multi_po ? [ qmp.closed_at
+        ? {id:"mpore",label:"Reopen POs",icon:"lock-open",color:"#0c447c",onClick:qmpReopen,why:user?.role==="super_admin"?null:"Only the Super Admin can reopen a closed rate contract."}
+        : {id:"mpoclose",label:"Close \u2014 no more POs",icon:"lock",color:"#8a5a00",onClick:qmpClose,why:noOpen} ] : []),
       {id:"amend",label:isSO?"Amend Sale Order":"Amend quote",icon:"git-branch",color:"#0c447c",
         onClick:async()=>{ if(await mayAmendFreely(user, quoteHeaderRow&&quoteHeaderRow.customer_name)) setShowAmendPicker(true); else setShowAmendGate(true); },   // 153: owner, tab FSE / TC, Sales Coordinator, Admins free; others a code
         why:noOpen||(isSO?"Amending a Sale Order isn't built yet.":null)||(!quoteHeaderRow?"The header is still loading.":null)||(quoteHeaderRow&&quoteHeaderRow.quote_status==="Draft"?"A Draft is edited directly. Amend is for a quote that has left Draft.":null)}
@@ -20755,6 +20814,12 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   return h(React.Fragment,null,
     h(ActionRibbon,{tab:isSO?"Sale Order":"Quote",groups:ribbonGroups,top:appHeaderHeight,onHeight:setRibbonHeight}),
     h("div",{style:{background:colors.bg,padding:"20px 24px 14px",borderBottom:"1px solid "+colors.border}},
+      (!isSO && refFilter && ((qmp && qmp.multi_po) || qmpSos.length>0)) ? h("div",{"data-qmpbar":"1",style:{display:"flex",flexWrap:"wrap",gap:"6px 10px",alignItems:"center",background:(qmp&&qmp.closed_at)?"#f1efe8":(qmp&&qmp.multi_po)?"#e8f0fe":"#fff",border:"1px solid "+((qmp&&qmp.multi_po&&!qmp.closed_at)?"#1a56c9":colors.border),borderRadius:8,padding:"7px 12px",marginBottom:12,fontSize:12.5}},
+        h("b",{style:{color:(qmp&&qmp.multi_po&&!qmp.closed_at)?"#1a56c9":colors.text}}, (qmp&&qmp.multi_po) ? (qmp.closed_at ? "Multiple POs \u00b7 closed "+qmpDmy(qmp.closed_at)+" by "+(qmp.closed_by||"\u2014") : "Multiple POs \u2014 one Sale Order per PO") : "Sale Order"),
+        qmp && qmp.closed_at && qmp.close_reason ? h("span",{style:{color:colors.muted}},"\u201c"+qmp.close_reason+"\u201d") : null,
+        h("span",{style:{color:colors.muted}}, qmpSos.length ? "Sale Orders from this quote:" : "No Sale Order yet."),
+        qmpSos.map(so=>h("button",{key:so.contract_number,type:"button","data-qmpso":so.contract_number,onClick:()=>onOpenContract && onOpenContract(so),title:"Open Sale Order "+so.contract_number,
+          style:{border:"1px solid #1a56c9",color:"#1a56c9",background:"#fff",borderRadius:999,padding:"2px 10px",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}, so.contract_number+(so.po_number?" \u00b7 PO "+so.po_number:"")))) : null,
       // 16 Sep -- this whole region used to be sticky, and it holds the
       // title row, the search, and (on a Contract) the entire
       // ContractStatusBanner. On an unapproved Contract that froze roughly
@@ -22181,7 +22246,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
                             {disabled:busy,title:"Put back the BOM that was here before the fresh BOM was started"}),
                           h("span",{style:{width:10}}),
                           slot("g",deletingSlNo===r.id?"…":"Remove",()=>deleteSlNo(r),
-                            editFirst||(isAdmin?null:"Only Admins can remove a Sl No."),72,
+                            editFirst||((isAdmin||soTrimOk)?null:"Only Admins can remove a Sl No."),72,
                             {disabled:deletingSlNo===r.id,style:{borderColor:"#f0b8b8",color:colors.danger}})
                         );
                       })()
@@ -24971,6 +25036,7 @@ function SaleOrderContractPicker({ user, onOpenContract, startCreate, onConsumed
     const quoteHit = quoteOptions.find(o=>(o.rn+" — "+(o.customer_name||"—"))===addQuoteSearch);
     if(!quoteHit){ alert("Pick a real Quote from the list — search by Offer Number or Customer Name."); return; }
     if(quoteHit.quote_status!=="Won"){ alert("Can't create a Sale Order yet — Quote "+quoteHit.rn+" is \""+(quoteHit.quote_status||"Draft")+"\", not Won."); return; }
+    { const chk = await qmpCanCreate(quoteHit.latestRef); if(!chk.ok){ alert(chk.why); return; } }   // 2026-10-28: one Sale Order per quote unless Multiple POs
     setBusy(true);
     try{
       // Pre-check (30 Aug convention: check first, THEN act) — avoids
@@ -33548,6 +33614,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"28 Oct 2026 (266)", summary:"Built on 2026-10-28T03:00:00Z, on top of 2026-10-28T02:00:00Z. SQL (structural): quote_multiple_po_2026-10-28.sql (both companies) \u2014 removes the one-Sale-Order-per-quote rule from the database and adds quote_multi_po_tbl. ONE QUOTE, MANY SALE ORDERS: a Won quote has a \u201cMultiple POs\u201d tick in the ribbon (Next step). Ticked, Create Sale Order makes a new Sale Order (next contract number) for every PO; each gets every Sl No of the quote, and the user removes the Sl Nos that PO doesn\u2019t have and changes the quantities \u2014 no balance, no checks. Not ticked, it works as before (one Sale Order; Create Sale Order opens it). The quote shows a bar with its Sale Orders (click to open). The quote stays locked from the first Sale Order, as before. Close \u2014 no more POs (reason required, logged) stops new Sale Orders; the bar shows who closed it, when and why; Reopen POs is for the Super Admin, with a reason. On a Sale Order from a Multiple-POs quote, anyone editing it may Remove Sl Nos while it is before the OA (no Admin / delete code needed). The Sale Order screen\u2019s create path also refuses a second Sale Order for a quote that isn\u2019t ticked. Quotes Report: \u201cOpen rate contracts only\u201d box beside Clear." },
   { date:"28 Oct 2026 (265)", summary:"Built on 2026-10-28T02:00:00Z, on top of 2026-10-27T10:00:00Z. SQL: eng_calc_history_move_2026-10-28.sql (both companies) copies the old ASME VIII Thickness and Bolting history into the register. ENGINEERING CALC is now a CALCULATIONS REGISTER: the list of every saved calculation (linked to, number / Sl No, client \u00b7 item, calculation, rev, key result, status, by, saved) with filters (linked to, client / item, number, calculation, status, prepared by) and + New, Save (a new revision; the earlier one stays), Update (overwrites the open revision, Draft only, with a confirm), Delete (reason required, logged; a Checked one only by the Super Admin) and Refresh. Unsaved changes are asked about before leaving. LINK: Quote / Contract are picked from a type-ahead list of the existing quotes (number \u00b7 client \u00b7 date \u00b7 Sl Nos) and contracts (number \u00b7 client \u00b7 PO); the Sl No list comes from that quote / contract (Sl \u00b7 description \u00b7 model \u00b7 qty); Internal takes a reference. Nothing saves without the link and Sl No; inputs start empty and must be numbers (0 or more, temperatures can be negative). REVISIONS: picking a quote revision (or a contract made from a quote) lists the calculations on the earlier revision \u2014 Sl Nos not changed are ticked, amended ones (model, description, size or BOM lines different) are left unticked, Sl Nos no longer there cannot move; the ticked ones are copied across and stay on the earlier one too. QUOTE / CONTRACT SCREEN: each Sl No row has Calcs (n) / + Calc \u2014 the list with Open, and + Add calculation, which opens the register with that quote / contract and Sl No filled. ASME VIII Thickness and Bolting are now in the register (their menu items open it); calculate, then Save / Update. LEVAFLOW: Backwash flow, Bursting pressure, Separation & flow, Free area and the Strainer datasheet pack are not shown (by company name)." },
   { date:"27 Oct 2026 (264)", summary:"Built on 2026-10-27T10:00:00Z, on top of 2026-10-27T04:30:00Z. SQL: eng_calc_workbench_2026-10-27.sql (both companies). ENGINEERING CALC \u2192 CALCULATION WORKBENCH: every calculation is a button \u2014 Backwash flow, Bursting pressure, Separation & flow, Free area, Joint efficiency & shell, MDMT, PFHT / PWHT, Volume & weights, and the Strainer datasheet pack (the client parameters in one go). Each is linked to a Quote No or Contract No (+ Sl No, the customer is looked up) or an Internal reference; every input takes its own unit (bar, MPa, kPa, psi, kg/cm\u00b2; mm, in, m; m\u00b3/h, USgpm, L/s, L/min; \u00b0C, \u00b0F; MPa, psi, ksi; kg, lb; m\u00b3, L, US gal; m\u00b2, mm\u00b2, in\u00b2, ft\u00b2), and results show only in the units the inputs were entered in. Inputs typed once are shared by every calculation of that item. Save makes a revision (R0, R1 \u2026) with Prepared and Mark checked (Technical Head / Super Admin); Open reloads a saved one. Excel: inputs in yellow and every result a live formula (base values in columns F\u2013G); PDF: an A4 print preview on the letterhead, Print / Save as PDF opens the print dialog. FREE AREA now asks for the number of layers (1\u20135) and each layer\u2019s type, hole / opening size and % open (pitch optional, to cross-check), and which open area to use: the most restrictive layer, the least restrictive layer, or all layers in line (multiplied); it shows the governing layer, filtration rating (finest layer) and the free / open area ratio to the line size. ASME VIII Thickness and Bolting get the same link bar \u2014 the link goes into their saves and PDFs. Engineering Calc is now shown only to Super Admin, the Technical Head (role or post) and the Design & Estimation department." },
   { date:"27 Oct 2026 (263)", summary:"Built on 2026-10-27T04:30:00Z, on top of 2026-10-27T03:00:00Z. No SQL. PROCUREMENT GANTT \u2014 RIGHT-CLICK ZOOM: right-click any material row (its Planned or its Actual line; long-press on a phone) and the chart swaps to that material alone, drawn big: one lane per step with the days wide, a yellow planned bar, a green actual bar, the days past the step\u2019s planned day in red, a red dashed bar for a step not started and overdue, and today\u2019s line. Chips on top: steps done, how many late and the worst, and which material of how many. Below the chart, the steps as a table \u2014 planned from / to, days, actual from / to and a status (Done on time, Done n d late, Running, Behind n d late, Due now, Not due yet). Right-clicking a step\u2019s cells opens the zoom with that step highlighted. Right-click again, Esc or Back to all rows zooms out (the chart keeps its scroll place); Previous / Next or the \u2191 \u2193 keys move between materials; Fill dates opens the dates of that material. A blue badge \u201cRight-click a row to zoom\u201d sits beside Jump to today. In the zoom, lateness is per step (against the step\u2019s own planned day); the main chart keeps its template rule (red only after the material\u2019s last planned day)." },
@@ -44265,6 +44332,8 @@ function OrdersReceivedList({ onOpenContract, user }){
       h("button",{style:btnSmall,disabled:page===0,onClick:()=>setPage(p=>p-1)},"Previous"), "Page "+(page+1)+" of "+pages, h("button",{style:btnSmall,disabled:page>=pages-1,onClick:()=>setPage(p=>p+1)},"Next")) : null);
 }
 function QuotesReportScreen({ user, onOpenQuote, initialFilters, onOpenContract }){
+  const [rcOnly,setRcOnly] = useState(false); const [rcSet,setRcSet] = useState(null);   // 2026-10-28: open rate contracts (Multiple POs, not closed)
+  useEffect(()=>{ if(!rcOnly) return; let dead = false; qmpOpenRateContracts().then(s=>{ if(!dead) setRcSet(s||new Set()); }); return ()=>{ dead = true; }; },[rcOnly]);
   const [qrMode,setQrMode] = useState(()=>{ try{ return localStorage.getItem("qrep_mode")||"offers"; }catch(e){ return "offers"; } });   // 197
   const [canExp,setCanExp] = useState(false); useEffect(()=>{ let dead = false; qrCanExport(user).then(v=>{ if(!dead) setCanExp(v); }); return ()=>{ dead = true; }; },[user && user.username]);   // 240
   const pickMode = m=>{ setQrMode(m); try{ localStorage.setItem("qrep_mode",m); }catch(e){} };
@@ -44965,6 +45034,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters, onOpenContract 
   const placeCtx = qrPlaceCtx(placeRowsFor(applied.regTabs), applied);
   const filtered = rows.filter(r=>{
     if(revMode!=="all" && r.__latest===false) return false;   // 141: earlier revisions are folded under the latest
+    if(rcOnly && !(rcSet && rcSet.has(String(r.reference_number||"").replace(/-Rev-\d+$/,"")))) return false;
     if(!passesNonValueFilters(r, applied)) return false;
     if(valueRangeOn && !rangeCheck(r, applied)) return false;
     return true;
@@ -45116,7 +45186,9 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters, onOpenContract 
       : pendingKeys.length>0
         ? h("span",{style:{fontSize:11.5,color:"#854f0b"}},pendingKeys.length+" filter"+(pendingKeys.length>1?"s":"")+" changed \u2014 press Apply filters (or Enter) to update the list")
         : h("span",{style:{fontSize:11.5,color:colors.mutedLight}},"The list below matches these filters."),
-      h("div",{style:{marginLeft:"auto",display:"flex",gap:8}},
+      h("div",{style:{marginLeft:"auto",display:"flex",gap:8,alignItems:"center"}},
+        h("label",{"data-rconly":"1",title:"Quotes marked Multiple POs that are not closed",style:{display:"inline-flex",gap:6,alignItems:"center",fontSize:12,cursor:"pointer",padding:"6px 10px",border:"1px solid "+(rcOnly?"#1a56c9":colors.border),borderRadius:6,background:rcOnly?"#e8f0fe":"#fff",color:rcOnly?"#1a56c9":colors.text}},
+          h("input",{type:"checkbox",checked:rcOnly,onChange:e=>setRcOnly(e.target.checked)}),"Open rate contracts only"),
         h("button",{onClick:clearFilters,style:{...btnSecondary,fontSize:12}},"Clear"),
         h("button",{onClick:applyFilters,style:{...btnPrimary,fontSize:12,padding:"8px 16px"}},
           pendingKeys.length ? "Apply filters ("+pendingKeys.length+")" : "Apply filters"))
