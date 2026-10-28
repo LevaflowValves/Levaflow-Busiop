@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-28T05:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-28T09:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -2281,7 +2281,67 @@ function VersionLine({ onOpen }){
     "Version "+ver+(isNew?" · new today":""));
 }
 
-function TopBar({ user, sessionCompanyId, sessionCompany, onChangeCompany, onLogout, flags, onOpenVersions, onFull, inFull }) {
+
+// 2026-10-28T09:00:00Z: Back / Home. Screens remember their filters for this session only (cleared on reload).
+window.__navMem = window.__navMem || {};
+function useNavState(key, init){
+  const [v,setV] = useState(()=> Object.prototype.hasOwnProperty.call(window.__navMem,key) ? window.__navMem[key] : init);
+  const set = (x)=> setV(old=>{ const n = typeof x==="function" ? x(old) : x; window.__navMem[key] = n; return n; });
+  return [v,set];
+}
+// 2026-10-28T09:00:00Z: always run the latest build. version.txt is read on load, every 10 minutes and when the window comes back;
+// a newer build reloads the page (with ?v= so no cache can serve the old one). Unsaved work: a banner waits for the user.
+function appVerOf(t){ const m = String(t||"").match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/); return m ? m[0] : ""; }
+async function appVersionCheck(){
+  try{
+    if(!/^https?:/.test(location.protocol)) return;
+    const r = await fetch("version.txt?t="+Date.now(), { cache:"no-store" }); if(!r.ok) return;
+    const v = appVerOf(await r.text()); if(!v || v<=APP_BUILD_VERSION) return;
+    const sp = new URLSearchParams(location.search);
+    if(sp.get("v")===v){ window.dispatchEvent(new CustomEvent("flo-version",{ detail:{ v, stale:true } })); return; }
+    if(window.__unsavedGuard && window.__unsavedGuard.dirty){ window.dispatchEvent(new CustomEvent("flo-version",{ detail:{ v, wait:true } })); return; }
+    appVersionGo(v);
+  }catch(e){}
+}
+function appVersionGo(v){ const sp = new URLSearchParams(location.search); sp.set("v", v); location.replace(location.pathname+"?"+sp.toString()+location.hash); }
+if(!window.__appVerTimer){
+  window.__appVerTimer = setInterval(appVersionCheck, 10*60*1000);
+  document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="visible") appVersionCheck(); });
+  setTimeout(appVersionCheck, 1500);
+}
+function AppVersionBanner(){
+  const [s,setS] = useState(null);
+  useEffect(()=>{ const f = (e)=>setS(e.detail||null); window.addEventListener("flo-version", f); return ()=>window.removeEventListener("flo-version", f); },[]);
+  if(!s) return null;
+  return h("div",{"data-testid":"ver-banner",style:{position:"fixed",top:0,left:0,right:0,zIndex:3000,background:"#fff4d6",borderBottom:"1px solid #e0b84a",padding:"7px 14px",fontSize:13,display:"flex",gap:12,alignItems:"center",justifyContent:"center"}},
+    s.stale ? h("span",null,"A newer build ("+s.v+") is on the server but this computer still gets the old page. Press Ctrl+Shift+R; if that does not help, tell the admin.")
+      : h("span",null,h("b",null,"A newer version of the app is ready. "),"Save your work, then reload."),
+    s.stale ? null : h("button",{"data-testid":"ver-reload",onClick:()=>{ if(window.__unsavedGuard && window.__unsavedGuard.dirty && !confirm(window.__unsavedGuard.message||"You have unsaved changes. Reload anyway?")) return; window.__unsavedGuard && (window.__unsavedGuard.dirty=false); appVersionGo(s.v); },style:{background:colors.dark,color:"#fff",border:0,borderRadius:6,padding:"5px 12px",cursor:"pointer",fontSize:12.5}},"Reload now"),
+    h("button",{onClick:()=>setS(null),style:{background:"none",border:0,cursor:"pointer",fontSize:15,color:colors.muted}},"×"));
+}
+// 2026-10-28T09:00:00Z: hide the browser bars (tabs, address bar, bookmarks). Browsers only allow full screen after a click,
+// so for everyone except super admins it starts on the first click after login and again on the next click after Esc.
+// Installed as an app (Chrome: Install page as app) the bars are already gone, so nothing is forced.
+const appIsInstalled = ()=>{ try{ return window.matchMedia("(display-mode: standalone)").matches || window.matchMedia("(display-mode: fullscreen)").matches || window.navigator.standalone===true; }catch(e){ return false; } };
+const appInFull = ()=> !!(document.fullscreenElement || document.webkitFullscreenElement);
+function appFullOn(){ try{ const el = document.documentElement; const p = el.requestFullscreen ? el.requestFullscreen({ navigationUI:"hide" }) : el.webkitRequestFullscreen ? el.webkitRequestFullscreen() : null; if(p && p.catch) p.catch(()=>{}); }catch(e){} }
+function appFullOff(){ try{ if(document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(()=>{}); else if(document.webkitFullscreenElement && document.webkitExitFullscreen) document.webkitExitFullscreen(); }catch(e){} }
+// the Back / Home strip under the menu
+function NavStrip({ stack, cur, onBack, onHome }){
+  const lab = (t)=> (window.__tabLabel && window.__tabLabel[t]) || (t==="home" ? "Home" : t);
+  const grp = (t)=> (window.__tabMenu && window.__tabMenu[t]) || "";
+  const prev = stack.length ? stack[stack.length-1] : null;
+  const crumbs = stack.slice(-3);
+  const btn = { background:"#fff", border:"1px solid "+colors.border, borderRadius:6, padding:"3px 10px", fontSize:12, cursor:"pointer", fontFamily:"inherit" };
+  return h("div",{"data-testid":"nav-strip",style:{display:"flex",alignItems:"center",gap:8,padding:"4px 14px",background:"#f6f5f0",borderBottom:"1px solid "+colors.border,fontSize:12,minHeight:28}},
+    h("button",{"data-testid":"nav-back",disabled:!prev,onClick:onBack,title:prev?("Back to "+lab(prev.tab)+(prev.so?" · "+(prev.so.contract_number||""):prev.q?" · "+prev.q:"")):"Nothing to go back to",style:{...btn,opacity:prev?1:.45,cursor:prev?"pointer":"default"}},"← Back"),
+    h("button",{"data-testid":"nav-home",disabled:cur.tab==="home",onClick:onHome,title:"Home screen",style:{...btn,opacity:cur.tab==="home"?.45:1}},"⌂ Home"),
+    h("div",{"data-testid":"nav-crumbs",style:{display:"flex",gap:5,alignItems:"center",color:colors.muted,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}},
+      stack.length>3 ? h("span",null,"… ›") : null,
+      crumbs.map((e,i)=>h("span",{key:i},lab(e.tab)+(e.so?" "+(e.so.contract_number||""):e.q?" "+e.q:"")+" ›")),
+      h("b",{style:{color:colors.text}}, (grp(cur.tab)&&cur.tab!=="home"?grp(cur.tab)+" · ":"")+lab(cur.tab)+(cur.so?" "+(cur.so.contract_number||""):cur.q?" "+cur.q:""))));
+}
+function TopBar({ user, sessionCompanyId, sessionCompany, onChangeCompany, onLogout, flags, onOpenVersions, onFull, inFull, onBars, barsHidden }) {
   const [sessionCompanyName,setSessionCompanyName] = useState("");
   useEffect(()=>{
     if(!sessionCompanyId){ setSessionCompanyName(""); return; }
@@ -2310,6 +2370,7 @@ function TopBar({ user, sessionCompanyId, sessionCompany, onChangeCompany, onLog
       h("span",{style:{fontSize:12,color:"#9a9d8f"}},user.username+" ("+user.role+")"),
       h(NotificationBell,{user}),
       onFull ? h("button",{onClick:onFull,title:inFull?"Leave full screen (Esc)":"Full screen: hide the Windows taskbar, the browser bars and this ribbon for more room (Esc to leave)",style:{background:"none",border:"1px solid #3a3f33",color:"#fff",padding:"6px 12px",fontSize:12,cursor:"pointer",borderRadius:6}},inFull?"✕ Exit full screen":"⛶ Full screen") : null,   // 225
+      onBars ? h("button",{"data-testid":"bars-btn",onClick:onBars,title:barsHidden?"Show the browser tabs, address bar and bookmarks":"Hide the browser tabs, address bar and bookmarks",style:{background:"none",border:"1px solid #3a3f33",color:"#fff",padding:"6px 12px",fontSize:12,cursor:"pointer",borderRadius:6}}, barsHidden?"▾ Show browser bars":"▴ Hide browser bars") : null,
       h("button",{onClick:()=>window.open(window.location.href,"_blank"),style:{background:"none",border:"1px solid #3a3f33",color:"#fff",padding:"6px 12px",fontSize:12,cursor:"pointer",borderRadius:6}},"⧉ New tab"),
       h("button",{onClick:onLogout,style:{background:"none",border:"1px solid #3a3f33",color:"#fff",padding:"6px 12px",fontSize:12,cursor:"pointer",borderRadius:6}},"Sign out")
     )
@@ -2333,8 +2394,130 @@ async function canCreateCustomers(user){
   }catch(e){ return false; }
 }
 
+// ---- 2026-10-28T08:00:00Z: DEPARTMENT ACCESS ----
+// Each person works fully in their own department's menus (dept_menu_tbl, plus extra departments in person_dept_tbl);
+// other departments' menus open as "view" (an Admin's admin powers do not apply there). Accounts is confidential:
+// only Super Admins and the people given it by name (user_access_tbl, menu Accounts, allow). The Admin menu is Super
+// Admin only. Per-person exceptions: user_access_tbl allow / block. Until the SQL is run, nothing changes.
+const ACCESS_SQL = "structure_department_access_2026-10-28.sql";
+const ACCESS_SHARED = ["Tasks","Order Status"];
+const ACCESS_MENUS = ["CRM","Sales","Engineering Calc","BOM","Document Control","Purchase","Stores","Reports","HR","Setup"];
+let ACC_ACCESS = null;
+async function accessLoad(user){
+  if(!user) return null;
+  const sa = user.role==="super_admin";
+  const out = { sa, own:new Set(), blocked:new Set(), accounts:sa, missing:false, depts:[], me:"" };
+  try{
+    let me = "", dept = "";
+    try{ const { data: e } = await sb.from("employee_tbl").select("employee_name,department").eq("app_user_id",user.id).limit(1); if(e && e[0]){ me = e[0].employee_name||""; dept = e[0].department||""; } }catch(x){}
+    if(!me){ try{ const { data: u } = await sb.from("app_users").select("employee_name").eq("username",user.username||"").limit(1); me = (u && u[0] && u[0].employee_name)||""; if(me){ const { data: e2 } = await sb.from("employee_tbl").select("department").eq("employee_name",me).limit(1); dept = (e2 && e2[0] && e2[0].department)||""; } }catch(x){} }
+    out.me = me;
+    const depts = dept ? [dept] : [];
+    const r1 = await sb.from("person_dept_tbl").select("department").eq("employee_name",me||"\u0000");
+    if(r1.error){ out.missing = true; ACC_ACCESS = out; window.__access = out; return out; }
+    (r1.data||[]).forEach(x=>{ if(x.department && !depts.includes(x.department)) depts.push(x.department); });
+    out.depts = depts;
+    if(depts.length){ const { data: dm } = await sb.from("dept_menu_tbl").select("department,menu").in("department",depts); (dm||[]).forEach(x=>{ if(x.menu && x.menu!=="Accounts" && x.menu!=="Admin") out.own.add(x.menu); }); }
+    const { data: ua } = await sb.from("user_access_tbl").select("menu,mode").eq("username",user.username||"");
+    (ua||[]).forEach(x=>{ if(x.mode==="block") out.blocked.add(x.menu); else if(x.menu==="Accounts") out.accounts = true; else out.own.add(x.menu); });
+  }catch(e){ out.missing = true; }
+  ACC_ACCESS = out; window.__access = out; return out;
+}
+// "full" | "view" | "none"
+function accessMenuMode(menu, A){
+  A = A || ACC_ACCESS;
+  if(!menu || !A || A.missing) return "full";   // before the SQL: as before
+  if(A.sa) return "full";
+  if(menu==="Admin") return "none";
+  if(A.blocked.has(menu)) return "none";
+  if(menu==="Accounts") return A.accounts ? "full" : "none";
+  if(ACCESS_SHARED.includes(menu) || A.own.has(menu)) return "full";
+  return "view";
+}
+function accessTabMenu(tab){ return (window.__tabMenu||{})[tab] || null; }
+// Outside one's own department an Admin works as an ordinary user.
+function accessUserFor(tab, user){
+  if(!user || user.role!=="admin") return user;
+  const m = accessTabMenu(tab); if(!m) return user;
+  return accessMenuMode(m)==="view" ? { ...user, role:"user", _view:true, _realRole:"admin" } : user;
+}
+function AccessDenied({ tab }){
+  const m = accessTabMenu(tab);
+  return h("div",{style:{padding:"40px 24px",textAlign:"center",color:colors.muted}},
+    h("div",{style:{fontSize:16,fontWeight:700,color:colors.text,marginBottom:6}}, m==="Accounts" ? "Accounts is confidential" : "No access"),
+    h("div",{style:{fontSize:13}}, m==="Accounts" ? "Only Super Admins and the Accounts people named by them can open Accounts." : "Your login has no access to "+(m||"this screen")+". A Super Admin can change it in Admin → Access."));
+}
+// ---- Admin -> Access (Super Admin only) ----
+function AccessScreen({ user }){
+  const [D,setD] = useState(null); const [err,setErr] = useState(""); const [q,setQ] = useState(""); const [busy,setBusy] = useState(false);
+  const load = useCallback(async()=>{
+    const [dp, dm, au, em, pd, ua] = await Promise.all([
+      sb.from("department_tbl").select("department").order("department"),
+      sb.from("dept_menu_tbl").select("*"),
+      sb.from("app_users").select("username,employee_name,role,is_active").order("username"),
+      sb.from("employee_tbl").select("employee_name,department"),
+      sb.from("person_dept_tbl").select("*"),
+      sb.from("user_access_tbl").select("*") ]);
+    if(dm.error || pd.error || ua.error){ setErr("Run "+ACCESS_SQL+" first (both companies)."); setD({ depts:[], dm:[], users:[], emp:[], pd:[], ua:[] }); return; }
+    setD({ depts:(dp.data||[]).map(r=>r.department).filter(Boolean), dm:dm.data||[], users:au.data||[], emp:em.data||[], pd:pd.data||[], ua:ua.data||[] });
+  },[]);
+  useEffect(()=>{ load(); },[load]);
+  if(user?.role!=="super_admin") return h("div",{style:{padding:24,color:colors.muted}},"Access is for Super Admins.");
+  if(!D) return h("div",{style:{padding:20,color:colors.muted}},"Reading…");
+  const by = user?.username||"";
+  const run = async(p, audit)=>{ setBusy(true); const r = await p; setBusy(false); if(r && r.error){ alert("Could not save: "+r.error.message); return; } try{ await logAudit("UPDATE","access",audit,audit,by,null,null); }catch(e){} load(); };
+  const hasDM = (d,m)=> D.dm.some(x=>x.department===d && x.menu===m);
+  const togDM = (d,m)=> hasDM(d,m) ? run(sb.from("dept_menu_tbl").delete().eq("department",d).eq("menu",m), "Access: "+d+" no longer owns "+m) : run(sb.from("dept_menu_tbl").insert({ department:d, menu:m, set_by:by }), "Access: "+d+" owns "+m);
+  const empOf = (n)=> D.emp.find(e=>e.employee_name===n)||{};
+  const uaOf = (u)=> D.ua.filter(x=>x.username===u);
+  const th = (t)=> h("th",{style:{textAlign:"left",padding:"5px 7px",fontSize:11,color:colors.muted,borderBottom:"2px solid "+colors.dark,whiteSpace:"nowrap"}},t);
+  const td = (c,s)=> h("td",{style:{padding:"5px 7px",borderBottom:"1px solid "+colors.border,verticalAlign:"top",fontSize:12.5,...(s||{})}},c);
+  const chip = (txt, onX, tone)=> h("span",{style:{display:"inline-flex",gap:4,alignItems:"center",fontSize:11.5,padding:"1px 7px",borderRadius:9,background:tone||"#eef2f7",marginRight:4,marginBottom:3}}, txt, onX ? h("button",{onClick:onX,title:"Remove",style:{border:"none",background:"none",cursor:"pointer",padding:0,fontSize:13,lineHeight:1}},"×") : null);
+  const users = D.users.filter(u=>!q || (u.username+" "+(u.employee_name||"")).toLowerCase().includes(q.toLowerCase()));
+  return h("div",{style:{padding:"14px 18px"}},
+    h("h2",{style:{fontSize:19,margin:"0 0 4px"}},"Access"),
+    h("div",{style:{fontSize:12.5,color:colors.muted,marginBottom:10}},"Each person works fully in their department's menus; other departments' menus open as view, and an Admin is an ordinary user there. Tasks and the Order Status board are shared. Accounts: only Super Admins and the people ticked below. The Admin menu: Super Admins only."),
+    err ? h("div",{style:{color:colors.danger,fontSize:12.5,marginBottom:8}},err) : null,
+    h("div",{style:{fontWeight:700,fontSize:14,margin:"6px 0"}},"1 · Which menus each department owns"),
+    h("div",{style:{overflowX:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8,marginBottom:16}},
+      h("table",{style:{borderCollapse:"collapse",width:"100%"}},
+        h("thead",null,h("tr",null, th("Department"), ...ACCESS_MENUS.map(m=>th(m)))),
+        h("tbody",null, D.depts.map(d=>h("tr",{key:d}, td(h("b",null,d)), ...ACCESS_MENUS.map(m=>td(h("input",{type:"checkbox",checked:hasDM(d,m),disabled:busy,"data-testid":"acc-dm",onChange:()=>togDM(d,m)}),{textAlign:"center"}))))))),
+    h("div",{style:{fontWeight:700,fontSize:14,margin:"6px 0"}},"2 · People"),
+    h("input",{value:q,onChange:e=>setQ(e.target.value),placeholder:"Search login or name",style:{...inputStyle,width:240,marginBottom:8}}),
+    h("div",{style:{overflowX:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8}},
+      h("table",{style:{borderCollapse:"collapse",width:"100%"}},
+        h("thead",null,h("tr",null, th("Login"), th("Employee · department"), th("Also in departments"), th("Accounts"), th("Extra menus (full)"), th("Blocked menus"), th("Result"))),
+        h("tbody",null, users.map(u=>{
+          const e = empOf(u.employee_name); const sa = u.role==="super_admin";
+          const extraD = D.pd.filter(x=>x.employee_name===u.employee_name).map(x=>x.department);
+          const ua = uaOf(u.username); const acc = ua.some(x=>x.menu==="Accounts" && x.mode==="allow");
+          const allow = ua.filter(x=>x.mode==="allow" && x.menu!=="Accounts").map(x=>x.menu), block = ua.filter(x=>x.mode==="block").map(x=>x.menu);
+          const own = new Set(); [e.department, ...extraD].filter(Boolean).forEach(d=>D.dm.filter(x=>x.department===d).forEach(x=>own.add(x.menu))); allow.forEach(m=>own.add(m)); block.forEach(m=>own.delete(m));
+          const addSel = (opts, on, ph)=> h("select",{value:"",onChange:e2=>{ if(e2.target.value) on(e2.target.value); },style:{...inputStyle,padding:"2px 5px",fontSize:11.5,width:130}}, h("option",{value:""},ph), opts.map(o=>h("option",{key:o,value:o},o)));
+          return h("tr",{key:u.username,style:{opacity:u.is_active===false?.55:1}},
+            td(h("div",null,h("b",null,u.username),h("div",{style:{fontSize:11,color:colors.muted}},u.role+(u.is_active===false?" · inactive":"")))),
+            td((u.employee_name||"— no employee")+(e.department?" · "+e.department:" · no department")),
+            td(u.employee_name ? h("div",null, extraD.map(d=>chip(d,()=>run(sb.from("person_dept_tbl").delete().eq("employee_name",u.employee_name).eq("department",d),"Access: "+u.employee_name+" removed from "+d))),
+              addSel(D.depts.filter(d=>d!==e.department && !extraD.includes(d)), d=>run(sb.from("person_dept_tbl").insert({ employee_name:u.employee_name, department:d, set_by:by }),"Access: "+u.employee_name+" also in "+d), "+ department")) : "—"),
+            td(sa ? "Super Admin" : h("input",{type:"checkbox",checked:acc,"data-testid":"acc-accounts",disabled:busy,onChange:()=> acc
+                ? run(sb.from("user_access_tbl").delete().eq("username",u.username).eq("menu","Accounts"),"Access: Accounts taken from "+u.username)
+                : run(sb.from("user_access_tbl").upsert({ username:u.username, menu:"Accounts", mode:"allow", set_by:by },{ onConflict:"username,menu" }),"Access: Accounts given to "+u.username)}),{textAlign:"center"}),
+            td(sa ? "—" : h("div",null, allow.map(m=>chip(m,()=>run(sb.from("user_access_tbl").delete().eq("username",u.username).eq("menu",m),"Access: "+u.username+" extra "+m+" removed"),"#e4f3ed")),
+              addSel(ACCESS_MENUS.filter(m=>!allow.includes(m)), m=>run(sb.from("user_access_tbl").upsert({ username:u.username, menu:m, mode:"allow", set_by:by },{ onConflict:"username,menu" }),"Access: "+u.username+" given "+m), "+ menu"))),
+            td(sa ? "—" : h("div",null, block.map(m=>chip(m,()=>run(sb.from("user_access_tbl").delete().eq("username",u.username).eq("menu",m),"Access: "+u.username+" unblocked "+m),"#fdecea")),
+              addSel([...ACCESS_MENUS,"Accounts"].filter(m=>!block.includes(m)), m=>run(sb.from("user_access_tbl").upsert({ username:u.username, menu:m, mode:"block", set_by:by },{ onConflict:"username,menu" }),"Access: "+u.username+" blocked from "+m), "+ block"))),
+            td(sa ? "Everything" : h("div",{style:{fontSize:11.5}}, h("div",null,h("b",null,"Full: "), [...ACCESS_SHARED, ...own, ...(acc?["Accounts"]:[])].join(", ")||"—"),
+              h("div",{style:{color:colors.muted}},"View: "+(ACCESS_MENUS.filter(m=>!own.has(m) && !block.includes(m)).join(", ")||"—")),
+              block.length ? h("div",{style:{color:"#a3312a"}},"Hidden: "+block.join(", ")) : null)));
+        })))));
+}
+
 /* ---- MENU ---- */
 function MenuTabs({ user, active, onChange, onRefresh }) {
+  const [accTick,setAccTick] = useState(0);   // 2026-10-28T08:00:00Z: department access
+  useEffect(()=>{ let live=true; accessLoad(user).then(()=>{ if(live) setAccTick(t=>t+1); }); return ()=>{ live=false; }; },[user?.id, user?.role, user?.username]);
+  useEffect(()=>{ try{ window.dispatchEvent(new Event("flo-access")); }catch(e){} },[accTick]);
   const [custAccess,setCustAccess] = useState(false);   // 125
   useEffect(()=>{ let live=true; canCreateCustomers(user).then(v=>{ if(live) setCustAccess(v); }); return ()=>{ live=false; }; },[user?.id, user?.role]);
   const [,setRegTick] = useState(0);   // 137: menu knows whether Register Tabs & People is in use
@@ -2351,6 +2534,8 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
   const isTechHeadRole = user.role==="technical_head";   // 235
   const [calcAccess,setCalcAccess] = useState(user.role==="super_admin" || user.role==="technical_head");   // Engineering Calc: Super Admin, Technical Head, Design & Estimation
   useEffect(()=>{ let live=true; cwCanUse(user).then(v=>{ window.__cwAccess = v; if(live) setCalcAccess(v); }); return ()=>{ live=false; }; },[user?.id, user?.role]);
+  const [vendAccess,setVendAccess] = useState(user.role==="admin" || user.role==="super_admin");   // 2026-10-28T07:00:00Z: Purchase -> Vendors
+  useEffect(()=>{ let live=true; vendorRights(user).then(r=>{ if(live) setVendAccess(!!r.view); }); return ()=>{ live=false; }; },[user?.id, user?.role, user?.username]);
   const [openGroup,setOpenGroup] = useState(null);
   const rootRef = useRef(null);
 
@@ -2427,7 +2612,8 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
   const purchaseGroup = { label:"Purchase", subgroups:[
       { label:"Procurement", tabs:[{key:"proc_list",label:"Procurement list"},{key:"proc_gantt",label:"Procurement Gantt"},{key:"proc_reports",label:"Procurement reports"}] },
       { label:"Registers", tabs:[{key:"po_register",label:"Purchase Register"},{key:"end_user_rules",label:"End User Rules"}] },   // 173: from Stores; 209: Purchase Register; 237: End User Rules
-      { label:"Price List", tabs:[ ...(canSeeValvePrice(user)?[{key:"valve_price_purchase",label:"Valves"}]:[]), ...(isAdmin?[{key:"price_list",label:"Price List"},{key:"vendors",label:"Vendors"}]:[]) ] },
+      { label:"Price List", tabs:[ ...(canSeeValvePrice(user)?[{key:"valve_price_purchase",label:"Valves"}]:[]), ...(isAdmin?[{key:"price_list",label:"Price List"}]:[]) ] },
+      ...(vendAccess ? [{ label:"Vendors", tabs:[{key:"vendors",label:"Vendors"}] }] : []),   // 2026-10-28T07:00:00Z: its own gateway
     ]};
   const crmGroup = { label:"CRM", subgroups:[
       { label:"Daily", tabs:[
@@ -2522,6 +2708,7 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
     groups.push({ label:"Admin", subgroups:[
       { label:"Access control", tabs:[
         {key:"users",label:"Users"},
+        ...(isSuperAdmin?[{key:"access",label:"Access"}]:[]),   // 2026-10-28T08:00:00Z
         {key:"permissions",label:"Permissions"},
         ...(isSuperAdmin?[{key:"deletion_codes",label:"Deletion Codes"}]:[]),
         {key:"authorization_codes",label:"Authorization Codes"},
@@ -2547,13 +2734,16 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
   // Overrides the whole nav to just Sale Order, same narrow-scope
   // approach as hr_admin, applied here rather than threading a
   // conditional through the entire groups literal above.
-  const visibleGroups = nonEmpty((isApprovalRole && !isAdmin && !isHrAdmin)
+  const visibleGroups0 = nonEmpty((isApprovalRole && !isAdmin && !isHrAdmin)
     ? [{ label:"Sales", subgroups:[{ label:"Sale Order", tabs:[{key:"sale_order_entry",label:"Sale Order"}] }] },
        ...(isTechHeadRole ? [engGroup, { label:"BOM", subgroups:[ { label:"BOM", tabs:[{key:"bom_form",label:"BOM Entry Form"}] } ]}] : []),   // 235: Technical Head
        orderStatusGroup, { label:"Order Status", tabs:[{key:"order_board",label:"Order Status Board"}] }, ...(isTechHeadRole ? [purchaseGroup] : []), storesGroup, accountsGroup,
        tasksGroup,   // 235: all three approval roles have task boards
        ...(isTechHeadRole ? [reportsGroup] : []), setupGroup]   // 129 / 172: approval roles see Order Status, Stores, Accounts
     : groups);
+  // 2026-10-28T08:00:00Z: department access — hidden menus go, other departments' menus are marked view
+  const visibleGroups = visibleGroups0.filter(g=>accessMenuMode(g.label)!=="none").map(g=> accessMenuMode(g.label)==="view" ? { ...g, _view:true } : g);
+  { const tm = {}; visibleGroups0.forEach(g=>allTabsOf(g).forEach(t=>{ if(!tm[t.key]) tm[t.key] = g.label; })); [...groups].forEach(g=>allTabsOf(g).forEach(t=>{ if(!tm[t.key]) tm[t.key] = g.label; })); window.__tabMenu = tm; const tl = { home:"Home" }; [...visibleGroups0, ...groups].forEach(g=>allTabsOf(g).forEach(t=>{ if(!tl[t.key]) tl[t.key] = t.label; })); window.__tabLabel = tl; }
 
   const itemStyle = t => ({
     padding:"5px 8px", fontSize:11.5, borderRadius:4, cursor:"pointer", textAlign:"left", border:"none",
@@ -2577,7 +2767,7 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
               fontWeight: groupIsActive(g) ? 700 : 500,
               display:"flex",alignItems:"center",gap:5
             }
-          }, g.label, h("span",{style:{fontSize:8,opacity:0.7}},"▾")),
+          }, g.label, g._view ? h("span",{title:"Another department: view only",style:{fontSize:9,opacity:0.6}},"\u{1F441}") : null, h("span",{style:{fontSize:8,opacity:0.7}},"▾")),
           // Flat groups (e.g. Engineering Calc) are a single clickable tab,
           // not a label plus a duplicate button underneath it — previously
           // both rendered the same text.
@@ -6922,6 +7112,7 @@ function AddPricePanel({ user, existing, onSaved, onClose }){
   const items = useMemo(()=>Array.from(new Set(live.map(r=>r.item))).sort(),[live]);
   const [item,setItem]=useState(items[0]||""); const [v,setV]=useState({});
   const [sizes,setSizes]=useState([]); const [vendors,setVendors]=useState([]); const [newV,setNewV]=useState("");
+  const [vAdd,setVAdd]=useState(false); useEffect(()=>{ vendorRights(user).then(r=>setVAdd(!!r.add)); },[user && user.username]);   // only vendor-right holders may add a vendor here
   const [f,setF]=useState({vendor:"",vendor_ref:"",pricelist_no:"",wef:"",list_price:"",uplift_pct:"0",description:"",note:""});
   const [mats,setMats]=useState({}); const [busy,setBusy]=useState(false); const [msg,setMsg]=useState("");
   useEffect(()=>{
@@ -7003,7 +7194,7 @@ function AddPricePanel({ user, existing, onSaved, onClose }){
       h("label",{htmlFor:"ap-vendor",style:{fontSize:13}},"Vendor"),
       h("div",{style:{display:"flex",gap:6}},
         h("select",{id:"ap-vendor",value:f.vendor,onChange:e=>setF(x=>({...x,vendor:e.target.value})),style:{...inputStyle,padding:"7px 9px"}},
-          h("option",{value:""},"Pick…"), vendors.map(o=>h("option",{key:o.vendor_name,value:o.vendor_name},o.vendor_name+(o.approval_status&&o.approval_status!=="Approved"?" ("+o.approval_status+")":""))), h("option",{value:"__new"},"+ New vendor…")),
+          h("option",{value:""},"Pick…"), vendors.map(o=>h("option",{key:o.vendor_name,value:o.vendor_name},o.vendor_name+(o.approval_status&&o.approval_status!=="Approved"?" ("+o.approval_status+")":""))), vAdd ? h("option",{value:"__new"},"+ New vendor…") : null),
         f.vendor==="__new" && h("input",{value:newV,onChange:e=>setNewV(e.target.value),placeholder:"New vendor's name",style:{...inputStyle,padding:"7px 9px"}}))),
     inp("Vendor ref","vendor_ref",{placeholder:"Vendor's own item / catalogue no. (internal)"}),
     inp("Price list no","pricelist_no"), inp("W.e.f.","wef",{placeholder:"dd-mm-yyyy"}),
@@ -12096,6 +12287,17 @@ function docIsCleared(status){
   return /code ?1|code ?2|all cleared|for info|internal info|no action/i.test(s) && !/code ?3/i.test(s);
 }
 // The posts that may change a document's For-production flag and hand over.
+// 2026-10-28T07:00:00Z: who may open Purchase -> Vendors, add and edit. Admins always; others from Admin -> Permissions
+// (user_permissions, table vendor_tbl — vendor_rights_purchase_2026-10-28.sql) or the Purchase Manager post.
+async function vendorRights(user){
+  if(!user) return { view:false, add:false, edit:false };
+  if(user.role==="admin" || user.role==="super_admin") return { view:true, add:true, edit:true, admin:true };
+  let r = { view:false, add:false, edit:false };
+  try{ const { data } = await sb.from("user_permissions").select("can_view,can_add,can_edit").eq("username",user.username||"").eq("table_name","vendor_tbl").limit(1);
+    const p = (data||[])[0]; if(p) r = { view:!!(p.can_view||p.can_add||p.can_edit), add:!!p.can_add, edit:!!p.can_edit }; }catch(e){}
+  if(!r.add){ try{ const { keys } = await myPostKeys(user); if((keys||[]).includes("purchase_manager")) r = { view:true, add:true, edit:true }; }catch(e){} }
+  return r;
+}
 async function myPostKeys(user){
   try{
     const { data: emp } = await sb.from("employee_tbl").select("employee_name").eq("app_user_id",user?.id||"").limit(1).maybeSingle();
@@ -14525,7 +14727,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     sb.from("employee_tbl").select("employee_name,designation").neq("status","Inactive").order("employee_name")
       .then(({data})=>setActiveSignatoryEmployees((data||[]).filter(e=>e.employee_name)));
   },[]);
-  const [refFilter,setRefFilter]=useState(""); const [slNoFilter,setSlNoFilter]=useState(""); const [descSearch,setDescSearch]=useState(""); const [openRef,setOpenRef]=useState(null);
+  const [refFilter,setRefFilter]=useState(""); useEffect(()=>{ if(mode!=="contract"){ const v = refFilter||null; if(window.__curQuoteRef!==v){ window.__curQuoteRef = v; window.dispatchEvent(new Event("flo-curquote")); } } },[refFilter, mode]); const [slNoFilter,setSlNoFilter]=useState(""); const [descSearch,setDescSearch]=useState(""); const [openRef,setOpenRef]=useState(null);
   // Value snapshot trigger (30 Aug) — fires when refFilter changes away
   // from a given quote/contract (switching to another one within this
   // same screen) and on final unmount (navigating away entirely). The
@@ -33706,6 +33908,10 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"28 Oct 2026 (272)", summary:"Built on 2026-10-28T09:00:00Z, on top of 2026-10-28T08:00:00Z. No SQL. CALCULATION LINK is now a cascade: Linked to (Quote / Contract / Internal) \u2192 Client \u2192 Quote No / Contract No \u2192 Sl No. Client is a type-ahead list of only the clients who have an offer (Quote) or a contract (Contract); the number list shows only that client's, as \u201cNo \u2013 Client\u201d; both are pick-from-list (typed text that is not on the list is not kept). Changing the client clears the number and Sl No. Internal greys out client, number and Sl No and asks only for the internal reference. ALWAYS THE LATEST BUILD: the app reads version.txt on opening, every 10 minutes and when you come back to the window; a newer build reloads the page by itself. If there is unsaved work a yellow bar asks you to save and press Reload now. BROWSER BARS (tabs, address bar, bookmarks) are hidden: everyone except Super Admins goes full screen on the first click after login, and again on the next click after Esc (not when the app is installed as an app \u2014 then the bars are already gone). Super Admins get a Hide / Show browser bars button. BACK and HOME on every screen: a strip under the menu with \u2190 Back (to the previous screen, with the quote or contract that was open and the Order Status board's filters), \u2302 Home and the trail of screens. The trail lives for this session only; a reload starts at Home." },
+  { date:"28 Oct 2026 (271)", summary:"Built on 2026-10-28T08:00:00Z, on top of 2026-10-28T07:00:00Z. DEPARTMENT ACCESS. Each person works fully in the menus their department owns (and any extra departments given to them); other departments' menus open with an eye mark, as view — an Admin is an ordinary user there (no admin powers, approvals or overrides). Tasks and the Order Status board are shared. ACCOUNTS IS CONFIDENTIAL: only Super Admins and the people named for it (Flometriq: Ponnarasi, Ganesh, Selvi; Levaflow: Gandhimathi) see the Accounts menu or open any Accounts screen. The Admin menu is Super Admin only. Blocked menus are hidden and can't be opened from a link or the bell (Levaflow: Annamalai — Sales; Sankar — Sales, Purchase). NEW Admin → Access (Super Admin): which menus each department owns, extra departments per person, Accounts per person, extra / blocked menus per person, and the result. Until the SQL is run nothing changes. Step 2 (later): other departments' screens fully read-only. SQL: structure_department_access_2026-10-28.sql (both), access_people_flometriq_2026-10-28.sql, access_people_levaflow_2026-10-28.sql." },
+  { date:"28 Oct 2026 (270)", summary:"Built on 2026-10-28T07:00:00Z, on top of 2026-10-28T06:00:00Z. VENDORS: its own gateway, Purchase → Vendors (was hidden under Price List for Admins only). Open to Admins / Super Admins, the Purchase Manager post (Keerthi) and anyone given vendor rights in Admin → Permissions (Vendors row; vendor_rights_purchase_2026-10-28.sql gives view + add + edit to the Purchase Manager and every login in the Purchase department). View-only people see the vendors but no + New vendor / Save. The Valve Price List's \u201c+ New vendor\u201d now shows only to people with add rights. SQL: vendor_rights_purchase_2026-10-28.sql (data, each company)." },
+  { date:"28 Oct 2026 (269)", summary:"Built on 2026-10-28T06:00:00Z, on top of 2026-10-28T05:00:00Z. FACTORY MANAGER post (V. Babu): factory admin, machine maintenance, safety and health hazards, logistics and factory security; not Quality Control. The post carries Stores rights everywhere the Stores In Charge has them — DCs, gate passes (recording the exit and the signed scan), the Stores side of the Procurement Gantt, PO making — while the Stores notices and tasks still go to the Stores In Charge. On the task boards he sits on, and approves, the Factory / Maintenance / Safety / Security / Logistics boards (when those departments exist) and sits on Stores. SQL: post_factory_manager_vbabu_2026-10-28.sql (data, Flometriq only)." },
   { date:"28 Oct 2026 (268)", summary:"Built on 2026-10-28T05:00:00Z, on top of 2026-10-28T04:00:00Z. ORDER STATUS BOARD (SOP FMQ-SOP-DESP-001). The old Order Status menu is now DOCUMENT CONTROL (unchanged inside); a new ORDER STATUS menu opens the board: 1 Under production · 2 Ready – with QC · 3 QC cleared · 4 Clearance given · 5 Shipped – awaiting payment · 6 Payment received. LOTS: the Production Manager presses Items ready on a contract card and ticks the Sl Nos and quantities that are ready — that makes Lot 1, Lot 2 …; the contract card shows what is left. Each lot: QC Head links the QC documents and issues the QC clearance letter (PDF) or objects (back to production); Stores press Make the DC — the DC opens with the lot's Sl Nos and quantities — and finish it with Done – to Production Manager; the Production Manager requests the despatch clearance (the DC goes to Accounts); the Accounts Head gives it (Approve and number on the DC) or holds it with a reason; the Production Manager enters gate pass, LR / AWB and the payment due date (invoice date + credit days from the payment terms) and presses Shipped; the lot moves to Payment received by itself when the receipt is allocated against its invoice in the books, or by hand with a note. When every quantity is in lots and every lot is paid, the contract is Closed and the Production Manager, Accounts Head and Sales Head are told. Every step closes the last task card and opens the next one, with a bell Action needed notice that lights up the button to press. MINE filter shows only what waits on you. PLACE OLD CONTRACTS (Production Manager / Super Admin, 30 days from go-live): tick many contracts in one list, pick the column, one note — no tasks, no gates; placed contracts are moved on by hand; placing in Payment received closes them. SQL: structure_order_status_board_2026-10-28.sql (structural, both companies)." },
   { date:"28 Oct 2026 (267)", summary:"Built on 2026-10-28T04:00:00Z, on top of 2026-10-28T03:00:00Z. WON — SINGLE OR MULTIPLE POs: marking a quote Won now asks, compulsorily, how the client will order: Single PO (one Sale Order; a second is refused) or Multiple POs (rate contract / plant-wise / phase-wise: a Sale Order per PO, every Sl No each time, the team trims it; open until Close). Multiple tells the Sales Head in the bell; so does ticking Multiple POs on the ribbon. THE BELL: Unread / All, × deletes one, Clear read deletes the read ones, read ones older than 30 days go on their own, Load older (25 at a time), a ? Help. ACTION GATEWAY: each notification is Action needed (a red button takes you to the record and enlarges, pulses and explains the button to press), Open (goes to the record) or Info. When the job is done — by you or another approver of the same section — it shows Done ✓ for everyone. Wired: Sale Order approvals (new: Accounts Admin for Commercial Terms, FSE / Sales Head for Everything else, on Sale Order creation), Purchase Order approval and the owner's send-out, organisation chart HR / MD approval, requests to add a document, direct invoice quantities, Production BOM re-approval, tasks given, Multiple-POs notice. Old notifications stay Info. FIX: the Calculations picker and the Multiple-POs bar read the client PO from basis_number (sale_order_tbl has no po_number). SQL: bell_action_gateway_2026-10-28.sql (structural, both companies)." },
   { date:"28 Oct 2026 (266)", summary:"Built on 2026-10-28T03:00:00Z, on top of 2026-10-28T02:00:00Z. SQL (structural): quote_multiple_po_2026-10-28.sql (both companies) \u2014 removes the one-Sale-Order-per-quote rule from the database and adds quote_multi_po_tbl. ONE QUOTE, MANY SALE ORDERS: a Won quote has a \u201cMultiple POs\u201d tick in the ribbon (Next step). Ticked, Create Sale Order makes a new Sale Order (next contract number) for every PO; each gets every Sl No of the quote, and the user removes the Sl Nos that PO doesn\u2019t have and changes the quantities \u2014 no balance, no checks. Not ticked, it works as before (one Sale Order; Create Sale Order opens it). The quote shows a bar with its Sale Orders (click to open). The quote stays locked from the first Sale Order, as before. Close \u2014 no more POs (reason required, logged) stops new Sale Orders; the bar shows who closed it, when and why; Reopen POs is for the Super Admin, with a reason. On a Sale Order from a Multiple-POs quote, anyone editing it may Remove Sl Nos while it is before the OA (no Admin / delete code needed). The Sale Order screen\u2019s create path also refuses a second Sale Order for a quote that isn\u2019t ticked. Quotes Report: \u201cOpen rate contracts only\u201d box beside Clear." },
@@ -41224,7 +41430,7 @@ async function pgCanEdit(user){
 async function pgStoresCan(user){
   const emp = await pgEmp(user); if(!emp) return false;
   if(/store/i.test(emp.department||"") || (typeof empBoards==="function" && empBoards(emp).some(b=>/store/i.test(b)))) return true;
-  try{ const { data } = await sb.from("post_holder_tbl").select("post_key").eq("post_key","stores").eq("employee_name",emp.employee_name).limit(1); return !!(data && data.length); }catch(e){ return false; }
+  try{ const { data } = await sb.from("post_holder_tbl").select("post_key").in("post_key",["stores","factory_manager"]).eq("employee_name",emp.employee_name).limit(1); return !!(data && data.length); }catch(e){ return false; }
 }
 const pgStoresKey = (key, field)=> String(key).split("|")[0]==="fac" && (field==="as" || field==="ae");
 // 157: an actual date may not be in the future (a week counts from its Sunday)
@@ -48075,7 +48281,7 @@ function PermissionsEditor() {
   const [users,setUsers]=useState([]); const [selUser,setSelUser]=useState("");
   const [perms,setPerms]=useState({}); const [loading,setLoading]=useState(false);
   const [saving,setSaving]=useState(false); const [msg,setMsg]=useState("");
-  const tables=["bom","model_tbl","category_tbl","item_tbl","size_tbl","component_item_tbl","subassembly_tbl","materials_shape","material_spec","uom_tbl","material_rates"];
+  const tables=["bom","model_tbl","category_tbl","item_tbl","size_tbl","component_item_tbl","subassembly_tbl","materials_shape","material_spec","uom_tbl","material_rates","vendor_tbl"];   // vendor_tbl: Purchase -> Vendors (2026-10-28T07:00:00Z)
 
   useEffect(()=>{ sb.from("app_users").select("username,role").order("username").then(({data})=>setUsers(data||[])); },[]);
 
@@ -52169,51 +52375,76 @@ async function cwFindMovable(link, lists){
   }
   return cands.sort((x,y)=>Number(x.link_sl)-Number(y.link_sl) || String(x.calc_type).localeCompare(String(y.calc_type)));
 }
-// the picker: type the number or the client, pick from the list; the Sl No list comes from that quote / contract
+// 2026-10-28T09:00:00Z: Linked to -> Client -> Quote / Contract No -> Sl No. Each a type-ahead list (pick from the list);
+// the client list holds only clients with an offer (Quote) or a contract (Contract); the number list only that client's.
+// Internal greys them all out and asks for the internal reference.
+function CwCombo({ value, placeholder, disabled, options, render, onPick, testid, red, emptyText }){
+  const [q,setQ] = useState(value||""); const [open,setOpen] = useState(false); const [hi,setHi] = useState(0);
+  const valRef = useRef(value); valRef.current = value;
+  useEffect(()=>{ setQ(value||""); },[value]);
+  const term = String(q||"").toLowerCase().trim();
+  const showAll = !term || term===String(value||"").toLowerCase();
+  const opts = (showAll ? options : options.filter(o=>render(o,false).toLowerCase().includes(term))).slice(0,60);
+  const pick = (o)=>{ setOpen(false); onPick(o); };
+  return h("div",{style:{position:"relative"}},
+    h("input",{"data-testid":testid,value:q,disabled,autoComplete:"off",placeholder,
+      onFocus:()=>{ if(!disabled){ setOpen(true); setHi(0); } },
+      onChange:e=>{ setQ(e.target.value); setOpen(true); setHi(0); },
+      onBlur:()=>setTimeout(()=>{ setOpen(false); setQ(valRef.current||""); },150),   // limit to list: free typing is not kept
+      onKeyDown:e=>{ if(e.key==="ArrowDown"){ e.preventDefault(); setHi(x=>Math.min(x+1,opts.length-1)); } else if(e.key==="ArrowUp"){ e.preventDefault(); setHi(x=>Math.max(x-1,0)); } else if(e.key==="Enter" && opts[hi]){ e.preventDefault(); pick(opts[hi]); } else if(e.key==="Escape"){ setOpen(false); } },
+      style:{...inputStyle,padding:"5px 8px",fontSize:12.5,...(disabled?{background:"#eeece6",color:colors.mutedLight,cursor:"not-allowed"}:{}),...(red||{})}}),
+    open && !disabled ? h("div",{"data-cwdd":"1",style:{position:"absolute",left:0,right:0,top:"100%",marginTop:2,background:"#fff",border:"1px solid "+colors.border,borderRadius:6,boxShadow:"0 6px 18px rgba(0,0,0,.18)",maxHeight:280,overflowY:"auto",zIndex:20}},
+      opts.length ? opts.map((o,i)=>h("div",{key:i,"data-cwopt":render(o,false),onMouseDown:e=>{ e.preventDefault(); pick(o); },onMouseEnter:()=>setHi(i),
+          style:{padding:"6px 9px",cursor:"pointer",borderBottom:"1px solid #ecebe4",fontSize:12.5,background:i===hi?"#eef3fd":"#fff"}}, render(o,true)))
+        : h("div",{style:{padding:"8px 9px",fontSize:12,color:colors.muted}}, emptyText||"No match — pick from the list")) : null);
+}
 function CwLinkPicker({ link, onPick, errs, lists, listsBusy }){
   const L = link || { type:"contract", ref:"", sl:"" };
-  const [q,setQ] = useState(""); const [open,setOpen] = useState(false); const [hi,setHi] = useState(0); const [busy,setBusy] = useState(false);
-  useEffect(()=>{ setQ(L.ref && L.type!=="internal" ? (L.ref+(L.client?" · "+L.client:"")) : ""); },[L.ref, L.type, L.client]);
+  const [busy,setBusy] = useState(false);
+  const [client,setClient] = useState(L.client||"");
   const src = !lists ? [] : (L.type==="quote" ? lists.quotes : lists.contracts);
-  const term = q.toLowerCase().replace(/ · .*$/,"").trim();
-  const opts = (term ? src.filter(x=>String(x.ref).toLowerCase().includes(term) || String(x.client||"").toLowerCase().includes(term)) : src).slice(0,40);
-  const choose = async (x)=>{ setOpen(false); setBusy(true);
+  // an older saved calc may carry the number without the client: take the client from the list
+  useEffect(()=>{ setClient(L.client || (L.ref ? ((src||[]).find(x=>x.ref===L.ref)||{}).client||"" : "")); },[L.client, L.type, L.ref, src]);
+  const clients = useMemo(()=>{ const m = new Map(); (src||[]).forEach(x=>{ const c = String(x.client||"").trim(); if(c) m.set(c,(m.get(c)||0)+1); }); return Array.from(m.entries()).sort((a,b)=>a[0].localeCompare(b[0])).map(([c,n])=>({ c, n })); },[src]);
+  const refs = (src||[]).filter(x=>String(x.client||"").trim()===client);
+  const choose = async (x)=>{ setBusy(true);
     const items = await cwItems(x.ref); setBusy(false);
     onPick({ type:L.type, ref:x.ref, client:x.client, po:x.po||"", date:x.date||"", quote:x.quote||"", items, sl: items.length===1 ? items[0].sl : "", picked:true }); };
   const lab = (t)=> h("div",{style:{fontSize:10.5,color:colors.muted,textTransform:"uppercase",letterSpacing:".04em",marginBottom:3}},t);
   const err = (t)=> t ? h("div",{style:{color:colors.danger,fontSize:11.5,marginTop:3}},t) : null;
   const red = (t)=> t ? { borderColor:colors.danger, background:"#fdecea" } : {};
-  const seg = (k,t)=> h("button",{key:k,type:"button","data-cwlt":k,onClick:()=>{ if(k!==L.type) onPick({ type:k, ref:"", sl:"", items:[], client:"", picked:false }); },
+  const seg = (k,t)=> h("button",{key:k,type:"button","data-cwlt":k,onClick:()=>{ if(k!==L.type){ setClient(""); onPick({ type:k, ref:"", sl:"", items:[], client:"", picked:false }); } },
     style:{border:0,borderRight:k!=="internal"?"1px solid "+colors.border:0,padding:"5px 11px",fontSize:12,cursor:"pointer",background:L.type===k?colors.dark:"#fff",color:L.type===k?"#fff":colors.text,fontWeight:L.type===k?700:400,fontFamily:"inherit"}},t);
+  const inter = L.type==="internal";
   const it = (L.items||[]).find(i=>String(i.sl)===String(L.sl));
+  const word = L.type==="quote" ? "Quote" : "Contract";
   return h("div",{"data-cwlink":"1",style:{display:"flex",flexWrap:"wrap",gap:"10px 14px",alignItems:"flex-start",padding:"10px 12px"}},
     h("div",null, lab("Linked to *"), h("span",{style:{display:"inline-flex",border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden"}}, seg("quote","Quote"), seg("contract","Contract"), seg("internal","Internal"))),
-    L.type==="internal"
-      ? h("div",{style:{flex:"1 1 280px"}}, lab("Internal reference *"),
-          h("input",{"data-cwint":"1",value:L.ref||"",placeholder:"e.g. UL free area study, R&D, training",onChange:e=>onPick({ ...L, ref:e.target.value, picked:!!e.target.value.trim(), sl:"" }),style:{...inputStyle,padding:"5px 8px",fontSize:12.5,...red(errs&&errs.ref)}}), err(errs&&errs.ref))
-      : h(React.Fragment,null,
-          h("div",{style:{flex:"1 1 300px",position:"relative"}}, lab((L.type==="quote"?"Quote No":"Contract No")+" * — type the number or the client"),
-            h("input",{"data-cwref":"1",value:q,autoComplete:"off",placeholder:listsBusy?"Loading the list…":(L.type==="quote"?"Search quotes…":"Search contracts…"),
-              onFocus:()=>{ setOpen(true); setHi(0); },
-              onChange:e=>{ setQ(e.target.value); setOpen(true); setHi(0); if(L.ref) onPick({ type:L.type, ref:"", sl:"", items:[], client:"", picked:false }); },
-              onBlur:()=>setTimeout(()=>setOpen(false),150),
-              onKeyDown:e=>{ if(e.key==="ArrowDown"){ e.preventDefault(); setHi(x=>Math.min(x+1,opts.length-1)); } else if(e.key==="ArrowUp"){ e.preventDefault(); setHi(x=>Math.max(x-1,0)); } else if(e.key==="Enter" && opts[hi]){ e.preventDefault(); choose(opts[hi]); } else if(e.key==="Escape") setOpen(false); },
-              style:{...inputStyle,padding:"5px 8px",fontSize:12.5,...red(errs&&errs.ref)}}),
-            open ? h("div",{"data-cwdd":"1",style:{position:"absolute",left:0,right:0,top:"100%",marginTop:2,background:"#fff",border:"1px solid "+colors.border,borderRadius:6,boxShadow:"0 6px 18px rgba(0,0,0,.18)",maxHeight:280,overflow:"auto",zIndex:30}},
-              opts.length ? opts.map((x,i)=>h("div",{key:x.ref,"data-cwopt":x.ref,onMouseDown:e=>{ e.preventDefault(); choose(x); },onMouseEnter:()=>setHi(i),
-                  style:{padding:"6px 9px",cursor:"pointer",borderBottom:"1px solid #ecebe4",fontSize:12.5,background:i===hi?"#eef3fd":"#fff"}},
-                  h("b",null,x.ref)," · ",x.client||"—",
-                  h("div",{style:{fontSize:11,color:colors.muted}}, L.type==="quote" ? ("Quote dated "+(cwDmy(x.date)||"—")+" · "+x.n+" Sl No"+(x.n===1?"":"s")) : ("PO "+(x.po||"—")+(x.quote?" · from quote "+x.quote:"")))))
-              : h("div",{style:{padding:"8px 9px",fontSize:12,color:colors.muted}}, listsBusy ? "Loading…" : "No "+(L.type==="quote"?"quote":"contract")+" matches “"+q+"”")) : null,
-            err(errs&&errs.ref)),
-          h("div",{style:{flex:"1 1 300px"}}, lab("Sl No * — items of this "+(L.type==="quote"?"quote":"contract")),
-            h("select",{"data-cwsl":"1",value:L.sl===undefined||L.sl===null?"":String(L.sl),disabled:!L.ref||busy,onChange:e=>{ const v = e.target.value; onPick({ ...L, sl: v==="" ? "" : Number(v) }); },
-              style:{...inputStyle,padding:"5px 8px",fontSize:12.5,...red(errs&&errs.sl)}},
-              h("option",{value:""}, busy ? "Loading the Sl Nos…" : !L.ref ? "— pick the "+(L.type==="quote"?"quote":"contract")+" first —" : "— pick the Sl No —"),
-              (L.items||[]).map(i=>h("option",{key:i.sl,value:String(i.sl)}, cwItemText(i)))),
-            err(errs&&errs.sl))),
-    L.ref && L.type!=="internal" ? h("div",{style:{flexBasis:"100%",display:"flex",flexWrap:"wrap",gap:"4px 14px",fontSize:12.5,padding:"7px 10px",borderRadius:6,background:"#eef3fd"}},
-      h("b",null,(L.type==="quote"?"Quote ":"Contract ")+L.ref), h("span",null,L.client||""), L.po?h("span",null,"PO "+L.po):null, L.date?h("span",null,cwDmy(L.date)):null,
+    h("div",{style:{flex:"1 1 220px"}}, lab("Client *"+(inter?"":" — type to search")),
+      h(CwCombo,{ testid:"cw-client", value: inter ? "" : client, disabled: inter,
+        placeholder: inter ? "Not needed for Internal" : listsBusy ? "Loading the list…" : (L.type==="quote" ? "Clients with an offer" : "Clients with a contract"),
+        options: clients, render:(o,rich)=> rich ? h("div",null,h("b",null,o.c),h("div",{style:{fontSize:11,color:colors.muted}},o.n+" "+(L.type==="quote"?"offer":"contract")+(o.n===1?"":"s"))) : o.c,
+        onPick:(o)=>{ setClient(o.c); if(L.ref || L.client!==o.c) onPick({ type:L.type, ref:"", sl:"", items:[], client:o.c, picked:false }); },
+        emptyText: listsBusy ? "Loading…" : "No client with "+(L.type==="quote"?"an offer":"a contract")+" matches" }),
+      !inter && !client ? err(errs&&errs.ref ? "Pick the client first." : "") : null),
+    h("div",{style:{flex:"1 1 260px"}}, lab((inter ? "Quote / Contract No" : word+" No – Client")+" *"),
+      h(CwCombo,{ testid:"cw-ref", value: inter || !L.ref ? "" : (L.ref+" – "+(L.client||client||"")), disabled: inter || !client,
+        placeholder: inter ? "Not needed for Internal" : !client ? "Pick the client first" : (L.type==="quote"?"Quotes of ":"Contracts of ")+client,
+        options: refs, render:(x,rich)=> rich ? h("div",null,h("b",null,x.ref)," – ",x.client||"",
+            h("div",{style:{fontSize:11,color:colors.muted}}, L.type==="quote" ? ("Quote dated "+(cwDmy(x.date)||"—")+" · "+x.n+" Sl No"+(x.n===1?"":"s")) : ("PO "+(x.po||"—")+(x.quote?" · from quote "+x.quote:"")))) : (x.ref+" – "+(x.client||"")),
+        onPick: choose, red: red(errs&&errs.ref) }),
+      !inter ? err(errs&&errs.ref) : null),
+    h("div",{style:{flex:"1 1 260px"}}, lab("Sl No *"),
+      h("select",{"data-cwsl":"1",value:L.sl===undefined||L.sl===null?"":String(L.sl),disabled:inter||!L.ref||busy,onChange:e=>{ const v = e.target.value; onPick({ ...L, sl: v==="" ? "" : Number(v) }); },
+        style:{...inputStyle,padding:"5px 8px",fontSize:12.5,...(inter||!L.ref?{background:"#eeece6",color:colors.mutedLight}:{}),...red(errs&&errs.sl)}},
+        h("option",{value:""}, inter ? "Not needed for Internal" : busy ? "Loading the Sl Nos…" : !L.ref ? "— pick the "+word.toLowerCase()+" first —" : "— pick the Sl No —"),
+        (inter?[]:(L.items||[])).map(i=>h("option",{key:i.sl,value:String(i.sl)}, cwItemText(i)))),
+      !inter ? err(errs&&errs.sl) : null),
+    inter ? h("div",{style:{flex:"1 1 280px"}}, lab("Internal reference *"),
+        h("input",{"data-cwint":"1",value:L.ref||"",placeholder:"e.g. UL free area study, R&D, training",onChange:e=>onPick({ ...L, ref:e.target.value, picked:!!e.target.value.trim(), sl:"" }),style:{...inputStyle,padding:"5px 8px",fontSize:12.5,...red(errs&&errs.ref)}}),
+        err(errs&&errs.ref)) : null,
+    L.ref && !inter ? h("div",{style:{flexBasis:"100%",display:"flex",flexWrap:"wrap",gap:"4px 14px",fontSize:12.5,padding:"7px 10px",borderRadius:6,background:"#eef3fd"}},
+      h("b",null,word+" "+L.ref), h("span",null,L.client||""), L.po?h("span",null,"PO "+L.po):null, L.date?h("span",null,cwDmy(L.date)):null,
       it ? h("span",null,h("b",null,cwItemText(it))) : h("span",{style:{color:colors.danger}},"Sl No not picked")) : null);
 }
 // pick which calculations come across from the earlier revision
@@ -54605,6 +54836,17 @@ function App() {
   // which is the one piece of context nobody needs.
   const [reportOpen,setReportOpen] = useState(false);
   const pickTab = (t)=>{ if(t==="report_issue"){ setReportOpen(true); return; } setTab(t); };
+  // 2026-10-28T09:00:00Z: browser bars. Super admins: a button. Everyone else: full screen on the first click (not when installed as an app).
+  const [barsHidden,setBarsHidden] = useState(appInFull());
+  useEffect(()=>{ const f = ()=>setBarsHidden(appInFull()); document.addEventListener("fullscreenchange", f); document.addEventListener("webkitfullscreenchange", f);
+    return ()=>{ document.removeEventListener("fullscreenchange", f); document.removeEventListener("webkitfullscreenchange", f); }; },[]);
+  useEffect(()=>{ if(!user || user.role==="super_admin" || appIsInstalled()) return;
+    const f = ()=>{ if(!appInFull()) appFullOn(); };
+    document.addEventListener("pointerdown", f, true); return ()=>document.removeEventListener("pointerdown", f, true); },[user && user.role]);
+  // 2026-10-28T09:00:00Z: Back / Home — the screens visited this session (memory only; a reload starts at Home)
+  const navStack = useRef([]); const navGoingBack = useRef(false); const [navN,setNavN] = useState(0);
+  const navPrevTab = useRef("home"); const navSnap = useRef({ tab:"home" });
+  const [accTick,setAccTick2] = useState(0); useEffect(()=>{ const f = ()=>setAccTick2(t=>t+1); window.addEventListener("flo-access", f); return ()=>window.removeEventListener("flo-access", f); },[]);
   useEffect(()=>{ const f = (e)=>{ const t = e && e.detail && e.detail.tab; if(t) setTab(t); }; window.addEventListener("flo-open-tab", f); return ()=>window.removeEventListener("flo-open-tab", f); },[]);   // 209: open a screen from anywhere (stale items, PDF block)
   useEffect(()=>{ const f = (e)=>{ const d = (e && e.detail)||{}; const b = d.back;   // 239: open (or start) a task card from the Order Status board, a Sale Order or a Quote
       if(b) setNavBack({ label:b.label||"← Back", go: async()=>{ setNavBack(null);
@@ -54672,6 +54914,23 @@ function App() {
     setSaleOrderTarget({reference_number:contractRow.contract_number, item_sl_no:1});
     setTab("sale_order");
   };
+  // snapshot of the screen in view: the tab plus the contract / quote open in it
+  const navCurSnap = { tab, so: tab==="sale_order" ? saleOrderContractInfo : null, q: tab==="saved" ? (window.__curQuoteRef||null) : null };
+  useEffect(()=>{
+    if(navPrevTab.current!==tab){
+      if(!navGoingBack.current && navSnap.current && navSnap.current.tab){ navStack.current.push(navSnap.current); if(navStack.current.length>40) navStack.current.shift(); }
+      navGoingBack.current = false; navPrevTab.current = tab; setNavN(n=>n+1);
+    }
+    navSnap.current = { tab, so: tab==="sale_order" ? saleOrderContractInfo : null, q: tab==="saved" ? (window.__curQuoteRef||null) : null };
+  });
+  useEffect(()=>{ const f = ()=>{ if(navPrevTab.current==="saved") navSnap.current = { tab:"saved", so:null, q: window.__curQuoteRef||null }; setNavN(n=>n+1); }; window.addEventListener("flo-curquote", f); return ()=>window.removeEventListener("flo-curquote", f); },[]);
+  const goBack = ()=>{ const e = navStack.current[navStack.current.length-1]; if(!e) return; if(!confirmLeaveIfDirty()) return; setUnsavedGuard(false);
+    navStack.current.pop(); setNavN(n=>n+1);
+    navGoingBack.current = e.tab!==tab;
+    if(e.so){ setSaleOrderContractInfo(e.so); setSaleOrderTarget({ reference_number:e.so.contract_number, item_sl_no:1 }); setTab("sale_order"); return; }
+    if(e.q){ setQuoteToOpen({ reference_number:e.q, item_sl_no:1 }); }
+    setTab(e.tab); };
+  const goHome = ()=>{ if(tab==="home") return; if(!confirmLeaveIfDirty()) return; setUnsavedGuard(false); setTab("home"); };
   const openContract = (contractRow)=>{
     if(!contractRow.billing_address && !contractRow.shipping_address && !contractRow.drawings_required){
       setPendingHeaderPromptFor(contractRow);
@@ -54948,6 +55207,7 @@ function App() {
   if(!user) return h(LoginScreen,{onLogin:setUserPersisted});
   if(user.role==="super_admin" && !sessionCompanyId) return h(CompanySessionPicker,{user,onPicked:setSessionCompanyIdPersisted});
 
+  const uTab = accessUserFor(tab, user); const accTabMode = accessMenuMode(accessTabMenu(tab)); void accTick;   // 2026-10-28T08:00:00Z
   return h("div",{style:{minHeight:"100vh"}},
     user.role==="super_admin" && !monthlyArchiveDone && h(MonthlyArchivePrompt,{user,onDone:()=>setMonthlyArchiveDone(true)}),
     overdueGateEmployee!==undefined && !isFseOrTelecaller && showOverduePrompt && h(OverdueCallsPrompt,{user,onDone:dismissOverduePrompt,onEmpty:()=>setOverduePromptEmpty(true)}),
@@ -54993,11 +55253,13 @@ function App() {
       h("button",{onClick:()=>setFocusMenu(m=>!m),title:focusMenu?"Hide the ribbon again":"Show the ribbon (menus) while staying full screen",style:{background:colors.dark,color:"#fff",border:"1px solid #3a3f33",borderRadius:16,padding:"5px 12px",fontSize:12,cursor:"pointer",boxShadow:"0 2px 6px rgba(0,0,0,.25)"}},focusMenu?"▴ Hide menu":"☰ Menu"),
       h("button",{onClick:exitFocus,title:"Leave full screen (Esc)",style:{background:colors.dark,color:"#fff",border:"1px solid #3a3f33",borderRadius:16,padding:"5px 12px",fontSize:12,cursor:"pointer",boxShadow:"0 2px 6px rgba(0,0,0,.25)"}},"✕ Exit full screen")) : null,
     (focusMode && !focusMenu) ? null : h("div",{id:"app-sticky-header",style:{position:"sticky",top:0,zIndex:60}},
-      h(TopBar,{user,onFull:focusMode?exitFocus:enterFocus,inFull:focusMode,sessionCompanyId,sessionCompany,onOpenVersions:user.role==="super_admin"?(()=>pickTab("version_history")):null,flags:h(MyDayFlags,{data:myDay,isSales:isFseOrTelecaller,hasEmp:myDayHasEmp,onOpen:openMyDay}),onChangeCompany:user.role==="super_admin"?(()=>setSessionCompanyIdPersisted(null)):null,onLogout:()=>{setUserPersisted(null);setSessionCompanyIdPersisted(null);setMasterData({models:[],gradesBySpec:new Map(),rateBySpecGrade:new Map(),allSpecs:[],loadingMaster:true});}}),
+      h(TopBar,{user,onBars:user.role==="super_admin"?(()=>{ appInFull() ? appFullOff() : appFullOn(); }):null,barsHidden,onFull:focusMode?exitFocus:enterFocus,inFull:focusMode,sessionCompanyId,sessionCompany,onOpenVersions:user.role==="super_admin"?(()=>pickTab("version_history")):null,flags:h(MyDayFlags,{data:myDay,isSales:isFseOrTelecaller,hasEmp:myDayHasEmp,onOpen:openMyDay}),onChangeCompany:user.role==="super_admin"?(()=>setSessionCompanyIdPersisted(null)):null,onLogout:()=>{setUserPersisted(null);setSessionCompanyIdPersisted(null);setMasterData({models:[],gradesBySpec:new Map(),rateBySpecGrade:new Map(),allSpecs:[],loadingMaster:true});}}),
       h(MenuTabs,{user,active:tab,onChange:pickTab,
         onRefresh: ["estimator","saved","sale_order","home","tour","user_manual","faq","change_password","version_history"].includes(tab) ? null
-          : ()=>{ if(!confirmLeaveIfDirty()) return; setUnsavedGuard(false); setScreenKey(k=>k+1); }})
+          : ()=>{ if(!confirmLeaveIfDirty()) return; setUnsavedGuard(false); setScreenKey(k=>k+1); }}),
+      h(NavStrip,{ stack:navStack.current, cur:navCurSnap, onBack:goBack, onHome:goHome, n:navN })
     ),
+    h(AppVersionBanner,null),
     // Mounted at app level so it can be opened from any screen, and captures
     // the tab the user was actually on rather than the one they navigated to.
     reportOpen && h(ReportIssueDialog,{user,screenContext:tab,recordRef:null,onClose:()=>setReportOpen(false)}),
@@ -55040,143 +55302,145 @@ function App() {
         })
       );
     })(),
-    h("div",{style:{display:tab==="estimator"?"block":"none"}},h(Estimator,{user,masterData,sessionCompanyId,sessionCompany,onRefresh:refresh,onOpenQuote:(ref,slNo,openDatasheet)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo,openDatasheet:!!openDatasheet});setTab("saved");},initialModel:openModelTarget,onConsumedInitialModel:()=>setOpenModelTarget(null),pendingNewSlNo,onConsumedPendingNewSlNo:()=>setPendingNewSlNo(null),onGoToTab:setTab})),
+    h("div",{style:{display:tab==="estimator" && accTabMode!=="none"?"block":"none"}},h(Estimator,{user:uTab,masterData,sessionCompanyId,sessionCompany,onRefresh:refresh,onOpenQuote:(ref,slNo,openDatasheet)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo,openDatasheet:!!openDatasheet});setTab("saved");},initialModel:openModelTarget,onConsumedInitialModel:()=>setOpenModelTarget(null),pendingNewSlNo,onConsumedPendingNewSlNo:()=>setPendingNewSlNo(null),onGoToTab:setTab})),
     h(React.Fragment,{key:"scr"+screenKey},
-    tab==="saved"?h(SavedEstimates,{user,sessionCompany,openTarget:quoteToOpen,onConsumedTarget:()=>setQuoteToOpen(null),onGoToTab:setTab,onNewSlNo:(ref,slNo,headerFields)=>{setPendingNewSlNo({reference_number:ref,item_sl_no:slNo,headerFields:headerFields||null});setTab("estimator");},onOpenContract:openContract,cameFromQuotesReport,onBackToQuotesReport:()=>{setCameFromQuotesReport(false); setTab("quotes_report");}}):
-    tab==="sale_order_entry"?h(SaleOrderContractPicker,{user,onOpenContract:openContract,startCreate:soStart,onConsumedStart:()=>setSoStart(null)}):
-    tab==="sale_order"?h(SavedEstimates,{user,sessionCompany,openTarget:saleOrderTarget,onConsumedTarget:()=>setSaleOrderTarget(null),onGoToTab:setTab,onNewSlNo:(ref,slNo,headerFields)=>{setPendingNewSlNo({reference_number:ref,item_sl_no:slNo,headerFields:headerFields||null});setTab("estimator");},mode:"contract",contractInfo:saleOrderContractInfo,onContractInfoChanged:refreshSaleOrderContractInfo,onOpenContract:openContract}):
-    tab==="contract_number_setup"?h(ContractNumberSetupScreen,{user}):
-    tab==="reports"?h(ReportsScreen,{user,onOpenModel:(m)=>{setOpenModelTarget(m);setTab("estimator");}}):
-    tab==="reports_activity"?h(ActivityByUserReport,{user}):
-    tab==="reports_my_timesheet"?h(DailyTimesheetScreen,{user}):
-    tab==="reports_hr_timesheet"?h(HrTimesheetReportScreen,{user}):
-    tab==="reports_quotes"?h(QuoteReports,{user}):
-    tab==="reports_masters"?h(MaterialRatesReport,{user}):
-    tab==="reports_missing_rates"?h(MissingRatesReport,{user}):
-    tab==="reports_audit"?h(MastersAuditReport,{user}):
+    accTabMode==="none" && tab!=="estimator" ? h(AccessDenied,{tab}) :
+    tab==="saved"?h(SavedEstimates,{user:uTab,sessionCompany,openTarget:quoteToOpen,onConsumedTarget:()=>setQuoteToOpen(null),onGoToTab:setTab,onNewSlNo:(ref,slNo,headerFields)=>{setPendingNewSlNo({reference_number:ref,item_sl_no:slNo,headerFields:headerFields||null});setTab("estimator");},onOpenContract:openContract,cameFromQuotesReport,onBackToQuotesReport:()=>{setCameFromQuotesReport(false); setTab("quotes_report");}}):
+    tab==="sale_order_entry"?h(SaleOrderContractPicker,{user:uTab,onOpenContract:openContract,startCreate:soStart,onConsumedStart:()=>setSoStart(null)}):
+    tab==="sale_order"?h(SavedEstimates,{user:uTab,sessionCompany,openTarget:saleOrderTarget,onConsumedTarget:()=>setSaleOrderTarget(null),onGoToTab:setTab,onNewSlNo:(ref,slNo,headerFields)=>{setPendingNewSlNo({reference_number:ref,item_sl_no:slNo,headerFields:headerFields||null});setTab("estimator");},mode:"contract",contractInfo:saleOrderContractInfo,onContractInfoChanged:refreshSaleOrderContractInfo,onOpenContract:openContract}):
+    tab==="contract_number_setup"?h(ContractNumberSetupScreen,{user:uTab}):
+    tab==="reports"?h(ReportsScreen,{user:uTab,onOpenModel:(m)=>{setOpenModelTarget(m);setTab("estimator");}}):
+    tab==="reports_activity"?h(ActivityByUserReport,{user:uTab}):
+    tab==="reports_my_timesheet"?h(DailyTimesheetScreen,{user:uTab}):
+    tab==="reports_hr_timesheet"?h(HrTimesheetReportScreen,{user:uTab}):
+    tab==="reports_quotes"?h(QuoteReports,{user:uTab}):
+    tab==="reports_masters"?h(MaterialRatesReport,{user:uTab}):
+    tab==="reports_missing_rates"?h(MissingRatesReport,{user:uTab}):
+    tab==="reports_audit"?h(MastersAuditReport,{user:uTab}):
     tab==="reports_item_coverage"?h(ItemCoverageReport,null):
     tab==="reports_quote_status"?h(QuoteStatusReport,null):
-    tab==="reports_quote_status_review"?h(QuoteStatusReview,{user}):
-    tab==="my_worklist"?h(MyWorklistScreen,{user}):
-    tab==="followup_entry"?h(ContinuousFollowupEntry,{user,sessionCompany,prefill:followupPrefill,onBackToOverdue:handleBackToOverdue,onClose:()=>setTab("home")}):
+    tab==="reports_quote_status_review"?h(QuoteStatusReview,{user:uTab}):
+    tab==="my_worklist"?h(MyWorklistScreen,{user:uTab}):
+    tab==="followup_entry"?h(ContinuousFollowupEntry,{user:uTab,sessionCompany,prefill:followupPrefill,onBackToOverdue:handleBackToOverdue,onClose:()=>setTab("home")}):
     tab==="reports_won_by_owner"?h(WonByOwnerReport,null):
     tab==="reports_overdue_calls"?h(OverdueCallsReport,null):
-    tab==="reports_overdue_followups"?h(SalesOverdueCallsScreen,{user,onGoLog:(prefillData)=>handleGoLogFromOverdue(prefillData,"admin")}):
-    tab==="reports_missed_entries"?h(MissedEntriesReport,{user}):
-    tab==="reports_pending_validation"?h(PendingValidationScreen,{user,onOpenQuote:(ref,slNo)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo});setTab("saved");}}):
+    tab==="reports_overdue_followups"?h(SalesOverdueCallsScreen,{user:uTab,onGoLog:(prefillData)=>handleGoLogFromOverdue(prefillData,"admin")}):
+    tab==="reports_missed_entries"?h(MissedEntriesReport,{user:uTab}):
+    tab==="reports_pending_validation"?h(PendingValidationScreen,{user:uTab,onOpenQuote:(ref,slNo)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo});setTab("saved");}}):
     tab==="reports_status_history"?h(StatusChangeHistoryReport,null):
     tab==="reports_po_register"?h(PoRegisterReport,null):
-    tab==="pending_actions"?h(PendingActionsScreen,{user}):
-    tab==="despatch_dc"?h(DespatchScreen,{user}):
-    tab==="order_board"?h(OrderStatusBoard,{user,sessionCompany}):
-    tab==="gate_pass"?h(GatePassScreen,{user}):
-    tab==="despatch_settings"?h(DespatchSettingsScreen,{user}):
-    String(tab||"").startsWith("acc_")?h(AccountsScreen,{user,route:tab,onGo:setTab}):   // 188
-    tab==="tax_invoices"?h(InvoicesScreen,{user}):
-    tab==="direct_invoices"?h(DirectInvoicesScreen,{user}):
-    tab==="petty_purchases"?h(PettyPurchasesScreen,{user}):   // 248
-    tab==="purchase_rules"?h(PurchaseRulesScreen,{user}):   // 247
-    tab==="bill_register"?h(BillRegisterScreen,{user}):   // 212
-    tab==="proforma_invoices"?h(ProformaScreen,{user}):
-    tab==="legacy_proforma"?h(LegacyProformaScreen,{user}):
-    tab==="period_reports"?h(PeriodReportsScreen,{user}):   // 148
+    tab==="pending_actions"?h(PendingActionsScreen,{user:uTab}):
+    tab==="despatch_dc"?h(DespatchScreen,{user:uTab}):
+    tab==="order_board"?h(OrderStatusBoard,{user:uTab,sessionCompany}):
+    tab==="gate_pass"?h(GatePassScreen,{user:uTab}):
+    tab==="despatch_settings"?h(DespatchSettingsScreen,{user:uTab}):
+    String(tab||"").startsWith("acc_")?h(AccountsScreen,{user:uTab,route:tab,onGo:setTab}):   // 188
+    tab==="tax_invoices"?h(InvoicesScreen,{user:uTab}):
+    tab==="direct_invoices"?h(DirectInvoicesScreen,{user:uTab}):
+    tab==="petty_purchases"?h(PettyPurchasesScreen,{user:uTab}):   // 248
+    tab==="purchase_rules"?h(PurchaseRulesScreen,{user:uTab}):   // 247
+    tab==="bill_register"?h(BillRegisterScreen,{user:uTab}):   // 212
+    tab==="proforma_invoices"?h(ProformaScreen,{user:uTab}):
+    tab==="legacy_proforma"?h(LegacyProformaScreen,{user:uTab}):
+    tab==="period_reports"?h(PeriodReportsScreen,{user:uTab}):   // 148
     tab==="reports_document_register"?h(DocumentRegisterReport,null):
     tab==="reports_grn_status"?h(GrnStatusReport,null):
-    tab==="deletion_codes"?h(DeletionCodesScreen,{user}):
-    tab==="authorization_codes"?h(AuthorizationCodesScreen,{user}):
-    tab==="delete_activity_report"?h(DeleteActivityReportScreen,{user}):
-    tab==="data_backup"?h(DataBackupScreen,{user}):
-    tab==="abandoned_quotes_cleanup"?h(AbandonedQuotesCleanupScreen,{user,onChanged:refreshAbandonedCount}):
-    tab==="calc_workbench"?h(CalcWorkbench,{user}):
-    tab==="calcs"?h(CalcWorkbench,{user,start:"asme"}):
-    tab==="bolting_calc"?h(CalcWorkbench,{user,start:"bolt"}):
-    tab==="flange_chart"?h(FlangeChart,{user}):
-    tab==="free_area_calc"?h(CalcWorkbench,{user,start:"fa"}):
-    tab==="davit_calc"?h(DavitCalculator,{user}):   // 256
-    tab==="major_projects"?h(MajorProjectsScreen,{user,
+    tab==="deletion_codes"?h(DeletionCodesScreen,{user:uTab}):
+    tab==="authorization_codes"?h(AuthorizationCodesScreen,{user:uTab}):
+    tab==="delete_activity_report"?h(DeleteActivityReportScreen,{user:uTab}):
+    tab==="data_backup"?h(DataBackupScreen,{user:uTab}):
+    tab==="abandoned_quotes_cleanup"?h(AbandonedQuotesCleanupScreen,{user:uTab,onChanged:refreshAbandonedCount}):
+    tab==="calc_workbench"?h(CalcWorkbench,{user:uTab}):
+    tab==="calcs"?h(CalcWorkbench,{user:uTab,start:"asme"}):
+    tab==="bolting_calc"?h(CalcWorkbench,{user:uTab,start:"bolt"}):
+    tab==="flange_chart"?h(FlangeChart,{user:uTab}):
+    tab==="free_area_calc"?h(CalcWorkbench,{user:uTab,start:"fa"}):
+    tab==="davit_calc"?h(DavitCalculator,{user:uTab}):   // 256
+    tab==="major_projects"?h(MajorProjectsScreen,{user:uTab,
       onCreateQuoteFromAllocation:(ref,allocationId,prefillCustomerName)=>{ setPendingNewSlNo({reference_number:ref,item_sl_no:1,linked_allocation_id:allocationId,prefillCustomerName}); setTab("estimator"); },
       onOpenQuote:(ref,slNo)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo});setTab("saved");},
       deepLinkTarget:projectDeepLink, onDeepLinkConsumed:()=>setProjectDeepLink(null), onGoTo:goToEntityLookup,
       initialDetailedProjectFilter:detailedProjectFilter, onDetailedProjectFilterConsumed:()=>setDetailedProjectFilter(null)
     }):
-    tab==="major_projects_bulk_import"?h(MajorProjectsBulkImport,{user}):
-    tab==="hr_home"?h(HrHomeScreen,{user,onOpenTab:setTab}):
-    tab==="hr_org_chart"?h(OrgChartScreen,{user,onOpenTab:setTab}):   // 229
-    tab==="lookup_end_user"?h(EntityLookupScreen,{user,entityType:"end_user",preselect:entityLookupPreselect,onGoTo:goToEntityLookup,returnTo:entityReturnTo}):
-    tab==="lookup_epc"?h(EntityLookupScreen,{user,entityType:"epc",preselect:entityLookupPreselect,onGoTo:goToEntityLookup,returnTo:entityReturnTo}):
-    tab==="lookup_package"?h(EntityLookupScreen,{user,entityType:"package",preselect:entityLookupPreselect,onGoTo:goToEntityLookup,returnTo:entityReturnTo}):
-    tab==="lookup_customer"?h(EntityLookupScreen,{user,entityType:"customer",preselect:entityLookupPreselect,onGoTo:goToEntityLookup,returnTo:entityReturnTo}):
-    tab==="task_report"?h(TaskCompletedReport,{user,company:sessionCompany}):
-    tab==="task_handover"?h(HandOverScreen,{user}):   // 178
-    tab==="board_grid"?h(BoardGridScreen,{user}):
-    (tab==="doc_board"||tab==="doc_report"||tab==="doc_letters")?h(DocControlScreen,{user,company:sessionCompany,initialPanel:tab==="doc_report"?"report":tab==="doc_letters"?"letters":null,onOpenContract:(row)=>{ setTab("sale_order_entry"); openContract(row); }}):
-    tab==="task_board"?h(TaskBoardScreen,{user, company:sessionCompany, onGoToTab:setTab,
+    tab==="major_projects_bulk_import"?h(MajorProjectsBulkImport,{user:uTab}):
+    tab==="hr_home"?h(HrHomeScreen,{user:uTab,onOpenTab:setTab}):
+    tab==="hr_org_chart"?h(OrgChartScreen,{user:uTab,onOpenTab:setTab}):   // 229
+    tab==="lookup_end_user"?h(EntityLookupScreen,{user:uTab,entityType:"end_user",preselect:entityLookupPreselect,onGoTo:goToEntityLookup,returnTo:entityReturnTo}):
+    tab==="lookup_epc"?h(EntityLookupScreen,{user:uTab,entityType:"epc",preselect:entityLookupPreselect,onGoTo:goToEntityLookup,returnTo:entityReturnTo}):
+    tab==="lookup_package"?h(EntityLookupScreen,{user:uTab,entityType:"package",preselect:entityLookupPreselect,onGoTo:goToEntityLookup,returnTo:entityReturnTo}):
+    tab==="lookup_customer"?h(EntityLookupScreen,{user:uTab,entityType:"customer",preselect:entityLookupPreselect,onGoTo:goToEntityLookup,returnTo:entityReturnTo}):
+    tab==="task_report"?h(TaskCompletedReport,{user:uTab,company:sessionCompany}):
+    tab==="task_handover"?h(HandOverScreen,{user:uTab}):   // 178
+    tab==="board_grid"?h(BoardGridScreen,{user:uTab}):
+    (tab==="doc_board"||tab==="doc_report"||tab==="doc_letters")?h(DocControlScreen,{user:uTab,company:sessionCompany,initialPanel:tab==="doc_report"?"report":tab==="doc_letters"?"letters":null,onOpenContract:(row)=>{ setTab("sale_order_entry"); openContract(row); }}):
+    tab==="task_board"?h(TaskBoardScreen,{user:uTab, company:sessionCompany, onGoToTab:setTab,
       onOpenGantt:(x)=>{ setNavBack({label:"\u2190 Back to the card", go:()=>{ setMyDayTaskId(x.taskId); setTab("task_board"); }}); setPgNav({contract:x.contract, form:x.form}); setTab("proc_gantt"); },   // 147
       openTaskId: (enqNav&&enqNav.taskId) || myDayTaskId, onBackToEnquiry: enqNav ? ()=>{ setEnqNav(n=>n?{enqId:n.enqId,back:true}:null); setTab("enquiries_list"); } : null,
       onOpenQuote:(ref,slNo)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo||1});setTab("saved");},
       onStartQuote:(ref,enquiryId,prefillCustomerName)=>{ setPendingNewSlNo({reference_number:ref,item_sl_no:1,linked_enquiry_id:enquiryId,prefillCustomerName}); setTab("estimator"); } }):
-    tab==="contract_register"?h(ContractRegisterScreen,{user, onGoToTab:setTab, onOpenContract:openContract,   // 168
+    tab==="contract_register"?h(ContractRegisterScreen,{user:uTab, onGoToTab:setTab, onOpenContract:openContract,   // 168
       onStartSaleOrder:(x)=>{ setSoStart(x); setTab("sale_order_entry"); },
       onOpenQuote:(ref)=>{setQuoteToOpen({reference_number:ref,item_sl_no:1});setTab("saved");} }):
-    tab==="quote_register"?h(QuoteRegisterScreen,{user,   // 137
+    tab==="quote_register"?h(QuoteRegisterScreen,{user:uTab,   // 137
       onOpenQuote:(ref,slNo)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo||1});setTab("saved");},
       onStartQuote:(ref,enquiryId,prefillCustomerName)=>{ setPendingNewSlNo({reference_number:ref,item_sl_no:1,linked_enquiry_id:enquiryId,prefillCustomerName}); setTab("estimator"); },
       onOpenCard:(taskId,enqId)=>{ setEnqNav({enqId,taskId}); setTab("task_board"); } }):
-    tab==="register_people"?h(RegisterTabsPeopleScreen,{user,onGoToTab:setTab}):
-    tab==="region_people"?h(SalesRegionsPeopleScreen,{user,onGoToTab:setTab}):   // 185h
-    tab==="enquiries_list"?h(EnquiriesListScreen,{user,onGoToTab:setTab,
+    tab==="register_people"?h(RegisterTabsPeopleScreen,{user:uTab,onGoToTab:setTab}):
+    tab==="region_people"?h(SalesRegionsPeopleScreen,{user:uTab,onGoToTab:setTab}):   // 185h
+    tab==="enquiries_list"?h(EnquiriesListScreen,{user:uTab,onGoToTab:setTab,
       initialOpenId: enqNav&&enqNav.back ? enqNav.enqId : null, onConsumedNav:()=>setEnqNav(null),
       onOpenCard:(taskId,enqId)=>{ setEnqNav({enqId,taskId}); setTab("task_board"); },
       onOpenQuote:(ref,slNo)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo});setTab("saved");},
       onCreateQuoteFromEnquiry:(ref,enquiryId,prefillCustomerName)=>{ setPendingNewSlNo({reference_number:ref,item_sl_no:1,linked_enquiry_id:enquiryId,prefillCustomerName}); setTab("estimator"); }
     }):
-    tab==="enquiry_review"?h(EnquiryReviewScreen,{user}):
-    tab==="gaps_dashboard"?h(GapsChaseDashboard,{user,onGoTo:goToEntityLookup}):
-    tab==="crm_funnel"?h(CrmFunnelKanban,{user}):
-    tab==="quotes_report"?h(QuotesReportScreen,{user,initialFilters:dashboardDrillFilters,onOpenContract:openContract,onOpenQuote:(ref,slNo)=>{setCameFromQuotesReport(true); setQuoteToOpen({reference_number:ref,item_sl_no:slNo});setTab("saved");}}):
-    tab==="crm_dashboards"?h(CrmDashboardsScreen,{user,onDrillToQuotesReport:(f)=>{setDashboardDrillFilters(f); setTab("quotes_report");},onOpenQuote:(ref,slNo)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo});setTab("saved");},onGoToTab:setTab}):
-    tab==="bom_form"?h(BomEntryForm,{onGoToTab:setTab,user}):
-    tab==="customer_bulk_upload"?h(CustomerBulkUpload,{user}):
-    tab==="customers"?h(CustomersScreen,{user}):
-    tab==="end_user_rules"?h(EndUserRulesScreen,{user}):   // 237
-    tab==="vendors"?h(VendorsScreen,{user}):
+    tab==="enquiry_review"?h(EnquiryReviewScreen,{user:uTab}):
+    tab==="gaps_dashboard"?h(GapsChaseDashboard,{user:uTab,onGoTo:goToEntityLookup}):
+    tab==="crm_funnel"?h(CrmFunnelKanban,{user:uTab}):
+    tab==="quotes_report"?h(QuotesReportScreen,{user:uTab,initialFilters:dashboardDrillFilters,onOpenContract:openContract,onOpenQuote:(ref,slNo)=>{setCameFromQuotesReport(true); setQuoteToOpen({reference_number:ref,item_sl_no:slNo});setTab("saved");}}):
+    tab==="crm_dashboards"?h(CrmDashboardsScreen,{user:uTab,onDrillToQuotesReport:(f)=>{setDashboardDrillFilters(f); setTab("quotes_report");},onOpenQuote:(ref,slNo)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo});setTab("saved");},onGoToTab:setTab}):
+    tab==="bom_form"?h(BomEntryForm,{onGoToTab:setTab,user:uTab}):
+    tab==="customer_bulk_upload"?h(CustomerBulkUpload,{user:uTab}):
+    tab==="customers"?h(CustomersScreen,{user:uTab}):
+    tab==="end_user_rules"?h(EndUserRulesScreen,{user:uTab}):   // 237
+    tab==="vendors"?h(VendorsScreen,{user:uTab}):   // rights checked inside (2026-10-28T07:00:00Z)
     tab==="test_types"?h(TestTypesScreen,null):
-    tab==="crm_helper_masters"?h(CrmHelperMastersScreen,{user}):
-    tab==="issues"?h(IssueTracker,{user}):
+    tab==="crm_helper_masters"?h(CrmHelperMastersScreen,{user:uTab}):
+    tab==="issues"?h(IssueTracker,{user:uTab}):
     tab==="user_manual"?h(UserManualScreen,null):
     tab==="tour"?h(TourScreen,null):
-    tab==="training"?h(TrainingScreen,{user,onGoToTab:setTab}):   // 241 (Build U)
+    tab==="training"?h(TrainingScreen,{user:uTab,onGoToTab:setTab}):   // 241 (Build U)
     tab==="faq"?h(FaqScreen,null):
     tab==="version_history"?h(VersionHistoryScreen,null):
-    tab==="allowable_stress"?h(AllowableStressEditor,{user}):
-    tab==="datasheet_master"?h(DatasheetMasterEditor,{onGoToTab:setTab,user}):
-    tab==="price_list"?h(PriceListMaster,{user}):
-    tab==="selection_questions"?h(SelectionQuestionsScreen,{user}):
-    tab==="valve_extras"?h(ValveExtrasScreen,{user}):
-    tab==="item_moc_rules"?h(ItemMocRulesEditor,{user}):
-    tab==="company_master"?h(CompanyMasterEditor,{user}):
-    tab==="gst_structures"?h(GstStructureEditor,{user}):
-    tab==="doc_status_master"?h(DocStatusEditor,{user}):
-    tab==="posts"?h(PostsEditor,{user}):
-    tab==="data_quality_flags"?h(DataQualityFlagsScreen,{user}):
-    tab==="gst_variance_report"?h(GstVarianceReport,{user}):
-    tab==="description_master"?h(DescriptionMasterEditor,{user}):
-    tab==="users"?h(UsersEditor,{user}):
+    tab==="allowable_stress"?h(AllowableStressEditor,{user:uTab}):
+    tab==="datasheet_master"?h(DatasheetMasterEditor,{onGoToTab:setTab,user:uTab}):
+    tab==="price_list"?h(PriceListMaster,{user:uTab}):
+    tab==="selection_questions"?h(SelectionQuestionsScreen,{user:uTab}):
+    tab==="valve_extras"?h(ValveExtrasScreen,{user:uTab}):
+    tab==="item_moc_rules"?h(ItemMocRulesEditor,{user:uTab}):
+    tab==="company_master"?h(CompanyMasterEditor,{user:uTab}):
+    tab==="gst_structures"?h(GstStructureEditor,{user:uTab}):
+    tab==="doc_status_master"?h(DocStatusEditor,{user:uTab}):
+    tab==="posts"?h(PostsEditor,{user:uTab}):
+    tab==="data_quality_flags"?h(DataQualityFlagsScreen,{user:uTab}):
+    tab==="gst_variance_report"?h(GstVarianceReport,{user:uTab}):
+    tab==="description_master"?h(DescriptionMasterEditor,{user:uTab}):
+    tab==="users"?h(UsersEditor,{user:uTab}):
     tab==="permissions"?h(PermissionsEditor,null):
-    tab==="dashboards"?h(DashboardsScreen,{user}):
-    tab==="proc_gantt"?h(ProcGanttScreen,{user, onGoToTab:setTab, initial:pgNav, onOpenCard:(id,cn)=>{ setNavBack({label:"\u2190 Back to the Gantt", go:()=>{ setPgNav({contract:cn}); setTab("proc_gantt"); }}); setMyDayTaskId(id); setTab("task_board"); }}):
-    tab==="proc_reports"?h(ProcReportsScreen,{user, onOpenGantt:(cn,form,edit)=>{ setNavBack({label:"\u2190 Back to the Procurement reports", go:()=>setTab("proc_reports")}); setPgNav({contract:cn, form, edit:edit?Date.now():0}); setTab("proc_gantt"); }}):   // 154
-    tab==="proc_list"?h(ProcListScreen,{user, onOpenCard:(id,cn)=>{ setNavBack({label:"\u2190 Back to the Procurement list", go:()=>setTab("proc_list")}); setMyDayTaskId(id); setTab("task_board"); },
+    tab==="access"?h(AccessScreen,{user}):
+    tab==="dashboards"?h(DashboardsScreen,{user:uTab}):
+    tab==="proc_gantt"?h(ProcGanttScreen,{user:uTab, onGoToTab:setTab, initial:pgNav, onOpenCard:(id,cn)=>{ setNavBack({label:"\u2190 Back to the Gantt", go:()=>{ setPgNav({contract:cn}); setTab("proc_gantt"); }}); setMyDayTaskId(id); setTab("task_board"); }}):
+    tab==="proc_reports"?h(ProcReportsScreen,{user:uTab, onOpenGantt:(cn,form,edit)=>{ setNavBack({label:"\u2190 Back to the Procurement reports", go:()=>setTab("proc_reports")}); setPgNav({contract:cn, form, edit:edit?Date.now():0}); setTab("proc_gantt"); }}):   // 154
+    tab==="proc_list"?h(ProcListScreen,{user:uTab, onOpenCard:(id,cn)=>{ setNavBack({label:"\u2190 Back to the Procurement list", go:()=>setTab("proc_list")}); setMyDayTaskId(id); setTab("task_board"); },
       onOpenGantt:(cn)=>{ setNavBack({label:"\u2190 Back to the Procurement list", go:()=>setTab("proc_list")}); setPgNav({contract:cn}); setTab("proc_gantt"); }}):   // 147   // 138 Build A
-    (tab==="valve_price"||tab==="valve_price_purchase")?(canSeeValvePrice(user)?h(ValvePriceScreen,{user}):h("div",{style:{padding:24,fontSize:13,color:colors.muted}},"Valve Price is for admins on this site.")):
-    tab==="po_register"?h(PurchaseRegisterScreen,{user}):   // 209: the Purchase Register (FFS POs + app POs)
-    tab==="stale_items"?h(StaleItemsScreen,{user}):   // 209
-    tab==="material_inward"?h(MaterialInwardScreen,{user,sessionCompany}):
-    tab==="tag_register"?h(TagRegisterScreen,{user}):
+    (tab==="valve_price"||tab==="valve_price_purchase")?(canSeeValvePrice(user)?h(ValvePriceScreen,{user:uTab}):h("div",{style:{padding:24,fontSize:13,color:colors.muted}},"Valve Price is for admins on this site.")):
+    tab==="po_register"?h(PurchaseRegisterScreen,{user:uTab}):   // 209: the Purchase Register (FFS POs + app POs)
+    tab==="stale_items"?h(StaleItemsScreen,{user:uTab}):   // 209
+    tab==="material_inward"?h(MaterialInwardScreen,{user:uTab,sessionCompany}):
+    tab==="tag_register"?h(TagRegisterScreen,{user:uTab}):
     tab==="login_history"?h(LoginHistoryViewer,null):
     tab==="audit_log"?h(AuditLogViewer,null):
-    tab==="activity_report"?h(ActivityReport,{user}):   // 224
-    tab==="change_password"?h(ChangePassword,{user}):
+    tab==="activity_report"?h(ActivityReport,{user:uTab}):   // 224
+    tab==="change_password"?h(ChangePassword,{user:uTab}):
     tab==="myday_history" && myDayHistory ? h(FollowupHistoryScreen,{scope:myDayHistory.scope, value:myDayHistory.value, user, onBack:openMyDay}) :   // 146
     tab==="home"?h("div",{style:{padding:"60px 24px",textAlign:"center"}},
       h(MyDayHomeBox,{data:myDay,isSales:isFseOrTelecaller,hasEmp:myDayHasEmp,onOpen:openMyDay}),   // 146
@@ -55185,8 +55449,8 @@ function App() {
         : h("div",{style:{fontSize:12,color:colors.mutedLight,marginBottom:14}},"Authored by K.Bala Boopathy"),
       h("div",{style:{fontSize:11,color:colors.mutedLight}},"Pick Quotes from Sales, or Engineering Calc above, to get started.")
     ):
-    tab==="quote_status_tbl"?h(QuoteStagesMaster,{user}):
-    (tab!=="estimator" && tab!=="home"?h(MasterEditor,{tableKey:tab,key:tab,user}):null))
+    tab==="quote_status_tbl"?h(QuoteStagesMaster,{user:uTab}):
+    (tab!=="estimator" && tab!=="home"?h(MasterEditor,{tableKey:tab,key:tab,user:uTab}):null))
   );
 }
 
@@ -55423,7 +55687,7 @@ async function purWho(user){
   let dept = ""; try{ const e = await pgEmp(user); dept = (e && e.department)||""; if(!me && e) me = e.employee_name||""; }catch(e){}
   const name = me || user?.employee_name || user?.username || "";
   const sa = user?.role==="super_admin", admin = sa || user?.role==="admin";
-  const pm = keys.includes("purchase_manager"), qc = keys.includes("qc"), th = keys.includes("technical_head"), stores = keys.includes("stores");
+  const pm = keys.includes("purchase_manager"), qc = keys.includes("qc"), th = keys.includes("technical_head"), stores = keys.includes("stores") || keys.includes("factory_manager");
   // 20 Oct (11:00): PO makers = the Purchase department, the Stores In Charge post (Ravikumar) and the named makers;
   // Purchase side = the Purchase Manager post (Keerthi) or a super admin (Bala Boopathy); QC side = the QC post
   // (Thangavignesh) or the Technical Head post (Veenai Vimal) or a super admin.
@@ -58298,6 +58562,8 @@ function PoRegisterReport(){
 }
 
 function VendorsScreen({ user }){
+  const [VR,setVR] = useState(null);   // 2026-10-28T07:00:00Z: { view, add, edit }
+  useEffect(()=>{ vendorRights(user).then(setVR); },[user && user.username]);
   const [vendors,setVendors] = useState([]);
   const [page,setPage] = useState(0);
   const PAGE_SIZE = 25;
@@ -58409,7 +58675,7 @@ function VendorsScreen({ user }){
   return h("div",{style:{padding:20}},
     h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}},
       h("div",{style:{fontWeight:700,fontSize:18}},"Vendors"),
-      h("button",{onClick:()=>{ setSelected(null); setCreatingNew(true); setDraft(blankVendor); setAddresses([]); },style:btnPrimary},"+ New vendor")
+      VR && VR.add ? h("button",{onClick:()=>{ setSelected(null); setCreatingNew(true); setDraft(blankVendor); setAddresses([]); },style:btnPrimary},"+ New vendor") : null
     ),
 
     (!selected && !creatingNew) ? h("div",null,
@@ -58484,7 +58750,7 @@ function VendorsScreen({ user }){
           field("SWIFT code","swift_code")
         ),
         h("div",{style:{display:"flex",gap:8}},
-          h("button",{onClick:saveVendor,style:btnPrimary},creatingNew?"Create vendor":"Save vendor"),
+          (creatingNew ? (VR && VR.add) : (VR && VR.edit)) ? h("button",{onClick:saveVendor,style:btnPrimary},creatingNew?"Create vendor":"Save vendor") : h("span",{style:{fontSize:12,color:colors.muted}},"View only \u2014 ask an Admin for vendor rights (Admin \u2192 Permissions)."),
           h("button",{onClick:()=>{setSelected(null);setCreatingNew(false);},style:btnSecondary},"Back to list")
         )
       ),
@@ -61515,6 +61781,7 @@ const POST_BOARD_RULES = [
   ["sales_coordinator",  [/sales/i],                             []],
   ["accounts",           [/account/i],                           [/account/i]],
   ["stores",             [/store/i],                             []],
+  ["factory_manager",    [/factory/i, /maint/i, /safety/i, /security/i, /logistic/i, /store/i], [/factory/i, /maint/i, /safety/i, /security/i, /logistic/i]],   // 2026-10-28T06:00:00Z
 ];
 let BOARD_CACHE = { loaded:false, extras:{}, auto:{}, autoWhy:{}, autoApprovers:[], depts:[], rows:[] };
 async function loadBoardMembership(){
@@ -64976,13 +65243,13 @@ async function despPeople(){
   await loadPostPeople(true);
   let supers = [];
   try{ const { data } = await sb.from("app_users").select("employee_name,role").eq("role","super_admin"); supers = (data||[]).map(r=>r.employee_name).filter(Boolean); }catch(e){}
-  return { stores:postHolders("stores"), pm:postHolders("production_manager"), qc:postHolders("qc"), acc:postHolders("accounts"), supers };
+  return { stores:postHolders("stores"), fm:postHolders("factory_manager"), pm:postHolders("production_manager"), qc:postHolders("qc"), acc:postHolders("accounts"), supers };   // 2026-10-28T06:00:00Z: fm = Factory Manager (Stores rights)
 }
 // Who may act at a step. Admins and super admins may act at any step (logged as such).
 function despCan(step, user, me, P){
   if(!user) return false;
   if(user.role==="admin" || user.role==="super_admin") return true;
-  if(step==="stores") return P.stores.includes(me);
+  if(step==="stores") return P.stores.includes(me) || (P.fm||[]).includes(me);   // the Factory Manager has Stores rights
   if(step==="pm") return P.pm.includes(me);
   if(step==="qc") return P.qc.includes(me) || user.role==="qc";
   if(step==="acc") return P.acc.includes(me) || user.role==="accounts_admin";
@@ -65966,7 +66233,7 @@ function OsLotPanel({ lotId, user, me, P, so, onClose, onChanged, sessionCompany
     setBusy(false); await after();
   };
   // Stores: the DC
-  const makeDc = ()=>{ if(!can("stores")){ noPermission("make the DC",{ posts:["stores"] }); return; } window.__despOpenId = dc && dc.status!=="Cancelled" ? dc.id : { new:L.contract_number, lot:L.id }; onClose(); appOpenTab("despatch_dc"); };
+  const makeDc = ()=>{ if(!can("stores")){ noPermission("make the DC",{ posts:["stores","factory_manager"] }); return; } window.__despOpenId = dc && dc.status!=="Cancelled" ? dc.id : { new:L.contract_number, lot:L.id }; onClose(); appOpenTab("despatch_dc"); };
   const openDc = ()=>{ window.__despOpenId = dc.id; onClose(); appOpenTab("despatch_dc"); };
   // Production Manager: ask Accounts
   const reqClear = async()=>{
@@ -66132,7 +66399,7 @@ function OsPlaceList({ data, user, me, onClose, onDone }){
 // ---- the board ----
 function OrderStatusBoard({ user, sessionCompany }){
   const [D,setD] = useState(null); const [me,setMe] = useState(""); const [P,setP] = useState({ stores:[], pm:[], qc:[], acc:[], supers:[] });
-  const [mine,setMine] = useState(false); const [q,setQ] = useState(""); const [showOld,setShowOld] = useState(false);
+  const [mine,setMine] = useNavState("os_mine",false); const [q,setQ] = useNavState("os_q",""); const [showOld,setShowOld] = useNavState("os_old",false);
   const [ready,setReady] = useState(null); const [lotOpen,setLotOpen] = useState(null); const [placeOpen,setPlaceOpen] = useState(false); const [busyAuto,setBusyAuto] = useState(false);
   const load = useCallback(async()=>{
     const [m, p, d] = await Promise.all([despMe(user), despPeople(), osLoadAll()]);
