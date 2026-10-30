@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-30T11:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-30T12:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -2476,11 +2476,12 @@ const MOD_DEFS = [
   { key:"quotes", label:"Quotes", codeFree:true, note:"Quotes screen, new quote (estimator), Quote Register",
     tabs:["saved","estimator","quote_register"],
     menu:[{group:"Sales",sub:"Quotes",tabs:[["saved","Quotes"]]},{group:"Sales",sub:"Registers",tabs:[["quote_register","Quote Register"]]}] },
-  { key:"so", label:"Sale Order & onward", codeFree:true, note:"Sale Order, contract approvals, Contract Register, Order Status Board, Engineering Calc, Production BOM (documents: see Documents)",
-    tabs:["sale_order","sale_order_entry","contract_register","order_board","calc_workbench","calcs","bolting_calc","flange_chart","free_area_calc","davit_calc"],
+  { key:"so", label:"Sale Order & onward", codeFree:true, note:"Sale Order, contract approvals, Contract Register, Engineering Calc, Production BOM (documents: see Documents; the board: see Production)",
+    tabs:["sale_order","sale_order_entry","contract_register","calc_workbench","calcs","bolting_calc","flange_chart","free_area_calc","davit_calc"],
     menu:[{group:"Sales",sub:"Sale Order",tabs:[["sale_order_entry","Sale Order"]]},{group:"Sales",sub:"Registers",tabs:[["contract_register","Contract Register"]]},
-          {group:"Order Status",sub:"Order Status",tabs:[["order_board","Order Status Board"]]},
           {group:"Engineering Calc",sub:"Engineering Calc",tabs:[["calc_workbench","Calculation Workbench"],["calcs","ASME VIII Thickness"],["bolting_calc","Bolting Calculator"],["flange_chart","Flange Chart"],["free_area_calc","Free Area Calculator"],["davit_calc","Davit Arm Design Generator"]]}] },
+  { key:"prod", label:"Production", codeFree:true, note:"The Order Status Board: Items ready, lots and moving the cards",
+    tabs:["order_board"], menu:[{group:"Order Status",sub:"Order Status",tabs:[["order_board","Order Status Board"]]}] },
   { key:"docs", label:"Documents (won SO → payment)", codeFree:true, note:"Documents on Sale Orders and the Document Control board, report, chase letters and register. Admin: add, edit any entry, unlock, override the sequence, delete. User: add, edit the latest entry, delete own latest entry the same day, ask for other deletes",
     tabs:["doc_board","doc_report","doc_letters","reports_document_register"],
     menu:[{group:"Document Control",sub:"Document Control",tabs:[["doc_board","Document Control Board"],["doc_report","Report by Contract"],["doc_letters","Chase Letters"],["reports_document_register","Document Register"]]}] },
@@ -2699,6 +2700,29 @@ function DocDelPanel({ entity, user, onDone }){
       showGone ? gone.map(g=>h("div",{key:g.id,style:{display:"flex",gap:8,alignItems:"center",padding:"4px 0",borderTop:"1px solid #ecebe4"}},
         h("span",{style:{flex:1}}, g.doc_number+" · "+(g.rev||"")+" — deleted by "+g.deleted_by+" "+String(g.deleted_at||"").slice(0,10)+": "+(g.reason||"")),
         h("button",{disabled:busy,onClick:()=>restore(g),style:btnSmall},"Restore"))) : null) : null);
+}
+
+// ---- 2026-10-30T12:00:00Z (Ramya): every admin gives codes; a code works only in its maker's areas ----
+const CODE_FREE_TYPES = ["stale_close","task_reopen","pdf_unblock","acc_export","rollback","price_check"];
+const myAdminAreas = ()=> Object.entries(MOD_ME||{}).filter(([k,v])=>v==="admin").map(([k])=>k);
+const isCodeAdmin = (user)=> !!user && (user.role==="super_admin" || user.role==="admin" || myAdminAreas().length>0);
+function codeAreasFor(user){ if(!user || user.role==="super_admin") return null; const a = myAdminAreas(); return a.length ? a : null; }
+function codeAreaCheck(row, kind){
+  try{
+    if(!row || CODE_FREE_TYPES.includes(row.code_type||kind)) return { ok:true };
+    const areas = Array.isArray(row.areas) ? row.areas.filter(Boolean) : [];
+    if(!areas.length) return { ok:true };
+    const ctx = window.__codeCtx || (window.__modCur||{}).module || null;
+    if(!ctx || areas.includes(ctx)) return { ok:true };
+    return { ok:false, why:"This code was made by "+(row.generated_by||"an admin")+" for "+areas.map(modLabel).join(", ")+". It does not work in "+modLabel(ctx)+". Ask an admin of "+modLabel(ctx)+" (or a Super Admin) for a code." };
+  }catch(e){ return { ok:true }; }
+}
+async function codeInsert(table, row, user){
+  const areas = codeAreasFor(user);
+  if(user && user.role!=="super_admin" && !areas && user.role!=="admin") return { error:{ message:"You are not an admin of any area. A Super Admin can give you one in Admin → Rights Grid." } };
+  let r = await sb.from(table).insert({ ...row, areas }).select().single();
+  if(r.error && /areas/.test(r.error.message||"")) r = await sb.from(table).insert(row).select().single();   // before the SQL
+  return r;
 }
 // ---- Admin -> Rights Grid (Super Admin only) ----
 function RightsGridScreen({ user }){
@@ -3047,8 +3071,10 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
   const visibleGroups = visibleGroups1.map(g=>{ const md = accessMenuMode(g.label);
     if(md!=="none") return md==="view" ? { ...g, _view:true } : g;
     const k = g.tabs ? { ...g, tabs:g.tabs.filter(t=>modGrants(t.key)) } : { ...g, subgroups:g.subgroups.map(sg=>({ ...sg, tabs:sg.tabs.filter(t=>modGrants(t.key)) })).filter(sg=>sg.tabs.length) };
-    return (k.tabs ? k.tabs.length : k.subgroups.length) ? k : null; }).filter(Boolean);
-  { const tm = {}; visibleGroups1.forEach(g=>allTabsOf(g).forEach(t=>{ if(!tm[t.key]) tm[t.key] = g.label; })); [...groups].forEach(g=>allTabsOf(g).forEach(t=>{ if(!tm[t.key]) tm[t.key] = g.label; })); window.__tabMenu = tm; const tl = { home:"Home" }; [...visibleGroups1, ...groups].forEach(g=>allTabsOf(g).forEach(t=>{ if(!tl[t.key]) tl[t.key] = t.label; })); window.__tabLabel = tl; }
+    return (k.tabs ? k.tabs.length : k.subgroups.length) ? k : null; }).filter(Boolean)
+    .filter(g=>g.label!=="Admin" || isSuperAdmin)
+    .concat(!isSuperAdmin && isCodeAdmin(user) ? [{ label:"Admin", subgroups:[{ label:"Codes", tabs:[{key:"authorization_codes",label:"Authorization Codes"},{key:"deletion_codes",label:"Deletion Codes"}] }] }] : []);   // 2026-10-30T12:00:00Z
+  { const tm = {}; visibleGroups1.forEach(g=>allTabsOf(g).forEach(t=>{ if(!tm[t.key]) tm[t.key] = g.label; })); [...groups].forEach(g=>allTabsOf(g).forEach(t=>{ if(!tm[t.key]) tm[t.key] = g.label; })); window.__tabMenu = tm; const tl = { home:"Home", authorization_codes:"Authorization Codes", deletion_codes:"Deletion Codes", rights_grid:"Rights Grid" }; [...visibleGroups1, ...groups].forEach(g=>allTabsOf(g).forEach(t=>{ if(!tl[t.key]) tl[t.key] = t.label; })); window.__tabLabel = tl; }
 
   const itemStyle = t => ({
     padding:"5px 8px", fontSize:11.5, borderRadius:4, cursor:"pointer", textAlign:"left", border:"none",
@@ -12686,6 +12712,7 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
   const docAdm = isContract && docsAdmin(user);
   const docLockClosed = isContract && soStatus==="Closed" && !docAdm;
   useEffect(()=>{ if(!isContract || !entityRef) return; sb.from("sale_order_tbl").select("status").eq("contract_number",entityRef).maybeSingle().then(({data})=>setSoStatus(data ? data.status : null)).catch(()=>{}); },[isContract, entityRef]);
+  useEffect(()=>{ if(!isContract) return; window.__codeCtx = "docs"; return ()=>{ window.__codeCtx = null; }; },[isContract]);
   useEffect(()=>{ if(!docLockClosed) return; window.__roLocal = "Contract "+entityRef+" is Closed (payment received), so its documents are locked. Only the Documents admins and Super Admins can change them."; return ()=>{ window.__roLocal = null; }; },[docLockClosed, entityRef]);
 
   const load = useCallback(async(keepSel)=>{
@@ -14601,7 +14628,7 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
     // Open to every role (25 Aug) — status is plain progress tracking,
     // separate entirely from the three-section approval workflow above,
     // which still requires the right role/Admin to sign off.
-    await sb.from("sale_order_tbl").update({status:newStatus}).eq("id",contractInfo.id);
+    await sb.from("sale_order_tbl").update({status:newStatus}).eq("id",contractInfo.id); try{ oaLoadMine(user); }catch(e){}   // 2026-10-30T12:00:00Z
     await logAudit("UPDATE","sale_order_tbl",contractInfo.contract_number,"Status changed to "+newStatus,user?.username||"unknown",null,null);
     if(onChanged) onChanged();
   };
@@ -19634,7 +19661,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           return;
         }
         if(soBeforeOa(contractInfo.status)){   // 251: Open is before the O.A too
-          watermark = await resolveContractDraftWatermark();
+          watermark = soAllApproved(contractInfo) ? false : await resolveContractDraftWatermark();   // 2026-10-30T12:00:00Z: Accounts approved = no DRAFT
           // Flag for O.A Sent (27-28 Aug) — offered right alongside the
           // Draft watermark decision, same moment: generating this PDF
           // IS the real-world trigger for "the Order Acceptance went
@@ -19642,7 +19669,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           // silently out of sync with what actually happened. Never
           // forced — Stage stays fully manual either way.
           if(confirm("This is the Order Acceptance — mark Stage as \"O.A Sent\"?")){
-            await sb.from("sale_order_tbl").update({status:"O.A Sent"}).eq("id",contractInfo.id);
+            await sb.from("sale_order_tbl").update({status:"O.A Sent"}).eq("id",contractInfo.id); try{ oaLoadMine(user); }catch(e){}
             await logAudit("UPDATE","sale_order_tbl",quoteExportRef,"Stage advanced to O.A Sent (generated via PDF)",user?.username||"unknown",null,null);
             if(onContractInfoChanged) onContractInfoChanged();
           }
@@ -25881,6 +25908,7 @@ async function verifyAndConsumeDeletionCode(code, username){
   if(!data || data.length===0) return { ok:false, reason:"Invalid or already-used code." };
   const row = data[0];
   if(new Date(row.expires_at) < new Date()) return { ok:false, reason:"That code has expired." };
+  { const ac = codeAreaCheck(row, "delete"); if(!ac.ok) return { ok:false, reason:ac.why }; }   // 2026-10-30T12:00:00Z
   await sb.from("deletion_codes").update({ used:true, used_by:username, used_at:new Date().toISOString() }).eq("id",row.id);
   return { ok:true };
 }
@@ -25900,6 +25928,7 @@ async function verifyAndConsumeAuthCode(code, username, requiredType){
   if(!data || data.length===0) return { ok:false, reason:"Invalid or already-used code." };
   const row = data[0];
   if(row.expires_at && new Date(row.expires_at) < new Date()) return { ok:false, reason:"That code has expired." };
+  { const ac = codeAreaCheck(row, requiredType); if(!ac.ok) return { ok:false, reason:ac.why }; }   // 2026-10-30T12:00:00Z
   if(requiredType==="delete" && row.code_type!=="delete") return { ok:false, reason:"This action needs a Super Admin delete code, not an edit code." };
   if(requiredType==="direct_price" && row.code_type!=="direct_price") return { ok:false, reason:"This needs a direct-price authorization code from an Admin or Super Admin, not an edit or delete code." };
   await sb.from("authorization_codes").update({ used:true, used_by:username, used_at:new Date().toISOString() }).eq("id",row.id);
@@ -34256,6 +34285,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"30 Oct 2026 (276)", summary:"Built on 2026-10-30T12:00:00Z, on top of 2026-10-30T11:00:00Z (batch Ramya + the O.A rule). SQL: structure_ramya_2026-10-30.sql (both companies), ramya_people_flometriq_2026-10-30.sql (Flometriq). CODES: every admin (Admin role, or admin of an area in the Rights Grid) has Admin → Authorization Codes and Deletion Codes and makes every kind of code (Edit, Direct Price, Delete, PDF unblock, Stale close, Task reopen); the rest of the Admin menu stays Super Admin only. A code works only in the areas of the admin who made it — used elsewhere it says whose code it is and whom to ask. Super Admins' codes work everywhere. Admins see their own codes; Super Admins see all. PRODUCTION: a new Rights Grid area (the Order Status Board), out of Sale Order. FLOMETRIQ: Kayathri — CRM and Quotes admin; Sunil — Production, Documents and Stores admin, BOM masters view only; Ravikumar, V. Babu — Stores admin; Sonia — CRM admin; Veenai, Karthik Raj — Production admin too. Login Ravi-Stores switched off; login Babu linked to V. Babu. SALE ORDER: once Accounts approves, the Order Acceptance prints without the DRAFT watermark, for everyone. THE O.A MUST GO OUT: from approvals on 30 Oct 2026 (the override approvals are left out) — day 3 after Accounts approves with the Stage still before O.A Sent, a daily bell to the person who created the Sale Order, escalated to the Sale Order admins and Super Admins (only Super Admins when the creator is an admin); from day 4 every PDF that person makes is stopped, with the reason, except the PDFs of that Sale Order itself; any admin's PDF unblock code opens PDFs for 2 days (not one's own code). Calendar days." },
   { date:"30 Oct 2026 (275)", summary:"Built on 2026-10-30T11:00:00Z, on top of 2026-10-30T10:00:00Z. No SQL. SCREEN BLINKING FIXED: logins other than Super Admins were put back into browser full screen on every click; Chrome leaves full screen for every alert, confirm and new tab, so the screen flashed in and out. Now the app goes full screen once, on the first click after login, and never forces it again. Everyone gets the Hide / Show browser bars button in the top bar. Installed as an app (Chrome: Install page as app), nothing is forced at all." },
   { date:"30 Oct 2026 (274)", summary:"Built on 2026-10-30T10:00:00Z, on top of 2026-10-30T08:00:00Z. SQL: structure_document_rights_2026-10-30.sql (both companies, after structure_module_rights), document_rights_flometriq_2026-10-30.sql (Flometriq). DOCUMENTS (won Sale Order → payment received): a new Rights Grid column. Admin (Suresh Subramaniam, Veenai Vimal, Karthik Raj): add, edit any entry, unlock older entries, override the Out/In sequence, change Out/In, delete an entry or a whole document — no code. User (Ramesh): add, edit the latest entry, delete his own latest entry on the day he logged it; any other delete is asked, goes to the Documents admins' bell and they Approve or Reject at the top of the Documents box; the answer goes back to his bell. Every delete keeps a copy; a Super Admin can restore it from the Documents box. A Closed contract (payment received) locks its documents for everyone but the Documents admins and Super Admins. The Document Control board, report, chase letters and register now follow the Documents column. CLEAR MESSAGES: every 'you can't do this' now says why, who can (with names, from roles, posts and the Rights Grid) and what to do; code boxes name who can do it without a code; view-only screens say why nothing was saved and whom to ask; Add-only master screens say who edits and deletes; a screen with no access names whom to ask." },
   { date:"30 Oct 2026 (273)", summary:"Built on 2026-10-30T08:00:00Z, on top of 2026-10-28T09:00:00Z. SQL: structure_module_rights_2026-10-30.sql (both companies), module_rights_flometriq_2026-10-30.sql (Flometriq), so_approve_pending_override_deepak_2026-10-30.sql (Flometriq; Levaflow if wanted). RIGHTS GRID (Admin → Rights Grid, Super Admin): one level per person per module — BOM & design masters, Quotes, Sale Order & onward (contract approvals, Document Control, Order Status, Engineering Calc, Production BOM), Purchase, Customers, Stores, CRM, HR. Levels: as today · None · Read-only from links · View only · User · Add · Admin (no codes). A level set wins over the department rule. Admin: add, edit, delete and approve in that module with no Super Admin code (Purchase: cancelling an issued PO still needs one). Add: new rows in the masters only. View / read-only: nothing on that screen can be saved. Deleting a master row still used in BOMs, rates or quotes shows where and asks Delete anyway?. FLOMETRIQ: Veenai Vimal — masters Admin, Quotes read-only from links (no menu), Sale Order & onward Admin; Karthik Raj — masters, Quotes, Sale Order & onward Admin, may create customers; Aragan Keerthi — masters Add, Purchase Admin; Ponnarasi, Ganesh, Selvi — may create POs. SALE ORDER: only the Accounts approval (Commercial Terms) is needed; the FSE / Sales Head approval is dropped; Accounts post holders may approve. ACCOUNTS: the Finance & Accounts Manager approves and deletes vouchers directly, approves discrepancies and rolls back corrections; the Finance Director also unlocks months and enters the WIP & FG closing; delete requests go to them. Admin → Permissions now says it only drives Vendors. Fixed: signing out and in as another login could crash the app." },
@@ -36009,7 +36039,7 @@ function AuthorizationCodesScreen({ user }){
 
   const load = useCallback(async()=>{
     setLoading(true);
-    const { data } = await sb.from("authorization_codes").select("*").order("generated_at",{ascending:false}).limit(50);
+    let q = sb.from("authorization_codes").select("*").order("generated_at",{ascending:false}).limit(50); if(!isSuperAdmin) q = q.eq("generated_by",user.username); const { data } = await q;   // 2026-10-30T12:00:00Z: admins see their own codes
     setCodes(data||[]); setLoading(false);
   },[]);
   useEffect(()=>{ load(); },[load]);
@@ -36018,7 +36048,7 @@ function AuthorizationCodesScreen({ user }){
     setGenerating(true);
     const code = String(Math.floor(100000+Math.random()*900000));
     const expires_at = new Date(Date.now()+15*60*1000).toISOString();
-    const { data, error:err } = await sb.from("authorization_codes").insert({ code, code_type:codeType, generated_by:user.username, expires_at }).select().single();
+    const { data, error:err } = await codeInsert("authorization_codes", { code, code_type:codeType, generated_by:user.username, expires_at }, user);
     setGenerating(false);
     if(err){ alert("Could not generate code: "+err.message); return; }
     setJustGenerated(data);
@@ -36033,20 +36063,20 @@ function AuthorizationCodesScreen({ user }){
 
   return h("div",{style:{padding:"20px 24px"}},
     h("h2",{style:{margin:"0 0 6px",fontSize:18,fontWeight:700}},"Authorization Codes"),
-    h("div",{style:{fontSize:12,color:colors.mutedLight,marginBottom:14}},"Once a quote's Sl No isn't Draft, a regular user needs one of these codes to save a change; deleting anything needs a Delete code from a Super Admin specifically."),
+    h("div",{style:{fontSize:12,color:colors.mutedLight,marginBottom:14}},(isSuperAdmin ? "Your codes work everywhere. " : "Your codes work only in your areas: "+((codeAreasFor(user)||[]).map(modLabel).join(", ")||"everywhere (no area set yet)")+". ")+"Once a quote's Sl No isn't Draft, a regular user needs one of these codes to save a change; deleting anything needs a Delete code from a Super Admin specifically."),
     h("div",{style:{border:"1px solid "+colors.border,borderRadius:6,background:"#fff",padding:16,marginBottom:16,display:"flex",gap:10}},
       h("button",{onClick:()=>generate("edit"),disabled:generating,style:btnPrimary},generating?"Generating…":"Generate Edit code"),
       h("button",{onClick:()=>generate("direct_price"),disabled:generating,style:{...btnPrimary,background:colors.accent}},generating?"Generating…":"Generate Direct Price code"),
       (user.role==="admin"||isSuperAdmin) && h("button",{onClick:async()=>{ if(!confirm("A Stale close code lets one person close one of their own stale items (Tasks → Stale Items) with a reason. It works once, for 24 hours. Make one?")) return; setGenerating(true);
-        const code = String(Math.floor(100000+Math.random()*900000)); const { data, error:err } = await sb.from("authorization_codes").insert({ code, code_type:"stale_close", generated_by:user.username, expires_at:new Date(Date.now()+24*3600*1000).toISOString() }).select().single();
+        const code = String(Math.floor(100000+Math.random()*900000)); const { data, error:err } = await codeInsert("authorization_codes", { code, code_type:"stale_close", generated_by:user.username, expires_at:new Date(Date.now()+24*3600*1000).toISOString() }, user);
         setGenerating(false); if(err){ alert("Could not generate code: "+err.message); return; } setJustGenerated(data); load(); },disabled:generating,style:{...btnPrimary,background:"#8a2d2d"}},generating?"Generating…":"Generate Stale close code"),   // 209
       (user.role==="admin"||isSuperAdmin) && h("button",{"data-testid":"gen-task-reopen",onClick:async()=>{ if(!confirm("A Task reopen code lets one person take one completed task back (out of Completed). It works once, for 24 hours. Make one?")) return; setGenerating(true);   // 234
-        const code = String(Math.floor(100000+Math.random()*900000)); const { data, error:err } = await sb.from("authorization_codes").insert({ code, code_type:"task_reopen", generated_by:user.username, expires_at:new Date(Date.now()+24*3600*1000).toISOString() }).select().single();
+        const code = String(Math.floor(100000+Math.random()*900000)); const { data, error:err } = await codeInsert("authorization_codes", { code, code_type:"task_reopen", generated_by:user.username, expires_at:new Date(Date.now()+24*3600*1000).toISOString() }, user);
         setGenerating(false); if(err){ alert("Could not generate code: "+err.message); return; } setJustGenerated(data); load(); },disabled:generating,style:{...btnPrimary,background:"#5b3f8f"}},generating?"Generating…":"Generate Task reopen code"),
-      isSuperAdmin && h("button",{"data-testid":"gen-pdf-unblock",onClick:async()=>{ if(!confirm("A PDF unblock code is for someone whose PDFs are blocked because an AVL link is missing (Sale Order → MTC & AVL). Used once, it gives them PDFs for 24 hours. The code itself works for 24 hours. Make one?")) return; setGenerating(true);   // 237
-        const code = String(Math.floor(100000+Math.random()*900000)); const { data, error:err } = await sb.from("authorization_codes").insert({ code, code_type:"pdf_unblock", generated_by:user.username, expires_at:new Date(Date.now()+24*3600*1000).toISOString() }).select().single();
+      h("button",{"data-testid":"gen-pdf-unblock",onClick:async()=>{ if(!confirm("A PDF unblock code is for someone whose PDFs are blocked because an AVL link is missing (Sale Order → MTC & AVL). Used once, it gives them PDFs for 24 hours. The code itself works for 24 hours. Make one?")) return; setGenerating(true);   // 237
+        const code = String(Math.floor(100000+Math.random()*900000)); const { data, error:err } = await codeInsert("authorization_codes", { code, code_type:"pdf_unblock", generated_by:user.username, expires_at:new Date(Date.now()+24*3600*1000).toISOString() }, user);
         setGenerating(false); if(err){ alert("Could not generate code: "+err.message); return; } setJustGenerated(data); load(); },disabled:generating,style:{...btnPrimary,background:"#0f7a5c"}},generating?"Generating…":"Generate PDF unblock code"),
-      isSuperAdmin && h("button",{onClick:()=>generate("delete"),disabled:generating,style:{...btnPrimary,background:colors.danger}},generating?"Generating…":"Generate Delete code"),
+      h("button",{"data-testid":"gen-delete",onClick:()=>generate("delete"),disabled:generating,style:{...btnPrimary,background:colors.danger}},generating?"Generating…":"Generate Delete code"),
       isSuperAdmin && h("button",{onClick:()=>generate("acc_export"),disabled:generating,style:{...btnPrimary,background:"#0c447c"}},generating?"Generating…":"Generate Accounts Export code"),   // 189: Export for Auditor
       isSuperAdmin && h("button",{onClick:()=>{ if(confirm("A Roll-back code lets a super admin roll the whole of the accounts before go-live back to the FFS books (Accounts → Discrepancies). Make one?")) generate("acc_rollback"); },disabled:generating,style:{...btnPrimary,background:"#7a1f1a"}},generating?"Generating…":"Generate Accounts Roll-back code")   // 19 Oct
     ),
@@ -42056,6 +42086,98 @@ function avlShowBlocked(rows){
       AVL_ME.until = Date.now()+24*3600e3; try{ await logAudit("UPDATE","contract_mtc_tbl",rows.map(x=>x.contract_number).join(", "),"PDF unblock code used (AVL link missing) — code from "+(r.by||"?")+"; PDFs open for 24 hours",(u&&u.username)||""); }catch(e){}
       wrap.remove(); alert("PDFs work for the next 24 hours. Fill the AVL link before then, or the block comes back."); };
   }catch(e){ alert("No PDFs until the AVL link is filled on your Sale Orders (Sale Order → MTC & AVL)."); }
+}
+// ---- 2026-10-30T12:00:00Z: the O.A must go out — 3 calendar days after Accounts approves a Sale Order ----
+// Day 1 = the day Accounts approved. Day 3 still not "O.A Sent": the person who created the Sale Order gets a bell every day,
+// escalated to the Sale Order admins and the Super Admins (only the Super Admins when the creator is an admin). From day 4
+// every PDF that person makes is stopped — except the PDFs of that Sale Order itself, which is how the O.A gets out — until
+// the Stage moves, or an admin's PDF unblock code opens PDFs for 2 days. Approvals before 30 Oct 2026, and approvals
+// waived by the override, are left out.
+const OA_RULE_FROM = "2026-10-30T00:00:00+05:30";
+const OA_NOTICE_DAY = 3, OA_BLOCK_DAY = 4, OA_UNBLOCK_HOURS = 48;
+const oaLocalDate = (v)=>{ const d = new Date(v); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); };
+function oaDayNo(approvedAt){ if(!approvedAt) return 0; const a = new Date(oaLocalDate(approvedAt)+"T12:00:00"), b = new Date(oaLocalDate(new Date())+"T12:00:00"); return Math.round((b-a)/864e5)+1; }
+async function oaLateRows(createdBy){
+  try{ let q = sb.from("sale_order_tbl").select("contract_number,customer_name,status,commercial_approved_by,commercial_approved_at,created_by").gte("commercial_approved_at",new Date(OA_RULE_FROM).toISOString());
+    if(createdBy) q = q.eq("created_by",createdBy);
+    const { data, error } = await q; if(error) return [];
+    return (data||[]).filter(r=>r.commercial_approved_by && !/^waived by/i.test(r.commercial_approved_by) && soBeforeOa(r.status))
+      .map(r=>({ ...r, day:oaDayNo(r.commercial_approved_at) })).filter(r=>r.day>=OA_NOTICE_DAY); }catch(e){ return []; }
+}
+let OA_ME = { rows:[], until:0, user:null };
+async function oaLoadMine(user){
+  if(!user || user.role==="super_admin"){ OA_ME = { rows:[], until:0, user }; return OA_ME; }
+  const rows = (await oaLateRows(user.username)).filter(r=>r.day>=OA_BLOCK_DAY); let until = 0;
+  if(rows.length){ try{ const { data } = await sb.from("authorization_codes").select("used_at").eq("code_type","pdf_unblock").eq("used",true).eq("used_by",user.username).order("used_at",{ascending:false}).limit(1);
+    const u = data && data[0] && data[0].used_at; if(u) until = new Date(u).getTime()+OA_UNBLOCK_HOURS*3600e3; }catch(e){} }
+  OA_ME = { rows, until, user }; return OA_ME;
+}
+async function oaUseCode(code, username){
+  const c = String(code||"").trim(); if(!c) return { ok:false, why:"Type the PDF unblock code an admin gave you." };
+  const { data, error } = await sb.from("authorization_codes").select("*").eq("code",c).eq("code_type","pdf_unblock").eq("used",false).limit(1);
+  if(error) return { ok:false, why:"The code couldn't be checked: "+error.message };
+  if(!data || !data.length) return { ok:false, why:"That isn't an unused PDF unblock code. An admin makes one in Admin → Authorization Codes → Generate PDF unblock code." };
+  const row = data[0];
+  if(row.expires_at && new Date(row.expires_at) < new Date()) return { ok:false, why:"That code has expired. Ask an admin for a new one." };
+  if(row.generated_by===username) return { ok:false, why:"You can't use a code you made yourself. Ask another admin or a Super Admin." };
+  const u = await sb.from("authorization_codes").update({ used:true, used_by:username||"unknown", used_at:new Date().toISOString() }).eq("id",row.id).eq("used",false).select("id");
+  if(u.error || !(u.data||[]).length) return { ok:false, why:"That code was just used by someone else. Ask for a new one." };
+  return { ok:true, by:row.generated_by };
+}
+function oaShowBlocked(rows){
+  try{
+    const esc = s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+    const old = document.getElementById("flo-oa-block"); if(old) old.remove();
+    const wrap = document.createElement("div"); wrap.id = "flo-oa-block"; wrap.setAttribute("data-testid","oa-block");
+    wrap.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:4000;display:flex;align-items:center;justify-content:center;padding:16px";
+    const box = document.createElement("div"); box.style.cssText = "background:#fff;border-radius:12px;max-width:580px;width:100%;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.3);font-family:inherit";
+    const items = rows.map(r=>"<li style='margin-bottom:4px'><b>"+esc(r.contract_number)+"</b>"+(r.customer_name?" — "+esc(r.customer_name):"")+" <span style='color:#a3312a'>(approved by Accounts on "+esc(fmtDMY(String(r.commercial_approved_at).slice(0,10)))+" — day "+r.day+", Stage still "+esc(r.status||"Draft")+")</span></li>").join("");
+    box.innerHTML = "<div style='font-weight:700;font-size:15px;background:#fbe4e4;color:#a32d2d;padding:12px 16px'>⛔ Your PDFs are stopped: the O.A is not marked Sent</div>"+
+      "<div style='padding:12px 16px;font-size:13px;line-height:1.6;color:#1c1f1a'><div>Why: Accounts approved these Sale Orders you created more than 3 days ago, and their Stage has not moved to <b>O.A Sent</b>:</div>"+
+      "<ul style='margin:8px 0 10px;padding-left:20px'>"+items+"</ul>"+
+      "<div><b>To lift it:</b> open the Sale Order, make the Order Acceptance PDF (its own PDFs still work) and mark the Stage <b>O.A Sent</b>. Or type a <b>PDF unblock code</b> from an admin — PDFs then work for 2 days:</div>"+
+      "<div id='flo-oa-who' style='font-size:12px;color:#0c447c;margin-top:6px'></div>"+
+      "<div style='display:flex;gap:8px;margin-top:8px'><input id='flo-oa-code' placeholder='PDF unblock code' style='flex:1;padding:7px 9px;border:1px solid #d8d4c5;border-radius:6px'><button id='flo-oa-use' style='padding:7px 14px;background:#0f7a5c;color:#fff;border:0;border-radius:6px;cursor:pointer'>Use code</button></div>"+
+      "<div id='flo-oa-msg' style='color:#a3312a;font-size:12px;margin-top:6px'></div></div>"+
+      "<div style='display:flex;justify-content:flex-end;padding:0 16px 14px'><button id='flo-oa-x' style='padding:9px 16px;background:#fff;border:1px solid #d8d4c5;border-radius:6px;cursor:pointer'>Close</button></div>";
+    wrap.appendChild(box); document.body.appendChild(wrap);
+    (async()=>{ try{ const ad = [...new Set([...(await modAdmins("so")), ...(await superAdminNames())])]; const el = box.querySelector("#flo-oa-who"); if(el) el.textContent = "Who can give a code: "+ad.join(", ")+" (any admin)."; }catch(e){} })();
+    box.querySelector("#flo-oa-x").onclick = ()=>wrap.remove();
+    box.querySelector("#flo-oa-use").onclick = async()=>{ const u = OA_ME.user; const r = await oaUseCode(box.querySelector("#flo-oa-code").value, u && u.username);
+      if(!r.ok){ box.querySelector("#flo-oa-msg").textContent = r.why; return; }
+      OA_ME.until = Date.now()+OA_UNBLOCK_HOURS*3600e3; AVL_ME.until = Math.max(AVL_ME.until||0, Date.now()+24*3600e3);
+      try{ await logAudit("UPDATE","sale_order_tbl",rows.map(x=>x.contract_number).join(", "),"PDF unblock code used (O.A not marked Sent) — code from "+(r.by||"?")+"; PDFs open for 2 days",(u&&u.username)||""); }catch(e){}
+      wrap.remove(); alert("PDFs work for the next 2 days. Mark the O.A Sent before then, or the block comes back."); };
+  }catch(e){ alert("Your PDFs are stopped: a Sale Order you created was approved by Accounts more than 3 days ago and its O.A is not marked Sent."); }
+}
+function oaPdfAllowed(){
+  const u = OA_ME.user; if(!u || u.role==="super_admin") return true;
+  const rows = OA_ME.rows||[]; if(!rows.length) return true;
+  if(OA_ME.until && Date.now() < OA_ME.until) return true;
+  const open = window.__soOpenCn ? String(window.__soOpenCn) : "";
+  if(open && rows.some(r=>String(r.contract_number)===open)) return true;   // that Sale Order's own PDFs — the way out
+  oaShowBlocked(rows); return false;
+}
+// Daily bells: the creator, escalated (Sale Order admins + Super Admins; only Super Admins when the creator is an admin)
+async function oaSweep(){
+  try{
+    const rows = await oaLateRows(null); if(!rows.length) return;
+    const day = oaLocalDate(new Date());
+    const { data: us } = await sb.from("app_users").select("username,employee_name,role,is_active");
+    const by = {}; (us||[]).forEach(u=>by[u.username] = u);
+    const sas = await superAdminNames(); const soAd = await modAdmins("so");
+    for(const r of rows){
+      const g = "oalate:"+r.contract_number+":"+day;
+      try{ const { data: ex } = await sb.from("notifications_tbl").select("id").eq("action_group",g).limit(1); if(ex && ex.length) continue; }catch(e){}
+      const cu = by[r.created_by] || {}; const creator = cu.employee_name || r.created_by;
+      const isAdm = cu.role==="admin" || cu.role==="super_admin";
+      const esc = isAdm ? sas : [...soAd, ...sas];
+      const msg = "⏰ Sale Order "+r.contract_number+(r.customer_name?" ("+r.customer_name+")":"")+" was approved by Accounts on "+fmtDMY(String(r.commercial_approved_at).slice(0,10))+" (day "+r.day+") and its O.A is still not marked Sent. "+
+        (r.day>=OA_BLOCK_DAY ? "PDFs for "+creator+" are stopped until it is." : "From tomorrow PDFs for "+creator+" stop until it is.");
+      await notifyPeople([...new Set([creator, ...esc].filter(Boolean))], msg, "oa_late",
+        { kind:"open", open:{ contract:String(r.contract_number) }, group:g, help:{ btn:"Open the Sale Order", what:"Send the Order Acceptance of "+r.contract_number, do:["Make the Order Acceptance PDF and send it to the client.","Set the Stage to O.A Sent."] } });
+    }
+  }catch(e){ console.warn("O.A reminders", e); }
 }
 function avlPdfAllowed(){
   const u = AVL_ME.user; if(!u || u.role==="super_admin") return true;
@@ -48548,7 +48670,7 @@ function DeletionCodesScreen({ user }){
 
   const load = useCallback(async()=>{
     setLoading(true);
-    const { data } = await sb.from("deletion_codes").select("*").order("generated_at",{ascending:false}).limit(50);
+    let q = sb.from("deletion_codes").select("*").order("generated_at",{ascending:false}).limit(50); if(user.role!=="super_admin") q = q.eq("generated_by",user.username); const { data } = await q;
     setCodes(data||[]); setLoading(false);
   },[]);
   useEffect(()=>{ load(); },[load]);
@@ -48557,7 +48679,7 @@ function DeletionCodesScreen({ user }){
     setGenerating(true);
     const code = String(Math.floor(100000+Math.random()*900000)); // 6-digit
     const expires_at = new Date(Date.now()+15*60*1000).toISOString();
-    const { data, error:err } = await sb.from("deletion_codes").insert({ code, generated_by:user.username, expires_at }).select().single();
+    const { data, error:err } = await codeInsert("deletion_codes", { code, generated_by:user.username, expires_at }, user);
     setGenerating(false);
     if(err){ alert("Could not generate code: "+err.message); return; }
     setJustGenerated(data);
@@ -55273,6 +55395,7 @@ function App() {
   };
   // snapshot of the screen in view: the tab plus the contract / quote open in it
   const navCurSnap = { tab, so: tab==="sale_order" ? saleOrderContractInfo : null, q: tab==="saved" ? (window.__curQuoteRef||null) : null };
+  window.__soOpenCn = tab==="sale_order" && saleOrderContractInfo ? String(saleOrderContractInfo.contract_number||"") : null;   // 2026-10-30T12:00:00Z: its own PDFs pass the O.A block
   useEffect(()=>{
     if(navPrevTab.current!==tab){
       if(!navGoingBack.current && navSnap.current && navSnap.current.tab){ navStack.current.push(navSnap.current); if(navStack.current.length>40) navStack.current.shift(); }
@@ -55565,8 +55688,9 @@ function App() {
   if(user.role==="super_admin" && !sessionCompanyId) return h(CompanySessionPicker,{user,onPicked:setSessionCompanyIdPersisted});
 
   const _mLv = (user && user.role!=="super_admin") ? modTabLevel(tab) : "";   // 2026-10-30T08:00:00Z: Rights Grid wins over the department rule
-  const uTab = _mLv ? modUserFor(tab, user) : accessUserFor(tab, user);
-  const accTabMode = _mLv ? (_mLv==="none" ? "none" : "full") : accessMenuMode(accessTabMenu(tab)); void accTick;
+  const _codeTab = tab==="authorization_codes" || tab==="deletion_codes";   // 2026-10-30T12:00:00Z: every admin makes codes
+  const uTab = _codeTab && user && user.role!=="super_admin" && isCodeAdmin(user) ? { ...user, role:"admin", baseRole:user.role } : _mLv ? modUserFor(tab, user) : accessUserFor(tab, user);
+  const accTabMode = _codeTab ? (isCodeAdmin(user) ? "full" : "none") : _mLv ? (_mLv==="none" ? "none" : "full") : accessMenuMode(accessTabMenu(tab)); void accTick;
   { const _mk = modOfTab(tab); const _md = MOD_DEFS.find(m=>m.key===_mk); window.__modCur = { tab, module:_mk, level:_mLv, codeFree:!!(_md && _md.codeFree) }; window.__roGuard = _mLv==="view" || _mLv==="link"; }   // 2026-10-28T08:00:00Z
   return h("div",{style:{minHeight:"100vh"}},
     user.role==="super_admin" && !monthlyArchiveDone && h(MonthlyArchivePrompt,{user,onDone:()=>setMonthlyArchiveDone(true)}),
@@ -56158,6 +56282,7 @@ async function stepLoadMine(user, force){
   let rows = [];
   try{ const { data, error } = await sb.from("pending_step_tbl").select("*").eq("owner",name).is("done_at",null).is("closed_at",null); if(!error) rows = data||[]; }catch(e){}
   try{ await avlLoadMine(user, name); }catch(e){}   // 237
+  try{ await oaLoadMine(user); }catch(e){}   // 2026-10-30T12:00:00Z
   STALE_ME = { user:user.username, name, rows, at:Date.now() };
   try{ window.dispatchEvent(new CustomEvent("flo-stale-changed")); }catch(e){}
   return STALE_ME;
@@ -56271,7 +56396,7 @@ function stepShowBlocked(rows){
     box.querySelector("#flo-stale-open").onclick = ()=>{ wrap.remove(); appOpenTab("stale_items"); };
   }catch(e){ alert("No PDFs until your stale items are cleared — Tasks → Stale Items says what to do."); }
 }
-function stepPdfAllowed(){ if(!stepPdfAllowedStale()) return false; try{ return avlPdfAllowed(); }catch(e){ return true; } }   // 237: + the AVL-link block
+function stepPdfAllowed(){ if(!stepPdfAllowedStale()) return false; try{ return avlPdfAllowed() && oaPdfAllowed(); }catch(e){ return true; } }   // 2026-10-30T12:00:00Z: + the O.A block   // 237: + the AVL-link block
 function stepPdfAllowedStale(){
   const st = (STALE_ME.rows||[]).filter(stepIsStale);
   if(!st.length) return true;
@@ -56283,7 +56408,7 @@ function stepPdfAllowedStale(){
 (function installPdfGate(){
   try{
     const ns = window.jspdf; const J = ns && ns.jsPDF; if(!J || J.__staleGate) return;
-    const G = function(){ if(!stepPdfAllowed()) throw new Error("PDFs are blocked until your stale items are cleared (Tasks → Stale Items)."); return new J(...arguments); };
+    const G = function(){ if(!stepPdfAllowed()) throw new Error("PDFs are stopped for your login — the reason and what to do are on the screen."); return new J(...arguments); };   // 2026-10-30T12:00:00Z: the gate has more than one reason now
     Object.setPrototypeOf(G, J); G.prototype = J.prototype; G.API = J.API; G.__staleGate = true;
     ns.jsPDF = G;
   }catch(e){ console.warn("PDF gate not installed", e); }
@@ -56294,7 +56419,7 @@ function StaleWatch({ user }){
   useEffect(()=>{ if(!user) return; let dead = false;
     (async()=>{ const k = "staleSweep|"+user.username; let first = true; try{ if(sessionStorage.getItem(k)) first = false; else sessionStorage.setItem(k,"1"); }catch(e){}
       if(first) await stepSweep(user.username);
-      if(!dead) diSweep(user.username); /* 247: direct invoice approvals — reminders and overdue bells */ if(!dead) pettySweep(user.username); /* 248 */ if(!dead) accSalesSweep(user.username); /* 249 */ if(!dead) await stepLoadMine(user, true); if(!dead) billSweepOnce(user); if(first && !dead) purDocsReminderSweep(); })();   // 217   // 212: advance-PI cards, send steps
+      if(!dead) oaSweep(); /* 2026-10-30T12:00:00Z */ if(!dead) diSweep(user.username); /* 247: direct invoice approvals — reminders and overdue bells */ if(!dead) pettySweep(user.username); /* 248 */ if(!dead) accSalesSweep(user.username); /* 249 */ if(!dead) await stepLoadMine(user, true); if(!dead) billSweepOnce(user); if(first && !dead) purDocsReminderSweep(); })();   // 217   // 212: advance-PI cards, send steps
     const t = setInterval(()=>{ stepLoadMine(user, true); }, 120000);
     return ()=>{ dead = true; clearInterval(t); }; },[user && user.username]);
   return null;
