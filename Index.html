@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-30T12:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-30T15:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -2347,7 +2347,171 @@ function NavStrip({ stack, cur, onBack, onHome }){
       crumbs.map((e,i)=>h("span",{key:i},lab(e.tab)+(e.so?" "+(e.so.contract_number||""):e.q?" "+e.q:"")+" ›")),
       h("b",{style:{color:colors.text}}, (grp(cur.tab)&&cur.tab!=="home"?grp(cur.tab)+" · ":"")+lab(cur.tab)+(cur.so?" "+(cur.so.contract_number||""):cur.q?" "+cur.q:""))));
 }
-function TopBar({ user, sessionCompanyId, sessionCompany, onChangeCompany, onLogout, flags, onOpenVersions, onFull, inFull, onBars, barsHidden }) {
+// ---- 2026-10-30T15:00:00Z: 📌 Reference window — keep a scan / bill / PDF open beside any screen ----
+// Docked on the right (bottom sheet on a phone), or ⇱ popped out into a real always-on-top window
+// (Document Picture-in-Picture, Chrome / Edge on a computer); elsewhere it floats inside the page.
+// Links are remembered per login (last 5). Files from the PC show only on this screen — nothing is uploaded.
+const REF_W_KEY = "flo_ref_w";
+const refRecentKey = (u)=> "flo_ref_recent_" + ((u && u.username) || "");
+function refLoadRecent(u){ try{ const a = JSON.parse(localStorage.getItem(refRecentKey(u))||"[]"); return Array.isArray(a) ? a.filter(x=>x && x.url).slice(0,5) : []; }catch(e){ return []; } }
+function refSaveRecent(u, list){ try{ localStorage.setItem(refRecentKey(u), JSON.stringify(list.slice(0,5))); }catch(e){} }
+function refNameOf(url){
+  try{ if(/^data:/i.test(url)) return "Attached file"; const x = new URL(url); const last = decodeURIComponent((x.pathname.split("/").filter(Boolean).pop())||"");
+    if(/drive\.google|docs\.google/i.test(x.host)) return "Drive file"; if(/1drv|onedrive|sharepoint/i.test(x.host)) return "OneDrive file";
+    return last && last.length<60 ? last : x.host; }catch(e){ return String(url).slice(0,40); }
+}
+// how to show a link: { kind:"img"|"frame", src, note }
+function refViewOf(url){
+  const u = String(url||"").trim();
+  if(/^data:image\//i.test(u) || /^blob:/i.test(u) && /\.(png|jpe?g|gif|webp|bmp)$/i.test(u)) return { kind:"img", src:u };
+  if(/^data:/i.test(u)) return { kind:"frame", src:u };
+  let m = u.match(/drive\.google\.com\/file\/d\/([^/?#]+)/i) || u.match(/drive\.google\.com\/(?:open|uc)\?(?:.*&)?id=([^&#]+)/i);
+  if(m) return { kind:"frame", src:"https://drive.google.com/file/d/"+m[1]+"/preview" };
+  m = u.match(/docs\.google\.com\/(document|spreadsheets|presentation)\/d\/([^/?#]+)/i);
+  if(m) return { kind:"frame", src:"https://docs.google.com/"+m[1]+"/d/"+m[2]+"/preview" };
+  m = u.match(/drive\.google\.com\/drive\/(?:u\/\d+\/)?folders\/([^/?#]+)/i);
+  if(m) return { kind:"frame", src:"https://drive.google.com/embeddedfolderview?id="+m[1]+"#list" };
+  if(/\.(png|jpe?g|gif|webp|bmp)(\?|#|$)/i.test(u)) return { kind:"img", src:u };
+  return { kind:"frame", src:u, note:/1drv|onedrive|sharepoint/i.test(u) ? "OneDrive often refuses to show inside another page. If it stays blank, use ↗ New tab." : "If this stays blank, the site doesn't allow showing inside another page — use ↗ New tab." };
+}
+// open from anywhere: window.floRefOpen(url, name)
+window.floRefOpen = function(url, name){ try{ window.dispatchEvent(new CustomEvent("flo-ref-open",{ detail:{ url, name } })); }catch(e){} };
+
+// a small "📌 Reference" chip that appears over any web link in the app (Drive / scan / bill / PDF links)
+function refHoverInstall(){
+  if(window.__refHover) return; window.__refHover = true;
+  const chip = document.createElement("button");
+  chip.type = "button"; chip.textContent = "📌 Reference"; chip.setAttribute("data-testid","ref-chip");
+  chip.title = "Open this link in the Reference window, beside the screen you are working on";
+  chip.style.cssText = "position:fixed;z-index:3600;display:none;background:#0f6b4f;color:#fff;border:0;border-radius:12px;padding:2px 9px;font:600 11px/1.6 inherit;font-family:inherit;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.25)";
+  document.body.appendChild(chip);
+  let link = null, tm = null;
+  const hide = ()=>{ clearTimeout(tm); tm = setTimeout(()=>{ chip.style.display = "none"; link = null; }, 350); };
+  document.addEventListener("mouseover", (e)=>{
+    const a = e.target && e.target.closest ? e.target.closest("a[href]") : null;
+    if(!a || a.closest("[data-ref-panel]")) return;
+    const href = a.getAttribute("href")||"";
+    if(!/^(https?:|data:|blob:)/i.test(href) || /^mailto:|^tel:|wa\.me|whatsapp/i.test(href)) return;
+    clearTimeout(tm); link = a;
+    const r = a.getBoundingClientRect();
+    chip.style.left = Math.max(4, Math.min(window.innerWidth-110, r.right+4))+"px";
+    chip.style.top = Math.max(4, r.top + r.height/2 - 11)+"px";
+    chip.style.display = "block";
+  }, true);
+  document.addEventListener("mouseout", (e)=>{ const a = e.target && e.target.closest ? e.target.closest("a[href]") : null; if(a && a===link) hide(); }, true);
+  chip.addEventListener("mouseenter", ()=>clearTimeout(tm));
+  chip.addEventListener("mouseleave", hide);
+  chip.addEventListener("click", (e)=>{ e.preventDefault(); e.stopPropagation(); if(link) window.floRefOpen(link.href, (link.textContent||"").trim().slice(0,50)); chip.style.display = "none"; });
+  window.addEventListener("scroll", ()=>{ chip.style.display = "none"; }, true);
+}
+
+function ReferencePanel({ user, open, onClose }){
+  const [files,setFiles] = useState([]);           // { name, url, local }
+  const [cur,setCur] = useState(-1);
+  const [zoom,setZoom] = useState(1);
+  const [mode,setMode] = useState("dock");          // dock | float | pip
+  const [pipWin,setPipWin] = useState(null);
+  const [w,setW] = useState(()=>{ try{ return Math.max(300, Math.min(900, +localStorage.getItem(REF_W_KEY)||440)); }catch(e){ return 440; } });
+  const [fpos,setFpos] = useState({ x: Math.max(10, window.innerWidth-440), y: 90, w: 400, h: 520 });
+  const [linkIn,setLinkIn] = useState("");
+  const [over,setOver] = useState(false);
+  const [recent,setRecent] = useState(()=>refLoadRecent(user));
+  const narrow = window.innerWidth < 760;
+  useEffect(()=>{ setRecent(refLoadRecent(user)); setFiles([]); setCur(-1); },[user && user.username]);
+  const remember = (f)=>{ if(f.local) return; const r = [{ name:f.name, url:f.url }].concat(refLoadRecent(user).filter(x=>x.url!==f.url)).slice(0,5); refSaveRecent(user, r); setRecent(r); };
+  const add = (f)=>{ setFiles(prev=>{ const i = prev.findIndex(x=>x.url===f.url); if(i>=0){ setCur(i); return prev; } const n = prev.concat([f]); setCur(n.length-1); return n; }); setZoom(1); remember(f); };
+  // opened from a link chip / anywhere
+  useEffect(()=>{ const f = (e)=>{ const d = (e && e.detail)||{}; if(!d.url) return; add({ name: d.name || refNameOf(d.url), url: d.url }); if(window.__refShow) window.__refShow(); };
+    window.addEventListener("flo-ref-open", f); return ()=>window.removeEventListener("flo-ref-open", f); },[user && user.username]);
+  // docked: push the page left so nothing hides under the panel
+  useEffect(()=>{ const el = document.documentElement; const on = open && mode==="dock" && !narrow;
+    el.style.paddingRight = on ? (w+"px") : ""; return ()=>{ el.style.paddingRight = ""; }; },[open, mode, w, narrow]);
+  // closing the panel closes the pop-out window too
+  useEffect(()=>{ if(!open && pipWin){ try{ pipWin.close(); }catch(e){} } },[open]);
+  const takeFiles = (list)=>{ Array.from(list||[]).forEach(fl=>{ const url = URL.createObjectURL(fl); add({ name: fl.name, url, local:true, img:/^image\//i.test(fl.type) }); }); };
+  const addLink = ()=>{ const v = linkIn.trim(); if(!v) return; if(!/^https?:\/\//i.test(v)){ alert("Paste a full link starting with https://"); return; } add({ name: refNameOf(v), url: v }); setLinkIn(""); };
+  const closeTab = (i)=>{ const fl = files[i]; if(fl && fl.local){ try{ URL.revokeObjectURL(fl.url); }catch(e){} }
+    const n = files.filter((_,j)=>j!==i); setFiles(n); setCur(n.length ? Math.max(0, Math.min(cur>i ? cur-1 : cur, n.length-1)) : -1); setZoom(1); };
+  const popOut = async ()=>{
+    try{
+      if(!("documentPictureInPicture" in window)) throw new Error("no pip");
+      const pw = await window.documentPictureInPicture.requestWindow({ width: 440, height: 600 });
+      Array.from(document.styleSheets).forEach(ss=>{ try{ const s = pw.document.createElement("style"); s.textContent = Array.from(ss.cssRules).map(r=>r.cssText).join("\n"); pw.document.head.appendChild(s); }catch(e){} });
+      pw.document.title = "📌 Reference";
+      pw.document.body.style.cssText = "margin:0;height:100vh;font-family:"+(getComputedStyle(document.body).fontFamily||"sans-serif");
+      pw.addEventListener("pagehide", ()=>{ setPipWin(null); setMode("dock"); });
+      setPipWin(pw); setMode("pip");
+    }catch(e){ setMode("float"); }
+  };
+  if(!open) return null;
+  const f = files[cur] || null;
+  const v = f ? (f.local ? { kind: f.img ? "img" : "frame", src: f.url } : refViewOf(f.url)) : null;
+  const btn = { border:"1px solid "+colors.border, background:"#fff", color:colors.text, borderRadius:6, padding:"3px 9px", fontSize:12, cursor:"pointer", fontFamily:"inherit" };
+  const pri = { ...btn, background:"#0f6b4f", borderColor:"#0f6b4f", color:"#fff", fontWeight:700 };
+  const body = h("div",{"data-ref-panel":"1","data-testid":"ref-panel",style:{display:"flex",flexDirection:"column",height:"100%",minHeight:0,background:"#fff",color:colors.text,fontSize:12.5}},
+    h("div",{style:{display:"flex",gap:6,alignItems:"center",padding:"7px 10px",borderBottom:"1px solid "+colors.border,flexWrap:"wrap"}},
+      h("b",{style:{flex:1,fontSize:13}},"📌 Reference"),
+      mode==="dock" ? h("button",{"data-testid":"ref-pop",onClick:popOut,style:pri,title:"Open in its own window that stays on top — drag it to a corner or another monitor"},"⇱ Pop out")
+        : h("button",{"data-testid":"ref-dock",onClick:()=>{ if(pipWin){ try{ pipWin.close(); }catch(e){} } setMode("dock"); },style:btn,title:"Put it back on the right side of the app"},"⇲ Dock"),
+      h("button",{onClick:onClose,style:btn,"aria-label":"Close the Reference window",title:"Close (your recent links stay)"},"✕")),
+    h("div",{style:{display:"flex",gap:4,padding:"6px 10px",borderBottom:"1px solid "+colors.border,flexWrap:"wrap",minHeight:34}},
+      files.length ? files.map((x,i)=>h("span",{key:i,style:{display:"inline-flex",alignItems:"center",border:"1px solid "+(i===cur?"#0f6b4f":colors.border),background:i===cur?"#e4f3ed":"#f6f5f0",borderRadius:14,maxWidth:190}},
+        h("button",{onClick:()=>{ setCur(i); setZoom(1); },title:x.name+(x.local?" (from this PC)":""),style:{border:0,background:"none",padding:"2px 4px 2px 10px",fontSize:11.5,cursor:"pointer",fontFamily:"inherit",color:i===cur?"#0f6b4f":colors.text,fontWeight:i===cur?700:400,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:160}},(x.local?"💻 ":"")+x.name),
+        h("button",{onClick:()=>closeTab(i),"aria-label":"Close "+x.name,style:{border:0,background:"none",cursor:"pointer",padding:"0 8px 0 2px",color:colors.muted,fontSize:12}},"×")))
+      : h("span",{style:{color:colors.muted,fontSize:11.5}},"Nothing open yet.")),
+    h("div",{style:{padding:"7px 10px",borderBottom:"1px solid "+colors.border,display:"grid",gap:6}},
+      h("div",{style:{display:"flex",gap:6}},
+        h("input",{value:linkIn,onChange:e=>setLinkIn(e.target.value),onKeyDown:e=>{ if(e.key==="Enter") addLink(); },placeholder:"Paste a Drive / OneDrive / file link",style:{flex:1,minWidth:0,fontSize:12,padding:"4px 7px",border:"1px solid "+colors.border,borderRadius:6,fontFamily:"inherit"}}),
+        h("button",{onClick:addLink,style:btn},"Open")),
+      h("label",{onDragOver:e=>{ e.preventDefault(); setOver(true); },onDragLeave:()=>setOver(false),onDrop:e=>{ e.preventDefault(); setOver(false); takeFiles(e.dataTransfer.files); },
+        style:{border:"2px dashed "+(over?"#0f6b4f":colors.border),background:over?"#e4f3ed":"transparent",borderRadius:8,padding:"7px",textAlign:"center",color:colors.muted,fontSize:11.5,cursor:"pointer"}},
+        "Drop a scan or PDF from this PC here, or click to pick one — it only shows on your screen, nothing is uploaded.",
+        h("input",{type:"file",accept:"image/*,application/pdf",multiple:true,style:{display:"none"},onChange:e=>{ takeFiles(e.target.files); e.target.value=""; }})),
+      recent.length ? h("div",{style:{display:"flex",gap:4,flexWrap:"wrap",alignItems:"center",fontSize:11}},
+        h("span",{style:{color:colors.muted}},"Recent:"),
+        recent.map((r,i)=>h("button",{key:i,onClick:()=>add({ name:r.name, url:r.url }),title:r.url,style:{border:"1px solid "+colors.border,background:"#f6f5f0",borderRadius:12,padding:"1px 8px",fontSize:11,cursor:"pointer",fontFamily:"inherit",maxWidth:130,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},r.name))) : null),
+    h("div",{"data-testid":"ref-view",style:{flex:1,minHeight:0,overflow:"auto",background:"#7d7f78",display:"flex",justifyContent:"center",alignItems:v&&v.kind==="img"?"flex-start":"stretch",padding:v&&v.kind==="img"?10:0}},
+      !v ? h("div",{style:{background:"#fff",borderRadius:8,padding:12,margin:12,alignSelf:"flex-start",maxWidth:340,lineHeight:1.5}},
+            "Keep a scanned bill, PO, drawing or PDF open here while you type in the app.", h("br"), h("br"),
+            "• Point at any document link in the app and press ", h("b",null,"📌 Reference"), h("br"),
+            "• Or paste a link / drop a file above", h("br"),
+            "• ", h("b",null,"⇱ Pop out"), " moves it to its own window that stays on top (Chrome / Edge on a computer)")
+        : v.kind==="img" ? h("img",{src:v.src,alt:f.name,style:{width:Math.round(400*zoom)+"px",maxWidth:"none",background:"#fff",boxShadow:"0 2px 8px rgba(0,0,0,.3)"}})
+        : h("iframe",{key:v.src,src:v.src,title:f.name,allow:"autoplay",style:{width:"100%",height:"100%",minHeight:300,border:0,background:"#fff"}})),
+    h("div",{style:{display:"flex",gap:6,alignItems:"center",padding:"6px 10px",borderTop:"1px solid "+colors.border,fontSize:12,color:colors.muted,flexWrap:"wrap"}},
+      v && v.kind==="img" ? [
+        h("button",{key:"o",onClick:()=>setZoom(z=>Math.max(0.5,z-0.25)),style:btn,"aria-label":"Zoom out"},"−"),
+        h("span",{key:"l",style:{minWidth:38,textAlign:"center"}},Math.round(zoom*100)+"%"),
+        h("button",{key:"i",onClick:()=>setZoom(z=>Math.min(4,z+0.25)),style:btn,"aria-label":"Zoom in"},"+"),
+        h("button",{key:"f",onClick:(e)=>{ const box = e.currentTarget.closest("[data-ref-panel]").querySelector("[data-testid=ref-view]"); setZoom(Math.max(0.5,((box?box.clientWidth:400)-24)/400)); },style:btn},"Fit width")] : null,
+      v && v.note ? h("span",{style:{fontSize:11,flex:"1 1 160px"}},v.note) : null,
+      f && !f.local ? h("a",{href:f.url,target:"_blank",rel:"noopener noreferrer",style:{marginLeft:"auto",color:"#0f6b4f",fontSize:12}},"↗ New tab") : null,
+      files.length ? h("span",{style:{marginLeft:f&&!f.local?8:"auto"}},(cur+1)+" of "+files.length) : null));
+
+  if(mode==="pip" && pipWin) return ReactDOM.createPortal(body, pipWin.document.body);
+  if(mode==="float" || (mode==="pip" && !pipWin)){
+    const drag = (e)=>{ const sx=e.clientX, sy=e.clientY, ox=fpos.x, oy=fpos.y; const t=e.currentTarget; try{ t.setPointerCapture(e.pointerId); }catch(_){}
+      const mv = (m)=>setFpos(p=>({ ...p, x:Math.max(0,Math.min(window.innerWidth-120, ox+m.clientX-sx)), y:Math.max(0,Math.min(window.innerHeight-40, oy+m.clientY-sy)) }));
+      const up = ()=>{ t.removeEventListener("pointermove",mv); t.removeEventListener("pointerup",up); }; t.addEventListener("pointermove",mv); t.addEventListener("pointerup",up); };
+    return h("div",{style:{position:"fixed",left:fpos.x,top:fpos.y,width:fpos.w,height:fpos.h,zIndex:3500,border:"1px solid "+colors.border,borderRadius:10,boxShadow:"0 10px 30px rgba(0,0,0,.35)",overflow:"hidden",resize:"both",display:"flex",flexDirection:"column",background:"#fff"},
+        onMouseUp:(e)=>{ const r = e.currentTarget.getBoundingClientRect(); if(Math.abs(r.width-fpos.w)>2 || Math.abs(r.height-fpos.h)>2) setFpos(p=>({ ...p, w:r.width, h:r.height })); }},
+      h("div",{onPointerDown:drag,style:{background:colors.dark,color:"#fff",padding:"5px 10px",fontSize:11.5,cursor:"move",userSelect:"none",touchAction:"none"}},"📌 Reference — drag here · resize at the corner",
+        h("span",{style:{display:"block",fontSize:10.5,color:"#c8c2a0"}},"This browser can't make a window that stays on top of other programs — Chrome or Edge on a computer can.")),
+      h("div",{style:{flex:1,minHeight:0}}, body));
+  }
+  // docked
+  const startResize = (e)=>{ e.preventDefault(); const sx = e.clientX, ow = w; const t = e.currentTarget; try{ t.setPointerCapture(e.pointerId); }catch(_){}
+    const mv = (m)=>{ const nw = Math.max(300, Math.min(Math.round(window.innerWidth*0.7), ow + (sx - m.clientX))); setW(nw); };
+    const up = ()=>{ t.removeEventListener("pointermove",mv); t.removeEventListener("pointerup",up); setW(cw=>{ try{ localStorage.setItem(REF_W_KEY, String(cw)); }catch(_){} return cw; }); };
+    t.addEventListener("pointermove",mv); t.addEventListener("pointerup",up); };
+  return h("div",{style: narrow
+      ? {position:"fixed",left:0,right:0,bottom:0,height:"60vh",zIndex:3500,borderTop:"2px solid #0f6b4f",boxShadow:"0 -6px 20px rgba(0,0,0,.25)",display:"flex",flexDirection:"column"}
+      : {position:"fixed",top:0,right:0,bottom:0,width:w,zIndex:3500,borderLeft:"1px solid "+colors.border,boxShadow:"-4px 0 14px rgba(0,0,0,.12)",display:"flex"}},
+    narrow ? null : h("div",{onPointerDown:startResize,title:"Drag to make the panel wider or narrower",style:{width:6,cursor:"ew-resize",background:"#ebe8de",flex:"0 0 6px",touchAction:"none"}}),
+    h("div",{style:{flex:1,minWidth:0,display:"flex",flexDirection:"column"}}, body));
+}
+
+function TopBar({ user, sessionCompanyId, sessionCompany, onChangeCompany, onLogout, flags, onOpenVersions, onFull, inFull, onBars, barsHidden, onRef, refOn }) {
   const [sessionCompanyName,setSessionCompanyName] = useState("");
   useEffect(()=>{
     if(!sessionCompanyId){ setSessionCompanyName(""); return; }
@@ -2376,6 +2540,7 @@ function TopBar({ user, sessionCompanyId, sessionCompany, onChangeCompany, onLog
       h("span",{style:{fontSize:12,color:"#9a9d8f"}},user.username+" ("+user.role+")"),
       h(NotificationBell,{user}),
       onFull ? h("button",{onClick:onFull,title:inFull?"Leave full screen (Esc)":"Full screen: hide the Windows taskbar, the browser bars and this ribbon for more room (Esc to leave)",style:{background:"none",border:"1px solid #3a3f33",color:"#fff",padding:"6px 12px",fontSize:12,cursor:"pointer",borderRadius:6}},inFull?"✕ Exit full screen":"⛶ Full screen") : null,   // 225
+      onRef ? h("button",{"data-testid":"ref-btn",onClick:onRef,"aria-pressed":!!refOn,title:refOn?"Close the Reference window":"Reference window: keep a scan, bill or PDF open beside this screen",style:{background:refOn?"#0f6b4f":"none",border:"1px solid "+(refOn?"#0f6b4f":"#3a3f33"),color:"#fff",padding:"6px 12px",fontSize:12,cursor:"pointer",borderRadius:6,fontWeight:refOn?700:400}},"📌 Reference") : null,
       onBars ? h("button",{"data-testid":"bars-btn",onClick:onBars,title:barsHidden?"Show the browser tabs, address bar and bookmarks":"Hide the browser tabs, address bar and bookmarks",style:{background:"none",border:"1px solid #3a3f33",color:"#fff",padding:"6px 12px",fontSize:12,cursor:"pointer",borderRadius:6}}, barsHidden?"▾ Show browser bars":"▴ Hide browser bars") : null,
       h("button",{onClick:()=>window.open(window.location.href,"_blank"),style:{background:"none",border:"1px solid #3a3f33",color:"#fff",padding:"6px 12px",fontSize:12,cursor:"pointer",borderRadius:6}},"⧉ New tab"),
       h("button",{onClick:onLogout,style:{background:"none",border:"1px solid #3a3f33",color:"#fff",padding:"6px 12px",fontSize:12,cursor:"pointer",borderRadius:6}},"Sign out")
@@ -34285,6 +34450,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"30 Oct 2026 (277)", summary:"Built on 2026-10-30T15:00:00Z, on top of 2026-10-30T12:00:00Z. No SQL. FULL SCREEN: the app no longer goes full screen by itself on the first click — people can switch between browser tabs again. The ▴ Hide browser bars button stays in the top bar for anyone who wants the room. 📌 REFERENCE WINDOW: a new button in the top bar, on every screen, for every login. It opens a panel on the right (at the bottom on a phone) to keep a scanned bill, PO, drawing or PDF open while typing in the app. Point at any document link in the app (supplier bill, GRN scan, Drive folder, documents) and press the little 📌 Reference chip; or paste a Drive / OneDrive link; or drop / pick a file from the PC (it shows only on that screen, nothing is uploaded). Several files open as tabs; pictures can be zoomed. Drag the panel edge to make it wider. ⇱ Pop out moves it into its own window that stays on top of everything, even other programs (Chrome or Edge on a computer); other browsers get a floating window inside the page. The last 5 links are remembered for each login. Drive files show only if that person's Google login can open them; a site that refuses to show inside gets ↗ New tab." },
   { date:"30 Oct 2026 (276)", summary:"Built on 2026-10-30T12:00:00Z, on top of 2026-10-30T11:00:00Z (batch Ramya + the O.A rule). SQL: structure_ramya_2026-10-30.sql (both companies), ramya_people_flometriq_2026-10-30.sql (Flometriq). CODES: every admin (Admin role, or admin of an area in the Rights Grid) has Admin → Authorization Codes and Deletion Codes and makes every kind of code (Edit, Direct Price, Delete, PDF unblock, Stale close, Task reopen); the rest of the Admin menu stays Super Admin only. A code works only in the areas of the admin who made it — used elsewhere it says whose code it is and whom to ask. Super Admins' codes work everywhere. Admins see their own codes; Super Admins see all. PRODUCTION: a new Rights Grid area (the Order Status Board), out of Sale Order. FLOMETRIQ: Kayathri — CRM and Quotes admin; Sunil — Production, Documents and Stores admin, BOM masters view only; Ravikumar, V. Babu — Stores admin; Sonia — CRM admin; Veenai, Karthik Raj — Production admin too. Login Ravi-Stores switched off; login Babu linked to V. Babu. SALE ORDER: once Accounts approves, the Order Acceptance prints without the DRAFT watermark, for everyone. THE O.A MUST GO OUT: from approvals on 30 Oct 2026 (the override approvals are left out) — day 3 after Accounts approves with the Stage still before O.A Sent, a daily bell to the person who created the Sale Order, escalated to the Sale Order admins and Super Admins (only Super Admins when the creator is an admin); from day 4 every PDF that person makes is stopped, with the reason, except the PDFs of that Sale Order itself; any admin's PDF unblock code opens PDFs for 2 days (not one's own code). Calendar days." },
   { date:"30 Oct 2026 (275)", summary:"Built on 2026-10-30T11:00:00Z, on top of 2026-10-30T10:00:00Z. No SQL. SCREEN BLINKING FIXED: logins other than Super Admins were put back into browser full screen on every click; Chrome leaves full screen for every alert, confirm and new tab, so the screen flashed in and out. Now the app goes full screen once, on the first click after login, and never forces it again. Everyone gets the Hide / Show browser bars button in the top bar. Installed as an app (Chrome: Install page as app), nothing is forced at all." },
   { date:"30 Oct 2026 (274)", summary:"Built on 2026-10-30T10:00:00Z, on top of 2026-10-30T08:00:00Z. SQL: structure_document_rights_2026-10-30.sql (both companies, after structure_module_rights), document_rights_flometriq_2026-10-30.sql (Flometriq). DOCUMENTS (won Sale Order → payment received): a new Rights Grid column. Admin (Suresh Subramaniam, Veenai Vimal, Karthik Raj): add, edit any entry, unlock older entries, override the Out/In sequence, change Out/In, delete an entry or a whole document — no code. User (Ramesh): add, edit the latest entry, delete his own latest entry on the day he logged it; any other delete is asked, goes to the Documents admins' bell and they Approve or Reject at the top of the Documents box; the answer goes back to his bell. Every delete keeps a copy; a Super Admin can restore it from the Documents box. A Closed contract (payment received) locks its documents for everyone but the Documents admins and Super Admins. The Document Control board, report, chase letters and register now follow the Documents column. CLEAR MESSAGES: every 'you can't do this' now says why, who can (with names, from roles, posts and the Rights Grid) and what to do; code boxes name who can do it without a code; view-only screens say why nothing was saved and whom to ask; Add-only master screens say who edits and deletes; a screen with no access names whom to ask." },
@@ -55316,12 +55482,10 @@ function App() {
   const [barsHidden,setBarsHidden] = useState(appInFull());
   useEffect(()=>{ const f = ()=>setBarsHidden(appInFull()); document.addEventListener("fullscreenchange", f); document.addEventListener("webkitfullscreenchange", f);
     return ()=>{ document.removeEventListener("fullscreenchange", f); document.removeEventListener("webkitfullscreenchange", f); }; },[]);
-  // 2026-10-30T11:00:00Z: full screen ONCE per login. Re-entering on every click made the screen blink, because Chrome
-  // leaves full screen for every alert / confirm / new tab and the next click brought it back. The button stays for anyone.
-  useEffect(()=>{ if(!user || user.role==="super_admin" || appIsInstalled()) return;
-    let done = false;
-    const f = ()=>{ if(done) return; done = true; document.removeEventListener("pointerdown", f, true); if(!appInFull()) appFullOn(); };
-    document.addEventListener("pointerdown", f, true); return ()=>document.removeEventListener("pointerdown", f, true); },[user && user.username]);
+  // 2026-10-30T15:00:00Z: no automatic full screen any more — it stopped people working across tabs. The ▴ Hide browser bars button stays.
+  // 📌 Reference window (any screen, any login)
+  const [refOpen,setRefOpen] = useState(false);
+  useEffect(()=>{ window.__refShow = ()=>setRefOpen(true); refHoverInstall(); return ()=>{ window.__refShow = null; }; },[]);
   // 2026-10-28T09:00:00Z: Back / Home — the screens visited this session (memory only; a reload starts at Home)
   const navStack = useRef([]); const navGoingBack = useRef(false); const [navN,setNavN] = useState(0);
   const navPrevTab = useRef("home"); const navSnap = useRef({ tab:"home" });
@@ -55693,6 +55857,7 @@ function App() {
   const accTabMode = _codeTab ? (isCodeAdmin(user) ? "full" : "none") : _mLv ? (_mLv==="none" ? "none" : "full") : accessMenuMode(accessTabMenu(tab)); void accTick;
   { const _mk = modOfTab(tab); const _md = MOD_DEFS.find(m=>m.key===_mk); window.__modCur = { tab, module:_mk, level:_mLv, codeFree:!!(_md && _md.codeFree) }; window.__roGuard = _mLv==="view" || _mLv==="link"; }   // 2026-10-28T08:00:00Z
   return h("div",{style:{minHeight:"100vh"}},
+    h(ReferencePanel,{user,open:refOpen,onClose:()=>setRefOpen(false)}),   // 2026-10-30T15:00:00Z
     user.role==="super_admin" && !monthlyArchiveDone && h(MonthlyArchivePrompt,{user,onDone:()=>setMonthlyArchiveDone(true)}),
     overdueGateEmployee!==undefined && !isFseOrTelecaller && showOverduePrompt && h(OverdueCallsPrompt,{user,onDone:dismissOverduePrompt,onEmpty:()=>setOverduePromptEmpty(true)}),
     // 146: My day replaces the FSE / Telecaller overdue-calls screen; everyone else sees it (tasks only) after the
@@ -55737,7 +55902,7 @@ function App() {
       h("button",{onClick:()=>setFocusMenu(m=>!m),title:focusMenu?"Hide the ribbon again":"Show the ribbon (menus) while staying full screen",style:{background:colors.dark,color:"#fff",border:"1px solid #3a3f33",borderRadius:16,padding:"5px 12px",fontSize:12,cursor:"pointer",boxShadow:"0 2px 6px rgba(0,0,0,.25)"}},focusMenu?"▴ Hide menu":"☰ Menu"),
       h("button",{onClick:exitFocus,title:"Leave full screen (Esc)",style:{background:colors.dark,color:"#fff",border:"1px solid #3a3f33",borderRadius:16,padding:"5px 12px",fontSize:12,cursor:"pointer",boxShadow:"0 2px 6px rgba(0,0,0,.25)"}},"✕ Exit full screen")) : null,
     (focusMode && !focusMenu) ? null : h("div",{id:"app-sticky-header",style:{position:"sticky",top:0,zIndex:60}},
-      h(TopBar,{user,onBars:appIsInstalled()?null:(()=>{ appInFull() ? appFullOff() : appFullOn(); }),barsHidden,onFull:focusMode?exitFocus:enterFocus,inFull:focusMode,sessionCompanyId,sessionCompany,onOpenVersions:user.role==="super_admin"?(()=>pickTab("version_history")):null,flags:h(MyDayFlags,{data:myDay,isSales:isFseOrTelecaller,hasEmp:myDayHasEmp,onOpen:openMyDay}),onChangeCompany:user.role==="super_admin"?(()=>setSessionCompanyIdPersisted(null)):null,onLogout:()=>{setUserPersisted(null);setSessionCompanyIdPersisted(null);setMasterData({models:[],gradesBySpec:new Map(),rateBySpecGrade:new Map(),allSpecs:[],loadingMaster:true});}}),
+      h(TopBar,{user,onRef:()=>setRefOpen(o=>!o),refOn:refOpen,onBars:appIsInstalled()?null:(()=>{ appInFull() ? appFullOff() : appFullOn(); }),barsHidden,onFull:focusMode?exitFocus:enterFocus,inFull:focusMode,sessionCompanyId,sessionCompany,onOpenVersions:user.role==="super_admin"?(()=>pickTab("version_history")):null,flags:h(MyDayFlags,{data:myDay,isSales:isFseOrTelecaller,hasEmp:myDayHasEmp,onOpen:openMyDay}),onChangeCompany:user.role==="super_admin"?(()=>setSessionCompanyIdPersisted(null)):null,onLogout:()=>{setUserPersisted(null);setSessionCompanyIdPersisted(null);setMasterData({models:[],gradesBySpec:new Map(),rateBySpecGrade:new Map(),allSpecs:[],loadingMaster:true});}}),
       h(MenuTabs,{user,active:tab,onChange:pickTab,
         onRefresh: ["estimator","saved","sale_order","home","tour","user_manual","faq","change_password","version_history"].includes(tab) ? null
           : ()=>{ if(!confirmLeaveIfDirty()) return; setUnsavedGuard(false); setScreenKey(k=>k+1); }}),
