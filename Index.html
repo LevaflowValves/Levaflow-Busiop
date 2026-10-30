@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-30T08:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-30T11:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -406,16 +406,22 @@ async function permWho(){
 }
 async function noPermission(what, who){
   who = who||{};
-  const posts = who.posts||[];
-  const roles = who.roles || (posts.length ? [] : ["admin","super_admin"]);
-  const needs = [], names = [];
+  const posts = who.posts||[], mods = who.mods||[];
+  const roles = who.roles || (posts.length || mods.length ? [] : ["admin","super_admin"]);
+  const needs = [], names = []; let sa = [];
   try{
     const w = await permWho();
     roles.forEach(r=>{ needs.push(PERM_ROLE_LABEL[r]||r); w.users.filter(x=>x.role===r && x.is_active!==false).forEach(x=>names.push(x.employee_name||x.username)); });
     posts.forEach(k=>{ needs.push(((w.posts.find(x=>x.post_key===k)||{}).label)||k); w.holders.filter(x=>x.post_key===k).forEach(x=>names.push(x.employee_name)); });
+    for(const m of mods){ needs.push(modLabel(m)+" admin"); (await modAdmins(m)).forEach(n=>names.push(n)); }
+    sa = w.users.filter(x=>x.role==="super_admin" && x.is_active!==false).map(x=>x.employee_name||x.username);
   }catch(e){ roles.forEach(r=>needs.push(PERM_ROLE_LABEL[r]||r)); posts.forEach(k=>needs.push(k)); }
-  const uniq = [...new Set(names.filter(Boolean))];
-  alert("You don't have permission to "+what+".\n\nWho can do it: "+needs.join(" / ")+".\nPlease contact: "+(uniq.length?uniq.join(", "):"a Super Admin")+".");
+  const uniq = [...new Set(names.filter(Boolean))]; const sas = [...new Set(sa.filter(Boolean))];
+  // 2026-10-30T10:00:00Z: say why, who can, and what to do
+  alert("⛔ You can't "+what+".\n\nWhy: "+(who.why || "your login does not have this right.")+
+    "\n\nWho can: "+(needs.length ? needs.join(" / ") : "a Super Admin")+(uniq.length ? " — "+uniq.join(", ") : "")+"."+
+    "\n\nWhat to do: "+(uniq.length ? "ask "+uniq.join(" or ")+" to do it" : "ask a Super Admin to do it")+
+    ". If you need this right yourself, ask a Super Admin ("+(sas.length ? sas.join(", ") : POST_VACANT_CONTACT)+") — they can give it in Admin → Rights Grid or Setup → Posts.");
   return false;
 }
 // A button the user may not use stays visible (dimmed); clicking it explains why.
@@ -2448,6 +2454,7 @@ function AccessDenied({ tab }){
   const m = accessTabMenu(tab);
   return h("div",{style:{padding:"40px 24px",textAlign:"center",color:colors.muted}},
     h("div",{style:{fontSize:16,fontWeight:700,color:colors.text,marginBottom:6}}, m==="Accounts" ? "Accounts is confidential" : "No access"),
+    modOfTab(tab) && modTabLevel(tab)==="none" ? h("div",{style:{maxWidth:560,margin:"0 auto"}}, h("div",{style:{fontSize:13,marginBottom:6}},"Your login has no access to "+modLabel(modOfTab(tab))+"."), h(WhoCan,{ mod:modOfTab(tab), pre:"For work there, ask: " })) :
     h("div",{style:{fontSize:13}}, m==="Accounts" ? "Only Super Admins and the Accounts people named by them can open Accounts." : "Your login has no access to "+(m||"this screen")+". A Super Admin can change it in Admin → Access."));
 }
 // ---- 2026-10-30T08:00:00Z: RIGHTS GRID — rights per person, per module (Admin → Rights Grid) ----
@@ -2469,12 +2476,14 @@ const MOD_DEFS = [
   { key:"quotes", label:"Quotes", codeFree:true, note:"Quotes screen, new quote (estimator), Quote Register",
     tabs:["saved","estimator","quote_register"],
     menu:[{group:"Sales",sub:"Quotes",tabs:[["saved","Quotes"]]},{group:"Sales",sub:"Registers",tabs:[["quote_register","Quote Register"]]}] },
-  { key:"so", label:"Sale Order & onward", codeFree:true, note:"Sale Order, contract approvals, Contract Register, Document Control, Order Status Board, Engineering Calc, Production BOM",
-    tabs:["sale_order","sale_order_entry","contract_register","doc_board","doc_report","doc_letters","reports_document_register","order_board","calc_workbench","calcs","bolting_calc","flange_chart","free_area_calc","davit_calc"],
+  { key:"so", label:"Sale Order & onward", codeFree:true, note:"Sale Order, contract approvals, Contract Register, Order Status Board, Engineering Calc, Production BOM (documents: see Documents)",
+    tabs:["sale_order","sale_order_entry","contract_register","order_board","calc_workbench","calcs","bolting_calc","flange_chart","free_area_calc","davit_calc"],
     menu:[{group:"Sales",sub:"Sale Order",tabs:[["sale_order_entry","Sale Order"]]},{group:"Sales",sub:"Registers",tabs:[["contract_register","Contract Register"]]},
-          {group:"Document Control",sub:"Document Control",tabs:[["doc_board","Document Control Board"],["doc_report","Report by Contract"],["doc_letters","Chase Letters"],["reports_document_register","Document Register"]]},
           {group:"Order Status",sub:"Order Status",tabs:[["order_board","Order Status Board"]]},
           {group:"Engineering Calc",sub:"Engineering Calc",tabs:[["calc_workbench","Calculation Workbench"],["calcs","ASME VIII Thickness"],["bolting_calc","Bolting Calculator"],["flange_chart","Flange Chart"],["free_area_calc","Free Area Calculator"],["davit_calc","Davit Arm Design Generator"]]}] },
+  { key:"docs", label:"Documents (won SO → payment)", codeFree:true, note:"Documents on Sale Orders and the Document Control board, report, chase letters and register. Admin: add, edit any entry, unlock, override the sequence, delete. User: add, edit the latest entry, delete own latest entry the same day, ask for other deletes",
+    tabs:["doc_board","doc_report","doc_letters","reports_document_register"],
+    menu:[{group:"Document Control",sub:"Document Control",tabs:[["doc_board","Document Control Board"],["doc_report","Report by Contract"],["doc_letters","Chase Letters"],["reports_document_register","Document Register"]]}] },
   { key:"purchase", label:"Purchase", codeFree:false, note:"Add = create POs (no cancel). Admin = approve, cancel, purchase masters; cancelling an issued PO still needs a Super Admin code",
     tabs:["proc_list","proc_gantt","proc_reports","po_register","price_list","vendors","valve_price_purchase"],
     menu:[{group:"Purchase",sub:"Registers",tabs:[["po_register","Purchase Register"]]},{group:"Purchase",sub:"Procurement",tabs:[["proc_list","Procurement list"],["proc_gantt","Procurement Gantt"],["proc_reports","Procurement reports"]]}] },
@@ -2556,11 +2565,11 @@ async function masterUsage(tableKey, rs){
     const p = new Proxy(function(){}, { get:(t,k)=> k==="then" ? (a,b)=>Promise.resolve(res).then(a,b) : k==="catch" ? (b)=>Promise.resolve(res) : k==="finally" ? (fn)=>Promise.resolve(res).finally(fn) : ()=>p, apply:()=>p });
     return p; };
   const of = sb.from.bind(sb);
-  sb.from = (t)=>{ const q = of(t); if(!window.__roGuard || OK.has(t)) return q;
+  sb.from = (t)=>{ const q = of(t); if(!(window.__roGuard || window.__roLocal) || OK.has(t)) return q;
     return new Proxy(q, { get:(o,k)=>{ if(k==="insert"||k==="update"||k==="upsert"||k==="delete") return ()=>{ toast(); return fake("View only: nothing is saved on this screen."); };
       const v = o[k]; return typeof v==="function" ? v.bind(o) : v; } }); };
   const orpc = sb.rpc.bind(sb);
-  sb.rpc = (fn, args, opt)=>{ if(window.__roGuard && !/^(list_|get_|fmq_sl_no_usage)/.test(String(fn||""))){ toast(); return fake("View only: nothing is saved on this screen."); } return orpc(fn, args, opt); };
+  sb.rpc = (fn, args, opt)=>{ if((window.__roGuard || window.__roLocal) && !/^(list_|get_|fmq_sl_no_usage)/.test(String(fn||""))){ toast(); return fake("View only: nothing is saved on this screen."); } return orpc(fn, args, opt); };
 })();
 function RoToast({ on }){
   const [t,setT] = useState(0);
@@ -2568,7 +2577,128 @@ function RoToast({ on }){
   useEffect(()=>{ if(!t) return; const id = setTimeout(()=>setT(0), 3500); return ()=>clearTimeout(id); },[t]);
   return h(React.Fragment,null,
     on ? h("div",{"data-testid":"ro-badge",style:{position:"fixed",bottom:12,right:12,zIndex:2500,background:"#23281e",color:"#fff",borderRadius:14,padding:"4px 12px",fontSize:12,opacity:.92}},"👁 View only — this screen can't be changed from your login") : null,
-    t ? h("div",{"data-testid":"ro-toast",style:{position:"fixed",top:70,left:"50%",transform:"translateX(-50%)",zIndex:3000,background:"#fff4d6",border:"1px solid #e0b84a",borderRadius:8,padding:"8px 14px",fontSize:13,boxShadow:"0 4px 14px rgba(0,0,0,.15)"}},"View only: that change was not saved.") : null);
+    t ? h("div",{"data-testid":"ro-toast",style:{position:"fixed",top:70,left:"50%",transform:"translateX(-50%)",zIndex:3000,background:"#fff4d6",border:"1px solid #e0b84a",borderRadius:8,padding:"10px 14px",fontSize:13,boxShadow:"0 4px 14px rgba(0,0,0,.15)",maxWidth:560}},
+      h("b",null,"⛔ Not saved. "), window.__roLocal ? window.__roLocal : ("Your login can only view "+modLabel((window.__modCur||{}).module||"")+" — nothing on this screen can be changed from it."),
+      h(WhoCan,{ mod: window.__roLocal ? "docs" : (window.__modCur||{}).module, pre:"To get it done, ask: " })) : null);
+}
+// ---- 2026-10-30T10:00:00Z: who to ask — names for the "you can't do this" messages ----
+let MOD_ADMINS_CACHE = null, MOD_ADMINS_AT = 0;
+async function modAdmins(mod){
+  if(!MOD_ADMINS_CACHE || Date.now()-MOD_ADMINS_AT > 5*60*1000){
+    MOD_ADMINS_CACHE = {}; MOD_ADMINS_AT = Date.now();
+    try{ const [{ data: r }, { data: us }] = await Promise.all([ sb.from("module_rights_tbl").select("username,module,level").eq("level","admin"), sb.from("app_users").select("username,employee_name,is_active") ]);
+      const nm = {}; (us||[]).forEach(u=>{ if(u.is_active!==false) nm[u.username] = u.employee_name||u.username; });
+      (r||[]).forEach(x=>{ if(nm[x.username]) (MOD_ADMINS_CACHE[x.module] = MOD_ADMINS_CACHE[x.module]||[]).push(nm[x.username]); }); }catch(e){}
+  }
+  return [...new Set(MOD_ADMINS_CACHE[mod]||[])];
+}
+async function superAdminNames(){
+  try{ const w = await permWho(); const n = w.users.filter(x=>x.role==="super_admin" && x.is_active!==false).map(x=>x.employee_name||x.username).filter(Boolean); return n.length ? [...new Set(n)] : [POST_VACANT_CONTACT]; }
+  catch(e){ return [POST_VACANT_CONTACT]; }
+}
+const modLabel = (k)=> ((MOD_DEFS.find(m=>m.key===k)||{}).label) || k;
+// One line under a code box or a locked screen: who can do it without a code, and who gives codes / rights
+function WhoCan({ mod, pre }){
+  const [t,setT] = useState("");
+  useEffect(()=>{ let live = true; (async()=>{ const ad = mod ? await modAdmins(mod) : []; const sa = await superAdminNames();
+    if(live) setT((pre||"")+(ad.length ? (mod ? modLabel(mod)+" admins (no code needed): " : "")+ad.join(", ")+". " : "")+"Super Admins (a code, or the right in Admin → Rights Grid): "+sa.join(", ")+"."); })(); return ()=>{ live = false; }; },[mod, pre]);
+  return t ? h("div",{"data-testid":"who-can",style:{fontSize:12,color:"#0c447c",background:"#eef3fd",borderRadius:6,padding:"6px 9px",margin:"6px 0 10px",lineHeight:1.5}},t) : null;
+}
+
+// ---- 2026-10-30T10:00:00Z: DOCUMENTS from a won Sale Order to payment received ----
+// Rights Grid "Documents": Admin (Suresh Subramaniam, Veenai Vimal, Karthik Raj) adds, edits any entry, unlocks, overrides
+// the Out/In sequence and deletes — no code. User (Ramesh) adds and edits the latest entry; deletes his own latest entry
+// on the day he logged it; anything else is asked, and a Documents admin approves it from the bell. Once the contract is
+// Closed (payment received) the documents lock for everyone but the Documents admins and Super Admins.
+// A delete keeps a copy (doc_deleted_tbl); a Super Admin can restore it from the Documents box.
+const DOC_DEL_SQL = "structure_document_rights_2026-10-30.sql";
+const docsLevel = ()=> modLevel("docs");
+const docsAdmin = (user)=> !!user && (user.role==="super_admin" || docsLevel()==="admin");
+const docSameDay = (iso)=>{ if(!iso) return false; const a = new Date(iso), b = new Date(); return !isNaN(a) && a.toDateString()===b.toDateString(); };
+async function docDeleteEntry(entity, d, x, reason, by, askedBy){
+  const keep = await sb.from("doc_deleted_tbl").insert({ kind:"entry", entity_id:String(entity), document_id:d.id, history_id:x.id, doc_number:d.doc_number, rev:"Rev "+x.rev_number+(x.direction?" "+x.direction:""),
+    data:x, reason, deleted_by:by, asked_by:askedBy||null });
+  if(keep.error) return /doc_deleted_tbl/.test(keep.error.message||"") ? { err:"Run "+DOC_DEL_SQL+" first (both companies)." } : { err:saveFailedText("The copy of the entry", keep.error) };
+  const { error } = await sb.from("universal_document_history_tbl").delete().eq("id",x.id);
+  if(error) return { err:saveFailedText("The delete", error) };
+  await logAudit("DELETE","universal_document_history_tbl",String(x.id),d.doc_number+" Rev "+x.rev_number+" "+(x.direction||"")+" deleted on "+entity+(askedBy?" (asked by "+askedBy+")":"")+": "+reason, by, x, null);
+  return { ok:true };
+}
+async function docDeleteDocument(entity, d, reason, by, askedBy){
+  const { data: hist } = await sb.from("universal_document_history_tbl").select("*").eq("document_id",d.id);
+  const keep = await sb.from("doc_deleted_tbl").insert({ kind:"document", entity_id:String(entity), document_id:d.id, doc_number:d.doc_number, rev:(hist||[]).length+" entries",
+    data:{ doc:{ ...d, revisions:undefined }, history:hist||[] }, reason, deleted_by:by, asked_by:askedBy||null });
+  if(keep.error) return /doc_deleted_tbl/.test(keep.error.message||"") ? { err:"Run "+DOC_DEL_SQL+" first (both companies)." } : { err:saveFailedText("The copy of the document", keep.error) };
+  const { error } = await sb.from("universal_documents_tbl").update({ is_archived:true, doc_number:String(d.doc_number||"")+" ~deleted "+d.id }).eq("id",d.id);
+  if(error) return { err:saveFailedText("The delete", error) };
+  try{ await sb.from("document_requests_tbl").update({ fulfilled_document_id:null }).eq("fulfilled_document_id",d.id); }catch(e){}
+  await logAudit("DELETE","universal_documents_tbl",String(d.id),"Document "+d.doc_number+" deleted on "+entity+(askedBy?" (asked by "+askedBy+")":"")+": "+reason, by, d, null);
+  return { ok:true };
+}
+async function docAskDelete(entity, kind, d, x, reason, user){
+  const ins = await sb.from("doc_delete_request_tbl").insert({ entity_id:String(entity), kind, document_id:d.id, history_id:x?x.id:null, doc_number:d.doc_number,
+    rev: x ? "Rev "+x.rev_number+(x.direction?" "+x.direction:"") : "whole document", reason, asked_by:user?.username||"unknown", status:"Asked", asked_at:new Date().toISOString() }).select("id");
+  if(ins.error) return /doc_delete_request_tbl/.test(ins.error.message||"") ? { err:"Run "+DOC_DEL_SQL+" first (both companies)." } : { err:saveFailedText("The delete request", ins.error) };
+  const id = ins.data && ins.data[0] && ins.data[0].id;
+  const ad = await modAdmins("docs");
+  try{ await notifyPeople(ad.length ? ad : await superAdminNames(), "🗑 "+(user?.username||"")+" asks to delete "+(x ? d.doc_number+" Rev "+x.rev_number+(x.direction?" "+x.direction:"") : "document "+d.doc_number)+" on "+entity+": "+reason, "doc_delete",
+    { kind:"open", open:{ contract:String(entity) }, group:"docdel:"+id, help:{ btn:"Open the contract", what:"Approve or reject the delete", do:["Open Documents on Sale Order "+entity+".","The request is at the top: Approve deletes it (a copy is kept), Reject sends it back with your reason."] } }); }catch(e){}
+  return { ok:true, admins:ad };
+}
+// Top of the Documents box: delete requests (Documents admins decide) and deleted items (Super Admins restore)
+function DocDelPanel({ entity, user, onDone }){
+  const [reqs,setReqs] = useState([]); const [gone,setGone] = useState([]); const [showGone,setShowGone] = useState(false); const [busy,setBusy] = useState(false);
+  const adm = docsAdmin(user), sa = user?.role==="super_admin";
+  const load = useCallback(async()=>{
+    const [r, g] = await Promise.all([ sb.from("doc_delete_request_tbl").select("*").eq("entity_id",String(entity)).eq("status","Asked").order("asked_at"),
+      sa ? sb.from("doc_deleted_tbl").select("*").eq("entity_id",String(entity)).is("restored_at",null).order("deleted_at",{ascending:false}) : Promise.resolve({ data:[] }) ]);
+    setReqs(r.error ? [] : (r.data||[])); setGone(g.error ? [] : (g.data||[]));
+  },[entity, sa]);
+  useEffect(()=>{ load(); },[load]);
+  const decide = async(q, ok)=>{
+    if(!adm){ noPermission("approve or reject a document delete", { mods:["docs"], why:"deleting documents on a contract is decided by the Documents admins." }); return; }
+    let note = "";
+    if(!ok){ note = prompt("Why is the delete rejected? ("+q.asked_by+" sees this)"); if(note===null) return; }
+    else if(!confirm("Delete "+q.doc_number+" "+q.rev+" on "+entity+"?\n\nAsked by "+q.asked_by+": "+q.reason+"\n\nA copy is kept; a Super Admin can restore it.")) return;
+    setBusy(true);
+    if(ok){
+      const { data: dd } = await sb.from("universal_documents_tbl").select("*").eq("id",q.document_id).maybeSingle();
+      if(!dd){ alert("That document is no longer there (already deleted?). The request is closed."); }
+      else if(q.kind==="entry"){ const { data: xx } = await sb.from("universal_document_history_tbl").select("*").eq("id",q.history_id).maybeSingle();
+        if(!xx) alert("That entry is no longer there (already deleted or changed). The request is closed.");
+        else { const r = await docDeleteEntry(entity, dd, xx, q.reason, user?.username||"", q.asked_by); if(r.err){ setBusy(false); alert(r.err); return; } } }
+      else { const r = await docDeleteDocument(entity, dd, q.reason, user?.username||"", q.asked_by); if(r.err){ setBusy(false); alert(r.err); return; } }
+    }
+    await sb.from("doc_delete_request_tbl").update({ status: ok ? "Approved" : "Rejected", decided_by:user?.username||"", decided_at:new Date().toISOString(), decision_note:note||null }).eq("id",q.id);
+    try{ notifDone("docdel:"+q.id, user?.username||""); const { data: au } = await sb.from("app_users").select("employee_name").eq("username",q.asked_by).limit(1);
+      await notifyPeople((au||[]).map(a=>a.employee_name).filter(Boolean), (ok ? "✓ Deleted as you asked: " : "✘ Not deleted: ")+q.doc_number+" "+q.rev+" on "+entity+(ok ? " (by "+(user?.username||"")+")" : " — "+(user?.username||"")+": "+note), "doc_delete"); }catch(e){}
+    setBusy(false); await load(); onDone && onDone();
+  };
+  const restore = async(g)=>{
+    if(!sa){ noPermission("restore a deleted document", { roles:["super_admin"] }); return; }
+    if(!confirm("Restore "+g.doc_number+" "+(g.rev||"")+" on "+entity+"?")) return;
+    setBusy(true); let err = null;
+    if(g.kind==="entry"){ const x = { ...(g.data||{}) }; delete x.id; const r = await sb.from("universal_document_history_tbl").insert(x); err = r.error; }
+    else { const doc = (g.data||{}).doc||{}; const r = await sb.from("universal_documents_tbl").update({ is_archived:false, doc_number:doc.doc_number||g.doc_number }).eq("id",g.document_id); err = r.error; }
+    if(!err) await sb.from("doc_deleted_tbl").update({ restored_by:user?.username||"", restored_at:new Date().toISOString() }).eq("id",g.id);
+    setBusy(false); if(err){ alert(saveFailedText("The restore", err)); return; }
+    await logAudit("UPDATE","doc_deleted_tbl",String(g.id),"Restored "+g.doc_number+" "+(g.rev||"")+" on "+entity,user?.username||"");
+    await load(); onDone && onDone();
+  };
+  if(!reqs.length && !gone.length) return null;
+  const box = { border:"1px solid #e0b84a", background:"#fff8e6", borderRadius:8, padding:"8px 11px", marginTop:8, fontSize:12.5 };
+  return h("div",{"data-testid":"doc-del-panel"},
+    reqs.length ? h("div",{style:box},
+      h("b",null,"🗑 Delete requests ("+reqs.length+")"), adm ? null : h("span",{style:{color:colors.muted}}," — waiting for a Documents admin"),
+      reqs.map(q=>h("div",{key:q.id,style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",padding:"5px 0",borderTop:"1px solid #f0e2b8"}},
+        h("span",{style:{flex:1,minWidth:240}}, h("b",null,q.doc_number+" · "+q.rev)," — "+q.asked_by+": "+q.reason),
+        adm ? h("button",{"data-testid":"doc-del-approve",disabled:busy,onClick:()=>decide(q,true),style:{...btnSmall,color:"#fff",background:"#a3312a",borderColor:"#a3312a"}},"Approve delete") : null,
+        adm ? h("button",{disabled:busy,onClick:()=>decide(q,false),style:btnSmall},"Reject") : null))) : null,
+    gone.length ? h("div",{style:{...box,borderColor:colors.border,background:"#faf9f4"}},
+      h("button",{onClick:()=>setShowGone(v=>!v),style:{border:"none",background:"none",padding:0,cursor:"pointer",fontWeight:700,fontSize:12.5}},(showGone?"▾ ":"▸ ")+"Deleted on this contract ("+gone.length+") — Super Admin can restore"),
+      showGone ? gone.map(g=>h("div",{key:g.id,style:{display:"flex",gap:8,alignItems:"center",padding:"4px 0",borderTop:"1px solid #ecebe4"}},
+        h("span",{style:{flex:1}}, g.doc_number+" · "+(g.rev||"")+" — deleted by "+g.deleted_by+" "+String(g.deleted_at||"").slice(0,10)+": "+(g.reason||"")),
+        h("button",{disabled:busy,onClick:()=>restore(g),style:btnSmall},"Restore"))) : null) : null);
 }
 // ---- Admin -> Rights Grid (Super Admin only) ----
 function RightsGridScreen({ user }){
@@ -4764,6 +4894,8 @@ function MasterEditor({ tableKey, user }) {
   const isAdmin = user?.role==="admin" || isSuperAdmin || (user?.role==="hr_admin" && HR_TABLE_KEYS.includes(tableKey));
   const [freshIds,setFreshIds]=useState(new Set());
   const mAdd = user?._mod==="add";   // 2026-10-30T08:00:00Z: Rights Grid "Add": new rows only
+  const mAddNote = mAdd ? h("div",{"data-testid":"add-only-note",style:{background:"#fff4d6",border:"1px solid #e0b84a",borderRadius:6,padding:"7px 10px",fontSize:12.5,margin:"0 0 10px"}},
+    "Your login may ", h("b",null,"add")," new rows here. Changing or deleting rows that already exist is done by the BOM & design masters admins.", h(WhoCan,{ mod:"bom", pre:"Ask: " })) : null;
   const [selectedIds,setSelectedIds]=useState(new Set());
   const [employeeLoginRow,setEmployeeLoginRow]=useState(null); // employee row being linked to a login, or null
   const [pendingDeleteIds,setPendingDeleteIds]=useState(null); // array of ids awaiting a code
@@ -5748,6 +5880,7 @@ function MasterEditor({ tableKey, user }) {
 
   return h("div",{style:{padding:"20px 24px",position:"relative"}},
     h(Watermark,{user}),
+    mAddNote,
     h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,flexWrap:"wrap",gap:10}},
       h("h2",{style:{margin:0,fontSize:18,fontWeight:700}},tableDef.label),
       h("div",{style:{display:"flex",gap:8,alignItems:"center"}},
@@ -5963,6 +6096,7 @@ function MasterEditor({ tableKey, user }) {
         h("div",{style:{fontSize:12.5,color:colors.muted,marginBottom:14}},
           "These "+pendingDeleteIds.length+" row(s) already existed before this session — deleting them needs a one-time code from a Super Admin."
         ),
+        h(WhoCan,{ mod:modOfTab(tableKey), pre:"Or ask someone who can delete without a code: " }),
         h("input",{value:codeInput,onChange:e=>setCodeInput(e.target.value),placeholder:"6-digit code",style:{...inputStyle,marginBottom:10,letterSpacing:2,fontSize:16,textAlign:"center"}}),
         codeMsg && h("div",{style:{fontSize:12,color:colors.danger,marginBottom:10}},codeMsg),
         h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end"}},
@@ -12547,6 +12681,12 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
   const [busy,setBusy] = useState(false);
   const [dirMissing,setDirMissing] = useState(false);
   const [quoteStatus,setQuoteStatus] = useState(null);   // 149: entries lock once the quote leaves Draft
+  // 2026-10-30T10:00:00Z: Documents rights (Rights Grid) — admins need no codes; a Closed contract locks for everyone else
+  const [soStatus,setSoStatus] = useState(null); const [dlg,setDlg] = useState(0);
+  const docAdm = isContract && docsAdmin(user);
+  const docLockClosed = isContract && soStatus==="Closed" && !docAdm;
+  useEffect(()=>{ if(!isContract || !entityRef) return; sb.from("sale_order_tbl").select("status").eq("contract_number",entityRef).maybeSingle().then(({data})=>setSoStatus(data ? data.status : null)).catch(()=>{}); },[isContract, entityRef]);
+  useEffect(()=>{ if(!docLockClosed) return; window.__roLocal = "Contract "+entityRef+" is Closed (payment received), so its documents are locked. Only the Documents admins and Super Admins can change them."; return ()=>{ window.__roLocal = null; }; },[docLockClosed, entityRef]);
 
   const load = useCallback(async(keepSel)=>{
     if(!entityRef) return;
@@ -12576,6 +12716,25 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
     }
   },[entityRef, isContract, user?.username, user?.id]);
   useEffect(()=>{ load(false); },[load]);
+  const delWhy = (q)=>{ const w = prompt(q); if(w===null) return null; if(String(w).trim().length<3){ alert("Write why (a few words). It is kept with the copy."); return null; } return String(w).trim(); };
+  const closedMsg = (what)=> noPermission(what+" on "+entityRef, { mods:["docs"], roles:["super_admin"], why:"contract "+entityRef+" is Closed (payment received), so its documents are locked." });
+  const delEntry = async(d, x)=>{
+    if(docLockClosed){ closedMsg("delete a document entry"); return; }
+    const own = x.changed_by===user?.username && docSameDay(x.changed_at) && ((d.revisions||[])[0]||{}).id===x.id;
+    if(docAdm || own){ const why = delWhy("Delete "+d.doc_number+" Rev "+x.rev_number+" "+(x.direction||"")+"?\n\nWhy? (a copy is kept; a Super Admin can restore it)"); if(!why) return;
+      const r = await docDeleteEntry(entityRef, d, x, why, user?.username||"", null); if(r.err){ alert(r.err); return; } await refresh(); return; }
+    const ad = await modAdmins("docs");
+    const why = delWhy("You can delete only your own latest entry, on the day you logged it. This one needs a Documents admin"+(ad.length?" ("+ad.join(", ")+")":"")+".\n\nAsk them to delete "+d.doc_number+" Rev "+x.rev_number+"? Write why:"); if(!why) return;
+    const r = await docAskDelete(entityRef, "entry", d, x, why, user); if(r.err){ alert(r.err); return; }
+    alert("Asked. "+(r.admins.length ? r.admins.join(", ") : "A Super Admin")+" will approve or reject it; the answer comes to your bell."); setDlg(n=>n+1); };
+  const delDoc = async(d)=>{
+    if(docLockClosed){ closedMsg("delete a document"); return; }
+    if(docAdm){ const why = delWhy("Delete the whole document "+d.doc_number+" ("+((d.revisions||[]).length)+" entries)?\n\nWhy? (a copy is kept; a Super Admin can restore it)"); if(!why) return;
+      const r = await docDeleteDocument(entityRef, d, why, user?.username||"", null); if(r.err){ alert(r.err); return; } setSel(null); await load(false); if(onChanged) await onChanged(); return; }
+    const ad = await modAdmins("docs");
+    const why = delWhy("Deleting a whole document needs a Documents admin"+(ad.length?" ("+ad.join(", ")+")":"")+".\n\nAsk them to delete "+d.doc_number+"? Write why:"); if(!why) return;
+    const r = await docAskDelete(entityRef, "document", d, null, why, user); if(r.err){ alert(r.err); return; }
+    alert("Asked. "+(r.admins.length ? r.admins.join(", ") : "A Super Admin")+" will approve or reject it; the answer comes to your bell."); setDlg(n=>n+1); };
   const refresh = async()=>{ await load(true); if(onChanged) await onChanged(); if(isContract) docBoardLoad().then(d=>docTasksSync(d,"App")).catch(e=>console.error(e)); };   // 129: keep document task cards in step
 
   const statusBucket = (label)=> (statuses.find(s=>docStatusName(s)===label)||{}).action_type;
@@ -12780,8 +12939,8 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
   };
   const lockWhy = (d)=> isContract || isPo ? "A later entry has been logged on "+d.doc_number+"." : "Quote "+entityRef+" has left Draft ("+quoteStatus+").";
   const unlockDoc = async(d)=>{
-    if(user?.role!=="super_admin" && !modFree()){ alert("Locked — "+lockWhy(d)+"\n\nLog a new revision instead, or ask a Super Admin to unlock it with a code."); return false; }
-    if(!modFree()){ const code = prompt("Locked — "+lockWhy(d)+"\n\nEnter a Deletion Code to unlock the entries of "+d.doc_number+" (the document will be flagged):");
+    if(user?.role!=="super_admin" && !modFree() && !docAdm){ noPermission("unlock the older entries of "+d.doc_number, { mods:["docs"], roles:["super_admin"], why:"they are locked: "+lockWhy(d)+" Log a new revision instead, or ask someone below to unlock them." }); return false; }
+    if(!modFree() && !docAdm){ const code = prompt("Locked — "+lockWhy(d)+"\n\nEnter a Deletion Code to unlock the entries of "+d.doc_number+" (the document will be flagged):");
     if(code===null) return false;
     const res = await verifyAndConsumeDeletionCode(code, user?.username||"unknown");
     if(!res.ok){ alert(res.reason); return false; } }
@@ -12807,8 +12966,8 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
     return last.direction==="Out" ? { rev:last.rev_number, direction:"In" } : { rev:(Number(last.rev_number)||0)+1, direction:"Out" };
   };
   const unlockSequence = async(doc)=>{
-    if(user?.role!=="super_admin" && !modFree()){ noPermission("override the Out/In sequence",{roles:["super_admin"]}); return; }
-    if(!modFree()){ const code = prompt("Enter a Deletion Code to override the document sequence:");
+    if(user?.role!=="super_admin" && !modFree() && !docAdm){ noPermission("override the Out/In sequence",{roles:["super_admin"], mods:["docs"], why:"the next entry must follow the Out / In order; skipping it flags the document."}); return; }
+    if(!modFree() && !docAdm){ const code = prompt("Enter a Deletion Code to override the document sequence:");
     if(code===null) return;
     const res = await verifyAndConsumeDeletionCode(code, user?.username||"unknown");
     if(!res.ok){ alert(res.reason); return; } }
@@ -12895,8 +13054,8 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
     const flipped = oldDir==="Out" ? "In" : "Out";
     const only = (d.revisions||[]).length<=1;
     if(!only){
-      if(user?.role!=="super_admin" && !modFree()){ noPermission("change Out/In on a later entry (it breaks the Out/In sequence)",{roles:["super_admin"]}); return; }
-      if(!modFree()){ const code = prompt("Changing Rev "+row.rev_number+" from "+oldDir+" to "+flipped+" breaks the Out/In sequence. Enter a Deletion Code to go ahead:");
+      if(user?.role!=="super_admin" && !modFree() && !docAdm){ noPermission("change Out/In on a later entry",{roles:["super_admin"], mods:["docs"], why:"it breaks the Out / In order of the document."}); return; }
+      if(!modFree() && !docAdm){ const code = prompt("Changing Rev "+row.rev_number+" from "+oldDir+" to "+flipped+" breaks the Out/In sequence. Enter a Deletion Code to go ahead:");
       if(code===null) return;
       const res = await verifyAndConsumeDeletionCode(code, user?.username||"unknown");
       if(!res.ok){ alert(res.reason); return; } }
@@ -13098,7 +13257,8 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
           "Fulfils: "+r.category+(r.item_sl_no!=null?" Sl "+r.item_sl_no:""),
           r.is_mandatory ? h("span",{style:{marginLeft:5,fontSize:10,padding:"1px 6px",borderRadius:9,background:"#fff4d6",color:"#854f0b",fontWeight:700}},"Mandatory") : null,
           isContract ? h("button",{onClick:()=>toggleMandatory(r),style:{marginLeft:6,border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:11}},r.is_mandatory?"Not mandatory":"Make mandatory") : null))),
-      h("div",{style:{fontSize:13,fontWeight:800,color:"#0c447c",textTransform:"uppercase",letterSpacing:".03em",margin:"12px 0 6px",paddingBottom:4,borderBottom:"2px solid #0c447c",display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},"This is the trail of the document already submitted",h("span",{style:{fontFamily:"monospace",textTransform:"none",letterSpacing:0,background:"#e6f1fb",borderRadius:5,padding:"1px 7px",fontSize:12.5}},d.doc_number)),   // 149
+      h("div",{style:{fontSize:13,fontWeight:800,color:"#0c447c",textTransform:"uppercase",letterSpacing:".03em",margin:"12px 0 6px",paddingBottom:4,borderBottom:"2px solid #0c447c",display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},"This is the trail of the document already submitted",h("span",{style:{fontFamily:"monospace",textTransform:"none",letterSpacing:0,background:"#e6f1fb",borderRadius:5,padding:"1px 7px",fontSize:12.5}},d.doc_number),
+        isContract ? h("button",{"data-testid":"doc-del-doc",onClick:()=>delDoc(d),style:{...btnSmall,fontSize:10.5,padding:"2px 8px",textTransform:"none",letterSpacing:0,fontWeight:600,color:"#a3312a",borderColor:"#e0b4ae",marginLeft:"auto"}}, docAdm ? "Delete document" : "Ask to delete document") : null),   // 149
       (!isContract && quoteStatus && quoteStatus!=="Draft" && unlockedDoc!==d.id) ? h("div",{style:{fontSize:11.5,color:"#854f0b",background:"#fff4d6",borderRadius:6,padding:"5px 10px",marginBottom:6}},"\ud83d\udd12 Quote "+entityRef+" has left Draft ("+quoteStatus+") — these entries are locked. Change something by adding a revision below, or a Super Admin unlocks them with a code.") : null,
       unlockedDoc===d.id ? h("div",{style:{fontSize:11.5,color:"#a3312a",background:"#fdecea",borderRadius:6,padding:"5px 10px",marginBottom:6}},"Unlocked with a code — edits on this document are flagged.") : null,
       h("div",{style:{overflowX:"auto",border:"1px solid "+colors.border,borderRadius:6}},
@@ -13112,7 +13272,7 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
                 h("span",{style:{fontSize:10,padding:"1px 7px",borderRadius:9,background:x.direction==="Out"?"#fff4d6":"#e6f1fb",color:x.direction==="Out"?"#854f0b":"#0c447c"}},x.direction==="Out"?"Out: we sent":x.direction==="In"?"In: we received":"—"),
                 null),
               h("td",{style:cell},
-                h("select",{value:x.status||"",disabled:rowLocked(d,x)&&user?.role!=="super_admin",title:rowLocked(d,x)?"Locked — "+lockWhy(d)+" A Super Admin's code unlocks it.":"",onChange:e=>changeStatus(x,e.target.value),style:{...chipStyle(x.status),fontSize:10.5,padding:"2px 4px",borderRadius:9,border:"none",maxWidth:200}},
+                h("select",{value:x.status||"",disabled:rowLocked(d,x)&&user?.role!=="super_admin"&&!docAdm,title:rowLocked(d,x)?"Locked — "+lockWhy(d)+(docAdm?" You can change it (Documents admin).":" A Documents admin or a Super Admin can unlock it."):"",onChange:e=>changeStatus(x,e.target.value),style:{...chipStyle(x.status),fontSize:10.5,padding:"2px 4px",borderRadius:9,border:"none",maxWidth:200}},
                   h("option",{value:""},"— status —"),
                   statusNames.map(s=>h("option",{key:s,value:s},s)))),
               h("td",{style:{...cell,whiteSpace:"nowrap",color:colors.muted}},(x.changed_at||"").slice(0,10)+(x.changed_by?" · "+x.changed_by:"")),
@@ -13123,7 +13283,9 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
                 x.lives_in_supabase && x.file_path ? h("button",{onClick:()=>viewFile(x),style:{marginLeft:8,border:"none",background:"none",padding:0,color:"#0c447c",textDecoration:"underline",cursor:"pointer",fontSize:11}},"View file") : null),
               h("td",{style:{...cell,whiteSpace:"nowrap"}}, rowLocked(d,x)
                 ? h("button",{onClick:()=>openEdit(d,x),title:"Locked — "+lockWhy(d),style:{...btnSmall,fontSize:10.5,padding:"2px 8px",color:colors.muted}},"\ud83d\udd12 Locked")
-                : h("button",{onClick:()=>openEdit(d,x),style:{...btnSmall,fontSize:10.5,padding:"2px 8px",color:"#1f5c40",borderColor:"#1f5c40"}},"Edit"))))))),
+                : h("button",{onClick:()=>openEdit(d,x),style:{...btnSmall,fontSize:10.5,padding:"2px 8px",color:"#1f5c40",borderColor:"#1f5c40"}},"Edit"),
+                isContract ? h("button",{"data-testid":"doc-del-entry",onClick:()=>delEntry(d,x),style:{...btnSmall,fontSize:10.5,padding:"2px 8px",marginLeft:4,color:"#a3312a",borderColor:"#e0b4ae"}},
+                  (docAdm || (i===0 && x.changed_by===user?.username && docSameDay(x.changed_at))) ? "Delete" : "Ask to delete") : null)))))),
       h("div",{style:{fontSize:13,fontWeight:800,color:"#0c447c",textTransform:"uppercase",letterSpacing:".03em",margin:"12px 0 6px",paddingBottom:4,borderBottom:"2px solid #0c447c",display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},"Add revisions on this doc here",h("span",{style:{fontFamily:"monospace",textTransform:"none",letterSpacing:0,background:"#e6f1fb",borderRadius:5,padding:"1px 7px",fontSize:12.5}},d.doc_number)),   // 149
       !nxOpen ? h("div",{style:{border:"1px dashed #1f5c40",background:"#f4faf6",borderRadius:8,padding:"10px 14px",display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}},
         h("div",{style:{flex:1,minWidth:220}},
@@ -13135,7 +13297,7 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
           h("div",{style:{fontSize:12.5,fontWeight:700}},"New entry — "+d.doc_number+" · Rev "+rev+(exp.direction&&!override?" — the sequence says "+exp.direction:"")),
           override ? h("span",{style:{fontSize:11,color:"#a3312a"}},"⚠ Override active — this document will be flagged.",
               h("input",{type:"number",min:0,value:override.rev,onChange:e=>setOverride({rev:Math.max(0,Number(e.target.value)||0)}),style:{...fld,width:70,marginLeft:8,padding:"3px 6px"}}))
-            : user?.role==="super_admin" && h("button",{onClick:()=>unlockSequence(d),style:{...btnSmall,fontSize:10.5}},"Override sequence (code)")),
+            : (user?.role==="super_admin" || docAdm) && h("button",{onClick:()=>unlockSequence(d),style:{...btnSmall,fontSize:10.5}},docAdm ? "Override sequence" : "Override sequence (code)")),
         h("div",{style:{marginTop:8}}, h(DocDirectionPick,{value:nx.dir,onChange:v=>setNx(x=>({...x,dir:v})),label:"This entry (Rev "+rev+") is:",missing:dirMissing&&!nx.dir,
           warn:(!override && exp.direction && nx.dir && nx.dir!==exp.direction) ? "The sequence says this entry is "+exp.direction+" (the last one was "+(last&&last.direction)+"). Tick "+exp.direction+", or ask a Super Admin to override the sequence." : null})),
         twoCol(
@@ -13172,7 +13334,10 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
             h("div",{style:{fontWeight:700,fontSize:15}},"Documents — "+entityRef),
             h("div",{style:{fontSize:11,color:colors.mutedLight}},isPo ? "One tab per document. In = from the vendor (it fulfils a required document); Out = what we send. An Out PDF ticked In PO PDF is enclosed in the PO." : isContract
               ? "One tab per document. The link is the permanent record; a PDF is optional."
-              : "One tab per document. The link is the permanent record; a PDF is optional and is removed once this quote leaves Draft.")),
+              : "One tab per document. The link is the permanent record; a PDF is optional and is removed once this quote leaves Draft."),
+            isContract ? h(DocDelPanel,{ key:"ddp"+dlg, entity:entityRef, user, onDone:()=>refresh() }) : null,
+            docLockClosed ? h("div",{"data-testid":"doc-closed",style:{marginTop:8,background:"#fdecea",border:"1px solid #e0b4ae",borderRadius:8,padding:"7px 10px",fontSize:12.5,color:"#7a1f1a"}},
+              h("b",null,"🔒 Contract "+entityRef+" is Closed (payment received). "),"Its documents are locked — nothing can be added or changed from your login.", h(WhoCan,{ mod:"docs", pre:"For a change, ask: " })) : null),
           h("div",{style:{display:"flex",gap:8,alignItems:"center"}},
             h("button",{onClick:()=>{ setClPick([]); setClOpen(true); },style:{...btnSmall,fontSize:11.5},title:"Tick several categories at once"},"Pick several…"),
             h("button",{onClick:onClose,style:{background:"none",border:"none",fontSize:16,cursor:"pointer",color:colors.mutedLight}},"✕"))),
@@ -25801,6 +25966,7 @@ function AuthCodeGate({ requiredType, onClose, onAuthorized, user, message }){
           ? "This quote is no longer Draft. Deleting anything on it needs a one-time code from a Super Admin specifically."
           : "This quote is no longer Draft. Ask an Admin or Super Admin for a one-time code to save this change."
       ),
+      h(WhoCan,{ mod:(window.__modCur||{}).module, pre:"Or ask someone who can do it: " }),
       h("input",{value:code,onChange:e=>setCode(e.target.value),placeholder:"Enter authorization code",style:{...inputStyle,marginBottom:8}}),
       err && h("div",{style:{fontSize:11.5,color:colors.danger,marginBottom:8}},err),
       h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8}},
@@ -34090,6 +34256,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"30 Oct 2026 (275)", summary:"Built on 2026-10-30T11:00:00Z, on top of 2026-10-30T10:00:00Z. No SQL. SCREEN BLINKING FIXED: logins other than Super Admins were put back into browser full screen on every click; Chrome leaves full screen for every alert, confirm and new tab, so the screen flashed in and out. Now the app goes full screen once, on the first click after login, and never forces it again. Everyone gets the Hide / Show browser bars button in the top bar. Installed as an app (Chrome: Install page as app), nothing is forced at all." },
+  { date:"30 Oct 2026 (274)", summary:"Built on 2026-10-30T10:00:00Z, on top of 2026-10-30T08:00:00Z. SQL: structure_document_rights_2026-10-30.sql (both companies, after structure_module_rights), document_rights_flometriq_2026-10-30.sql (Flometriq). DOCUMENTS (won Sale Order → payment received): a new Rights Grid column. Admin (Suresh Subramaniam, Veenai Vimal, Karthik Raj): add, edit any entry, unlock older entries, override the Out/In sequence, change Out/In, delete an entry or a whole document — no code. User (Ramesh): add, edit the latest entry, delete his own latest entry on the day he logged it; any other delete is asked, goes to the Documents admins' bell and they Approve or Reject at the top of the Documents box; the answer goes back to his bell. Every delete keeps a copy; a Super Admin can restore it from the Documents box. A Closed contract (payment received) locks its documents for everyone but the Documents admins and Super Admins. The Document Control board, report, chase letters and register now follow the Documents column. CLEAR MESSAGES: every 'you can't do this' now says why, who can (with names, from roles, posts and the Rights Grid) and what to do; code boxes name who can do it without a code; view-only screens say why nothing was saved and whom to ask; Add-only master screens say who edits and deletes; a screen with no access names whom to ask." },
   { date:"30 Oct 2026 (273)", summary:"Built on 2026-10-30T08:00:00Z, on top of 2026-10-28T09:00:00Z. SQL: structure_module_rights_2026-10-30.sql (both companies), module_rights_flometriq_2026-10-30.sql (Flometriq), so_approve_pending_override_deepak_2026-10-30.sql (Flometriq; Levaflow if wanted). RIGHTS GRID (Admin → Rights Grid, Super Admin): one level per person per module — BOM & design masters, Quotes, Sale Order & onward (contract approvals, Document Control, Order Status, Engineering Calc, Production BOM), Purchase, Customers, Stores, CRM, HR. Levels: as today · None · Read-only from links · View only · User · Add · Admin (no codes). A level set wins over the department rule. Admin: add, edit, delete and approve in that module with no Super Admin code (Purchase: cancelling an issued PO still needs one). Add: new rows in the masters only. View / read-only: nothing on that screen can be saved. Deleting a master row still used in BOMs, rates or quotes shows where and asks Delete anyway?. FLOMETRIQ: Veenai Vimal — masters Admin, Quotes read-only from links (no menu), Sale Order & onward Admin; Karthik Raj — masters, Quotes, Sale Order & onward Admin, may create customers; Aragan Keerthi — masters Add, Purchase Admin; Ponnarasi, Ganesh, Selvi — may create POs. SALE ORDER: only the Accounts approval (Commercial Terms) is needed; the FSE / Sales Head approval is dropped; Accounts post holders may approve. ACCOUNTS: the Finance & Accounts Manager approves and deletes vouchers directly, approves discrepancies and rolls back corrections; the Finance Director also unlocks months and enters the WIP & FG closing; delete requests go to them. Admin → Permissions now says it only drives Vendors. Fixed: signing out and in as another login could crash the app." },
   { date:"28 Oct 2026 (272)", summary:"Built on 2026-10-28T09:00:00Z, on top of 2026-10-28T08:00:00Z. No SQL. CALCULATION LINK is now a cascade: Linked to (Quote / Contract / Internal) \u2192 Client \u2192 Quote No / Contract No \u2192 Sl No. Client is a type-ahead list of only the clients who have an offer (Quote) or a contract (Contract); the number list shows only that client's, as \u201cNo \u2013 Client\u201d; both are pick-from-list (typed text that is not on the list is not kept). Changing the client clears the number and Sl No. Internal greys out client, number and Sl No and asks only for the internal reference. ALWAYS THE LATEST BUILD: the app reads version.txt on opening, every 10 minutes and when you come back to the window; a newer build reloads the page by itself. If there is unsaved work a yellow bar asks you to save and press Reload now. BROWSER BARS (tabs, address bar, bookmarks) are hidden: everyone except Super Admins goes full screen on the first click after login, and again on the next click after Esc (not when the app is installed as an app \u2014 then the bars are already gone). Super Admins get a Hide / Show browser bars button. BACK and HOME on every screen: a strip under the menu with \u2190 Back (to the previous screen, with the quote or contract that was open and the Order Status board's filters), \u2302 Home and the trail of screens. The trail lives for this session only; a reload starts at Home." },
   { date:"28 Oct 2026 (271)", summary:"Built on 2026-10-28T08:00:00Z, on top of 2026-10-28T07:00:00Z. DEPARTMENT ACCESS. Each person works fully in the menus their department owns (and any extra departments given to them); other departments' menus open with an eye mark, as view — an Admin is an ordinary user there (no admin powers, approvals or overrides). Tasks and the Order Status board are shared. ACCOUNTS IS CONFIDENTIAL: only Super Admins and the people named for it (Flometriq: Ponnarasi, Ganesh, Selvi; Levaflow: Gandhimathi) see the Accounts menu or open any Accounts screen. The Admin menu is Super Admin only. Blocked menus are hidden and can't be opened from a link or the bell (Levaflow: Annamalai — Sales; Sankar — Sales, Purchase). NEW Admin → Access (Super Admin): which menus each department owns, extra departments per person, Accounts per person, extra / blocked menus per person, and the result. Until the SQL is run nothing changes. Step 2 (later): other departments' screens fully read-only. SQL: structure_department_access_2026-10-28.sql (both), access_people_flometriq_2026-10-28.sql, access_people_levaflow_2026-10-28.sql." },
@@ -55026,9 +55194,12 @@ function App() {
   const [barsHidden,setBarsHidden] = useState(appInFull());
   useEffect(()=>{ const f = ()=>setBarsHidden(appInFull()); document.addEventListener("fullscreenchange", f); document.addEventListener("webkitfullscreenchange", f);
     return ()=>{ document.removeEventListener("fullscreenchange", f); document.removeEventListener("webkitfullscreenchange", f); }; },[]);
+  // 2026-10-30T11:00:00Z: full screen ONCE per login. Re-entering on every click made the screen blink, because Chrome
+  // leaves full screen for every alert / confirm / new tab and the next click brought it back. The button stays for anyone.
   useEffect(()=>{ if(!user || user.role==="super_admin" || appIsInstalled()) return;
-    const f = ()=>{ if(!appInFull()) appFullOn(); };
-    document.addEventListener("pointerdown", f, true); return ()=>document.removeEventListener("pointerdown", f, true); },[user && user.role]);
+    let done = false;
+    const f = ()=>{ if(done) return; done = true; document.removeEventListener("pointerdown", f, true); if(!appInFull()) appFullOn(); };
+    document.addEventListener("pointerdown", f, true); return ()=>document.removeEventListener("pointerdown", f, true); },[user && user.username]);
   // 2026-10-28T09:00:00Z: Back / Home — the screens visited this session (memory only; a reload starts at Home)
   const navStack = useRef([]); const navGoingBack = useRef(false); const [navN,setNavN] = useState(0);
   const navPrevTab = useRef("home"); const navSnap = useRef({ tab:"home" });
@@ -55442,7 +55613,7 @@ function App() {
       h("button",{onClick:()=>setFocusMenu(m=>!m),title:focusMenu?"Hide the ribbon again":"Show the ribbon (menus) while staying full screen",style:{background:colors.dark,color:"#fff",border:"1px solid #3a3f33",borderRadius:16,padding:"5px 12px",fontSize:12,cursor:"pointer",boxShadow:"0 2px 6px rgba(0,0,0,.25)"}},focusMenu?"▴ Hide menu":"☰ Menu"),
       h("button",{onClick:exitFocus,title:"Leave full screen (Esc)",style:{background:colors.dark,color:"#fff",border:"1px solid #3a3f33",borderRadius:16,padding:"5px 12px",fontSize:12,cursor:"pointer",boxShadow:"0 2px 6px rgba(0,0,0,.25)"}},"✕ Exit full screen")) : null,
     (focusMode && !focusMenu) ? null : h("div",{id:"app-sticky-header",style:{position:"sticky",top:0,zIndex:60}},
-      h(TopBar,{user,onBars:user.role==="super_admin"?(()=>{ appInFull() ? appFullOff() : appFullOn(); }):null,barsHidden,onFull:focusMode?exitFocus:enterFocus,inFull:focusMode,sessionCompanyId,sessionCompany,onOpenVersions:user.role==="super_admin"?(()=>pickTab("version_history")):null,flags:h(MyDayFlags,{data:myDay,isSales:isFseOrTelecaller,hasEmp:myDayHasEmp,onOpen:openMyDay}),onChangeCompany:user.role==="super_admin"?(()=>setSessionCompanyIdPersisted(null)):null,onLogout:()=>{setUserPersisted(null);setSessionCompanyIdPersisted(null);setMasterData({models:[],gradesBySpec:new Map(),rateBySpecGrade:new Map(),allSpecs:[],loadingMaster:true});}}),
+      h(TopBar,{user,onBars:appIsInstalled()?null:(()=>{ appInFull() ? appFullOff() : appFullOn(); }),barsHidden,onFull:focusMode?exitFocus:enterFocus,inFull:focusMode,sessionCompanyId,sessionCompany,onOpenVersions:user.role==="super_admin"?(()=>pickTab("version_history")):null,flags:h(MyDayFlags,{data:myDay,isSales:isFseOrTelecaller,hasEmp:myDayHasEmp,onOpen:openMyDay}),onChangeCompany:user.role==="super_admin"?(()=>setSessionCompanyIdPersisted(null)):null,onLogout:()=>{setUserPersisted(null);setSessionCompanyIdPersisted(null);setMasterData({models:[],gradesBySpec:new Map(),rateBySpecGrade:new Map(),allSpecs:[],loadingMaster:true});}}),
       h(MenuTabs,{user,active:tab,onChange:pickTab,
         onRefresh: ["estimator","saved","sale_order","home","tour","user_manual","faq","change_password","version_history"].includes(tab) ? null
           : ()=>{ if(!confirmLeaveIfDirty()) return; setUnsavedGuard(false); setScreenKey(k=>k+1); }}),
@@ -75726,7 +75897,7 @@ function DocumentRegisterReport(){
       const reqBy = new Map();
       (reqs||[]).forEach(r=>{ if(r.fulfilled_document_id) reqBy.set(r.fulfilled_document_id, r); });
       setStatusRows(docStatusRowsNorm(st));
-      setRows((parents||[]).map(p=>{
+      setRows((parents||[]).filter(p=>!p.is_archived).map(p=>{
         const revs = byDoc.get(p.id)||[];
         const L = revs[0]||{};
         const req = reqBy.get(p.id);
