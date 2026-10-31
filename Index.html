@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-31T06:00:00Z";
+  var APP_BUILD_VERSION = "2026-10-31T08:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -3749,6 +3749,8 @@ function BomEntryForm({ onGoToTab, user }) {
   const saveAllEdits = async()=>{
     const m = modelInput.trim();
     if(!confirm("Save changes to all "+subRows.length+" line(s) of \""+m+"\"?")) return;
+    { const dup = bomDupOf(subRows.map(r=>({ ...r, ...(editAllDrafts[r.id]||{}) })));   // 2026-10-31T08:00:00Z
+      if(dup){ alert("Not saved: "+dup+" would be on this BOM twice. A BOM may not hold the same Sub-assembly + Component twice."); return; } }
     setSavingAll(true);
     try{
       const updates=[]; const failures=[];
@@ -3786,6 +3788,8 @@ function BomEntryForm({ onGoToTab, user }) {
       cutting_plan_uom:editRowDraft.cutting_plan_uom||"",
       qty_required:Number(editRowDraft.qty_required)||0, uom:editRowDraft.uom||"",
     };
+    { const clash = subRows.find(r=>r.id!==editingRowId && bomKey(r)===bomKey(payload));   // 2026-10-31T08:00:00Z
+      if(clash){ setMsg("Not saved: "+bomKeyText(payload)+" is already on this BOM. A BOM may not hold the same Sub-assembly + Component twice."); return; } }
     const { error:err } = await sb.from("bom").update(payload).eq("id",editingRowId);
     if(err){ setMsg("Save failed: "+err.message); return; }
     await logAudit("UPDATE","bom",editingRowId,(modelInput.trim())+" — "+(payload.component),user?.username||"unknown",null,payload);
@@ -3863,6 +3867,8 @@ function BomEntryForm({ onGoToTab, user }) {
   const saveNewRow = async()=>{
     setMsg("");
     if(!newRowDraft.model) { setMsg("Set a model first."); return; }
+    { const clash = subRows.find(r=>bomKey(r)===bomKey(newRowDraft));   // 2026-10-31T08:00:00Z
+      if(clash && String(newRowDraft.component||"").trim()){ setMsg("Not added: "+bomKeyText(newRowDraft)+" is already on this BOM. A BOM may not hold the same Sub-assembly + Component twice."); return; } }
     setSavingNew(true);
     try {
       const payload = {
@@ -15246,6 +15252,143 @@ async function qmpCanCreate(ref){
   return { ok:true, sos, multi:true };
 }
 async function qmpOpenRateContracts(){ const { data, error } = await sb.from("quote_multi_po_tbl").select("base_ref,multi_po,closed_at"); if(error) return null; return new Set((data||[]).filter(r=>r.multi_po && !r.closed_at).map(r=>r.base_ref)); }
+// ===== 2026-10-31T08:00:00Z: BOM vs MASTER =====
+// Sale Order (after the work order): the Technical Head post holders, admins and super admins edit the BOM; on ✓ Done
+// editing the lines touched that differ from the model's master BOM are offered for the master (no code, nobody told).
+// Quote: a line added by hand that is not in the master is NOT written to the master — the Sl No's BOM goes to the
+// Technical Head post holders for approval; the quote goes on, its PDF prints DRAFT until approved. No codes.
+// A BOM (and the master) may not hold the same Sub-assembly + Component twice.
+const BOM_CMP = ["material_shape","material_spec","qty_required","uom","cutting_plan_layout_size","cutting_plan_qty","cutting_plan_uom"];
+const BOM_CMP_LABEL = { material_shape:"Shape", material_spec:"Spec", qty_required:"Qty", uom:"UOM", cutting_plan_layout_size:"Cutting plan", cutting_plan_qty:"Cut plan qty", cutting_plan_uom:"Cutting UOM" };
+const BOM_SQL = "structure_bom_master_backupdate_2026-10-31.sql";
+const bomKey = (r)=> String((r&&r.sub_assembly)||"").trim().toLowerCase()+"|"+String((r&&r.component)||"").trim().toLowerCase();
+const bomKeyText = (r)=> [String(r.sub_assembly||"").trim()||"—", String(r.component||"").trim()||"—"].join(" · ");
+const bomIsPlain = (l)=> !!l && !l.is_direct_price && !l.price_source && !isDavitLine(l) && !!String(l.component||l.sub_assembly||"").trim();
+function bomSame(f, a, b){
+  if(f==="qty_required" || f==="cutting_plan_qty") return Math.abs((Number(a)||0)-(Number(b)||0)) < 1e-9;
+  return String(a??"").trim().toLowerCase()===String(b??"").trim().toLowerCase();
+}
+function bomFieldDiffs(line, master){ return BOM_CMP.filter(f=>!bomSame(f, line[f], master[f])).map(f=>({ f, from:master[f], to:line[f] })); }
+// the same Sub-assembly + Component twice? rows = the whole BOM after the change; returns the clashing key text or ""
+function bomDupOf(rows){ const seen = new Map(); for(const r of (rows||[])){ if(!bomIsPlain(r)) continue; const k = bomKey(r); if(k==="|") continue; if(seen.has(k)) return bomKeyText(r); seen.set(k,1); } return ""; }
+async function bomIsTh(user){
+  try{ await loadPostPeople(true); const me = await despMe(user); return !!me && postHolders("technical_head").includes(me); }catch(e){ return false; }
+}
+// write the ticked differences into the master BOM of one model
+async function bomApplyMaster(model, item, size, picks, srcNote, byUser){
+  const out = { added:0, changed:0, removed:0, err:"" };
+  const { data: master, error } = await sb.from("bom").select("*").eq("model",model);
+  if(error){ out.err = error.message; return out; }
+  const byKey = new Map((master||[]).map(r=>[bomKey(r), r]));
+  const withSrc = async(fn)=>{ let r = await fn(true); if(r.error && /src_note/.test(r.error.message||"")) r = await fn(false); return r; };
+  for(const l of (picks.add||[])){
+    if(byKey.has(bomKey(l))) continue;   // already there: never twice
+    const row = { model, item:item||l.item||"", size:size||l.size||"", sub_assembly:l.sub_assembly||"", component:l.component||"", material_shape:l.material_shape||"",
+      cutting_plan_layout_size:l.cutting_plan_layout_size||"", cutting_plan_qty:Number(l.cutting_plan_qty)||0, cutting_plan_uom:l.cutting_plan_uom||"", material_spec:l.material_spec||"",
+      qty_required:Number(l.qty_required)||0, uom:l.uom||"" };
+    const r = await withSrc(ws=>sb.from("bom").insert(ws ? { ...row, src_note:srcNote } : row));
+    if(r.error){ out.err = r.error.message; return out; } out.added++; byKey.set(bomKey(l), row);
+  }
+  for(const c of (picks.chg||[])){
+    const m = byKey.get(bomKey(c.line)); if(!m || !m.id) continue;
+    const patch = {}; c.diffs.forEach(d=>{ patch[d.f] = (d.f==="qty_required"||d.f==="cutting_plan_qty") ? (Number(d.to)||0) : (d.to??""); });
+    const r = await withSrc(ws=>sb.from("bom").update(ws ? { ...patch, src_note:srcNote } : patch).eq("id",m.id));
+    if(r.error){ out.err = r.error.message; return out; } out.changed++;
+  }
+  for(const d of (picks.del||[])){
+    const m = byKey.get(bomKey(d)); if(!m || !m.id) continue;
+    const r = await sb.from("bom").delete().eq("id",m.id);
+    if(r.error){ out.err = r.error.message; return out; } out.removed++;
+  }
+  if(out.added||out.changed||out.removed)
+    await logAudit("UPDATE","bom",model,"Master BOM updated "+srcNote+": "+out.added+" added, "+out.changed+" changed, "+out.removed+" removed"+
+      [(picks.add||[]).map(l=>"+ "+bomKeyText(l)).join("; "), (picks.chg||[]).map(c=>"~ "+bomKeyText(c.line)+" ("+c.diffs.map(d=>BOM_CMP_LABEL[d.f]+" "+(d.from??"—")+" → "+(d.to??"—")).join(", ")+")").join("; "), (picks.del||[]).map(l=>"− "+bomKeyText(l)).join("; ")].filter(Boolean).map(x=>" · "+x).join(""),
+      byUser||"",null,null);
+  return out;
+}
+// ---- quote stage: approval of hand-added lines by the Technical Head post ----
+async function bomApprAddLine(est, line, user){
+  // est = the estimates row (Sl No). Adds the line to its approval list and makes it pending.
+  try{
+    const { data: cur, error } = await sb.from("estimates").select("id,bom_appr_state,bom_appr_lines").eq("id",est.id).maybeSingle();
+    if(error){ return { err: /bom_appr/.test(error.message||"") ? "Run "+BOM_SQL+" first." : error.message }; }
+    const list = ((cur && cur.bom_appr_lines)||[]).filter(x=>Number(x.sl_no)!==Number(line.sl_no));
+    list.push({ sl_no:line.sl_no, sub_assembly:line.sub_assembly||"", component:line.component||"", material_shape:line.material_shape||"", material_spec:line.material_spec||"", grade:line.grade||"", qty_required:line.qty_required, uom:line.uom||"", added_by:user?.username||"", added_at:new Date().toISOString() });
+    const was = cur && cur.bom_appr_state;
+    const { error: e2 } = await sb.from("estimates").update({ bom_appr_state:"pending", bom_appr_lines:list, bom_appr_req_by:user?.username||"", bom_appr_req_at:new Date().toISOString(), bom_appr_by:null, bom_appr_at:null }).eq("id",est.id);
+    if(e2) return { err:e2.message };
+    if(was!=="pending"){
+      await loadPostPeople(true);
+      await notifyPeople(postHolders("technical_head"), "BOM approval: "+est.reference_number+" Sl No "+est.item_sl_no+(est.customer_name?" ("+est.customer_name+")":"")+" — line(s) not in the master BOM of "+(est.model||"the model")+" added by "+(user?.username||"")+".", "bom_approval",
+        { kind:"act", open:{ quote:est.reference_number }, target:'[data-testid="bom-appr-review"]', group:"bomappr:"+est.id, help:{ btn:"Go and approve", what:"BOM approval — "+est.reference_number+" Sl No "+est.item_sl_no, do:["Open Sl No "+est.item_sl_no+" if it is not open.","Check the lines not in the master BOM.","Press Approve BOM. The quote's PDF stops printing DRAFT for this."] } });
+    }
+    await logAudit("UPDATE","estimates",est.reference_number+"-"+est.item_sl_no,"BOM line not in the master added ("+bomKeyText(line)+") — sent for Technical Head approval",user?.username||"",null,null);
+    return { list };
+  }catch(e){ return { err:String(e.message||e) }; }
+}
+async function bomApprDropLine(est, slNo, user){
+  try{
+    const { data: cur, error } = await sb.from("estimates").select("id,bom_appr_state,bom_appr_lines").eq("id",est.id).maybeSingle();
+    if(error || !cur || cur.bom_appr_state!=="pending") return null;
+    const list = (cur.bom_appr_lines||[]).filter(x=>Number(x.sl_no)!==Number(slNo));
+    if(list.length===(cur.bom_appr_lines||[]).length) return null;
+    await sb.from("estimates").update(list.length ? { bom_appr_lines:list } : { bom_appr_lines:[], bom_appr_state:null }).eq("id",est.id);
+    if(!list.length) await notifDone("bomappr:"+est.id, user?.username||"");
+    return list;
+  }catch(e){ return null; }
+}
+// Sl Nos of a quote still waiting for the BOM approval (for the DRAFT watermark)
+async function bomApprPendingSl(ref){
+  try{ const { data, error } = await sb.from("estimates").select("item_sl_no,bom_appr_state").eq("reference_number",ref); if(error) return [];
+    return (data||[]).filter(r=>r.bom_appr_state==="pending").map(r=>r.item_sl_no).sort((a,b)=>a-b); }catch(e){ return []; }
+}
+// ---- the one box: Sale Order (offer to the master), quote (sent for approval), approval (Technical Head) ----
+function BomMasterDialog({ kind, model, sub, add, chg, del, onApply, onClose, busy }){
+  // kind: "so" | "quote" | "approve"
+  const [pick,setPick] = useState(kind==="so" && add.length>1 ? "ask" : "list");
+  const [tA,setTA] = useState(()=>Object.fromEntries(add.map((_,i)=>[i,true])));
+  const [tC,setTC] = useState(()=>Object.fromEntries(chg.map((_,i)=>[i,true])));
+  const [tD,setTD] = useState(()=>Object.fromEntries(del.map((_,i)=>[i,false])));
+  const nA = add.filter((_,i)=>tA[i]).length, nC = chg.filter((_,i)=>tC[i]).length, nD = del.filter((_,i)=>tD[i]).length;
+  const th = (t,w)=> h("th",{style:{textAlign:"left",fontSize:11,color:colors.muted,borderBottom:"2px solid "+colors.dark,padding:"5px 7px",width:w}},t);
+  const td = (c,s)=> h("td",{style:{padding:"5px 7px",borderBottom:"1px solid "+colors.border,verticalAlign:"top",fontSize:12.5,...(s||{})}},c);
+  const pill = (t,bg,fg)=> h("span",{style:{fontSize:11,fontWeight:700,borderRadius:9,padding:"1px 8px",background:bg,color:fg}},t);
+  const sec = (head, kids)=> h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px",marginTop:10,background:"#fcfbf7"}}, h("div",{style:{fontWeight:700,fontSize:13.5,marginBottom:8,display:"flex",gap:8,alignItems:"center"}},head), kids);
+  const so = kind==="so";
+  const box = (on, set, i, tid)=> so ? h("input",{type:"checkbox","data-testid":tid,checked:!!on[i],onChange:e=>set(s=>({ ...s, [i]:e.target.checked }))}) : null;
+  const lineCells = (l)=>[ td(l.sub_assembly||"—"), td(h("b",null,l.component||"—")), td([l.material_shape, l.material_spec, l.grade].filter(Boolean).join(" · ")||"—"), td((l.qty_required??"")+" "+(l.uom||"")) ];
+  const title = so ? "Update the master BOM too?" : kind==="quote" ? "Not in the master BOM — sent for approval" : "Approve the BOM";
+  return h("div",{"data-testid":"bom-master-dlg",style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:2600,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"50px 12px",overflowY:"auto"}},
+    h("div",{style:{background:"#fff",borderRadius:10,width:900,maxWidth:"100%",padding:"16px 20px",boxShadow:"0 10px 30px rgba(0,0,0,.25)"}},
+      h("div",{style:{fontSize:17,fontWeight:700}},title),
+      h("div",{style:{fontSize:12,color:colors.muted,margin:"2px 0 10px"}}, sub),
+      add.length ? sec([pill("NEW","#e4f3ed","#0f6b4f"), add.length+" line"+(add.length===1?"":"s")+" not in the master BOM of "+model],
+        pick==="ask" ? h("div",{style:{background:"#e6f1fb",border:"1px solid #9cc3e8",borderRadius:8,padding:"10px 12px",fontSize:13}},
+            "Add ", h("b",null,"all "+add.length), " new lines to the master BOM of ", h("b",null,model), "? ",
+            h("button",{"data-testid":"bom-add-all",onClick:()=>{ setTA(Object.fromEntries(add.map((_,i)=>[i,true]))); setPick("list"); },style:{...btnPrimary,padding:"5px 12px",marginLeft:6}},"Yes, add all "+add.length),
+            h("button",{"data-testid":"bom-add-pick",onClick:()=>{ setTA({}); setPick("list"); },style:{...btnSecondary,padding:"5px 12px",marginLeft:6}},"No — let me pick"),
+            h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:6}}, add.map(bomKeyText).join(" · ")))
+          : h("table",{style:{width:"100%",borderCollapse:"collapse"}},
+              h("thead",null,h("tr",null, so?th("Add",40):null, th("Sub-assembly"), th("Component"), th("Shape · Spec"+(so?"":" · Grade")), th("Qty / UOM"))),
+              h("tbody",null, add.map((l,i)=>h("tr",{key:i}, so?td(box(tA,setTA,i,"bom-tick-add")):null, ...lineCells(l)))))) : null,
+      chg.length ? sec([pill("CHANGED","#fff4d6","#854f0b"), chg.length+" line"+(chg.length===1?"":"s")+" differ from the master"],
+        h("table",{style:{width:"100%",borderCollapse:"collapse"}},
+          h("thead",null,h("tr",null, th("Update",54), th("Sub-assembly · Component"), th("What changed"))),
+          h("tbody",null, chg.map((c,i)=>h("tr",{key:i}, td(box(tC,setTC,i,"bom-tick-chg")), td(bomKeyText(c.line)),
+            td(c.diffs.map((d,j)=>h("span",{key:j,style:{marginRight:10}}, BOM_CMP_LABEL[d.f]+" ", h("span",{style:{color:"#a3312a",textDecoration:"line-through"}},String(d.from??"—")||"—"), " → ", h("b",{style:{color:"#0f6b4f"}},String(d.to??"—")||"—"))))))))) : null,
+      del.length ? sec([pill("REMOVED","#fdecea","#a3312a"), del.length+" master line"+(del.length===1?"":"s")+" taken off this BOM"],
+        h("table",{style:{width:"100%",borderCollapse:"collapse"}},
+          h("thead",null,h("tr",null, th("Remove",58), th("Sub-assembly · Component"), th("Note"))),
+          h("tbody",null, del.map((l,i)=>h("tr",{key:i}, td(box(tD,setTD,i,"bom-tick-del")), td(bomKeyText(l)), td("Left unticked = the master keeps it.",{color:colors.muted,fontSize:11.5})))))) : null,
+      so ? h("div",{style:{fontSize:12,background:"#fff4d6",borderRadius:6,padding:"7px 10px",marginTop:10}},"Updating the master changes new quotes of "+model+" only. Old quotes, Sale Orders and this contract are not touched. Each change is logged with the Sale Order, the Sl No and your name; nobody is told.")
+      : kind==="quote" ? h("div",{style:{fontSize:12,background:"#eaf2fb",borderRadius:6,padding:"7px 10px",marginTop:10}},"Nothing is written to the master. The BOM of this Sl No goes to "+postPersonText("technical_head")+" for approval. Carry on with the quote — its PDF prints DRAFT until the BOM is approved.")
+      : h("div",{style:{fontSize:12,background:"#eaf2fb",borderRadius:6,padding:"7px 10px",marginTop:10}},"Approving clears the DRAFT on the quote's PDF for this Sl No. The master BOM is not changed."),
+      h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:12,flexWrap:"wrap"}},
+        so ? [h("button",{key:"n","data-testid":"bom-not-now",onClick:onClose,style:btnSecondary},"Not now — master stays as it is"),
+              h("button",{key:"y","data-testid":"bom-apply",disabled:busy || pick==="ask" || !(nA+nC+nD),onClick:()=>onApply({ add:add.filter((_,i)=>tA[i]), chg:chg.filter((_,i)=>tC[i]), del:del.filter((_,i)=>tD[i]) }),style:btnPrimary},busy?"Updating…":"Update master ("+nA+" new, "+nC+" changed, "+nD+" removed)")]
+        : kind==="quote" ? h("button",{"data-testid":"bom-ok",onClick:onClose,style:btnPrimary},"OK")
+        : [h("button",{key:"n",onClick:onClose,style:btnSecondary},"Close"), h("button",{key:"y","data-testid":"bom-appr-approve",disabled:busy,onClick:()=>onApply({}),style:btnPrimary},busy?"Approving…":"Approve BOM")])));
+}
 function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, onGoToTab, onNewSlNo, mode, contractInfo, onContractInfoChanged, onOpenContract, cameFromQuotesReport, onBackToQuotesReport }) {
   // mode: "quote" (default) | "contract". When "contract", this exact
   // same screen is a Sale Order — the underlying data lives in the same
@@ -18252,6 +18395,11 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     const edits=lineEdits[key];
     if(!edits||Object.keys(edits).length===0) return;
     if(mode==="contract" && !soOpenLine(key)) return;   // 224: a Sale Order BOM line is read-only until ✎
+    if(edits.sub_assembly!==undefined || edits.component!==undefined){   // 2026-10-31T08:00:00Z: never the same Sub-assembly + Component twice
+      const nk = bomKey({ sub_assembly: edits.sub_assembly!==undefined ? edits.sub_assembly : line.sub_assembly, component: edits.component!==undefined ? edits.component : line.component });
+      const clash = openLines.find(l=>l.sl_no!==line.sl_no && bomIsPlain(l) && bomKey(l)===nk);
+      if(clash){ alert("Not saved: line "+clash.sl_no+" already has this Sub-assembly + Component. A BOM may not hold the same one twice."); return; }
+    }
     setSavingLine(s=>({...s,[key]:true}));
     try {
       // Always recompute cost and sales from current values (edited or stored)
@@ -18277,7 +18425,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         payload.validated_at=null;
       }
       await sb.from("estimate_lines").update(payload).eq("reference_number",line.reference_number).eq("item_sl_no",line.item_sl_no).eq("sl_no",line.sl_no);
-      if(mode==="contract") soNote("line "+line.sl_no+" ("+(line.component||"")+"): "+Object.keys(edits).filter(f=>f!=="cost"&&f!=="sales_price").map(f=>f+" "+(line[f]??"—")+" → "+(edits[f]??"—")).join(", "));   // 224
+      if(mode==="contract") soNote("line "+line.sl_no+" ("+(line.component||"")+"): "+Object.keys(edits).filter(f=>f!=="cost"&&f!=="sales_price").map(f=>f+" "+(line[f]??"—")+" → "+(edits[f]??"—")).join(", "), { edited:line.sl_no });   // 224
       if(payload.validation_status==="Pending"){
         await logAudit("UPDATE","estimate_lines",line.reference_number+"-"+line.item_sl_no,"Direct Price line \""+(line.component||"")+"\" reverted from Validated to Pending — price changed from "+line.sales_price+" to "+sales_price+" on a revision, needs re-validation",user?.username||"unknown",{validation_status:"Validated",sales_price:line.sales_price},{validation_status:"Pending",sales_price});
       }
@@ -18295,6 +18443,10 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         return updated;
       });
       setLineEdits(e=>{ const n={...e}; delete n[key]; return n; });
+      if(mode!=="contract" && (edits.sub_assembly!==undefined || edits.component!==undefined) && bomIsPlain({ ...line, ...payload }) && openRef && !bomForModel.some(r=>bomKey(r)===bomKey({ ...line, ...payload }))){   // 2026-10-31T08:00:00Z
+        const r = await bomApprAddLine(openRef, { ...line, ...payload }, user);
+        if(!r.err){ await loadBomAppr(openRef); setBomDlg({ kind:"quote", model:openRef.model||"", sub:"Quote "+openRef.reference_number+" · Sl No "+openRef.item_sl_no+" · model "+(openRef.model||""), add:r.list, chg:[], del:[] }); }
+      }
     } catch(err){ console.error("Save failed",err); }
     finally{ setSavingLine(s=>{ const n={...s}; delete n[key]; return n; }); }
   };
@@ -18435,7 +18587,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   // Add line form state
   const [addModel,setAddModel]=useState("");
   const [addSubAssembly,setAddSubAssembly]=useState("");
-  const [addComponent,setAddComponent]=useState("");
+  const [addComponent,setAddComponent]=useState(""); const [addShape,setAddShape]=useState("");   // addShape: 2026-10-31T08:00:00Z, for a component not in the master
   const [addSpec,setAddSpec]=useState("");
   const [addGrade,setAddGrade]=useState("");
   // Declared here, above every reader. It used to sit ~470 lines further
@@ -18452,6 +18604,16 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
 
   // Master data for cascading combos
   const [bomForModel,setBomForModel]=useState([]);
+  // 2026-10-31T08:00:00Z: BOM vs master — the Technical Head post edits a Sale Order BOM; quote lines not in the master go for approval
+  const [isTh,setIsTh] = useState(false);
+  useEffect(()=>{ let on = true; bomIsTh(user).then(v=>{ if(on) setIsTh(v); }); return ()=>{ on = false; }; },[user && user.username]);
+  const [bomDlg,setBomDlg] = useState(null);   // {kind, model, sub, add, chg, del, est, item, size, srcNote}
+  const [bomBusy,setBomBusy] = useState(false);
+  const [bomAppr,setBomAppr] = useState(null);   // the open Sl No's {state, lines, by, at, req_by, req_at}
+  const loadBomAppr = async(est)=>{ if(!est || !est.id){ setBomAppr(null); return; }
+    try{ const { data, error } = await sb.from("estimates").select("bom_appr_state,bom_appr_lines,bom_appr_by,bom_appr_at,bom_appr_req_by,bom_appr_req_at").eq("id",est.id).maybeSingle();
+      setBomAppr(error ? null : (data ? { state:data.bom_appr_state, lines:data.bom_appr_lines||[], by:data.bom_appr_by, at:data.bom_appr_at, req_by:data.bom_appr_req_by, req_at:data.bom_appr_req_at } : null)); }catch(e){ setBomAppr(null); } };
+  useEffect(()=>{ loadBomAppr(openRef); },[openRef && openRef.id]);
   const [gradesBySpec,setGradesBySpec]=useState(new Map());
   const [rateBySpecGrade,setRateBySpecGrade]=useState(new Map());
   const [uoms,setUoms]=useState([]);
@@ -18624,8 +18786,9 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   },[bomForModel,addSubAssembly]);
   const specOptions = useMemo(()=>{
     const pool = addComponent ? bomForModel.filter(r=>r.component===addComponent) : bomForModel;
-    return Array.from(new Set(pool.map(r=>r.material_spec).filter(Boolean))).sort();
-  },[bomForModel,addComponent]);
+    const own = Array.from(new Set(pool.map(r=>r.material_spec).filter(Boolean))).sort();
+    return own.length ? own : (allSpecs||[]);   // 2026-10-31T08:00:00Z: a new component picks from every spec
+  },[bomForModel,addComponent,allSpecs]);
   const gradeOptions = useMemo(()=>addSpec?(gradesBySpec.get(addSpec)||[]):[],[gradesBySpec,addSpec]);
   const lookedUpRate = useMemo(()=>{
     if(!addSpec||!addGrade) return null;
@@ -18728,13 +18891,18 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   };
 
   const saveAddLine=async()=>{
-    setAddMsg(""); if(!openRef) return; setSavingAdd(true);
+    setAddMsg(""); if(!openRef) return;
+    if(!String(addComponent||"").trim()){ setAddMsg("Give the component."); return; }
+    { const k = bomKey({ sub_assembly:addSubAssembly, component:addComponent });   // 2026-10-31T08:00:00Z: never the same Sub-assembly + Component twice
+      const clash = openLines.find(l=>bomIsPlain(l) && bomKey(l)===k);
+      if(clash){ setAddMsg("Not added: "+bomKeyText({ sub_assembly:addSubAssembly, component:addComponent })+" is already on this BOM (line "+clash.sl_no+"). Change that line instead."); return; } }
+    setSavingAdd(true);
     try {
       const nextSl=(openLines.length>0?Math.max(...openLines.map(l=>l.sl_no)):0)+1;
       const rate=lookedUpRate!==null?lookedUpRate:(0);
       // Look up material_shape from BOM for this component/spec
-      const bomMatch=bomForModel.find(r=>r.component===addComponent&&r.material_spec===addSpec);
-      const materialShape=bomMatch?bomMatch.material_shape||"":"";
+      const bomMatch=bomForModel.find(r=>r.component===addComponent&&r.material_spec===addSpec) || bomForModel.find(r=>bomKey(r)===bomKey({ sub_assembly:addSubAssembly, component:addComponent }));
+      const materialShape=bomMatch?bomMatch.material_shape||"":(addShape||"");
       const payload={
         reference_number:openRef.reference_number, item_sl_no:openRef.item_sl_no, sl_no:nextSl, estimate_id:openRef.id,
         model:addModel, sub_assembly:addSubAssembly, component:addComponent,
@@ -18745,9 +18913,15 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         sales_price:computeSalesPrice(computeCost(addQty, 1, rate), Number(addSf)||3.1)
       };
       const{data,error:err}=await sb.from("estimate_lines").insert(payload).select().single();
-      if(!err && mode==="contract") soNote("line added: "+(payload.component||payload.sub_assembly||""));   // 224
+      if(!err && mode==="contract") soNote("line added: "+(payload.component||payload.sub_assembly||""), { added:data && data.sl_no });   // 224
       if(err) throw err;
       setOpenLines(l=>{ const updated=[...l,data]; autoRefreshDescriptionFromLines(updated); return updated; });
+      if(mode!=="contract" && data && !bomForModel.some(r=>bomKey(r)===bomKey(data))){   // 2026-10-31T08:00:00Z: not in the master -> Technical Head approval
+        const r = await bomApprAddLine(openRef, data, user);
+        if(r.err) setAddMsg("Line added, but not sent for approval: "+r.err);
+        else { await loadBomAppr(openRef); setBomDlg({ kind:"quote", model:openRef.model||addModel||"", sub:"Quote "+openRef.reference_number+" · Sl No "+openRef.item_sl_no+" · model "+(openRef.model||addModel||""), add:r.list.map(x=>({ ...x })), chg:[], del:[] }); }
+      }
+      setAddShape("");
       setAddSubAssembly(""); setAddComponent(""); setAddSpec(""); setAddGrade(""); setAddQty(""); setAddUom(""); setAddSf(3.1); setAddCuttingPlan(""); setAddCutPlanQty(""); setAddCuttingUom("");
       setAddMsg("Line added as Sl No "+nextSl+".");
     } catch(e){setAddMsg("Failed: "+e.message);} finally{setSavingAdd(false);}
@@ -18755,18 +18929,20 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
 
   // 224: Sale Order BOM — read-only until an admin presses ✎ Edit BOM (all lines) or ✎ on one line; reason asked once
   const soOpenLine = (key)=> mode!=="contract" || !!(soEd && (soEd.all || soEd.lines[key]));
-  const soMsg = ()=> "Sale Order "+soCt()+" is issued — this BOM is read-only. "+(isAdmin ? "Press ✎ Edit BOM (or ✎ on a line) to correct it; no code is needed." : "Only an admin can correct it.");
+  const soCan = isAdmin || isTh;   // 2026-10-31T08:00:00Z: the Technical Head post holders too
+  const soMsg = ()=> "Sale Order "+soCt()+" is issued — this BOM is read-only. "+(soCan ? "Press ✎ Edit BOM (or ✎ on a line) to correct it; no code is needed." : "Only the Technical Head, an admin or a super admin can correct it.");
   const soBlock = ()=>{ if(mode==="contract" && !(soEd && soEd.all)){ alert(soMsg()); return true; } return false; };
   const soStart = (lineKey)=>{
-    if(!isAdmin){ noPermission("change the BOM of an issued Sale Order",{roles:["admin","super_admin"]}); return; }
+    if(!soCan){ noPermission("change the BOM of an issued Sale Order",{posts:["technical_head"],roles:["admin","super_admin"]}); return; }
     if(soEd){ setSoEd(e=>({ ...e, all: e.all || !lineKey, lines: lineKey ? { ...e.lines, [lineKey]:true } : e.lines })); return; }
     const w = prompt("Why is the BOM of Sale Order "+soCt()+" being changed?\n\n1 = "+SO_BOM_WHY[0]+"\n2 = "+SO_BOM_WHY[1]+"\n3 = "+SO_BOM_WHY[2]+"\n\nType 1, 2 or 3, or write the reason:");
     if(w===null) return; const t = String(w).trim();
     const why = /^[123]$/.test(t) ? SO_BOM_WHY[Number(t)-1] : t;
     if(why.length<3){ alert("A reason is needed — it is kept with every change."); return; }
-    setSoEd({ all:!lineKey, lines: lineKey ? { [lineKey]:true } : {}, why, saved:0, changes:[] });
+    setSoEd({ all:!lineKey, lines: lineKey ? { [lineKey]:true } : {}, why, saved:0, changes:[], touched:{ added:[], edited:[], deleted:[] } });
   };
-  const soNote = (txt)=> setSoEd(e=> e ? { ...e, saved:e.saved+1, changes:[...e.changes, txt] } : e);
+  const soNote = (txt, t)=> setSoEd(e=> e ? { ...e, saved:e.saved+1, changes:[...e.changes, txt],
+    touched:{ added:[...(((e.touched||{}).added)||[]), ...(t && t.added!=null ? [t.added] : [])], edited:[...(((e.touched||{}).edited)||[]), ...(t && t.edited!=null ? [t.edited] : [])], deleted:[...(((e.touched||{}).deleted)||[]), ...(t && t.deleted ? [t.deleted] : [])] } } : e);
   const soFinish = async()=>{
     const e = soEd; if(!e) return;
     if(Object.keys(lineEdits).some(k=>lineEdits[k] && Object.keys(lineEdits[k]).length) && !confirm("Some lines have changes not saved yet (press Save on the line). Finish anyway? Those are dropped.")) return;
@@ -18779,6 +18955,26 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       setSoEd(null); setLineEdits({});
       alert("Saved — "+e.saved+" change(s) to the BOM of Sale Order "+soCt()+".\n\n"+(r.plan ? "Procurement Gantt updated"+(r.added.length?": new row(s) "+r.added.join(", "):"")+(r.merged.length?"; merged "+r.merged.join(", "):"")+(r.gone.length?"; no BOM lines now on "+r.gone.join(", ")+" (flagged for Purchase)":"")+"." : "No Procurement Gantt yet for this contract.")
         +(r.reapprove ? "\nThe Production BOM goes back to the Technical Head for re-approval." : "\nThe Technical Head is told.")+(r.poTold.length ? "\nPO owner(s) told — quantity up after "+r.poTold.join(", ")+"." : "")+(r.sqlMissing ? "\n\n(Run structure_so_bom_edit_2026-10-21.sql to keep the re-approval on the plan.)" : ""));
+      // 2026-10-31T08:00:00Z: the lines touched that differ from the master are offered to the master (no code, nobody told)
+      try{
+        const t = e.touched||{}; const mdl = (openRef && openRef.model) || headerModel || "";
+        if(openRef && mdl && ((t.added||[]).length || (t.edited||[]).length || (t.deleted||[]).length)){
+          const [{ data: master }, { data: now }] = await Promise.all([ sb.from("bom").select("*").eq("model",mdl), sb.from("estimate_lines").select("*").eq("reference_number",openRef.reference_number).eq("item_sl_no",openRef.item_sl_no) ]);
+          const mBy = new Map((master||[]).map(x=>[bomKey(x), x]));
+          const touchedSl = new Set([...(t.added||[]), ...(t.edited||[])].map(Number));
+          const add = [], chg = [], seen = new Set();
+          (now||[]).filter(l=>touchedSl.has(Number(l.sl_no)) && bomIsPlain(l)).forEach(l=>{ const k = bomKey(l); if(seen.has(k)) return; seen.add(k);
+            const m = mBy.get(k); if(!m) add.push(l); else { const d = bomFieldDiffs(l, m); if(d.length) chg.push({ line:l, diffs:d }); } });
+          const nowKeys = new Set((now||[]).filter(bomIsPlain).map(bomKey));
+          const del = (t.deleted||[]).filter(x=>x && bomIsPlain(x) && mBy.has(bomKey(x)) && !nowKeys.has(bomKey(x))).filter((x,i,a)=>a.findIndex(y=>bomKey(y)===bomKey(x))===i);
+          if(add.length || chg.length || del.length){
+            const m0 = (master||[])[0]||{};
+            setBomDlg({ kind:"so", model:mdl, add, chg, del, item:m0.item||openRef.item||"", size:m0.size||openRef.size||"",
+              sub:"Model "+mdl+" · your changes on Sale Order "+soCt()+" / Sl No "+openRef.item_sl_no+" differ from its master BOM in "+(add.length+chg.length+del.length)+" place(s). The master is what every new quote of this model starts from. No code is needed.",
+              srcNote:"from Sale Order "+soCt()+" / Sl No "+openRef.item_sl_no+" · "+me+" · "+fmtDMY(toISODate(new Date()))+" · "+e.why });
+          }
+        }
+      }catch(x){ console.warn("BOM vs master", x); }
     }catch(err){ alert("The BOM is saved, but the follow-up could not finish:\n\n"+(err.message||err)); }
     setSoBusy(false);
   };
@@ -18787,7 +18983,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     if(!confirm("Delete Sl No "+slNo+"?")) return;
     const{data:rowData}=await sb.from("estimate_lines").select("*").eq("reference_number",refNumber).eq("item_sl_no",itemSlNo).eq("sl_no",slNo).single();
     await sb.from("estimate_lines").delete().eq("reference_number",refNumber).eq("item_sl_no",itemSlNo).eq("sl_no",slNo);
-    if(mode==="contract") soNote("line "+slNo+" deleted"+(rowData?.component?" ("+rowData.component+")":""));   // 224
+    if(mode==="contract") soNote("line "+slNo+" deleted"+(rowData?.component?" ("+rowData.component+")":""), { deleted:rowData||null });   // 224
+    else if(openRef && openRef.item_sl_no===itemSlNo){ const left = await bomApprDropLine(openRef, slNo, user); if(left) loadBomAppr(openRef); }   // 2026-10-31T08:00:00Z
     await logAudit("DELETE","estimate_lines",refNumber+"-"+itemSlNo+"-"+slNo,"Quote#: "+refNumber+" Sl: "+itemSlNo+" Line: "+slNo+(rowData?.component?" — "+rowData.component:""),user?.username||"unknown",rowData,null);
     setOpenLines(l=>{ const updated=l.filter(x=>!(x.reference_number===refNumber&&x.item_sl_no===itemSlNo&&x.sl_no===slNo)); autoRefreshDescriptionFromLines(updated); return updated; });
   };
@@ -19937,6 +20134,9 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           priceWatermark = true; priceSlNos = Array.from(new Set(pl.map(l=>l.item_sl_no))).sort((a,b)=>a-b);
         }
       }
+      // 2026-10-31T08:00:00Z: a Sl No whose BOM has lines not in the master prints DRAFT until the Technical Head approves it
+      let bomSl = [];
+      if(mode!=="contract"){ bomSl = await bomApprPendingSl(quoteExportRef); if(bomSl.length) watermark = true; }
       const {estimatesRows, linesRows, datasheetsRows} = await fetchQuoteBundle(quoteExportRef);
       if(!estimatesRows.length){ alert("No Sl Nos found under "+quoteExportRef+"."); return; }
       const {data:termsRow} = await sb.from("quote_commercial_terms").select("*").eq("reference_number",quoteExportRef).maybeSingle();
@@ -21083,6 +21283,11 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
             doc.setFontSize(60);
             doc.setTextColor(230,195,190); // light, faded — no opacity plugin dependency, just a pale color
             doc.text("DRAFT", pw/2, ph/2, {angle:35, align:"center"});
+            if(bomSl.length){   // 2026-10-31T08:00:00Z
+              doc.setFillColor(255,244,214); doc.rect(0, ph-7, pw, 7, "F");
+              doc.setFontSize(7.5); doc.setTextColor(133,79,11);
+              doc.text("DRAFT – BOM NOT APPROVED · Sl No "+bomSl.join(", ")+" has lines not in the master BOM, waiting for the Technical Head · printed "+stamp+" by "+(user?.username||""), pw/2, ph-2.6, {align:"center"});
+            }
           }
           doc.setTextColor(...dark); // restore for anything drawn after (safety, though this is the last step per page)
         }
@@ -22267,7 +22472,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
                 h("div",{style:{display:"flex",gap:8}},
                   mode==="contract" ? (soEd
                     ? h("button",{onClick:soFinish,disabled:soBusy,title:"Finish editing: the Procurement Gantt follows the BOM and the Technical Head is told",style:{...btnPrimary,background:"#0f7a5c"}},soBusy?"Updating the Gantt…":"✓ Done editing"+(soEd.saved?" ("+soEd.saved+")":""))
-                    : h("button",{onClick:()=>soStart(null),title:isAdmin?"Correct this Sale Order's BOM (no code needed)":"Only an admin can correct an issued Sale Order's BOM",style:{...btnSecondary,fontWeight:700,opacity:isAdmin?1:0.5}},"✎ Edit BOM")) : null,   // 224
+                    : h("button",{onClick:()=>soStart(null),title:soCan?"Correct this Sale Order's BOM (no code needed)":"Only the Technical Head, an admin or a super admin can correct an issued Sale Order's BOM",style:{...btnSecondary,fontWeight:700,opacity:soCan?1:0.5}},"✎ Edit BOM")) : null,   // 224
                   h("button",{onClick:openAddLine,style:btnPrimary},"+ Add line"),
                   h("button",{
                     onClick:()=>{ if(quoteAnyNonDraft() && !(mode==="contract" && soEd)){ alert(mode==="contract" ? soMsg() : "This offer's already been sent to the customer — price can't change now. Make an amended offer if this needs updating."); return; } setShowRefreshPriceConfirm(true); },
@@ -22297,6 +22502,24 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
               mode==="contract" ? h("div",{style:{background:soEd?"#fff4d6":"#eef3f8",border:"1px solid "+(soEd?"#efd59c":"#c8d8e8"),color:soEd?"#5a3a00":"#20456b",borderRadius:7,padding:"7px 11px",margin:"4px 0 6px",fontSize:12}},   // 224
                 soEd ? "✎ Editing "+(soEd.all?"all lines":Object.keys(soEd.lines).length+" line(s)")+" of Sale Order "+soCt()+" — reason: "+soEd.why+". Each line saves on Save (or when you leave the box); press ✓ Done editing when finished so the Procurement Gantt follows and the Technical Head is told."
                   : "🔒 "+soMsg()) : null,
+              mode!=="contract" && bomAppr && bomAppr.state==="pending" ? h("div",{"data-testid":"bom-appr-banner",style:{background:"#fff4d6",border:"1px solid #efd59c",color:"#5a3a00",borderRadius:7,padding:"7px 11px",margin:"4px 0 6px",fontSize:12,display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}},   // 2026-10-31T08:00:00Z
+                h("span",{style:{flex:1,minWidth:260}}, h("b",null,"⚠ BOM approval pending — "), (bomAppr.lines||[]).length+" line(s) not in the master BOM: "+(bomAppr.lines||[]).map(bomKeyText).join("; ")+". The quote's PDF prints DRAFT until "+postPersonText("technical_head")+" approves."),
+                (isTh || user?.role==="super_admin") ? h("button",{"data-testid":"bom-appr-review",onClick:()=>setBomDlg({ kind:"approve", model:openRef.model||"", sub:"Quote "+openRef.reference_number+" · Sl No "+openRef.item_sl_no+" · model "+(openRef.model||"")+" · asked by "+(bomAppr.req_by||"")+(bomAppr.req_at?" on "+fmtDMY(bomAppr.req_at):""), add:bomAppr.lines||[], chg:[], del:[], est:openRef }),style:{...btnPrimary,padding:"5px 12px",fontSize:12}},"Review & approve BOM") : null)
+              : mode!=="contract" && bomAppr && bomAppr.state==="approved" ? h("div",{style:{fontSize:11.5,color:"#0f6b4f",margin:"2px 0 4px"}},"✓ BOM approved by "+(bomAppr.by||"")+(bomAppr.at?" on "+fmtDMY(bomAppr.at):"")+" — lines not in the master: "+(bomAppr.lines||[]).map(bomKeyText).join("; ")) : null,
+              bomDlg ? h(BomMasterDialog,{ key:JSON.stringify([bomDlg.kind,bomDlg.add.length,bomDlg.chg.length,bomDlg.del.length]), kind:bomDlg.kind, model:bomDlg.model, sub:bomDlg.sub, add:bomDlg.add, chg:bomDlg.chg, del:bomDlg.del, busy:bomBusy,
+                onClose:()=>{ if(bomDlg.kind==="so") logAudit("UPDATE","bom",bomDlg.model,"Master BOM NOT updated (Not now) "+bomDlg.srcNote,user?.username||"",null,null); setBomDlg(null); },
+                onApply:async(picks)=>{ const d = bomDlg; setBomBusy(true);
+                  try{
+                    if(d.kind==="so"){ const r = await bomApplyMaster(d.model, d.item, d.size, picks, d.srcNote, user?.username||"");
+                      if(r.err){ alert("The master BOM was not fully updated: "+r.err+(/src_note|bom_appr/.test(r.err)?"\n\nRun "+BOM_SQL+" first.":"")); }
+                      else { appToast("✓ Master BOM of "+d.model+" updated: "+r.added+" added, "+r.changed+" changed, "+r.removed+" removed"); try{ const { data } = await sb.from("bom").select("*").eq("model",d.model); setBomForModel(data||[]); }catch(x){} setBomDlg(null); } }
+                    else if(d.kind==="approve"){
+                      const me = user?.employee_name || user?.username || "";
+                      const { error } = await sb.from("estimates").update({ bom_appr_state:"approved", bom_appr_by:me, bom_appr_at:new Date().toISOString() }).eq("id",d.est.id).eq("bom_appr_state","pending");
+                      if(error){ alert("Could not approve: "+error.message); }
+                      else { await notifDone("bomappr:"+d.est.id, user?.username||""); await logAudit("UPDATE","estimates",d.est.reference_number+"-"+d.est.item_sl_no,"BOM approved by the Technical Head (lines not in the master: "+d.add.map(bomKeyText).join("; ")+")",user?.username||"",null,null);
+                        appToast("✓ BOM of Sl No "+d.est.item_sl_no+" approved"); await loadBomAppr(d.est); setBomDlg(null); } }
+                  }finally{ setBomBusy(false); } } }) : null,
               h("div",{ref:quoteTopScrollRef,onScroll:syncQuoteScrollFromTop,style:{overflowX:"auto",overflowY:"hidden",height:14}},
                 h("div",{style:{height:1,width:quoteMeasuredWidth||quoteColWidths.reduce((a,b)=>a+b,0)}})
               ),
@@ -22386,7 +22609,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
                     ),
                     h("td",{style:{padding:"5px 6px",whiteSpace:"nowrap",pointerEvents:"auto"}},
                       h("div",{style:{display:"flex",gap:4}},
-                        mode==="contract" && !soOpenLine(key) ? h("button",{onClick:()=>soStart(key),title:isAdmin?"Edit this line (no code needed)":"Only an admin can correct an issued Sale Order's BOM",style:{background:"#fff",border:"0.5px solid "+colors.border,borderRadius:4,padding:"4px 8px",fontSize:11,cursor:"pointer",opacity:isAdmin?1:0.5}},"✎") : null,   // 224
+                        mode==="contract" && !soOpenLine(key) ? h("button",{onClick:()=>soStart(key),title:soCan?"Edit this line (no code needed)":"Only the Technical Head, an admin or a super admin can correct an issued Sale Order's BOM",style:{background:"#fff",border:"0.5px solid "+colors.border,borderRadius:4,padding:"4px 8px",fontSize:11,cursor:"pointer",opacity:isAdmin?1:0.5}},"✎") : null,   // 224
                         isDirty&&!isSaving&&h("button",{onClick:()=>saveLineEdit(l),style:{background:"#e1f5ee",color:"#0f6e56",border:"0.5px solid #9fe1cb",borderRadius:4,padding:"4px 8px",fontSize:11,cursor:"pointer"}},"Save"),
                         h("button",{
                           title:"Refresh this line's price to the current rate",
@@ -22633,9 +22856,13 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           ) : h(React.Fragment,null,
           // Cascading combos
           h("div",{style:{display:"flex",gap:10,marginBottom:10,flexWrap:"wrap"}},
-            fld("Sub assembly","(from model)",sel(addSubAssembly,v=>{setAddSubAssembly(v);setAddComponent("");setAddSpec("");setAddGrade("");},subAssemblyOptions,"All sub-assemblies")),
-            fld("Component","(filters by sub-assembly)",sel(addComponent,v=>setAddComponent(v),componentOptions,"Select…"))
+            // 2026-10-31T08:00:00Z: pick from the model's master, or type a new one (a quote then goes for the Technical Head's BOM approval)
+            fld("Sub assembly","(from model, or type a new one)",h(LimitToListCombo,{value:addSubAssembly,limitToList:false,onChange:v=>{ if(v!==addSubAssembly){ setAddSubAssembly(v); setAddComponent(""); setAddSpec(""); setAddGrade(""); } },options:subAssemblyOptions,placeholder:"Sub-assembly",style:{...inputStyle,padding:"7px 9px",fontSize:12}})),
+            fld("Component","(filters by sub-assembly, or type a new one)",h(LimitToListCombo,{value:addComponent,limitToList:false,onChange:v=>setAddComponent(v),options:componentOptions,placeholder:"Component",style:{...inputStyle,padding:"7px 9px",fontSize:12}}))
           ),
+          addComponent && !bomForModel.some(r=>bomKey(r)===bomKey({ sub_assembly:addSubAssembly, component:addComponent })) ? h("div",{"data-testid":"bom-new-line-note",style:{background:"#fff4d6",borderRadius:6,padding:"7px 10px",fontSize:11.5,color:"#5a3a00",marginBottom:10,display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}},
+            h("span",{style:{flex:1,minWidth:220}}, h("b",null,"Not in the master BOM of "+(addModel||"this model")+". "), mode==="contract" ? "When you press ✓ Done editing you'll be asked whether to add it to the master." : "Nothing goes to the master: this Sl No's BOM goes to "+postPersonText("technical_head")+" for approval, and the quote's PDF prints DRAFT until then."),
+            fld("Shape",null,h(LimitToListCombo,{value:addShape,limitToList:false,onChange:v=>setAddShape(v),options:Array.from(new Set(bomForModel.map(r=>r.material_shape).filter(Boolean))).sort(),placeholder:"e.g. Plate",style:{...inputStyle,padding:"6px 8px",fontSize:12,width:160}}))) : null,
           h("div",{style:{display:"flex",gap:10,marginBottom:10,flexWrap:"wrap"}},
             fld("Material spec","(from component)",sel(addSpec,v=>setAddSpec(v),specOptions,"Select…")),
             fld("Grade (MOC)","(from material spec)",
@@ -34451,6 +34678,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"31 Oct 2026 (280)", summary:"Built on 2026-10-31T08:00:00Z, on top of 2026-10-31T06:00:00Z. SQL: structure_bom_master_backupdate_2026-10-31.sql (structure, both companies). SALE ORDER BOM → MASTER: the Technical Head post holders (as well as admins and super admins) can ✎ Edit BOM of an issued Sale Order, no code. On ✓ Done editing, the lines touched that differ from the model's master BOM open one box: NEW lines (\u201cAdd all N?\u201d — Yes adds them all, No lets you tick), CHANGED lines (old → new, ticked) and REMOVED lines (unticked). Update master writes the ticked ones with \u201cfrom Sale Order … / Sl No … · name · date · reason\u201d; Not now leaves the master alone. No code; nobody is told; every change is in the audit log. QUOTE: Add line now takes a Sub-assembly / Component not in the master (type it; a Shape box appears). Nothing goes to the master: the Sl No's BOM goes to the Technical Head post holders for approval (bell, Pending Actions); the quote carries on and its PDF prints DRAFT, with a band naming the Sl Nos, until Review & approve BOM is pressed on the Sl No. No codes. NO DUPLICATES: a quote / Sale Order BOM and the master BOM refuse the same Sub-assembly + Component twice (add, edit, edit all)." },
   { date:"31 Oct 2026 (279)", summary:"Built on 2026-10-31T06:00:00Z, on top of 2026-10-30T16:30:00Z (batch Deepak). SQL: structure_order_board_deepak_2026-10-31.sql (structure, both companies). ORDER STATUS BOARD — NEW FLOW, 7 columns: Under production → Ready – DC & packing slip (the Production Manager makes the DC and packing slip from the board) → With QC (clearance letter + QC documents; issuing it sends the DC to Accounts) → With Accounts (despatch clearance = approve and number, or Hold) → Clearance given (Stores: gate pass, despatch, hand-over) → Despatched – payment awaited (Accounts) → Payment received. QC objects or Accounts holds → back to the Production Manager with the reason; after a hold, Done in the DC goes straight back to Accounts. Stores' hand-over needs the gate pass Exited with its signed scan linked, and an LR / AWB — or, for own vehicle / hand delivery, the customer's signed DC acknowledgement. Non-lot DCs stay with Stores. DRAG: drag a card to the next column — the move is done, or its button lights up; QC can drag back to column 2, Accounts back from column 4; placed old contracts drag forward. Old placements are re-numbered to the 7 columns by the SQL. BACK TO THE BOARD: '← Back to the Order Status board' after Open the Sale Order / contract, and after Open Gate Passes; the DC opens over the board with ← Back to the lot. DOCUMENTS GATEWAY: 📎 on every lot card and in the lot — QC documents (QC Head) and shipping documents (Stores, Production Manager, Accounts). TABLE view with Excel and PDF; DASHBOARD (cards per column by days waiting, waiting on whom, average days per step, longest waiting, lots made / despatched / paid this month, payment awaited and overdue). RECEIVER: the bell as before, a ⚑ Order Status flag in the top bar (amber, red after a day), a 'waiting on you' dialog when the app opens (once per login per opening), and a '⚑ waiting on you' strip on the board." },
   { date:"30 Oct 2026 (278)", summary:"Built on 2026-10-30T16:30:00Z, on top of 2026-10-30T15:00:00Z. SQL (already run): structure_serial_register_2026-10-30.sql (both companies), data_serial_register_load_FLOMETRIQ_2026-10-30 parts 1-9 (Flometriq). SERIAL NUMBER REGISTER: a new QC tab in the ribbon, QC → Serial Number Register. Every product serial, one row each, with contract, Sl No, client, item, size, description, who gave it and when, and the DC it went on. Find by serial, contract, client, item or size; Excel export. NEW ENTRY (QC logins, the QC post, QC department, Super Admins): type the contract number; every Sl No gets serials equal to its order quantity less what was given before, spares too; client, item, size and description come from the Sale Order; one press gives the next numbers in one block. New numbers start at 29641 (the Excel ended at 29140, +500 kept spare). The database hands out the numbers, so two people at once never get the same one. The Excel from 1 Nov 2023 is in: semi-legacy (contract in the app, matched to its Sl No where possible) and legacy (contract not in the app). Everyone can look; only QC gives. DC: the serial column now fills from the register for that contract and Sl No — enter Send now and the serials tick themselves; untick any not going in this lot. No typing. A serial not given to that Sl No, or already on another DC, is refused. Serials from the Excel with no Sl No show with a * and can be ticked on any line of that contract. Older DCs with YY-NNNNNNN serials still read as before." },
   { date:"30 Oct 2026 (277)", summary:"Built on 2026-10-30T15:00:00Z, on top of 2026-10-30T12:00:00Z. No SQL. FULL SCREEN: the app no longer goes full screen by itself on the first click — people can switch between browser tabs again. The ▴ Hide browser bars button stays in the top bar for anyone who wants the room. 📌 REFERENCE WINDOW: a new button in the top bar, on every screen, for every login. It opens a panel on the right (at the bottom on a phone) to keep a scanned bill, PO, drawing or PDF open while typing in the app. Point at any document link in the app (supplier bill, GRN scan, Drive folder, documents) and press the little 📌 Reference chip; or paste a Drive / OneDrive link; or drop / pick a file from the PC (it shows only on that screen, nothing is uploaded). Several files open as tabs; pictures can be zoomed. Drag the panel edge to make it wider. ⇱ Pop out moves it into its own window that stays on top of everything, even other programs (Chrome or Edge on a computer); other browsers get a floating window inside the page. The last 5 links are remembered for each login. Drive files show only if that person's Google login can open them; a site that refuses to show inside gets ↗ New tab." },
@@ -67895,6 +68123,9 @@ async function despPendingItems(){
   try{ (await invLutPending(P)).forEach(x=>out.push(x)); }catch(e){ console.error("LUT pending items", e); }
   try{ (await pbomPendingItems(P)).forEach(x=>out.push(x)); }catch(e){ console.error("PO release pending items", e); }   // 184c
   try{ (await accPendingItems(P)).forEach(x=>out.push(x)); }catch(e){ console.error("Accounts pending items", e); }   // 188: closing stock / lock month
+  try{ const { data: ba, error: be } = await sb.from("estimates").select("reference_number,item_sl_no,customer_name,model,bom_appr_req_at,bom_appr_lines").eq("bom_appr_state","pending");   // 2026-10-31T08:00:00Z
+    if(!be){ await loadPostPeople(); const th = postHolders("technical_head");
+      (ba||[]).forEach(r=>{ const dw = days(r.bom_appr_req_at); (th.length ? th : [""]).forEach(pn=>out.push({ what:"BOM approval — quote "+r.reference_number+" Sl No "+r.item_sl_no+(r.customer_name?" ("+r.customer_name+")":"")+": "+(r.bom_appr_lines||[]).length+" line(s) not in the master BOM of "+(r.model||"the model"), entity_key:r.reference_number, detail_key:"bomappr|"+r.reference_number+"|"+r.item_sl_no, owed_by_role:"technical_head", owed_by_person:pn, client_side:true, days_waiting:dw||null, urgency: dw>=2 ? "overdue" : "due", source:"bom_appr" })); }); } }catch(e){}
   return out;
 }
 
