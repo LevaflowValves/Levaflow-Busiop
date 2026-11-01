@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-10-31T08:00:00Z";
+  var APP_BUILD_VERSION = "2026-11-01T06:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -4804,8 +4804,8 @@ function QuoteStageTrack({ referenceNumber, customerName, current, changedAt, ch
       setBusy(true);
       try{
         if((current||"")==="Won" && st!=="Won"){
-          const { data: soList } = await sb.from("sale_order_tbl").select("contract_number").eq("quote_reference_number",referenceNumber).limit(1);
-          const so = (soList||[])[0];
+          const { data: soList } = await sb.from("sale_order_tbl").select("contract_number,status").eq("quote_reference_number",referenceNumber);
+          const so = (soList||[]).find(x=>!/cancel/i.test(x.status||""));   // 2026-10-31T10:00:00Z: a cancelled Sale Order no longer holds the quote in Won
           if(so){ alert("Can't move "+referenceNumber+" out of Won \u2014 Sale Order "+so.contract_number+" was raised from it. Cancel the Sale Order first."); return; }
           if(!confirm("Move "+referenceNumber+" from Won back to "+st+"?\n\nThe PO details and the FSE credit already captured stay on record.")) return;
         }
@@ -14478,7 +14478,7 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
     await loadPbom(); return true;
   };
   const releaseGoAhead = async(toState)=>{
-    if(!canReleaseGoAhead(user,isSalesHead||isTechHeadSO)){ noPermission("release production",{posts:["sales_head","technical_head"],roles:["super_admin"]}); return; }
+    if(!canReleaseGoAhead(user,isTechHeadSO)){ noPermission("release the work order",{posts:WO_REL_POSTS,roles:["super_admin"]}); return; }
     let bomAns = null;   // 184c
     const backward = GO_AHEAD_STATES.indexOf(toState) < GO_AHEAD_STATES.indexOf(goState||"Hold");
     let reason = null;
@@ -14535,6 +14535,11 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
     const days = String(delDays).trim()===""? null : Number(delDays);
     if(days!==null && (!isFinite(days) || days<=0)){ setDelErr("Days must be a number above zero."); return; }
     if(!delTrig){ setDelErr("Choose which event starts the delivery clock."); return; }
+    // 2026-10-31T16:00:00Z: once the Sale Order is approved, the delivery (days / what starts the clock) changes only through
+    // Amend Sale Order. The event dates (order, Code 2, advance) are still entered here.
+    { const bd = (delView && delView.delivery_days!=null) ? delView.delivery_days : contractInfo.delivery_days; const bt = (delView && delView.delivery_trigger) || contractInfo.delivery_trigger;
+      if(soAllApproved(contractInfo) && bd!=null && bt && (Number(bd)!==Number(days) || String(bt)!==String(delTrig))){
+        setDelErr("The Sale Order is approved — the delivery days and what starts the clock change only through Amend Sale Order… (the client's amendment)."); return; } }
     const needs = trigNeeds(delTrig);
     if(needs.needs_code2 && delCode2At && code2Blocked && !isAdminOrAbove){
       setDelErr("Full Hold documents are still short of Code 2 ("+(holdOpen.documents||"")+
@@ -14797,6 +14802,7 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
     if(onChanged) onChanged();
   };
   const changeStatus = async(newStatus)=>{
+    if(/cancel/i.test(newStatus||"")){ alert("An order is cancelled through Cancel order… (beside Stage) — it asks the reason and settles the lots, DCs, serials, POs and money.\n\nWho: the Sales Head, the Technical Head or a Super Admin."); return; }   // 2026-10-31T10:00:00Z
     // Open to every role (25 Aug) — status is plain progress tracking,
     // separate entirely from the three-section approval workflow above,
     // which still requires the right role/Admin to sign off.
@@ -15017,9 +15023,9 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
       // Sales Head or a Super Admin can act on it.
       goState==="Hold" && readyForGoAhead && h("span",{style:{fontSize:10.5,padding:"2px 8px",borderRadius:9,background:"#fff4d6",color:"#854f0b",fontWeight:600}},
         "Ready — work order not released"),
-      canReleaseGoAhead(user,isSalesHead||isTechHeadSO) && h("select",{value:"",disabled:goBusy,
+      canReleaseGoAhead(user,isTechHeadSO) && h("select",{value:"",disabled:goBusy,
         onChange:e=>{ const v=e.target.value; if(v) releaseGoAhead(v); },
-        title:"Only the Sales Head, the Technical Head and Super Admins see this",
+        title:"Only the Technical Head, Document Controller, VP Projects posts and Super Admins see this",
         style:{...inputStyle,padding:"2px 6px",fontSize:10.5,width:150}},
         h("option",{value:""},goBusy?"Working…":"Work order release…"),
         GO_AHEAD_STATES.filter(st=>st!==goState).map(st=>h("option",{key:st,value:st},woLabel(st)))
@@ -15100,6 +15106,8 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
       h(SoMtcAvlChip,{contractInfo,user,onChanged}),   // 237: gateway 2
       h(ProdBomApproveChip,{contractInfo,user}),   // 138 Build A
       h("div",{style:{display:"flex",alignItems:"center",gap:5,marginLeft:"auto"}},
+        h(SoAmendChip,{contractInfo,user,onChanged}),   // 2026-10-31T16:00:00Z: the amendment gateway
+        h(SoCancelChip,{contractInfo,user,onChanged}),   // 2026-10-31T10:00:00Z: the cancellation gateway
         h("span",{style:{fontSize:11,color:colors.muted}},"Stage:"),
         // Locked until all three sections are approved (27-28 Aug) —
         // approval is a GATE on whether Stage can move at all, never a
@@ -16216,6 +16224,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
   const [newSlNoInput,setNewSlNoInput]=useState("");
   const [newSlNoError,setNewSlNoError]=useState("");
   const [newSlNoStep,setNewSlNoStep]=useState("input"); // "input" | "confirm"
+  useEffect(()=>{ const f = ()=>{ setNewSlNoInput(""); setNewSlNoError(""); setNewSlNoStep("input"); setShowNewSlNoModal(true); }; window.addEventListener("flo-so-newsl", f); return ()=>window.removeEventListener("flo-so-newsl", f); },[]);   // 2026-10-31T16:00:00Z: from the amendment gateway
   const confirmNewSlNo = ()=>{
     const n = Number(newSlNoInput);
     if(!newSlNoInput.trim() || !Number.isInteger(n) || n<=0){ setNewSlNoError("Enter a whole number greater than 0."); return; }
@@ -20024,7 +20033,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
           return;
         }
         if(soBeforeOa(contractInfo.status)){   // 251: Open is before the O.A too
-          watermark = soAllApproved(contractInfo) ? false : await resolveContractDraftWatermark();   // 2026-10-30T12:00:00Z: Accounts approved = no DRAFT
+          watermark = (soAllApproved(contractInfo) && !(await amdThPending(contractInfo.contract_number))) ? false : await resolveContractDraftWatermark();   /* 2026-10-31T16:00:00Z: an amendment waiting for the Technical Head keeps DRAFT */   // 2026-10-30T12:00:00Z: Accounts approved = no DRAFT
           // Flag for O.A Sent (27-28 Aug) — offered right alongside the
           // Draft watermark decision, same moment: generating this PDF
           // IS the real-world trigger for "the Order Acceptance went
@@ -20423,7 +20432,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       // Declared before the cover block because the classic cover puts the
       // revision inside the quote-number box.
       const revMatch = quoteExportRef.match(/-Rev-(\d+)$/);
-      letterhead(isContract ? "ORDER ACCEPTANCE" : "QUOTATION");
+      letterhead(isContract ? "ORDER ACCEPTANCE"+(contractInfo && Number(contractInfo.amd_no)>0 ? " - REV "+contractInfo.amd_no : "") : "QUOTATION");   /* 2026-10-31T16:00:00Z: an amended order goes as Rev N */
       let y = classic ? CLASSIC_CONTENT_TOP+6 : 39;
       doc.setFontSize(8.5); doc.setTextColor(...dark);
       // Aligned label:value columns (24 Aug) — VALUE_X is wide enough to
@@ -20546,6 +20555,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         const poDt = first.po_date ? fmtDMY(first.po_date) : "";
         doc.setFont("times","bold"); doc.text("Ref:",12,y); doc.setFont("times","normal");
         doc.text("P.O. Number: "+poNo+(poDt?" dated "+poDt:""),24,y); y+=8;
+        if(contractInfo && Number(contractInfo.amd_no)>0){ doc.text("Amendment "+contractInfo.amd_no+(contractInfo.amd_ref?": your ref. "+contractInfo.amd_ref:"")+(contractInfo.amd_date?" dated "+fmtDMY(String(contractInfo.amd_date).slice(0,10)):""),24,y); y+=8; }   /* 2026-10-31T16:00:00Z */
         doc.setFont("times","bold"); doc.text("Sub:",12,y); doc.setFont("times","normal");
         doc.text("Our Detailed order acceptance for the above",24,y); y+=14;
       } else {
@@ -21834,8 +21844,8 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         ? {id:"mpore",label:"Reopen POs",icon:"lock-open",color:"#0c447c",onClick:qmpReopen,why:user?.role==="super_admin"?null:"Only the Super Admin can reopen a closed rate contract."}
         : {id:"mpoclose",label:"Close \u2014 no more POs",icon:"lock",color:"#8a5a00",onClick:qmpClose,why:noOpen} ] : []),
       {id:"amend",label:isSO?"Amend Sale Order":"Amend quote",icon:"git-branch",color:"#0c447c",
-        onClick:async()=>{ if(await mayAmendFreely(user, quoteHeaderRow&&quoteHeaderRow.customer_name)) setShowAmendPicker(true); else setShowAmendGate(true); },   // 153: owner, tab FSE / TC, Sales Coordinator, Admins free; others a code
-        why:noOpen||(isSO?"Amending a Sale Order isn't built yet.":null)||(!quoteHeaderRow?"The header is still loading.":null)||(quoteHeaderRow&&quoteHeaderRow.quote_status==="Draft"?"A Draft is edited directly. Amend is for a quote that has left Draft.":null)}
+        onClick:async()=>{ if(isSO){ try{ window.dispatchEvent(new Event("flo-so-amend")); }catch(x){} return; } if(await mayAmendFreely(user, quoteHeaderRow&&quoteHeaderRow.customer_name)) setShowAmendPicker(true); else setShowAmendGate(true); },   // 153: owner, tab FSE / TC, Sales Coordinator, Admins free; others a code
+        why:noOpen||(isSO?null:(!quoteHeaderRow?"The header is still loading.":null)||(quoteHeaderRow&&quoteHeaderRow.quote_status==="Draft"?"A Draft is edited directly. Amend is for a quote that has left Draft.":null))}
     ]},
     {key:"end",cap:"",row:2,push:true,items:[
       {id:"close",label:"Close",icon:"x",color:colors.danger,onClick:()=>attemptCloseOrNewQuotes("close"),why:noOpen},
@@ -25032,13 +25042,16 @@ async function createWorkOrder(contractNumber, slNos, username, note){
   return { workOrder:wo };
 }
 // 244: Sales Head, Technical Head (post) and Super Admins release work orders.
+// 2026-11-01T06:00:00Z (Uma): the W/O is released by the Technical Head, Document Controller and VP Projects posts
+// (and Super Admins). "tech" now means "holds one of these three posts"; the Sales Head no longer releases.
+const WO_REL_POSTS = ["technical_head","doc_controller","vp_projects"];
 async function woReleaserPosts(user){
   if(!user || !user.id) return { sales:false, tech:false };
   try{ const [{ data: emp },{ data: holders }] = await Promise.all([
       sb.from("employee_tbl").select("employee_name").eq("app_user_id",user.id).limit(1).maybeSingle(),
-      sb.from("post_holder_tbl").select("employee_name,post_key").in("post_key",["sales_head","technical_head"]) ]);
+      sb.from("post_holder_tbl").select("employee_name,post_key").in("post_key",["sales_head",...WO_REL_POSTS]) ]);
     const me = emp && emp.employee_name; const mine = (k)=> !!me && (holders||[]).some(x=>x.post_key===k && x.employee_name===me);
-    return { sales:mine("sales_head"), tech:mine("technical_head") }; }catch(e){ return { sales:false, tech:false }; }
+    return { sales:mine("sales_head"), tech:WO_REL_POSTS.some(mine) }; }catch(e){ return { sales:false, tech:false }; }
 }
 // 244: the ONE release routine — the Sale Order and the "orders ready" list both call it, so the rules never drift.
 // Re-reads the state first: if somebody moved it meanwhile, nothing is written. Production BOM (link or a card to the
@@ -25675,6 +25688,7 @@ async function cloneQuoteIntoContract(quoteRef, contractNumber, customerName, us
   }).select().single();
   if(error) throw error;
   await logAudit("CREATE","sale_order_tbl",contractNumber,"Contract created from Quote "+quoteRef,username||"unknown",null,null);
+  try{ setTimeout(()=>{ ospSync([String(contractNumber)], username||"App"); }, 1500); }catch(e){}   // 2026-11-01T06:00:00Z: "Make the Sale Order" closes, "Release the W/O" opens
   soTellApprovers(contractRow).catch(()=>{});   // 2026-10-28T04:00:00Z: the bell takes them to the Approve buttons
   return contractRow;
 }
@@ -26052,7 +26066,11 @@ function SaleOrderContractPicker({ user, onOpenContract, startCreate, onConsumed
       if(hit.quote_status!=="Won"){ alert("Quote "+hit.rn+" is \""+(hit.quote_status||"Draft")+"\", not Won — move it to Won first."); return; }
       setAddNumber(sc.num); setAddQuoteSearch(hit.rn+" — "+(hit.customer_name||"—"));
       basisRef.current = null;
-      setBasisGate({ num:sc.num, quoteHit:hit, prefill:{ kind: sc.po ? (/^\s*loi/i.test(sc.po)?"LOI":"PO") : "", number:sc.po||"", date:sc.poDate?String(sc.poDate).slice(0,10):"" } });
+      // 2026-11-01T06:00:00Z (Uma): the register line says PO / LOI / verbal
+      const pf = sc.basis==="LOI" ? { kind:"LOI", number:sc.loiRef||"", date:sc.loiDate?String(sc.loiDate).slice(0,10):"" }
+        : sc.basis==="Verbal" ? { kind:"LOI", number:"Verbal order — agreed by "+(sc.vBy||"")+" with "+(sc.vWith||""), date:sc.vOn?String(sc.vOn).slice(0,10):"" }
+        : { kind: sc.po ? (/^\s*loi/i.test(sc.po)?"LOI":"PO") : "", number:sc.po||"", date:sc.poDate?String(sc.poDate).slice(0,10):"" };
+      setBasisGate({ num:sc.num, quoteHit:hit, prefill:pf });
     })();
   },[startCreate]);
   const openAddFlow = async()=>{
@@ -34678,6 +34696,11 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"1 Nov 2026 (285)", summary:"Built on 2026-11-01T06:00:00Z, on top of 2026-10-31T16:00:00Z. Run structure_uma_order_stages_2026-11-01.sql first (both companies), then data_purchase_engineer_holders_FLOMETRIQ_2026-11-01.sql (Flometriq). UMA: a new Contract Register line says what the client gave — Purchase Order (number and date mandatory), LOI (ref and date) or verbal order (who agreed, with whom, when). Saving it gives the Document Controller and Technical Head posts a Make the Sale Order task (3 working days), then daily to the Sales Head, VP Projects and Technical Head posts. LOI / verbal orders are chased for the PO: PO awaited on the register (Log a chase, Add PO…), a daily list to the Sales Coordinator, Sales Head and Super Admins, a chase task to the area FSE, and daily to the Sales Head and VP Projects after 7 days. Billing is allowed meanwhile. ORDER STATUS BOARD: six stages before production — 1 Sale Order pending, 2 W/O release, 3 BOM summary, 4 PR release (one click, Stores or Purchase Manager), 5 Purchase approval (one click, Super Admin), 6 Purchase – material in (forms at our factory; Start production by the Purchase Manager / Purchase Engineer, due 3 days once all is in) — then 7 Production in progress and the lot columns (8–13). Cards move by themselves from the data; each stage opens a task for its posts and closes the last one. A PO cannot be approved while its contract waits for PR release / purchase approval. W/O release: Technical Head, Document Controller and VP Projects posts (and Super Admins). The Procurement card goes to the Purchase Manager. One-order filter on the board. New Purchase Engineer post." },
+  { date:"31 Oct 2026 (284)", summary:"Built on 2026-10-31T16:00:00Z, on top of 2026-10-31T14:00:00Z. Run structure_so_amendment_2026-10-31.sql first (both companies). Sale Order amendment gateway (batch Babu): Amend Sale Order… on the Sale Order (and the ribbon) for the person who made it, the Document Controller post and Super Admins — no codes. Step 1 the client's amendment ref, date and link; step 2 what changes: quantity up, new Sl No, price, commercial terms, delivery, item details (quantity down goes to Cancel order); step 3 check and save. Price, terms or a new Sl No send the Commercial Terms back to Accounts; quantity up, a new Sl No or an item change go to the Technical Head (item changes after the work order allowed with that approval; undespatched lots and draft DCs of a changed item go back to production). The new price applies to everything not yet invoiced. Until approved the Sale Order prints DRAFT and Stage goes back to Open; the O.A goes as Rev N. The Sale Order as it was is kept with each amendment. Amendment N prints on the O.A, DC, packing slip, tax invoice and PI. Once approved, the delivery days and trigger change only through an amendment. One amendment at a time." },
+  { date:"31 Oct 2026 (283)", summary:"Built on 2026-10-31T14:00:00Z, on top of 2026-10-31T12:00:00Z. Data SQL (Flometriq): data_po_totals_app_FLOMETRIQ_2026-10-31.sql. PURCHASE ENTRY — PO FOOTER CHARGES (P&F, transport) NOW COUNT: the purchase screen read the PO list without total_addition, so the footer added on 23 Oct (build 252) was always 0 and a bill with P&F was refused as above the PO (e.g. PO/0522/26-27: 3,570 + P&F 2,450). It is read now: the footer counts in what is left to bill, and Fill items from PO brings the PO footer charges row. POs MADE IN THE APP save their basic value, footer and CGST / SGST / IGST again (the line that saved them had been commented out); the data SQL fills them for the app POs already made. The bill link box no longer says 'can be added within 3 days'." },
+  { date:"31 Oct 2026 (282)", summary:"Built on 2026-10-31T12:00:00Z, on top of 2026-10-31T10:00:00Z. No structure SQL (permission SQL for Selvi's Accountant post if she does not hold it). PURCHASE ENTRIES: the supplier bill link is optional — no 3-day lock-out of Accounts, no reminders to the Finance & Accounts Manager or super admins; the box stays, labelled Supplier bill link (optional). VOUCHER DATES: the go-live rule is gone — everyone who enters vouchers (Accountant post included) can enter and edit vouchers of any date in the books, before go-live too. Locked months stay locked and nothing goes before the start of the books; test books keep their own start. New vouchers open on today's date." },
+  { date:"31 Oct 2026 (281)", summary:"Built on 2026-10-31T10:00:00Z, on top of 2026-10-31T08:00:00Z. SQL: structure_order_cancellation_2026-10-31.sql (structure, both companies). ORDER CANCELLATION GATEWAY: Cancel order… beside Stage on the Sale Order — the Sales Head and Technical Head post holders and Super Admins. Whole order or part quantities (only what has not gone out; numbered DCs stay). Reason, the customer's date and letter link. What happens is listed before it is done: Stage → Cancelled (whole) or the Sl Nos' quantities drop (estimates.cancelled_qty — DCs, lots, the board and the Serial Number Register follow); lots holding the cancelled quantity and not despatched are returned and their draft DCs cancelled; draft PIs cancelled (whole); serials given and not needed kept unused with the reason; open task cards and pending steps closed (whole). Invoices / direct invoices / issued PIs / advance / numbered DCs: allowed, a Super Admin's code is needed, and Accounts gets a task card + bell. POs raised for the contract: Purchase (Purchase Manager post + PO owners) is told, reminded every day (Super Admins from day 2), and the Purchase Manager post's PDFs are stopped until each PO is settled in Cancelled orders — POs to settle (cancelled with the vendor / amended / kept for stock / other, with a note). Picking Cancelled in the Stage list now points to the gateway. FIX: a cancelled Sale Order no longer holds its quote in Won." },
   { date:"31 Oct 2026 (280)", summary:"Built on 2026-10-31T08:00:00Z, on top of 2026-10-31T06:00:00Z. SQL: structure_bom_master_backupdate_2026-10-31.sql (structure, both companies). SALE ORDER BOM → MASTER: the Technical Head post holders (as well as admins and super admins) can ✎ Edit BOM of an issued Sale Order, no code. On ✓ Done editing, the lines touched that differ from the model's master BOM open one box: NEW lines (\u201cAdd all N?\u201d — Yes adds them all, No lets you tick), CHANGED lines (old → new, ticked) and REMOVED lines (unticked). Update master writes the ticked ones with \u201cfrom Sale Order … / Sl No … · name · date · reason\u201d; Not now leaves the master alone. No code; nobody is told; every change is in the audit log. QUOTE: Add line now takes a Sub-assembly / Component not in the master (type it; a Shape box appears). Nothing goes to the master: the Sl No's BOM goes to the Technical Head post holders for approval (bell, Pending Actions); the quote carries on and its PDF prints DRAFT, with a band naming the Sl Nos, until Review & approve BOM is pressed on the Sl No. No codes. NO DUPLICATES: a quote / Sale Order BOM and the master BOM refuse the same Sub-assembly + Component twice (add, edit, edit all)." },
   { date:"31 Oct 2026 (279)", summary:"Built on 2026-10-31T06:00:00Z, on top of 2026-10-30T16:30:00Z (batch Deepak). SQL: structure_order_board_deepak_2026-10-31.sql (structure, both companies). ORDER STATUS BOARD — NEW FLOW, 7 columns: Under production → Ready – DC & packing slip (the Production Manager makes the DC and packing slip from the board) → With QC (clearance letter + QC documents; issuing it sends the DC to Accounts) → With Accounts (despatch clearance = approve and number, or Hold) → Clearance given (Stores: gate pass, despatch, hand-over) → Despatched – payment awaited (Accounts) → Payment received. QC objects or Accounts holds → back to the Production Manager with the reason; after a hold, Done in the DC goes straight back to Accounts. Stores' hand-over needs the gate pass Exited with its signed scan linked, and an LR / AWB — or, for own vehicle / hand delivery, the customer's signed DC acknowledgement. Non-lot DCs stay with Stores. DRAG: drag a card to the next column — the move is done, or its button lights up; QC can drag back to column 2, Accounts back from column 4; placed old contracts drag forward. Old placements are re-numbered to the 7 columns by the SQL. BACK TO THE BOARD: '← Back to the Order Status board' after Open the Sale Order / contract, and after Open Gate Passes; the DC opens over the board with ← Back to the lot. DOCUMENTS GATEWAY: 📎 on every lot card and in the lot — QC documents (QC Head) and shipping documents (Stores, Production Manager, Accounts). TABLE view with Excel and PDF; DASHBOARD (cards per column by days waiting, waiting on whom, average days per step, longest waiting, lots made / despatched / paid this month, payment awaited and overdue). RECEIVER: the bell as before, a ⚑ Order Status flag in the top bar (amber, red after a day), a 'waiting on you' dialog when the app opens (once per login per opening), and a '⚑ waiting on you' strip on the board." },
   { date:"30 Oct 2026 (278)", summary:"Built on 2026-10-30T16:30:00Z, on top of 2026-10-30T15:00:00Z. SQL (already run): structure_serial_register_2026-10-30.sql (both companies), data_serial_register_load_FLOMETRIQ_2026-10-30 parts 1-9 (Flometriq). SERIAL NUMBER REGISTER: a new QC tab in the ribbon, QC → Serial Number Register. Every product serial, one row each, with contract, Sl No, client, item, size, description, who gave it and when, and the DC it went on. Find by serial, contract, client, item or size; Excel export. NEW ENTRY (QC logins, the QC post, QC department, Super Admins): type the contract number; every Sl No gets serials equal to its order quantity less what was given before, spares too; client, item, size and description come from the Sale Order; one press gives the next numbers in one block. New numbers start at 29641 (the Excel ended at 29140, +500 kept spare). The database hands out the numbers, so two people at once never get the same one. The Excel from 1 Nov 2023 is in: semi-legacy (contract in the app, matched to its Sl No where possible) and legacy (contract not in the app). Everyone can look; only QC gives. DC: the serial column now fills from the register for that contract and Sl No — enter Send now and the serials tick themselves; untick any not going in this lot. No typing. A serial not given to that Sl No, or already on another DC, is refused. Serials from the Excel with no Sl No show with a * and can be ticked on any line of that contract. Older DCs with YY-NNNNNNN serials still read as before." },
@@ -43051,7 +43074,9 @@ pgPurchaseDept();
 async function pgCreateTasks(plan, me, dept){
   const pdept = await pgPurchaseDept();
   const base = { assignee:null, department:pdept, labels:["Procurement"], links:[], ref:plan.contract_number, customer:plan.client||null, created_by:me||"", status:"open", proc_plan_id:plan.id };
-  const { data: card, error } = await sb.from("task_tbl").insert({ ...base, title:"Procurement — "+plan.contract_number+(plan.client?" "+plan.client:""), checklists:[], notes:"Procurement Gantt for contract "+plan.contract_number+" (Purchase → Procurement Gantt). Dates are kept in step with the Gantt." }).select().single();
+  try{ await loadPostPeople(true); }catch(e){}
+  const pmHolder = postHolders("purchase_manager")[0] || null;   // 2026-11-01T06:00:00Z: the Procurement card goes straight to the Purchase Manager post
+  const { data: card, error } = await sb.from("task_tbl").insert({ ...base, assignee:pmHolder, title:"Procurement — "+plan.contract_number+(plan.client?" "+plan.client:""), checklists:[], notes:"Procurement Gantt for contract "+plan.contract_number+" (Purchase → Procurement Gantt). Dates are kept in step with the Gantt." }).select().single();
   if(error){ console.error("Procurement card", error); alert("The plan is made, but its task card could not be created:\n\n"+error.message+"\n\nHas the build-139 SQL been run?"); return null; }
   await taskLog(card.id, me, "Created by the Procurement Gantt for contract "+plan.contract_number);
   return card;
@@ -43288,7 +43313,8 @@ async function pgMakePlan(row, user, how){
   }
   const card = await pgCreateTasks(p, me, emp && emp.department);
   if(card) await pgSyncTasks(p.id, me);
-  await pgNotifyPurchase("Contract "+p.contract_number+(p.client?" ("+p.client+")":"")+": Procurement Gantt made ("+how+") — its card is in the "+PG_PURCHASE_DEPT+" Unassigned pile for the daily review.", null);
+  await pgNotifyPurchase("Contract "+p.contract_number+(p.client?" ("+p.client+")":"")+": Procurement Gantt made ("+how+") — its card is with the Purchase Manager ("+(postHolders("purchase_manager")[0]||"post vacant")+"). Next on the Order Status board: PR release (Stores / Purchase Manager), then purchase approval (Super Admin).", null);
+  try{ setTimeout(()=>{ ospSync([String(p.contract_number)], me||"App"); }, 1000); }catch(e){}   // 2026-11-01T06:00:00Z
   return p;
 }
 
@@ -55736,6 +55762,8 @@ function App() {
   useEffect(()=>{ const f = (e)=>{ const d = (e && e.detail)||{};   // 2026-10-31T06:00:00Z: "← Back to the Order Status board" (or any screen) after a jump
       setNavBack({ label:d.label||"\u2190 Back", go:()=>{ if(d.oslot) window.__osOpenLot = d.oslot; setTab(d.tab||"home"); setTimeout(()=>{ try{ window.dispatchEvent(new CustomEvent("flo-open-tab",{ detail:{ tab:d.tab } })); }catch(x){} },30); } }); };
     window.addEventListener("flo-navback", f); return ()=>window.removeEventListener("flo-navback", f); },[]);
+  const [socPos,setSocPos] = useState(false);   // 2026-10-31T10:00:00Z: POs of cancelled orders
+  useEffect(()=>{ const f = ()=>setSocPos(true); window.addEventListener("flo-socancel-pos", f); return ()=>window.removeEventListener("flo-socancel-pos", f); },[]);
   const [osPopTick,setOsPopTick] = useState(0);   // 2026-10-31T06:00:00Z: the waiting-on-you dialog, once per opening of the app per login
   const osPopKey = ()=> "flo_os_popup_"+((user && user.username)||"");
   const showOsPopup = (()=>{ void osPopTick; try{ return !!user && sessionStorage.getItem(osPopKey())!=="1"; }catch(e){ return !!user; } })();
@@ -55776,6 +55804,7 @@ function App() {
   // line seeds Quotes Report's filters before navigating there.
   const [dashboardDrillFilters,setDashboardDrillFilters]=useState(null);
   const [soStart,setSoStart]=useState(null);   // 171: Sale Order + from the Contract Register
+  useEffect(()=>{ const f = (e)=>{ if(e && e.detail){ setSoStart(e.detail); setTab("sale_order_entry"); } }; window.addEventListener("flo-so-start", f); return ()=>window.removeEventListener("flo-so-start", f); },[]);   // 2026-11-01T06:00:00Z: Sale Order + from the Order Status board
   const [screenKey,setScreenKey]=useState(0);  // 171: ↻ Refresh re-reads the screen
   // Sale Order / Contract (24 Aug) — its own top-level tab, reusing the
   // exact SavedEstimates screen in mode="contract". saleOrderTarget is the
@@ -56113,6 +56142,7 @@ function App() {
       h("button",{onClick:()=>setMyDayBack(false),title:"Dismiss",style:{background:"transparent",border:"none",color:"#ffe9b8",fontSize:15,padding:"6px 12px 6px 6px",cursor:"pointer"}},"\u00d7")),
     (user.role==="admin"||user.role==="super_admin") && showBillingOverrideReminder && h(IncompleteSaleOrderReminder,{user,onDone:dismissBillingOverrideReminder,onOpenContract:openContract}),
     showQuoteOwnerAlerts && h(QuoteStatusOwnerAlerts,{user,onDone:()=>setShowQuoteOwnerAlerts(false)}),
+    socPos && h(SoCancelPoDialog,{ user, onClose:()=>setSocPos(false) }),
     showOsPopup && !(showMyDay && myDay && myDayHasEmp && (myDayForced || isFseOrTelecaller || ((myDayCounts(myDay).tkOver+myDayCounts(myDay).tkToday+myDayCounts(myDay).pile)>0 && !(showOverduePrompt && !overduePromptEmpty && !isFseOrTelecaller)))) && h(OsWaitingPopup,{user,onClose:closeOsPopup}),
     returnToReport && tab!=="quotes_report" && h("div",{style:{position:"fixed",left:16,bottom:16,zIndex:1100,display:"flex",alignItems:"center",gap:2,
         background:"#0f6e56",borderRadius:22,boxShadow:"0 4px 14px rgba(0,0,0,0.18)"}},
@@ -56121,7 +56151,7 @@ function App() {
       h("button",{onClick:()=>setReturnToReport(false),title:"Dismiss",
         style:{background:"transparent",border:"none",color:"#cfeee3",fontSize:15,padding:"6px 12px 6px 6px",cursor:"pointer"}},"\u00d7")
     ),
-    (isSalesHeadUser||isTechHeadUser||user.role==="super_admin") && showGoAheadPrompt && h(GoAheadPendingPrompt,{user,onDone:dismissGoAheadPrompt,onOpenContract:openContract}),
+    (isTechHeadUser||user.role==="super_admin") && showGoAheadPrompt && h(GoAheadPendingPrompt,{user,onDone:dismissGoAheadPrompt,onOpenContract:openContract}),
     showWorkOrderFlags && h(WorkOrderFlagPrompt,{user,onDone:()=>setShowWorkOrderFlags(false)}),
     (isSalesCoordinatorUser||isSalesHeadUser||user.role==="super_admin") && showLoiPrompt && h(LoiPoAwaitedPrompt,{onDone:dismissLoiPrompt,onOpenContract:openContract}),
     (user.role==="admin"||user.role==="super_admin") && showDocSequenceReminder && h(DocumentSequenceReminder,{onDone:dismissDocSequenceReminder}),
@@ -56688,6 +56718,8 @@ async function stepLoadMine(user, force){
   try{ const { data, error } = await sb.from("pending_step_tbl").select("*").eq("owner",name).is("done_at",null).is("closed_at",null); if(!error) rows = data||[]; }catch(e){}
   try{ await avlLoadMine(user, name); }catch(e){}   // 237
   try{ await oaLoadMine(user); }catch(e){}   // 2026-10-30T12:00:00Z
+  try{ await socLoadMine(user); }catch(e){}   // 2026-10-31T10:00:00Z
+  try{ ospSyncSoon(user); }catch(e){}   // 2026-11-01T06:00:00Z: the order stages (tasks, escalations, PO chase), at most every 30 min
   STALE_ME = { user:user.username, name, rows, at:Date.now() };
   try{ window.dispatchEvent(new CustomEvent("flo-stale-changed")); }catch(e){}
   return STALE_ME;
@@ -56801,7 +56833,7 @@ function stepShowBlocked(rows){
     box.querySelector("#flo-stale-open").onclick = ()=>{ wrap.remove(); appOpenTab("stale_items"); };
   }catch(e){ alert("No PDFs until your stale items are cleared — Tasks → Stale Items says what to do."); }
 }
-function stepPdfAllowed(){ if(!stepPdfAllowedStale()) return false; try{ return avlPdfAllowed() && oaPdfAllowed(); }catch(e){ return true; } }   // 2026-10-30T12:00:00Z: + the O.A block   // 237: + the AVL-link block
+function stepPdfAllowed(){ if(!stepPdfAllowedStale()) return false; try{ return avlPdfAllowed() && oaPdfAllowed() && socPdfAllowed(); }catch(e){ return true; } }   // 2026-10-31T10:00:00Z: + POs of cancelled orders (Purchase Manager)   // 2026-10-30T12:00:00Z: + the O.A block   // 237: + the AVL-link block
 function stepPdfAllowedStale(){
   const st = (STALE_ME.rows||[]).filter(stepIsStale);
   if(!st.length) return true;
@@ -56824,7 +56856,7 @@ function StaleWatch({ user }){
   useEffect(()=>{ if(!user) return; let dead = false;
     (async()=>{ const k = "staleSweep|"+user.username; let first = true; try{ if(sessionStorage.getItem(k)) first = false; else sessionStorage.setItem(k,"1"); }catch(e){}
       if(first) await stepSweep(user.username);
-      if(!dead) oaSweep(); /* 2026-10-30T12:00:00Z */ if(!dead) diSweep(user.username); /* 247: direct invoice approvals — reminders and overdue bells */ if(!dead) pettySweep(user.username); /* 248 */ if(!dead) accSalesSweep(user.username); /* 249 */ if(!dead) await stepLoadMine(user, true); if(!dead) billSweepOnce(user); if(first && !dead) purDocsReminderSweep(); })();   // 217   // 212: advance-PI cards, send steps
+      if(!dead) oaSweep(); /* 2026-10-30T12:00:00Z */ if(!dead) socSweep(); /* 2026-10-31T10:00:00Z */ if(!dead) diSweep(user.username); /* 247: direct invoice approvals — reminders and overdue bells */ if(!dead) pettySweep(user.username); /* 248 */ if(!dead) accSalesSweep(user.username); /* 249 */ if(!dead) await stepLoadMine(user, true); if(!dead) billSweepOnce(user); if(first && !dead) purDocsReminderSweep(); })();   // 217   // 212: advance-PI cards, send steps
     const t = setInterval(()=>{ stepLoadMine(user, true); }, 120000);
     return ()=>{ dead = true; clearInterval(t); }; },[user && user.username]);
   return null;
@@ -58204,6 +58236,7 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
         const r = await sb.from("po_register").update(head).eq("id",po.id).select().single(); if(r.error){ if(/subject|nde|mtc|notes_list|charge_basis/.test(r.error.message||"")) throw new Error("Run structure_po_like_sale_order_2026-10-20.sql first (both companies)."); throw r.error; } p = r.data;
         await logAudit("UPDATE","po_register",p.po_no,"PO saved (Draft)",user.username||"");
       }
+      try{ await sb.from("po_register").update({ total_amt:t.basic, total_addition:t.add, cgst_amt:t.cgst, sgst_amt:t.sgst, igst_amt:t.igst }).eq("id",p.id); }catch(e){}   // 2026-10-31T14:00:00Z: basic / footer / taxes stored again
       await sb.from("po_register_items").delete().eq("po_no",p.po_no).or("source.is.null,source.neq.FFS");
       const rows = lines.map((l,i)=>{ const a = purLineAmt(l); const k = sugKey(l); const sg = sug[k]||null;
         return { po_no:p.po_no, sl: Number(po.rev)>0 ? (Number(l.sl)||i+1) : i+1, line_kind:l.line_kind||"item", shape:l.shape||null, spec:l.spec||null, grade:l.grade||null, size:l.size||null,
@@ -58244,6 +58277,8 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
   };
   const approve = async(which, stagesIn)=>{   // 237: the Purchase Manager's approval completes it; a 3.2 PO needs its inspection stages
     if(dirty){ alert("Save first."); return; }
+    { const g = await ospPurGate(po.contract_ref, po.po_no);   // 2026-11-01T06:00:00Z: no PO release before the Super Admin approves the purchase
+      if(!g.ok){ alert("Contract "+g.cn+" is waiting for "+(g.stage==="pr"?"its PR release (Stores / Purchase Manager) and then ":"")+"the purchase approval (Super Admin) on the Order Status board.\n\n"+po.po_no+" can stay a draft and be edited; it can be approved once the purchase is approved."); return; } }
     const m = po.mtc||{};
     if(po.po_kind!=="SPO" && mtcIs32(m) && !mtcStagesOk(stagesIn ? { ...m, stages:stagesIn } : m)){
       const rs = (m.stages||[]).length ? m.stages.map(x=>({ ...x })) : (mctx && mctx.rule && (mctx.rule.stages||[]).length ? mctx.rule.stages.map(x=>({ label:x.label||"", what:x.what||"", by:x.by||"TPI", agency:x.agency||"" })) : [{ label:"Stage 1", what:"", by:"TPI", agency:"" }]);
@@ -62755,6 +62790,7 @@ function bellGo(n){
     else if(o.dc){ window.__despOpenId = o.dc; appOpenTab("despatch_dc"); }
     else if(o.di){ window.__diOpenId = o.di; appOpenTab("direct_invoices"); }
     else if(o.oslot){ window.__osOpenLot = o.oslot; appOpenTab("order_board"); }
+    else if(o.socpos){ window.dispatchEvent(new Event("flo-socancel-pos")); }   // 2026-10-31T10:00:00Z
     else if(o.tab) appOpenTab(o.tab);
   }catch(e){ console.warn("bell go", e); }
   if(n.action_kind==="act" && n.action_target) floFlash(n.action_target, notifHelpOf(n), n.action_pre);
@@ -66196,7 +66232,7 @@ async function despContract(cn, exceptDcId){
   const lines = (ests||[]).map(e=>{
     const dp = (dps||[]).find(x=>x.item_sl_no===e.item_sl_no);
     const item = dp ? (dp.item||"Custom") : (modelItem.get(e.model)||e.model||"");
-    const ordered = Number(e.order_qty)||1, sh = shipped.get(e.item_sl_no)||0; const bf = before.get(e.item_sl_no) || { qty:0, refs:[] };
+    const ordered = Math.max(0, (Number(e.order_qty)||1) - (Number(e.cancelled_qty)||0)), sh = shipped.get(e.item_sl_no)||0; const bf = before.get(e.item_sl_no) || { qty:0, refs:[] };   // 2026-10-31T10:00:00Z: ordered = less what was cancelled
     return { item_sl_no:e.item_sl_no, item, description:e.description||"", hsn:hsnByItem.get(String(item).trim().toLowerCase())||"", ordered, shipped:sh, before:bf.qty, beforeRefs:bf.refs, balance:Math.max(0, ordered-bf.qty-sh), customer_tag:e.tag_number||"" };
   });
   const head = (ests||[])[0]||{};
@@ -66205,7 +66241,7 @@ async function despContract(cn, exceptDcId){
   const isExport = currency!=="INR" || (!!country && !/^india$/i.test(country));
   const buyerAddr = (so&&so.billing_address) || (company ? [company.billing_street||company.street, company.billing_city||company.city, company.billing_state||company.state, company.billing_pin||company.pin, country].filter(Boolean).join(", ") : "");
   return { cn, so, ests:ests||[], lines, despatch:dd||null, company, customer:cust, isExport, currency, country,
-    buyerAddr, buyerGstin: company ? (company.gst_tax_id||"") : "", oaShip:(so&&so.shipping_address)||"", po_number:head.po_number||"", po_date:head.po_date||"",
+    buyerAddr, buyerGstin: company ? (company.gst_tax_id||"") : "", oaShip:(so&&so.shipping_address)||"", po_number:(head.po_number||"")+(so && Number(so.amd_no)>0 ? " / Amendment "+so.amd_no+(so.amd_ref?" ("+so.amd_ref+(so.amd_date?" dt "+fmtDMY(String(so.amd_date).slice(0,10)):"")+")":"") : ""), po_date:head.po_date||"",   /* 2026-10-31T16:00:00Z: DC, packing slip, invoice, PI print the amendment */
     dcCount:(dcs||[]).filter(d=>d.status!=="Cancelled" && !d.is_test).length };
 }
 function despDetailsComplete(dd, isExport){
@@ -66540,9 +66576,10 @@ async function qcsrCanGive(user){
 }
 // serials (as text) of a contract from the register, and which are already on a DC: { rows, onDc: Map serial -> dc_id }
 async function qcsrForContract(cn, exceptDcId){
-  const { data, error } = await sb.from("qc_serial_register_tbl").select("serial,item_sl_no,kind").eq("contract_number",String(cn||"").trim()).order("serial");
+  let { data, error } = await sb.from("qc_serial_register_tbl").select("serial,item_sl_no,kind,void_at").eq("contract_number",String(cn||"").trim()).order("serial");
+  if(error && /void_at/.test(error.message||"")) ({ data, error } = await sb.from("qc_serial_register_tbl").select("serial,item_sl_no,kind").eq("contract_number",String(cn||"").trim()).order("serial"));
   if(error) return { rows:[], onDc:new Map(), missing:true };
-  const rows = data||[]; const onDc = new Map();
+  const rows = (data||[]).filter(r=>!r.void_at); const onDc = new Map();   // 2026-10-31T10:00:00Z: serials kept unused (order cancelled) are never picked
   const keys = Array.from(new Set(rows.map(r=>String(r.serial))));
   for(let i=0;i<keys.length;i+=300){
     const { data: u } = await sb.from("dc_serial_tbl").select("serial,dc_id").in("serial", keys.slice(i,i+300));
@@ -66584,7 +66621,7 @@ function QcSerialRegister({ user }){
   const btn = { ...btnSecondary, padding:"6px 12px", fontSize:12.5 };
   const toExcel = ()=>{
     const out = list.map(r=>({ Serial:r.serial, Contract:r.contract_number||"", "Sl No":r.item_sl_no??"", Client:r.client||"", Item:r.item||"", Size:r.size||"", Description:r.description||"",
-      "Given on":r.given_on||"", "Given by":r.given_by||"", Kind:(QCSR_KIND[r.kind]||[r.kind])[0], DC:dcOf.get(String(r.serial))||"", "Excel row":r.xl_row??"", "Client in Excel":r.xl_client||"", Note:r.match_note||"" }));
+      "Given on":r.given_on||"", "Given by":r.given_by||"", Kind:(QCSR_KIND[r.kind]||[r.kind])[0]+(r.void_at?" — unused: "+(r.void_reason||""):""), DC:dcOf.get(String(r.serial))||"", "Excel row":r.xl_row??"", "Client in Excel":r.xl_client||"", Note:r.match_note||"" }));
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(out), "Serials"); XLSX.writeFile(wb, "serial_number_register.xlsx");
   };
   if(view==="new") return h(QcSerialNew,{ user, rows, nextNo, onBack:()=>setView("list"), onDone:()=>{ load(); } });
@@ -66614,7 +66651,7 @@ function QcSerialRegister({ user }){
           td(h("b",null,r.serial),mono), td(r.contract_number||"—",mono), td(r.item_sl_no??"—",mono), td(r.client||"—"), td(r.item||"—"), td(r.size||"—",mono),
           td(h("div",{style:{minWidth:200,maxWidth:380}}, r.description||"—", r.match_note && r.kind!=="new" ? h("div",{style:{fontSize:11,color:/check|twice/i.test(r.match_note)?"#854f0b":colors.mutedLight}},r.match_note+(r.xl_row?" · Excel row "+r.xl_row:"")) : null)),
           td(h("div",{style:{whiteSpace:"nowrap"}}, r.given_by||"—", h("div",{style:{fontSize:11,color:colors.muted}}, qcsrDate(r.given_on)))),
-          td(qcsrKindPill(r.kind)), td(dcOf.get(String(r.serial))||"—",mono))))),
+          td(h("div",null, qcsrKindPill(r.kind), r.void_at ? h("div",{title:r.void_reason||"",style:{fontSize:10.5,fontWeight:700,color:"#a3312a",marginTop:2}},"Unused — "+String(r.void_reason||"").slice(0,40)) : null)), td(dcOf.get(String(r.serial))||"—",mono))))),   // void: 2026-10-31T10:00:00Z
       list.length>show ? h("div",{style:{padding:8,textAlign:"center"}}, h("button",{onClick:()=>setShow(s=>s+500),style:btn},"Show more ("+(list.length-show)+" left)")) : null,
       !list.length ? h("div",{style:{padding:14,color:colors.muted,fontSize:12.5}},"Nothing matches.") : null));
 }
@@ -67037,7 +67074,7 @@ function DcEditor({ user, me, P, S, dcId, contract, lot, onClose, onChanged }){
 // -> QC (clearance letter + QC documents) -> Accounts (despatch clearance = DC approved and numbered) -> Stores (gate pass,
 // despatch, hand-over to Accounts) -> payment. Non-lot DCs (returnable, scrap, sale DCs outside the board) stay with Stores.
 const OS_COLS = [
-  { n:1, key:"prod",  label:"Under production",             sub:"Production Manager",            tone:["#eef2f7","#2f4f7a"] },
+  { n:1, key:"prod",  label:"Production in progress",       sub:"Production Manager",            tone:["#eef2f7","#2f4f7a"] },
   { n:2, key:"dc",    label:"Ready – DC & packing slip",    sub:"Production Manager",            tone:["#e6f1fb","#2a6db0"] },
   { n:3, key:"qc",    label:"With QC",                      sub:"QC Head: clearance letter",     tone:["#efe9fb","#5b3fa3"] },
   { n:4, key:"acc",   label:"With Accounts",                sub:"Despatch clearance",            tone:["#fff4d6","#854f0b"] },
@@ -67053,6 +67090,7 @@ const OS_MODES = [["transport","Transporter / courier (LR / AWB)"],["own","Own v
 const osModeLabel = (m)=> (OS_MODES.find(x=>x[0]===m)||[null,""])[1];
 // Old placements (before 31 Oct) were numbered on the 6-column board; board_v = 2 rows use the 7 columns above.
 const OS_OLD2NEW = { 1:1, 2:3, 3:4, 4:5, 5:6, 6:7 };
+const OSN = (n)=> Number(n)+6;   // 2026-11-01T06:00:00Z: six columns before production come first; lot columns show as 7-13
 const osPlaceCol = (p)=> !p ? 1 : Number(p.board_v)===2 ? Number(p.col) : (OS_OLD2NEW[Number(p.col)]||Number(p.col));
 const osDmy = (d)=> d ? fmtDMY(String(d).slice(0,10)) : "";
 const osIso = ()=> new Date().toISOString();
@@ -67152,7 +67190,9 @@ async function osLoadAll(){
   // ordered quantities of the open contracts (for "x of y left")
   const open = out.sos.filter(s=>!/cancel|closed/i.test(s.status||"")).map(s=>String(s.contract_number));
   for(let i=0;i<open.length;i+=150){
-    try{ const { data } = await sb.from("estimates").select("reference_number,item_sl_no,order_qty").in("reference_number",open.slice(i,i+150)); out.ests = out.ests.concat(data||[]); }catch(e){}
+    try{ let r = await sb.from("estimates").select("reference_number,item_sl_no,order_qty,cancelled_qty").in("reference_number",open.slice(i,i+150));
+      if(r.error) r = await sb.from("estimates").select("reference_number,item_sl_no,order_qty").in("reference_number",open.slice(i,i+150));
+      out.ests = out.ests.concat(r.data||[]); }catch(e){}
   }
   if(dcIds.length){ try{ const { data } = await sb.from("invoice_tbl").select("id,invoice_no,invoice_date,dc_id,grand_total,status").in("dc_id",dcIds); out.invs = data||[]; }catch(e){} }
   return out;
@@ -67593,7 +67633,7 @@ function OsPlaceList({ data, user, me, onClose, onDone }){
       h("button",{onClick:()=>setTick(t=>{ const x = { ...t }; shown.forEach(s=>x[s.contract_number]=true); return x; }),style:btnSmall},"Tick all shown"),
       h("button",{onClick:()=>setTick({}),style:btnSmall},"Clear"),
       h("span",{style:{marginLeft:"auto",fontSize:12.5}},"Place ",h("b",null,n)," in"),
-      h("select",{value:col,"data-testid":"os-place-col",onChange:e=>setCol(e.target.value),style:{...inputStyle,width:230}}, OS_COLS.map(c=>h("option",{key:c.n,value:String(c.n)},c.n+" · "+c.label)))),
+      h("select",{value:col,"data-testid":"os-place-col",onChange:e=>setCol(e.target.value),style:{...inputStyle,width:230}}, OS_COLS.map(c=>h("option",{key:c.n,value:String(c.n)},OSN(c.n)+" · "+c.label)))),
     h("input",{value:note,onChange:e=>setNote(e.target.value),placeholder:"Note",style:{...inputStyle,marginBottom:8}}),
     h("div",{style:{maxHeight:420,overflowY:"auto",border:"1px solid "+colors.border,borderRadius:6}},
       h("table",{style:{borderCollapse:"collapse",width:"100%",fontSize:12.5}},
@@ -67604,7 +67644,7 @@ function OsPlaceList({ data, user, me, onClose, onDone }){
           h("td",{style:{padding:"4px 7px",borderBottom:"1px solid "+colors.border}},s.customer_name||""),
           h("td",{style:{padding:"4px 7px",borderBottom:"1px solid "+colors.border}},s.basis_number||""),
           h("td",{style:{padding:"4px 7px",borderBottom:"1px solid "+colors.border}},(s.status||"")+(s.go_ahead_state?" · "+woLabel(s.go_ahead_state):"")),
-          h("td",{style:{padding:"4px 7px",borderBottom:"1px solid "+colors.border,color:colors.muted}}, p ? osPlaceCol(p)+" · "+OS_COLS[osPlaceCol(p)-1].label : "1 · Under production")); })))),
+          h("td",{style:{padding:"4px 7px",borderBottom:"1px solid "+colors.border,color:colors.muted}}, p ? OSN(osPlaceCol(p))+" · "+OS_COLS[osPlaceCol(p)-1].label : "7 · Production in progress")); })))),
     h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:10}}, h("button",{onClick:onClose,style:btnSecondary},"Cancel"), h("button",{onClick:go,disabled:busy,"data-testid":"os-place-go",style:btnPrimary},busy?"Placing…":"Place "+n)));
 }
 // ---- the board ----
@@ -67661,7 +67701,7 @@ function OsDashboard({ rows, lots, dcBy, invBy }){
       panel("Cards per column, by days in the column", h("div",null,
         OS_COLS.filter(c=>c.n<7).map(c=>{ const xs = live.filter(r=>r.col===c.n); const b = [0,0,0,0]; xs.forEach(r=>b[osAgeBucket(r.days)]++);
           return h("div",{key:c.n,style:{display:"grid",gridTemplateColumns:"minmax(110px,190px) 1fr auto",gap:8,alignItems:"center",marginBottom:6,fontSize:12}},
-            h("span",null,c.n+" · "+c.label),
+            h("span",null,OSN(c.n)+" · "+c.label),
             h("div",{style:{display:"flex",height:14,background:"#f1efe6",borderRadius:4,overflow:"hidden",width:Math.max(xs.length?4:0,Math.round(100*xs.length/maxCol))+"%"}}, b.map((n,i)=> n ? h("div",{key:i,title:OS_AGE_LABELS[i]+": "+n,style:{flex:n,background:OS_AGE_TONES[i]}}) : null)),
             h("span",{style:{fontWeight:600,minWidth:34,textAlign:"right"}},xs.length)); }),
         h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",marginTop:6,fontSize:11,color:colors.muted}}, OS_AGE_LABELS.map((l,i)=>h("span",{key:i,style:{display:"flex",gap:4,alignItems:"center"}},h("span",{style:{width:10,height:10,borderRadius:2,background:OS_AGE_TONES[i],display:"inline-block"}}),l))))),
@@ -67680,10 +67720,12 @@ function OrderStatusBoard({ user, sessionCompany }){
   const [view,setView] = useNavState("os_view","board");
   const [ready,setReady] = useState(null); const [lotOpen,setLotOpen] = useState(null); const [lotIntent,setLotIntent] = useState(null); const [placeOpen,setPlaceOpen] = useState(false);
   const [dcOpen,setDcOpen] = useState(null); const [docsFor,setDocsFor] = useState(null); const [drag,setDrag] = useState(null); const [over,setOver] = useState(0);
+  const [M,setM] = useState(null); const [myKeys,setMyKeys] = useState([]); const [one,setOne] = useNavState("os_one",""); const [hidePre,setHidePre] = useNavState("os_hidepre",false); const [pBusy,setPBusy] = useState("");   // 2026-11-01T06:00:00Z
   const openLot = (id, intent)=>{ setLotIntent(intent||null); setLotOpen(id); };
   const load = useCallback(async()=>{
-    const [m, p, d, st] = await Promise.all([despMe(user), despPeople(), osLoadAll(), despSettings()]);
-    setMe(m); setP(p); setS(st||{});
+    const [m, p, d, st, mm, mk] = await Promise.all([despMe(user), despPeople(), osLoadAll(), despSettings(), ospLoad().catch(()=>null), myPostKeys(user).catch(()=>({ keys:[] }))]);
+    setMe(m); setP(p); setS(st||{}); setM(mm); setMyKeys((mk&&mk.keys)||[]);
+    if(mm && !mm.missing) ospSyncSoon(user);
     // paid in the books? (lots despatched, not yet paid)
     if(!d.err){
       const waiting = d.lots.filter(l=>l.status!=="Returned" && l.shipped_at && !l.paid_at && l.dc_id);
@@ -67714,7 +67756,7 @@ function OrderStatusBoard({ user, sessionCompany }){
   const invBy = new Map(D.invs.map(i=>[i.dc_id, i]));
   const gpBy = new Map((D.gps||[]).map(g=>[g.id, g]));
   const placeBy = new Map(D.place.map(p=>[String(p.contract_number), p]));
-  const ordered = new Map(); D.ests.forEach(e=>{ const k = String(e.reference_number); ordered.set(k,(ordered.get(k)||0)+(Number(e.order_qty)||1)); });
+  const ordered = new Map(); D.ests.forEach(e=>{ const k = String(e.reference_number); ordered.set(k,(ordered.get(k)||0)+Math.max(0,(Number(e.order_qty)||1)-(Number(e.cancelled_qty)||0))); });
   const lotsOf = new Map(); D.lots.filter(l=>l.status!=="Returned").forEach(l=>{ const k = String(l.contract_number); lotsOf.set(k,[...(lotsOf.get(k)||[]), l]); });
   const goLive = D.settings && D.settings.go_live ? String(D.settings.go_live).slice(0,10) : null;
   const placeOpenUntil = goLive ? purAddDays(goLive, Number((D.settings||{}).place_days)||30) : null;
@@ -67725,10 +67767,13 @@ function OrderStatusBoard({ user, sessionCompany }){
   const whoName = (k)=> k ? postPersonShort(OS_WHO_LABEL[k]) : "";
   // the cards, per column
   const cols = OS_COLS.map(()=>[]);
+  const pre = OSP_COLS.map(()=>[]);   // 2026-11-01T06:00:00Z: the six stages before production
+  const preMine = (k)=>{ const c = OSP_COLS.find(z=>z.k===k); if(!c) return false; if(c.sa) return isSA; if(k==="bom") return (myKeys||[]).includes("technical_head"); return (c.posts||[]).some(p=>(myKeys||[]).includes(p)); };
   D.sos.forEach(s=>{
     const cn = String(s.contract_number); if(/cancel/i.test(s.status||"")) return;
     const p = placeBy.get(cn), lots = lotsOf.get(cn)||[];
     if(p && !lots.length){
+      if(one && cn!==String(one)) return;
       const pc = osPlaceCol(p);
       if(pc===7 && !showOld && osDays(p.moved_at||p.placed_at)>30) return;
       if(!match(cn, s.customer_name, s.basis_number)) return;
@@ -67741,15 +67786,26 @@ function OrderStatusBoard({ user, sessionCompany }){
     const ord = ordered.get(cn)||0; const left = Math.max(0, ord-lotted);
     if(lots.length && left<=0) return;
     if(!match(cn, s.customer_name, s.basis_number)) return;
+    if(one && cn!==String(one)) return;
+    // 2026-11-01T06:00:00Z: before production the contract sits in the stage it has reached
+    const ps = (M && !M.missing && !lots.length) ? ospStage(cn, M) : null;
+    if(ps && ps.stage && ps.stage!=="prod"){ const ix = OSP_COLS.findIndex(c=>c.k===ps.stage);
+      if(mine && !preMine(ps.stage)) return;
+      pre[ix].push({ kind:"pre", cn, s, ps, client:s.customer_name||"" }); return; }
     if(mine && !can("pm")) return;
-    cols[0].push({ kind:"contract", cn, s, ord, left, lots, nextK:"pm", since:s.created_at });
+    cols[0].push({ kind:"contract", cn, s, ord, left, lots, nextK:"pm", since:s.created_at, ps });
   });
+  // register lines with no Sale Order yet -> 1 · Sale Order pending
+  if(M && !M.missing) M.reg.forEach((r, cn)=>{ if(soBy.has(cn)) return; const ps = ospStage(cn, M); if(ps.stage!=="so") return;
+    if(!match(cn, r.client, r.po_no||r.loi_ref)) return; if(one && cn!==String(one)) return; if(mine && !preMine("so")) return;
+    pre[0].push({ kind:"pre", cn, s:{ customer_name:r.client||"" }, ps, client:r.client||"" }); });
   D.lots.forEach(l=>{
     if(l.status==="Returned") return;
     const dc = dcBy.get(l.dc_id)||null; const c = osLotCol(l, dc); if(!c) return;
     if(c===7 && !showOld && osDays(l.paid_at)>30) return;
     const s = soBy.get(String(l.contract_number))||{};
     if(!match(l.contract_number, s.customer_name, s.basis_number)) return;
+    if(one && String(l.contract_number)!==String(one)) return;
     const nextK = osLotNext(l, dc);
     if(mine && !myKind(nextK)) return;
     cols[c-1].push({ kind:"lot", l, dc, s, nextK, since:osLotSince(l, dc) });
@@ -67817,7 +67873,7 @@ function OrderStatusBoard({ user, sessionCompany }){
           await logAudit("UPDATE","os_place_tbl",x.cn,"Moved by hand on the Order Status board to "+c+" ("+OS_COLS[c-1].label+")",user?.username||"",null,null);
           if(c===7) await osCloseContract(x.cn, x.s, user?.username, "payment received (old contract)");
           load(); },style:{...inputStyle,marginTop:6,padding:"3px 6px",fontSize:11.5}},
-          h("option",{value:""},"Move to…"), OS_COLS.filter(c=>c.n>x.pc && (can("pm") || c.n===7)).map(c=>h("option",{key:c.n,value:String(c.n)},c.n+" · "+c.label))) : null);
+          h("option",{value:""},"Move to…"), OS_COLS.filter(c=>c.n>x.pc && (can("pm") || c.n===7)).map(c=>h("option",{key:c.n,value:String(c.n)},OSN(c.n)+" · "+c.label))) : null);
     const l = x.l; const age = osDays(x.since);
     const overdue = l.shipped_at && !l.paid_at && l.due_date && new Date(l.due_date) < new Date();
     const mineNow = myKind(x.nextK); const nd = (l.qc_docs||[]).length+(l.despatch_docs||[]).length;
@@ -67829,11 +67885,57 @@ function OrderStatusBoard({ user, sessionCompany }){
       h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:3}}, (l.lines||[]).length+" Sl No"+((l.lines||[]).length===1?"":"s")+" · "+(l.lines||[]).reduce((n,z)=>n+Number(z.qty||0),0)+" Nos"+(x.nextK?" · next: "+whoName(x.nextK):"")+(age?" · "+age+" d here":"")),
       mineNow ? h("div",{style:{fontSize:10.5,fontWeight:700,color:"#0f7a5c",marginTop:3}},"⚑ your move"+(strict(x.nextK)?"":" (as admin)")+" — drag it to the next column or open it") : null);
   };
-  const total = cols.reduce((n,c)=>n+c.length,0);
+  // ---- 2026-11-01T06:00:00Z: the cards before production ----
+  const press = async(k, x)=>{
+    const col = OSP_COLS.find(c=>c.k===k);
+    if(!(await ospMayAct(k, user))){ noPermission(k==="pr"?"release the PR":k==="pa"?"approve the purchase":"start production",{ posts:col.posts, roles:["super_admin"] }); return; }
+    let extra = null;
+    if(k==="pur"){ if(x.ps.pct<100 && !confirm("Only "+x.ps.pct+"% of the material of "+x.cn+" is at our factory.\n\nStart production with part of the material?")) return; extra = { pct:x.ps.pct }; }
+    else if(!confirm((k==="pr"?"PR released for ":"Approve the purchase of ")+x.cn+" ("+(x.client||"")+")?"+(k==="pa"?"\n\nIts POs can then be approved and released.":""))) return;
+    setPBusy(x.cn+k);
+    try{ await ospPress(k==="pur"?"start":k, x.cn, user, extra); }catch(e){ alert(String(e.message||e)); }
+    setPBusy(""); load();
+  };
+  const preCard = (x, k)=>{
+    const ps = x.ps, st = ps.st||{}, op = (st.opened||{})[k==="pur"&&ps.pct>=100?"start":k];
+    const col = OSP_COLS.find(c=>c.k===k); const wd = op ? wdSince(op) : 0; const late = col.days>0 && op && wd>col.days;
+    const pill = (t,tone)=> h("span",{style:{fontSize:11,fontWeight:700,borderRadius:9,padding:"2px 8px",background:tone[0],color:tone[1]}},t);
+    const reg = ps.reg||{}; const so = ps.so||{};
+    const basisTxt = reg.order_basis==="LOI" ? "LOI "+(reg.loi_ref||"") : reg.order_basis==="Verbal" ? "Verbal order" : (reg.po_no||so.basis_number) ? "PO "+(reg.po_no||so.basis_number) : "";
+    let body = null, btn = null;
+    if(k==="so"){ body = pill(late ? "SO overdue "+(wd-3)+" d" : "SO pending · day "+wd+" of 3", late?["#fdecea","#a3312a"]:["#e6f1fb","#0c447c"]);
+      btn = h("button",{"data-testid":"osp-so",onClick:()=>{ try{ window.dispatchEvent(new CustomEvent("flo-so-start",{ detail:{ num:x.cn, quoteRef:reg.quote_number||"", client:reg.client||"", po:reg.po_no||"", poDate:reg.po_date||"", ccy:reg.currency||"INR", basis:reg.order_basis||"", loiRef:reg.loi_ref||"", loiDate:reg.loi_date||"", vBy:reg.verbal_by||"", vWith:reg.verbal_with||"", vOn:reg.verbal_on||"" } })); }catch(e){} },style:{...btnSmall,fontSize:11.5,background:"#0c447c",color:"#fff",borderColor:"#0c447c"}},"Sale Order +"); }
+    if(k==="wo"){ body = h("div",null, pill(so.go_ahead_state?woLabel(so.go_ahead_state):"On Hold",["#fdecea","#a3312a"]), h("div",{style:{fontSize:11,color:colors.muted,marginTop:3}},"Released on the Sale Order"+(op?" · "+osDays(op)+" d here":"")));
+      btn = h("button",{onClick:()=>osGotoSo(x.cn, null),style:{...btnSmall,fontSize:11.5}},"Open Sale Order →"); }
+    if(k==="bom"){ body = pill(so.prod_bom_link ? "Link given — to approve" : "Production BOM being made",["#e6f1fb","#0c447c"]);
+      btn = h("button",{onClick:()=>osGotoSo(x.cn, null),style:{...btnSmall,fontSize:11.5}},"Open Sale Order →"); }
+    if(k==="pr"){ body = h("div",null, pill("Waiting for PR release"+(op?" · "+wd+" d":""), late?["#fdecea","#a3312a"]:["#e6f1fb","#0c447c"]), h("div",{style:{fontSize:11,color:colors.muted,marginTop:3}},"Procurement Gantt made"));
+      btn = h("button",{"data-testid":"osp-pr",disabled:pBusy===x.cn+k,onClick:()=>press("pr",x),style:{...btnSmall,fontSize:11.5,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c"}},"PR released"); }
+    if(k==="pa"){ body = h("div",null, pill("Waiting for Super Admin"+(op?" · "+wd+" d":""), late?["#fdecea","#a3312a"]:["#fff4d6","#854f0b"]), h("div",{style:{fontSize:11,color:colors.muted,marginTop:3}},"PR released by "+(st.pr_released_by||"—")+" · POs cannot be approved yet"));
+      btn = isSA ? h("button",{"data-testid":"osp-pa",disabled:pBusy===x.cn+k,onClick:()=>press("pa",x),style:{...btnSmall,fontSize:11.5,background:"#5b3fa3",color:"#fff",borderColor:"#5b3fa3"}},"Approve purchase") : null; }
+    if(k==="pur"){ body = h("div",null,
+        h("div",{style:{display:"flex",justifyContent:"space-between",fontSize:11.5}}, h("b",null,"Material in "+ps.pct+"%"), h("span",{style:{color:colors.muted}},ps.facN+"/"+ps.forms.length+" forms")),
+        h("div",{style:{height:7,background:"#eeece4",borderRadius:5,overflow:"hidden",margin:"4px 0"}}, h("div",{style:{width:ps.pct+"%",height:"100%",background:"#2f8f6b"}})),
+        h("div",{style:{display:"flex",flexWrap:"wrap",gap:3}}, ps.forms.map(f=>h("span",{key:f,style:{fontSize:10,borderRadius:7,padding:"0 6px",background:ps.fac.has(f)?"#d7efe3":"#eeece4",color:ps.fac.has(f)?"#0b5a40":"#5c5a50"}},f+(ps.fac.has(f)?" ✓":"")))),
+        ps.pct>=100 ? h("div",{style:{marginTop:4}}, pill("Start production"+(op?" — "+Math.max(0,3-wd)+" d left":" — due in 3 days"), late?["#fdecea","#a3312a"]:["#fff4d6","#854f0b"])) : null,
+        h("div",{style:{fontSize:11,color:colors.muted,marginTop:3}},"Purchase approved by "+(st.pur_approved_by||(ps.relPo?"(PO already out)":"—"))));
+      btn = h("button",{"data-testid":"osp-start",disabled:pBusy===x.cn+k,onClick:()=>press("pur",x),style:{...btnSmall,fontSize:11.5,background:"#0c447c",color:"#fff",borderColor:"#0c447c"}},"Start production"); }
+    return h("div",{key:"pre"+k+x.cn,"data-testid":"osp-card",style:{background:"#fff",border:"1px solid "+colors.border,borderLeft:late?"4px solid #a3312a":"1px solid "+colors.border,borderRadius:8,padding:"8px 10px",marginBottom:8}},
+      h("div",{style:{fontWeight:700,fontSize:12.5}},x.cn+" – "+(x.client||"")),
+      basisTxt ? h("div",{style:{fontSize:11,color:colors.muted}},basisTxt+(ospPoAwaited(reg)?" · PO awaited":"")) : null,
+      h("div",{style:{marginTop:4}},body),
+      h("div",{style:{display:"flex",gap:6,marginTop:6,flexWrap:"wrap"}}, btn, k!=="so"&&k!=="wo"&&k!=="bom" ? h("button",{onClick:()=>osGotoSo(x.cn, null),style:{...btnSmall,fontSize:11.5}},"Open contract →") : null,
+        k!=="so" && can("pm") ? h("button",{"data-testid":"os-items-ready",title:"The Production Manager can still mark items ready (an order already in production)",onClick:()=>{ if(!confirm(x.cn+" is still at “"+col.label+"” on the board.\n\nMark items ready anyway? (the order moves into production)")) return; setReady(x.cn); },style:{...btnSmall,fontSize:11,color:"#0f7a5c",borderColor:"#0f7a5c"}},"Items ready") : null),
+      h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:4}},"Waiting on: "+ospPostText(col.posts, col.sa)));
+  };
+  const preRows = pre.flatMap((list,i)=>list.map(x=>({ x, col:0, colLabel:(i+1)+" · "+OSP_COLS[i].label, name:x.cn, cn:x.cn, lot:"", client:x.client||"", po:(x.s&&x.s.basis_number)||"", nos:"", sls:"",
+    where: OSP_COLS[i].k==="pur" ? "Material in "+x.ps.pct+"%" : OSP_COLS[i].label, whoName:ospPostText(OSP_COLS[i].posts, OSP_COLS[i].sa), days:osDays(((x.ps.st||{}).opened||{})[OSP_COLS[i].k]), dc:"", dcStatus:"", gp:"", inv:"", amount:null, due:"", overdue:false, qcDocs:"", shipDocs:"", mode:"" })));
+  const oneList = Array.from(new Set([...D.sos.filter(s=>!/cancel|closed/i.test(s.status||"")).map(s=>String(s.contract_number)), ...(M && !M.missing ? Array.from(M.reg.keys()).filter(cn=>{ const r = M.reg.get(cn); return r && r.status==="Pending"; }) : [])])).sort();
+  const total = cols.reduce((n,c)=>n+c.length,0) + pre.reduce((n,c)=>n+c.length,0);
   const myLots = rows.filter(r=>r.x.kind==="lot" && strict(r.x.nextK));
   // table + exports
   const TCOLS = [
-    { label:"Column", get:r=>r.col+" · "+(OS_COLS[r.col-1]||{}).label }, { label:"Contract", get:r=>r.cn }, { label:"Lot", get:r=>r.lot||"" },
+    { label:"Column", get:r=>r.colLabel || (OSN(r.col)+" · "+(OS_COLS[r.col-1]||{}).label) }, { label:"Contract", get:r=>r.cn }, { label:"Lot", get:r=>r.lot||"" },
     { label:"Client", get:r=>r.client }, { label:"Client PO", get:r=>r.po }, { label:"Sl Nos", get:r=>r.sls }, { label:"Nos", get:r=>r.nos },
     { label:"Where it is", get:r=>r.where }, { label:"Next: who", get:r=>r.whoName }, { label:"Days here", get:r=>r.days },
     { label:"DC", get:r=>r.dc+(r.dcStatus?" ("+r.dcStatus+")":"") }, { label:"Gate pass", get:r=>r.gp }, { label:"How", get:r=>r.mode },
@@ -67848,14 +67950,17 @@ function OrderStatusBoard({ user, sessionCompany }){
       h("div",{style:{display:"flex",gap:4}}, tabBtn("board","Board"), tabBtn("table","Table"), tabBtn("dash","Dashboard")),
       h("div",{style:{fontSize:12.5,color:colors.muted}}, total+" cards · "+D.lots.filter(l=>l.status!=="Returned").length+" lots"),
       h("input",{value:q,onChange:e=>setQ(e.target.value),placeholder:"Search contract, client, PO",style:{...inputStyle,width:220,padding:"6px 9px"}}),
+      h("select",{"data-testid":"os-one",value:one||"",onChange:e=>setOne(e.target.value),title:"Show one order only",style:{...inputStyle,width:170,padding:"5px 7px",fontSize:12.5}}, h("option",{value:""},"One order: all"), oneList.map(cn=>h("option",{key:cn,value:cn},cn))),
       h("label",{style:{fontSize:12.5,display:"flex",gap:5,alignItems:"center"}}, h("input",{type:"checkbox","data-testid":"os-mine",checked:mine,onChange:e=>setMine(e.target.checked)}),"Mine (waiting on me)"),
       h("label",{style:{fontSize:12.5,display:"flex",gap:5,alignItems:"center"}}, h("input",{type:"checkbox",checked:showOld,onChange:e=>setShowOld(e.target.checked)}),"Show paid older than 30 days"),
+      h("label",{style:{fontSize:12.5,display:"flex",gap:5,alignItems:"center"}}, h("input",{type:"checkbox","data-testid":"os-hide-pre",checked:!!hidePre,onChange:e=>setHidePre(e.target.checked)}),"Hide 1–6 (before production)"),
       h("span",{style:{marginLeft:"auto",display:"flex",gap:6,flexWrap:"wrap"}},
         view==="table" ? h(React.Fragment,null,
-          h("button",{"data-testid":"os-xl",onClick:()=>exportRowsToExcel(TCOLS, rows, "Order Status", fname),style:btnSmall},"Excel"),
-          h("button",{"data-testid":"os-pdf",onClick:()=>exportRowsToPdf("Order Status — "+osDmy(osIso())+(mine?" — waiting on "+(me||user.username):"")+(q?" — “"+q+"”":""), TCOLS.filter(c=>!["QC docs","Shipping docs","Sl Nos"].includes(c.label)), rows, fname),style:btnSmall},"PDF")) : null,
+          h("button",{"data-testid":"os-xl",onClick:()=>exportRowsToExcel(TCOLS, [...preRows, ...rows], "Order Status", fname),style:btnSmall},"Excel"),
+          h("button",{"data-testid":"os-pdf",onClick:()=>exportRowsToPdf("Order Status — "+osDmy(osIso())+(mine?" — waiting on "+(me||user.username):"")+(q?" — “"+q+"”":""), TCOLS.filter(c=>!["QC docs","Shipping docs","Sl Nos"].includes(c.label)), [...preRows, ...rows], fname),style:btnSmall},"PDF")) : null,
         canPlace ? h("button",{"data-testid":"os-place-open",onClick:()=>setPlaceOpen(true),style:btnSmall},"Place old contracts"+(placeOpenUntil?" (until "+osDmy(placeOpenUntil)+")":"")) : null,
         h("button",{onClick:load,"data-testid":"os-refresh",style:btnSmall},"Refresh"))),
+    M && M.missing ? h("div",{style:{background:"#fdecea",color:"#a3312a",borderRadius:6,padding:"6px 10px",fontSize:12.5,marginBottom:8}},"Run "+UMA_SQL+" on this company (structure, both companies) to see the stages before production.") : null,
     D.needSql2 ? h("div",{style:{background:"#fdecea",color:"#a3312a",borderRadius:6,padding:"6px 10px",fontSize:12.5,marginBottom:8}},"Run "+OS_SQL2+" on this company (structure, both companies). Until then QC send-back, the despatch mode / signed acknowledgement and moving placed contracts will not save.") : null,
     myLots.length ? h("div",{"data-testid":"os-mine-flag",style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",background:"#fff4d6",border:"1px solid #e0b84a",borderRadius:8,padding:"7px 12px",marginBottom:10,fontSize:12.5}},
       h("b",null,"⚑ "+myLots.length+" lot"+(myLots.length===1?"":"s")+" waiting on you"),
@@ -67866,15 +67971,21 @@ function OrderStatusBoard({ user, sessionCompany }){
     view==="table" ? h("div",{style:{overflowX:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8}},
       h("table",{"data-testid":"os-table",style:{borderCollapse:"collapse",width:"100%",minWidth:1200,fontSize:12}},
         h("thead",null,h("tr",null,TCOLS.map(c=>h("th",{key:c.label,style:{textAlign:"left",padding:"6px 8px",fontSize:11,color:colors.muted,borderBottom:"2px solid "+colors.dark,whiteSpace:"nowrap",position:"sticky",top:0,background:"#fff"}},c.label)))),
-        h("tbody",null, rows.length===0 ? h("tr",null,h("td",{colSpan:TCOLS.length,style:{padding:12,color:colors.mutedLight}},"Nothing here.")) :
-          rows.map((r,i)=>h("tr",{key:i,onClick:()=>{ if(r.x.kind==="lot") openLot(r.x.l.id); },style:{cursor:r.x.kind==="lot"?"pointer":"default",background:r.x.kind==="lot" && myKind(r.x.nextK)?"#f1faf6":(r.overdue?"#fdf3f2":"transparent")}},
+        h("tbody",null, rows.length+preRows.length===0 ? h("tr",null,h("td",{colSpan:TCOLS.length,style:{padding:12,color:colors.mutedLight}},"Nothing here.")) :
+          [...preRows, ...rows].map((r,i)=>h("tr",{key:i,onClick:()=>{ if(r.x.kind==="lot") openLot(r.x.l.id); },style:{cursor:r.x.kind==="lot"?"pointer":"default",background:r.x.kind==="lot" && myKind(r.x.nextK)?"#f1faf6":(r.overdue?"#fdf3f2":"transparent")}},
             TCOLS.map(c=>h("td",{key:c.label,style:{padding:"5px 8px",borderBottom:"1px solid "+colors.border,verticalAlign:"top",color:c.label==="Payment due"&&r.overdue?"#a3312a":undefined,fontWeight:c.label==="Contract"?700:undefined}},String(c.get(r)??"")))))))) :
     h("div",{style:{display:"flex",gap:10,overflowX:"auto",alignItems:"flex-start",paddingBottom:10}},
+      M && !M.missing && hidePre ? h("div",{key:"prehid",onClick:()=>setHidePre(false),title:"Show the stages before production",style:{minWidth:46,maxWidth:46,background:"#efe9fb",borderRadius:10,padding:"8px 4px",cursor:"pointer",writingMode:"vertical-rl",fontSize:12,fontWeight:700,color:"#5b3fa3",textAlign:"center"}},"1–6 Before production ("+pre.reduce((n,c)=>n+c.length,0)+") ▸") : null,
+      M && !M.missing && !hidePre ? OSP_COLS.map((c,i)=>h("div",{key:"p"+c.k,"data-testid":"osp-col-"+c.k,style:{minWidth:190,flex:"1 1 0",background:"#f4f2ea",borderRadius:10,padding:8,minHeight:120}},
+        h("div",{style:{background:c.tone[0],color:c.tone[1],borderRadius:8,padding:"7px 10px",marginBottom:8}},
+          h("div",{style:{fontWeight:700,fontSize:13}},(i+1)+" · "+c.label+"  ("+pre[i].length+")"),
+          h("div",{style:{fontSize:11}},ospPostText(c.posts, c.sa))),
+        pre[i].length ? pre[i].map(x=>preCard(x, c.k)) : h("div",{style:{fontSize:12,color:colors.mutedLight,padding:"4px 6px"}},"Nothing here."))) : null,
       OS_COLS.map((c,i)=>h("div",{key:c.n,"data-testid":"os-col-"+c.n,
           onDragOver:e=>{ if(!drag) return; e.preventDefault(); if(over!==c.n) setOver(c.n); }, onDragLeave:()=>{ if(over===c.n) setOver(0); }, onDrop:e=>{ e.preventDefault(); dropOn(c.n); },
           style:{minWidth:178,flex:"1 1 0",background:over===c.n?"#e3efe9":"#f4f2ea",outline:over===c.n?"2px dashed #0f7a5c":"none",borderRadius:10,padding:8,minHeight:120}},
         h("div",{style:{background:c.tone[0],color:c.tone[1],borderRadius:8,padding:"7px 10px",marginBottom:8}},
-          h("div",{style:{fontWeight:700,fontSize:13}},c.n+" · "+c.label+"  ("+cols[i].length+")"),
+          h("div",{style:{fontWeight:700,fontSize:13}},OSN(c.n)+" · "+c.label+"  ("+cols[i].length+")"),
           h("div",{style:{fontSize:11}},c.sub)),
         cols[i].length ? cols[i].map(card) : h("div",{style:{fontSize:12,color:colors.mutedLight,padding:"4px 6px"}},"Nothing here.")))),
     ready ? h(OsItemsReady,{ cn:ready, so:soBy.get(String(ready)), user, me, P, onClose:()=>setReady(null), onDone:(lot)=>{ setReady(null); load(); if(lot && confirm(osLotName(lot)+" is made.\n\nMake its DC and packing slip now?")) setDcOpen({ new:lot.contract_number, lot:lot.id }); } }) : null,
@@ -67931,6 +68042,791 @@ function OsWaitingPopup({ user, onClose }){
       h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:12}},
         h("button",{onClick:()=>{ onClose(); window.__osMine = true; appOpenTab("order_board"); },style:btnSecondary},"Open the board"),
         h("button",{"data-testid":"os-popup-later",onClick:onClose,style:btnSecondary},"Later"))));
+}
+// ===== 2026-10-31T10:00:00Z: ORDER CANCELLATION GATEWAY =====
+// Cancel a whole Sale Order or part quantities of its Sl Nos. Who: the Sales Head and Technical Head post holders and
+// Super Admins. Reason, date and the customer's letter are kept. Undespatched lots are returned (their draft DCs cancelled),
+// draft PIs and DCs cancelled, serials given and not needed are kept unused with the reason, open task cards closed (whole).
+// Issued invoices / issued PIs / advance received: allowed, Accounts gets a task — a Super Admin's code is needed.
+// POs raised for the contract: Purchase is told and reminded every day, and the Purchase Manager post's PDFs are stopped
+// until each PO is settled (cancelled with the vendor / amended / kept for stock / other, with a note).
+const SOC_SQL = "structure_order_cancellation_2026-10-31.sql";
+const SOC_REASONS = ["Customer cancelled","Customer reduced the quantity","Duplicate / wrong order","Price or terms not agreed","Other"];
+const SOC_PO_RES = ["Cancelled with the vendor","PO amended (quantity reduced)","Kept — material goes to stock","Other"];
+async function socCanCancel(user){
+  if(!user) return false; if(user.role==="super_admin") return true;
+  try{ const { keys } = await myPostKeys(user); return (keys||[]).some(k=>k==="sales_head" || k==="technical_head"); }catch(e){ return false; }
+}
+// a Super Admin's code: an unused Deletion Code made by a Super Admin
+async function socSuperCode(code, username){
+  const c = String(code||"").trim(); if(!c) return { ok:false, why:"Enter a Super Admin's code." };
+  const { data, error } = await sb.from("deletion_codes").select("*").eq("code",c).eq("used",false).limit(1);
+  if(error) return { ok:false, why:"The code couldn't be checked: "+error.message };
+  const row = (data||[])[0]; if(!row) return { ok:false, why:"That isn't an unused code." };
+  if(row.expires_at && new Date(row.expires_at) < new Date()) return { ok:false, why:"That code has expired." };
+  const { data: u } = await sb.from("app_users").select("role").eq("username",row.generated_by||"").maybeSingle();
+  if(!u || u.role!=="super_admin") return { ok:false, why:"That code was not made by a Super Admin. Ask "+((await superAdminNames()).join(" / ")||"a Super Admin")+"." };
+  if(row.generated_by===username) return { ok:false, why:"You can't use a code you made yourself." };
+  const r = await sb.from("deletion_codes").update({ used:true, used_by:username||"unknown", used_at:new Date().toISOString() }).eq("id",row.id).eq("used",false).select("id");
+  if(r.error || !(r.data||[]).length) return { ok:false, why:"That code was just used by someone else." };
+  return { ok:true, by:row.generated_by };
+}
+// everything open on a contract that a cancellation touches
+async function socScan(cn){
+  const out = { cn, so:null, C:null, lots:[], dcs:[], dcLines:[], invs:[], invDrafts:[], dinvs:[], pis:[], pos:[], advance:false, serials:[], cancels:[], err:"" };
+  try{
+    out.C = await despContract(cn); out.so = out.C.so;
+    const [l, d, i, p, po, sr, cx] = await Promise.all([
+      sb.from("so_lot_tbl").select("*").eq("contract_number",cn),
+      sb.from("dc_tbl").select("id,status,bill_no,draft_no,lot_id,is_test,gate_pass_id").eq("contract_number",cn),
+      sb.from("invoice_tbl").select("id,invoice_no,status,grand_total,currency").eq("contract_number",cn),
+      sb.from("proforma_tbl").select("id,pi_no,rev,status").eq("contract_number",cn),
+      sb.from("po_register").select("id,po_no,owner_name,stage,status,vendor_name").eq("contract_ref",cn),
+      sb.from("qc_serial_register_tbl").select("*").eq("contract_number",cn),
+      sb.from("so_cancel_tbl").select("*").eq("contract_number",cn).order("id") ]);
+    out.lots = (l.data||[]).filter(x=>x.status!=="Returned");
+    out.dcs = (d.data||[]).filter(x=>x.status!=="Cancelled" && !x.is_test);
+    out.invs = (i.data||[]).filter(x=>!/draft|cancel/i.test(x.status||""));
+    out.invDrafts = (i.data||[]).filter(x=>/draft/i.test(x.status||""));
+    out.pis = (p.data||[]).filter(x=>!/cancel/i.test(x.status||""));
+    out.pos = (po.data||[]).filter(x=>!/cancel|closed/i.test(x.status||""));
+    out.serials = (sr.error ? [] : (sr.data||[])).filter(x=>!x.void_at);
+    out.cancels = cx.error ? [] : (cx.data||[]); out.needSql = !!cx.error;
+    out.dcLines = []; if(out.dcs.length){ try{ const { data } = await sb.from("dc_line_tbl").select("dc_id,item_sl_no,qty").in("dc_id",out.dcs.map(x=>x.id)); out.dcLines = data||[]; }catch(e){} }
+    try{ const { data } = await sb.from("direct_invoice_tbl").select("id,di_no,status").eq("contract_number",cn); out.dinvs = (data||[]).filter(x=>!/draft|cancel/i.test(x.status||"")); }catch(e){}
+    try{ const { data } = await sb.from("advance_register_tbl").select("status").eq("contract_number",cn); out.advance = (data||[]).some(r=>/receiv|paid/i.test(r.status||"")); }catch(e){}
+    if(out.so && out.so.trigger_advance_at) out.advance = true;
+  }catch(e){ out.err = String(e.message||e); }
+  return out;
+}
+const socLotted = (lots)=>{ const m = new Map(); (lots||[]).filter(l=>!l.shipped_at).forEach(l=>(l.lines||[]).forEach(x=>m.set(Number(x.sl),(m.get(Number(x.sl))||0)+Number(x.qty||0)))); return m; };
+function SoCancelDialog({ contractInfo, user, onClose, onDone }){
+  const cn = String(contractInfo.contract_number);
+  const [S,setS] = useState(null); const [kind,setKind] = useState("whole"); const [q,setQ] = useState({});
+  const [why,setWhy] = useState(SOC_REASONS[0]); const [note,setNote] = useState(""); const [dt,setDt] = useState(toISODate(new Date())); const [link,setLink] = useState("");
+  const [code,setCode] = useState(""); const [busy,setBusy] = useState(false); const [err,setErr] = useState("");
+  useEffect(()=>{ socScan(cn).then(setS); },[cn]);
+  if(!S) return h(OsModal,{ title:"Cancel order "+cn, onClose }, h("div",{style:{color:colors.muted}},"Reading the contract…"));
+  if(S.needSql) return h(OsModal,{ title:"Cancel order "+cn, onClose }, h("div",{style:{color:colors.danger}},"Run "+SOC_SQL+" first (both companies)."));
+  if(S.err || !S.C) return h(OsModal,{ title:"Cancel order "+cn, onClose }, h("div",{style:{color:colors.danger}},"The contract could not be read: "+(S.err||"not found")));
+  const isSA = user?.role==="super_admin";
+  // per Sl No: what is firm (non-draft DCs, before the app), what sits in drafts / open lots, and what is free
+  const dcBy = new Map(S.dcs.map(d=>[d.id,d]));
+  const sum = (f)=>{ const m = new Map(); S.dcLines.forEach(x=>{ const d = dcBy.get(x.dc_id); if(d && f(d)) m.set(Number(x.item_sl_no),(m.get(Number(x.item_sl_no))||0)+Number(x.qty||0)); }); return m; };
+  const firmDc = sum(d=>d.status!=="Draft"), draftLot = sum(d=>d.status==="Draft" && !!d.lot_id), draftOther = sum(d=>d.status==="Draft" && !d.lot_id);
+  const openLots = S.lots.filter(l=>!l.shipped_at && !(l.dc_id && dcBy.get(l.dc_id) && dcBy.get(l.dc_id).status!=="Draft"));   // lots the board can return
+  const lotNoDc = new Map(); openLots.filter(l=>!(l.dc_id && dcBy.get(l.dc_id))).forEach(l=>(l.lines||[]).forEach(x=>lotNoDc.set(Number(x.sl),(lotNoDc.get(Number(x.sl))||0)+Number(x.qty||0))));
+  const inLotAll = socLotted(openLots);
+  const rows = (S.C ? S.C.lines : []).map(x=>{
+    const k = Number(x.item_sl_no), firm = (firmDc.get(k)||0) + Number(x.before||0);
+    const dl = draftLot.get(k)||0, dO = draftOther.get(k)||0, nl = lotNoDc.get(k)||0;
+    const free = Math.max(0, Number(x.ordered) - firm - dl - dO - nl);
+    const maxWhole = Math.max(0, Number(x.ordered) - firm);           // whole: drafts and open lots go too
+    const maxPart = Math.max(0, Number(x.ordered) - firm - dO);        // part: Stores' own draft DCs stay
+    return { ...x, out:firm, free, inLot:inLotAll.get(k)||0, max: kind==="whole" ? maxWhole : maxPart };
+  });
+  const pick = kind==="whole" ? rows.map(r=>({ ...r, cq:r.max })) : rows.map(r=>({ ...r, cq: Math.min(r.max, Math.max(0, Math.round(Number(q[r.item_sl_no]||0)))) }));
+  const total = pick.reduce((n,r)=>n+r.cq,0);
+  const whole = kind==="whole" || rows.every(r=>{ const p = pick.find(x=>x.item_sl_no===r.item_sl_no); return r.out===0 && (p?p.cq:0)>=Number(r.ordered); });
+  // a lot is returned when the cancellation eats into what it holds
+  const eats = new Set(pick.filter(r=> whole ? r.cq>0 : r.cq > r.free).map(r=>Number(r.item_sl_no)));
+  const lotsHit = openLots.filter(l=>(l.lines||[]).some(x=>eats.has(Number(x.sl))));
+  const dcHit = S.dcs.filter(d=>d.status==="Draft" && (whole || lotsHit.some(l=>l.dc_id===d.id)));
+  const dcStuck = whole ? S.dcs.filter(d=>d.status!=="Draft" && d.status!=="Despatched") : [];
+  const piDraft = S.pis.filter(p=>/draft/i.test(p.status||"")), piIssued = S.pis.filter(p=>!/draft/i.test(p.status||""));
+  const money = S.invs.length + S.dinvs.length + (whole ? piIssued.length : 0) + (S.advance ? 1 : 0) + dcStuck.length > 0;
+  const needCode = money && !isSA;
+  const li = (t, k)=> h("li",{key:k||t,style:{marginBottom:3}},t);
+  const go = async()=>{
+    setErr("");
+    if(!total){ setErr(kind==="part" ? "Give the quantity to cancel on at least one Sl No." : "Nothing is left to cancel — every quantity has gone out."); return; }
+    if(why==="Other" && !note.trim()){ setErr("Write the reason."); return; }
+    if(link.trim() && !/^https?:\/\//i.test(link.trim())){ setErr("The customer's letter must be a full https:// link."); return; }
+    if(!confirm((whole?"Cancel the WHOLE order ":"Cancel part of order ")+cn+"?\n\n"+pick.filter(r=>r.cq>0).map(r=>"Sl No "+r.item_sl_no+": "+r.cq+" of "+r.ordered).join("\n")+"\n\nThis cannot be undone from the screen.")) return;
+    let codeBy = null;
+    if(needCode){ const r = await socSuperCode(code, user?.username); if(!r.ok){ setErr(r.why); return; } codeBy = r.by; }
+    setBusy(true);
+    try{ const r = await socApply({ S, pick:pick.filter(r=>r.cq>0), whole, why, note:note.trim(), dt, link:link.trim(), user, codeBy, lotsHit, dcHit, dcStuck, piDraft, piIssued });
+      setBusy(false); alert(r.summary); onDone && onDone(); }
+    catch(e){ setBusy(false); setErr("Stopped: "+(e.message||e)); }
+  };
+  const th = (t,w)=> h("th",{style:{textAlign:"left",padding:"5px 7px",fontSize:11,color:colors.muted,borderBottom:"2px solid "+colors.dark,width:w}},t);
+  const td = (c,s)=> h("td",{style:{padding:"5px 7px",borderBottom:"1px solid "+colors.border,fontSize:12.5,...(s||{})}},c);
+  return h(OsModal,{ title:"Cancel order "+cn+(S.so && S.so.customer_name ? " — "+S.so.customer_name : ""), sub:"Whole order, or part quantities. Only what has not gone out can be cancelled.", onClose, width:940 },
+    S.cancels.length ? h("div",{style:{fontSize:12,background:"#f4f2ea",borderRadius:6,padding:"6px 10px",marginBottom:8}}, h("b",null,"Cancelled before: "), S.cancels.map(c=>(c.kind==="whole"?"whole order":(c.lines||[]).map(x=>"Sl "+x.sl+" × "+x.qty).join(", "))+" on "+osDmy(c.cancel_date)+" ("+c.reason_kind+")").join(" · ")) : null,
+    h("div",{style:{display:"flex",gap:8,marginBottom:8}},
+      h("button",{"data-testid":"soc-whole",onClick:()=>setKind("whole"),style:{...btnSmall,padding:"5px 12px",background:kind==="whole"?colors.dark:"#fff",color:kind==="whole"?"#fff":colors.text}},"Whole order"),
+      h("button",{"data-testid":"soc-part",onClick:()=>setKind("part"),style:{...btnSmall,padding:"5px 12px",background:kind==="part"?colors.dark:"#fff",color:kind==="part"?"#fff":colors.text}},"Part quantities")),
+    h("table",{style:{borderCollapse:"collapse",width:"100%"}},
+      h("thead",null,h("tr",null, th("Sl No",50), th("Item / description"), th("Ordered",64), th("Gone out / DC numbered",90), th("In an open lot",80), th("Can cancel",74), th("Cancel now",90))),
+      h("tbody",null, rows.map(r=>{ const p = pick.find(x=>x.item_sl_no===r.item_sl_no);
+        return h("tr",{key:r.item_sl_no,style:{opacity:r.max?1:.5}}, td(r.item_sl_no), td(h("span",null,h("b",null,(r.item||"")+" "),r.description||"")), td(r.ordered), td(r.out), td(r.inLot||"—"), td(r.max),
+          td(kind==="whole" ? h("b",null,r.max) : h("input",{type:"number","data-testid":"soc-qty",min:0,max:r.max,disabled:!r.max,value:q[r.item_sl_no]||"",onChange:e=>setQ(s=>({ ...s, [r.item_sl_no]:e.target.value })),style:{...inputStyle,width:70,padding:"4px 6px"}}))); }))),
+    h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:8,marginTop:10}},
+      h("label",{style:{fontSize:12}},"Reason",h("select",{"data-testid":"soc-why",value:why,onChange:e=>setWhy(e.target.value),style:{...inputStyle,marginTop:3}}, SOC_REASONS.map(x=>h("option",{key:x,value:x},x)))),
+      h("label",{style:{fontSize:12}},"Cancelled on (the customer's date)",h("input",{type:"date",value:dt,onChange:e=>setDt(e.target.value),style:{...inputStyle,marginTop:3}})),
+      h("label",{style:{fontSize:12}},"Customer's letter / mail (link)",h("input",{value:link,placeholder:"https://…",onChange:e=>setLink(e.target.value),style:{...inputStyle,marginTop:3}}))),
+    h("textarea",{"data-testid":"soc-note",rows:2,value:note,onChange:e=>setNote(e.target.value),placeholder:"Details"+(why==="Other"?" (required)":" (optional)"),style:{...inputStyle,marginTop:8}}),
+    h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px",marginTop:10,background:"#fcfbf7",fontSize:12.5}},
+      h("div",{style:{fontWeight:700,marginBottom:4}}, (whole ? "Whole order — " : "Part — ")+total+" Nos. What the app will do:"),
+      h("ul",{style:{margin:"4px 0 0",paddingLeft:18}},
+        whole ? li("Sale Order Stage → Cancelled.","st") : li("The Sl Nos' quantities drop by what is cancelled (lots, DCs, serials and the board follow).","st"),
+        lotsHit.length ? li("Order Status board: "+lotsHit.map(osLotName).join(", ")+" returned (not despatched)"+(dcHit.length?"; draft DC "+dcHit.map(despNo).join(", ")+" cancelled":"")+". Re-make a lot for any quantity still to go.","l") : null,
+        whole && piDraft.length ? li("Draft PI "+piDraft.map(p=>p.pi_no||("#"+p.id)).join(", ")+" cancelled.","pd") : null,
+        li("Serials given and no longer needed: kept unused, with this reason.","sr"),
+        whole ? li("Open task cards and pending steps of the contract closed.","tk") : null,
+        S.pos.length ? li(h("span",null,h("b",{style:{color:"#a3312a"}},"POs: "),S.pos.map(p=>p.po_no+" ("+(p.vendor_name||"")+")").join(", ")+" — Purchase is told and reminded every day; the Purchase Manager's PDFs stop until each PO is settled."),"po") : null,
+        money ? li(h("span",null,h("b",{style:{color:"#a3312a"}},"Accounts task: "),[S.invs.length?S.invs.length+" invoice(s) issued ("+S.invs.map(x=>x.invoice_no).join(", ")+")":"", S.dinvs.length?S.dinvs.length+" direct invoice(s)":"", whole && piIssued.length?piIssued.length+" PI(s) issued":"", S.advance?"advance received":"", dcStuck.length?"DC "+dcStuck.map(despNo).join(", ")+" ("+dcStuck.map(d=>d.status).join(", ")+")":""].filter(Boolean).join("; ")+" — credit note / refund / adjustment."),"ac") : null)),
+    needCode ? h("div",{style:{background:"#fff4d6",borderRadius:6,padding:"8px 10px",marginTop:8,fontSize:12.5}},
+      h("b",null,"A Super Admin's code is needed"), " — invoices, PIs, an advance or numbered DCs are involved.",
+      h("input",{"data-testid":"soc-code",value:code,onChange:e=>setCode(e.target.value),placeholder:"Super Admin's code",style:{...inputStyle,marginTop:6,width:240}})) : null,
+    err ? h("div",{style:{color:colors.danger,fontSize:12.5,marginTop:8,whiteSpace:"pre-wrap"}},err) : null,
+    h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:12}},
+      h("button",{onClick:onClose,style:btnSecondary},"Close"),
+      h("button",{"data-testid":"soc-go",onClick:go,disabled:busy||!total,style:{...btnPrimary,background:colors.danger,borderColor:colors.danger}},busy?"Cancelling…":(whole?"Cancel the whole order":"Cancel "+total+" Nos"))));
+}
+async function socApply(o){
+  const { S, pick, whole, why, note, dt, link, user, codeBy, lotsHit, dcHit, dcStuck, piDraft, piIssued } = o;
+  const cn = S.cn, by = user?.username||"", now = new Date().toISOString();
+  let me = ""; try{ me = await despMe(user); }catch(e){}
+  const reasonTxt = why+(note?": "+note:"");
+  const done = [];
+  // 1. the record
+  const rec = { contract_number:cn, kind: whole ? "whole" : "part", reason_kind:why, reason:note||null, cancel_date:dt, letter_link:link||null,
+    lines: pick.map(r=>({ sl:r.item_sl_no, qty:r.cq, ordered:r.ordered, item:r.item||"", description:r.description||"" })), by_user:by, by_name:me||by, code_by:codeBy||null,
+    open_items:{ lots:lotsHit.map(osLotName), dcs:dcHit.map(despNo), dc_stuck:dcStuck.map(despNo), invoices:S.invs.map(x=>x.invoice_no), pis_issued:whole?piIssued.map(p=>p.pi_no):[], advance:S.advance, pos:S.pos.map(p=>p.po_no) } };
+  const { data: cx, error: ce } = await sb.from("so_cancel_tbl").insert(rec).select().single();
+  if(ce) throw new Error(/so_cancel_tbl/.test(ce.message||"") ? "Run "+SOC_SQL+" first." : ce.message);
+  // 2. quantities
+  for(const r of pick){ const e = (S.C.ests||[]).find(x=>Number(x.item_sl_no)===Number(r.item_sl_no)); if(!e) continue;
+    const nq = (Number(e.cancelled_qty)||0) + r.cq;
+    const { error } = await sb.from("estimates").update({ cancelled_qty:nq }).eq("id",e.id); if(error) throw new Error("Quantity not saved: "+error.message); }
+  done.push(pick.map(r=>"Sl No "+r.item_sl_no+" −"+r.cq).join(", "));
+  // 3. the board: lots holding cancelled quantity and not despatched are returned; their draft DCs cancelled
+  for(const l of lotsHit){
+    const d = dcHit.find(x=>x.id===l.dc_id);
+    if(d){ await sb.from("dc_serial_tbl").delete().eq("dc_id",d.id); await sb.from("dc_tbl").update({ status:"Cancelled", cancelled_by:by, cancelled_at:now, cancel_reason:"Order cancelled: "+reasonTxt }).eq("id",d.id).eq("status","Draft"); await despHist(d.id, null, "Cancelled — order cancelled", by, reasonTxt); }
+    await sb.from("so_lot_tbl").update({ status:"Returned", returned_by:me||by, returned_at:now, return_note:"Order cancelled: "+reasonTxt }).eq("id",l.id);
+    for(const st of ["dc","qc","acc","ship","req"]) await osDone(l, st, me||by, "Order cancelled");
+  }
+  if(lotsHit.length) done.push("lots returned: "+lotsHit.map(osLotName).join(", "));
+  if(whole){ for(const d of dcHit.filter(x=>!lotsHit.some(l=>l.dc_id===x.id))){ await sb.from("dc_serial_tbl").delete().eq("dc_id",d.id); await sb.from("dc_tbl").update({ status:"Cancelled", cancelled_by:by, cancelled_at:now, cancel_reason:"Order cancelled: "+reasonTxt }).eq("id",d.id).eq("status","Draft"); await despHist(d.id, null, "Cancelled — order cancelled", by, reasonTxt); } }
+  // 4. draft PIs (whole)
+  if(whole) for(const p of piDraft){ await sb.from("proforma_tbl").update({ status:"Cancelled", cancelled_by:by, cancelled_at:now, cancel_reason:"Order cancelled: "+reasonTxt }).eq("id",p.id); }
+  // 5. serials given and no longer needed: unused, with the reason (the highest numbers first)
+  try{
+    const C2 = await despContract(cn); const { data: onDc } = await sb.from("dc_serial_tbl").select("serial").in("serial", S.serials.map(x=>String(x.serial)).concat(["-"]));
+    const used = new Set((onDc||[]).map(x=>String(x.serial))); let nVoid = 0;
+    for(const line of C2.lines){
+      const free = S.serials.filter(x=>Number(x.item_sl_no)===Number(line.item_sl_no) && !used.has(String(x.serial))).sort((a,b)=>Number(b.serial)-Number(a.serial));
+      const excess = free.length - Math.max(0, line.balance); if(excess<=0) continue;
+      const ids = free.slice(0, excess).map(x=>x.id);
+      const { error } = await sb.from("qc_serial_register_tbl").update({ void_reason:"Order cancelled: "+reasonTxt, void_at:now, void_by:me||by }).in("id",ids);
+      if(!error) nVoid += ids.length;
+    }
+    if(nVoid) done.push(nVoid+" serial(s) kept unused");
+  }catch(e){ console.warn("serials", e); }
+  // 6. whole: Stage, task cards, pending steps
+  if(whole){
+    await sb.from("sale_order_tbl").update({ status:"Cancelled" }).eq("contract_number",cn);
+    try{ const { data: ts } = await sb.from("task_tbl").select("id").eq("ref",cn).neq("status","done");
+      for(const t of (ts||[])){ await sb.from("task_tbl").update({ status:"done", moved_by:by, moved_at:now, moved_what:"Order cancelled: "+reasonTxt }).eq("id",t.id); try{ await taskLog(t.id, by, "Closed — order cancelled: "+reasonTxt); }catch(x){} }
+      if((ts||[]).length) done.push((ts||[]).length+" task card(s) closed"); }catch(e){}
+    try{ await sb.from("pending_step_tbl").update({ closed_at:now, closed_by:by, close_reason:"Order cancelled: "+reasonTxt }).eq("doc_ref",cn).is("done_at",null).is("closed_at",null); }catch(e){}
+  }
+  // 7. Purchase: one row per live PO, reminded daily; the Purchase Manager post is stopped until settled
+  let waiting = new Set(); try{ const { data } = await sb.from("so_cancel_po_tbl").select("po_no").eq("contract_number",cn).eq("status","open"); waiting = new Set((data||[]).map(x=>x.po_no)); }catch(e){}
+  const newPos = S.pos.filter(p=>!waiting.has(p.po_no));   // a PO already waiting to be settled is not listed twice
+  if(!newPos.length && S.pos.length) done.push("PO "+S.pos.map(p=>p.po_no).join(", ")+" already waiting with Purchase");
+  if(newPos.length){
+    const { error } = await sb.from("so_cancel_po_tbl").insert(newPos.map(p=>({ cancel_id:cx.id, contract_number:cn, po_no:p.po_no, vendor_name:p.vendor_name||null, owner_name:p.owner_name||null, status:"open" })));
+    if(error) done.push("POs NOT listed for Purchase: "+error.message);
+    else { await loadPostPeople(true);
+      await notifyPeople([...postHolders("purchase_manager"), ...newPos.map(p=>p.owner_name)].filter(Boolean), "⛔ Order "+cn+(S.so&&S.so.customer_name?" ("+S.so.customer_name+")":"")+(whole?" is CANCELLED":" is partly cancelled ("+pick.map(r=>"Sl "+r.item_sl_no+" −"+r.cq).join(", ")+")")+". Settle PO "+newPos.map(p=>p.po_no).join(", ")+" with the vendor. Until every PO is settled the Purchase Manager's PDFs are stopped.", "order_cancel",
+        { kind:"act", open:{ socpos:1 }, target:'[data-testid="soc-po-resolve"]', group:"socpo:"+cx.id, help:{ btn:"Settle the POs", what:"Order "+cn+" cancelled — settle its POs", do:["Talk to each vendor.","Pick what was done (cancelled / amended / kept for stock / other) and write a note.","Press Settle. The daily reminders and the PDF block end when every PO is settled."] } });
+      done.push("Purchase told about "+newPos.length+" PO(s)"); }
+  }
+  // 8. Accounts task
+  const accBits = [S.invs.length?"Invoice(s) issued: "+S.invs.map(x=>x.invoice_no).join(", ")+" — credit note?":"", S.dinvs.length?"Direct invoice(s): "+S.dinvs.map(x=>x.di_no||("#"+x.id)).join(", "):"", whole && piIssued.length?"PI(s) issued: "+piIssued.map(p=>p.pi_no).join(", ")+" — cancel / revise":"", S.advance?"Advance received — refund or adjust":"", dcStuck.length?"DC "+dcStuck.map(d=>despNo(d)+" ("+d.status+")").join(", ")+" — cancel or keep":""].filter(Boolean);
+  if(accBits.length){
+    await loadPostPeople(true); const acc = postHolders("accounts");
+    for(const n of acc){ try{ const { data: t } = await sb.from("task_tbl").insert({ title:"Order "+cn+" cancelled"+(whole?"":" (part)")+" — settle the money", assignee:n, department:"Accounts", labels:["Order cancellation"], links: link ? [{ label:"Customer's letter", url:link }] : [], ref:cn, created_by:by, status:"open",
+        checklists:[{ id:"soc", title:"To settle", items:accBits.map((x,i)=>({ id:"s"+i, text:x, done:false })) }], notes:"Reason: "+reasonTxt+(codeBy?" · Super Admin code from "+codeBy:"") }).select().single();
+      if(t) try{ await taskLog(t.id, by, "Made by the order cancellation gateway"); }catch(x){} }catch(e){} }
+    await notifyPeople(acc, "Order "+cn+(whole?" cancelled":" partly cancelled")+" — "+accBits.join("; ")+". A task card is on your board.", "order_cancel", { kind:"open", open:{ contract:cn }, help:{ btn:"Open the Sale Order", what:"Order cancelled — settle the money", do:accBits } });
+    done.push("Accounts task made");
+  }
+  await logAudit("UPDATE","sale_order_tbl",cn,(whole?"WHOLE ORDER CANCELLED":"PART CANCELLED")+" — "+pick.map(r=>"Sl "+r.item_sl_no+" −"+r.cq+" of "+r.ordered).join(", ")+" · "+reasonTxt+" · customer's date "+dt+(link?" · "+link:"")+(codeBy?" · Super Admin code from "+codeBy:"")+" · "+done.join(" · "),by,null,rec);
+  try{ window.dispatchEvent(new Event("flo-os-changed")); }catch(e){}
+  return { summary:(whole?"Order "+cn+" is cancelled.":"Part of order "+cn+" is cancelled.")+"\n\n"+done.map(x=>"• "+x).join("\n") };
+}
+// The button and the record on the Sale Order
+function SoCancelChip({ contractInfo, user, onChanged }){
+  const cn = contractInfo && contractInfo.contract_number ? String(contractInfo.contract_number) : "";
+  const [can,setCan] = useState(false); const [open,setOpen] = useState(false); const [cx,setCx] = useState([]);
+  const load = async()=>{ if(!cn) return; try{ const { data, error } = await sb.from("so_cancel_tbl").select("*").eq("contract_number",cn).order("id"); setCx(error?[]:(data||[])); }catch(e){} };
+  useEffect(()=>{ let on = true; socCanCancel(user).then(v=>{ if(on) setCan(v); }); load(); return ()=>{ on = false; }; },[cn, user && user.username]);
+  useEffect(()=>{ const f = ()=>{ if(can) setOpen(true); else alert("Cancelling quantities is for the Sales Head post and Super Admins."); }; window.addEventListener("flo-so-cancel", f); return ()=>window.removeEventListener("flo-so-cancel", f); },[can]);
+  if(!cn) return null;
+  const isCx = /cancel/i.test(contractInfo.status||"");
+  return h("span",{style:{display:"inline-flex",gap:6,alignItems:"center",flexWrap:"wrap"}},
+    cx.length ? h("span",{"data-testid":"soc-record",title:cx.map(c=>osDmy(c.cancel_date)+" · "+c.reason_kind+(c.reason?": "+c.reason:"")+" · by "+(c.by_name||c.by_user)).join("\n"),style:{fontSize:11,fontWeight:700,borderRadius:9,padding:"2px 9px",background:"#fdecea",color:"#a3312a"}},
+      "⛔ "+(cx.some(c=>c.kind==="whole") ? "Cancelled "+osDmy((cx.find(c=>c.kind==="whole")||{}).cancel_date) : "Part cancelled: "+cx.flatMap(c=>(c.lines||[]).map(x=>"Sl "+x.sl+" −"+x.qty)).join(", "))) : null,
+    !isCx && can ? h("button",{"data-testid":"so-cancel",onClick:()=>setOpen(true),title:"Cancel the whole order or part quantities",style:{...btnSmall,fontSize:11,padding:"3px 9px",color:colors.danger,borderColor:colors.danger}},"Cancel order…") : null,
+    open ? h(SoCancelDialog,{ contractInfo, user, onClose:()=>setOpen(false), onDone:async()=>{ setOpen(false); await load(); onChanged && onChanged(); } }) : null);
+}
+// ---- Purchase: settle the POs of cancelled orders ----
+async function socOpenPos(){ try{ const { data, error } = await sb.from("so_cancel_po_tbl").select("*").eq("status","open").order("id"); return error ? [] : (data||[]); }catch(e){ return []; } }
+function SoCancelPoDialog({ user, onClose }){
+  const [rows,setRows] = useState(null); const [f,setF] = useState({}); const [busy,setBusy] = useState(false); const [me,setMe] = useState(""); const [pm,setPm] = useState([]);
+  const load = async()=>{ setRows(await socOpenPos()); };
+  useEffect(()=>{ load(); (async()=>{ setMe(await despMe(user)); await loadPostPeople(true); setPm(postHolders("purchase_manager")); })(); },[]);
+  const can = (r)=> user?.role==="super_admin" || user?.role==="admin" || pm.includes(me) || (r.owner_name && r.owner_name===me);
+  const settle = async(r)=>{
+    const x = f[r.id]||{}; if(!x.res){ alert("Pick what was done with PO "+r.po_no+"."); return; } if(!String(x.note||"").trim()){ alert("Write a note (what the vendor agreed)."); return; }
+    setBusy(true);
+    const { error } = await sb.from("so_cancel_po_tbl").update({ status:"settled", resolution:x.res, note:x.note.trim(), resolved_by:me||user?.username||"", resolved_at:new Date().toISOString() }).eq("id",r.id).eq("status","open");
+    if(error){ setBusy(false); alert("Not saved: "+error.message); return; }
+    await logAudit("UPDATE","so_cancel_po_tbl",r.po_no,"PO settled after order "+r.contract_number+" was cancelled: "+x.res+" — "+x.note.trim(),user?.username||"",null,null);
+    const left = (await socOpenPos()).filter(y=>y.cancel_id===r.cancel_id);
+    if(!left.length) await notifDone("socpo:"+r.cancel_id, user?.username||"");
+    try{ await stepRefresh(user); }catch(e){}
+    setBusy(false); await load();
+  };
+  return h(OsModal,{ title:"Cancelled orders — POs to settle", sub:"Until every PO here is settled, the Purchase Manager's PDFs are stopped and a reminder goes out every day.", onClose, width:980 },
+    !rows ? h("div",{style:{color:colors.muted}},"Reading…") : !rows.length ? h("div",{style:{color:"#0f6b4f",fontWeight:700}},"✓ Nothing left to settle.") :
+    h("table",{style:{borderCollapse:"collapse",width:"100%",fontSize:12.5}},
+      h("thead",null,h("tr",null,["Contract","PO","Vendor","Owner","Since","What was done","Note",""].map(x=>h("th",{key:x,style:{textAlign:"left",padding:"5px 7px",fontSize:11,color:colors.muted,borderBottom:"2px solid "+colors.dark}},x)))),
+      h("tbody",null, rows.map(r=>{ const x = f[r.id]||{}; const set = (p)=> setF(s=>({ ...s, [r.id]:{ ...(s[r.id]||{}), ...p } }));
+        return h("tr",{key:r.id},
+          ...[h("b",null,r.contract_number), r.po_no, r.vendor_name||"", r.owner_name||"", osDmy(r.created_at)+" ("+osDays(r.created_at)+" d)",
+            h("select",{value:x.res||"",disabled:!can(r),onChange:e=>set({ res:e.target.value }),style:{...inputStyle,padding:"4px 6px",fontSize:12}}, h("option",{value:""},"Pick…"), SOC_PO_RES.map(o=>h("option",{key:o,value:o},o))),
+            h("input",{value:x.note||"",disabled:!can(r),onChange:e=>set({ note:e.target.value }),placeholder:"What the vendor agreed",style:{...inputStyle,padding:"4px 6px",fontSize:12}}),
+            h("button",{"data-testid":"soc-po-resolve",disabled:busy||!can(r),onClick:()=>settle(r),style:{...btnPrimary,padding:"4px 10px",fontSize:12}},"Settle")].map((c,i)=>h("td",{key:i,style:{padding:"5px 7px",borderBottom:"1px solid "+colors.border,verticalAlign:"top"}},c))); }))));
+}
+// the Purchase Manager post is stopped while POs of cancelled orders are open
+let SOC_ME = { rows:[], user:null };
+async function socLoadMine(user){
+  if(!user || user.role==="super_admin"){ SOC_ME = { rows:[], user }; return SOC_ME; }
+  let rows = [];
+  try{ const { keys } = await myPostKeys(user); if((keys||[]).includes("purchase_manager")) rows = await socOpenPos(); }catch(e){}
+  SOC_ME = { rows, user }; return SOC_ME;
+}
+function socPdfAllowed(){
+  const u = SOC_ME.user; if(!u || u.role==="super_admin") return true;
+  const rows = SOC_ME.rows||[]; if(!rows.length) return true;
+  try{
+    const old = document.getElementById("flo-soc-block"); if(old) old.remove();
+    const esc = s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+    const wrap = document.createElement("div"); wrap.id = "flo-soc-block"; wrap.setAttribute("data-testid","soc-block");
+    wrap.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:4000;display:flex;align-items:center;justify-content:center;padding:16px";
+    const box = document.createElement("div"); box.style.cssText = "background:#fff;border-radius:12px;max-width:600px;width:100%;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.3)";
+    box.innerHTML = "<div style='font-weight:700;font-size:15px;background:#fbe4e4;color:#a32d2d;padding:12px 16px'>⛔ Your PDFs are stopped: POs of cancelled orders are not settled</div>"+
+      "<div style='padding:12px 16px;font-size:13px;line-height:1.6'><ul style='margin:0 0 8px;padding-left:20px'>"+rows.map(r=>"<li><b>"+esc(r.po_no)+"</b> — "+esc(r.vendor_name||"")+" · order "+esc(r.contract_number)+" cancelled "+esc(osDmy(r.created_at))+"</li>").join("")+"</ul>"+
+      "<div><b>To lift it:</b> settle each PO with the vendor and record it (cancelled / amended / kept for stock / other, with a note).</div></div>"+
+      "<div style='display:flex;justify-content:flex-end;gap:8px;padding:0 16px 14px'><button id='flo-soc-go' style='padding:9px 16px;background:#0f7a5c;color:#fff;border:0;border-radius:6px;cursor:pointer'>Settle the POs</button><button id='flo-soc-x' style='padding:9px 16px;background:#fff;border:1px solid #d8d4c5;border-radius:6px;cursor:pointer'>Close</button></div>";
+    wrap.appendChild(box); document.body.appendChild(wrap);
+    box.querySelector("#flo-soc-x").onclick = ()=>wrap.remove();
+    box.querySelector("#flo-soc-go").onclick = ()=>{ wrap.remove(); window.dispatchEvent(new Event("flo-socancel-pos")); };
+  }catch(e){ alert("Your PDFs are stopped until the POs of cancelled orders are settled."); }
+  return false;
+}
+// a reminder every day while a PO is open: the Purchase Manager post, the PO owner and the Super Admins
+async function socSweep(){
+  try{
+    const rows = await socOpenPos(); if(!rows.length) return;
+    const day = oaLocalDate(new Date()); await loadPostPeople(true);
+    const pm = postHolders("purchase_manager"), sas = await superAdminNames();
+    const byCx = new Map(); rows.forEach(r=>byCx.set(r.cancel_id,[...(byCx.get(r.cancel_id)||[]), r]));
+    for(const [cid, rs] of byCx){
+      const g = "socpo-day:"+cid+":"+day;
+      try{ const { data: ex } = await sb.from("notifications_tbl").select("id").eq("action_group",g).limit(1); if(ex && ex.length) continue; }catch(e){}
+      const d = osDays(rs[0].created_at);
+      await notifyPeople([...new Set([...pm, ...rs.map(r=>r.owner_name), ...(d>=1 ? sas : [])].filter(Boolean))],
+        "⏰ Order "+rs[0].contract_number+" was cancelled "+d+" day(s) ago — PO "+rs.map(r=>r.po_no).join(", ")+" still not settled. The Purchase Manager's PDFs stay stopped until it is.", "order_cancel",
+        { kind:"act", open:{ socpos:1 }, target:'[data-testid="soc-po-resolve"]', group:g, help:{ btn:"Settle the POs", what:"POs of cancelled order "+rs[0].contract_number, do:["Settle each PO with the vendor.","Record what was done and press Settle."] } });
+    }
+  }catch(e){ console.warn("Cancelled-order PO reminders", e); }
+}
+// ===== 2026-10-31T16:00:00Z (batch Babu): SALE ORDER AMENDMENT GATEWAY =====
+// The client amends the PO: quantity up, new Sl Nos, price, commercial terms, delivery, item details. Quantity down goes to
+// Cancel order. Who: the person who made the Sale Order, the Document Controller post and Super Admins. No codes.
+// Price / terms (and a new Sl No) -> Accounts re-approves the Commercial Terms; quantity up / new Sl No / item change ->
+// the Technical Head approves. Until then the Sale Order prints DRAFT; the O.A becomes Rev N and the O.A rule starts again.
+// The Sale Order as it was is kept with each amendment. "Amendment N" prints on the O.A, DC, packing slip, invoice and PI.
+const AMD_SQL = "structure_so_amendment_2026-10-31.sql";
+const AMD_TERMS = [["payment_term","Payment"],["delivery_term","Delivery term"],["price_basis","Price basis"],["freight","Freight"],["incoterms","Inco terms"],["insurance","Insurance"],["guarantee","Guarantee"]];
+const amdRefText = (so)=> so && Number(so.amd_no)>0 ? "Amendment "+so.amd_no+(so.amd_ref?" ("+so.amd_ref+(so.amd_date?" dt "+fmtDMY(String(so.amd_date).slice(0,10)):"")+")":"") : "";
+async function amdList(cn){ try{ const { data, error } = await sb.from("so_amend_tbl").select("*").eq("contract_number",String(cn)).order("amd_no"); return error ? null : (data||[]); }catch(e){ return null; } }
+// is an amendment still waiting? (Accounts = the Commercial Terms approved after it; Technical Head = its own approval)
+function amdWaiting(a, so){
+  if(!a) return { acc:false, th:false, any:false };
+  const acc = !!a.need_acc && !(so && so.commercial_approved_by && so.commercial_approved_at && new Date(so.commercial_approved_at) > new Date(a.created_at));
+  const th = !!a.need_th && !a.th_at;
+  return { acc, th, any: acc || th };
+}
+async function amdThPending(cn){ const L = await amdList(cn); if(!L || !L.length) return false; const a = L[L.length-1]; return !!a.need_th && !a.th_at; }
+async function amdCanAmend(user, so){
+  if(!user) return false; if(user.role==="super_admin") return true;
+  if(so && so.created_by && so.created_by===user.username) return true;
+  try{ const { keys } = await myPostKeys(user); return (keys||[]).includes("doc_controller"); }catch(e){ return false; }
+}
+function SoAmendDialog({ contractInfo, user, onClose, onDone }){
+  const cn = String(contractInfo.contract_number);
+  const [S,setS] = useState(null); const [step,setStep] = useState(1); const [tab,setTab] = useState("qty");
+  const [h1,setH1] = useState({ ref:"", date:"", link:"", what:"" });
+  const [qty,setQty] = useState({}); const [price,setPrice] = useState({}); const [terms,setTerms] = useState({}); const [days,setDays] = useState(""); const [dayWhy,setDayWhy] = useState("");
+  const [item,setItem] = useState({}); const [newSl,setNewSl] = useState({}); const [busy,setBusy] = useState(false); const [err,setErr] = useState("");
+  useEffect(()=>{ (async()=>{
+    const [{ data: so }, { data: ests }, { data: t }, L] = await Promise.all([
+      sb.from("sale_order_tbl").select("*").eq("contract_number",cn).maybeSingle(),
+      sb.from("estimates").select("*").eq("reference_number",cn).order("item_sl_no"),
+      sb.from("quote_commercial_terms").select("*").eq("reference_number",cn).limit(1),
+      amdList(cn) ]);
+    let lots = [], dcs = []; try{ const r1 = await sb.from("so_lot_tbl").select("*").eq("contract_number",cn); lots = (r1.data||[]).filter(l=>l.status!=="Returned"); }catch(e){}
+    try{ const r2 = await sb.from("dc_tbl").select("id,status,lot_id,is_test,draft_no,bill_no").eq("contract_number",cn); dcs = (r2.data||[]).filter(d=>d.status!=="Cancelled" && !d.is_test); }catch(e){}
+    const prevNew = new Set((L||[]).flatMap(a=>((a.changes||{}).new_sl)||[]).map(Number));
+    setS({ so, ests:ests||[], terms:(t||[])[0]||{}, L, lots, dcs, prevNew, missing: L===null });
+  })(); },[cn]);
+  if(!S) return h(OsModal,{ title:"Amend Sale Order "+cn, onClose }, h("div",{style:{color:colors.muted}},"Reading the Sale Order…"));
+  if(S.missing) return h(OsModal,{ title:"Amend Sale Order "+cn, onClose }, h("div",{style:{color:colors.danger}},"Run "+AMD_SQL+" first (both companies)."));
+  const no = (S.L.length ? Number(S.L[S.L.length-1].amd_no)||S.L.length : 0) + 1;
+  const eff = (e)=> Math.max(0,(Number(e.order_qty)||1)-(Number(e.cancelled_qty)||0));
+  const poP = (e)=>{ const p = poPricePaid(e); return p ? p.value : null; };
+  const cur = String((S.so && S.so.currency) || ((S.ests[0]||{}).po_price_currency) || "INR").toUpperCase();
+  const woRel = woReleased(S.so && S.so.go_ahead_state);
+  const lotsOf = (sl)=> S.lots.filter(l=>!l.shipped_at && (l.lines||[]).some(x=>Number(x.sl)===Number(sl)));
+  // what this amendment changes
+  const ch = [];
+  Object.entries(qty).forEach(([sl,v])=>{ const e = S.ests.find(x=>Number(x.item_sl_no)===Number(sl)); ch.push({ k:"qty", sl:Number(sl), from:eff(e), to:Number(v), th:true, txt:"Sl "+sl+" qty "+eff(e)+" → "+v }); });
+  Object.keys(newSl).filter(k=>newSl[k]).forEach(sl=>{ const e = S.ests.find(x=>Number(x.item_sl_no)===Number(sl)); ch.push({ k:"new", sl:Number(sl), th:true, acc:true, txt:"New Sl "+sl+": "+((e&&e.description)||(e&&e.model)||"")+" × "+eff(e||{})+(poP(e)?" @ "+poP(e)+" "+cur:"") }); });
+  Object.entries(price).forEach(([sl,v])=>{ const e = S.ests.find(x=>Number(x.item_sl_no)===Number(sl)); ch.push({ k:"price", sl:Number(sl), from:poP(e), to:Number(v), acc:true, txt:"Sl "+sl+" unit price "+(poP(e)??"—")+" → "+v+" "+cur+" (everything not yet invoiced)" }); });
+  Object.entries(terms).forEach(([k,v])=>{ ch.push({ k:"terms", f:k, from:S.terms[k]||"", to:v, acc:true, txt:(AMD_TERMS.find(x=>x[0]===k)||[k,k])[1]+": "+(S.terms[k]||"—")+" → "+v }); });
+  if(days!=="" && Number(days)!==Number(S.so && S.so.delivery_days)) ch.push({ k:"days", from:S.so && S.so.delivery_days, to:Number(days), txt:"Delivery "+((S.so&&S.so.delivery_days)??"—")+" → "+days+" days"+((S.so&&S.so.delivery_trigger)?" from "+S.so.delivery_trigger:"")+(dayWhy?" — "+dayWhy:"") });
+  Object.entries(item).forEach(([sl,x])=>{ if(!String(x.desc||"").trim()) return; const e = S.ests.find(y=>Number(y.item_sl_no)===Number(sl)); ch.push({ k:"item", sl:Number(sl), from:(e&&e.description)||"", to:x.desc.trim(), note:x.note||"", th:true, txt:"Sl "+sl+" item: "+((e&&e.description)||"—")+" → "+x.desc.trim()+(x.note?" ("+x.note+")":"")+(woRel?" — after the work order, Technical Head approves":"") }); });
+  const needAcc = ch.some(c=>c.acc), needTh = ch.some(c=>c.th);
+  const next = ()=>{ setErr("");
+    if(step===1){ if(!h1.ref.trim() || !h1.date || !/^https?:\/\//i.test(h1.link.trim())){ setErr("Give the client's amendment reference, its date and the link to the document (https://…)."); return; } setStep(2); return; }
+    if(step===2){ if(!ch.length){ setErr("Nothing changes yet. Pick at least one change."); return; }
+      if(ch.some(c=>c.k==="days") && !dayWhy.trim()){ setErr("Say why the delivery changes (it goes into the delivery history)."); return; }
+      setStep(3); } };
+  const save = async()=>{
+    setBusy(true); setErr("");
+    try{
+      const by = user?.username||""; let me = ""; try{ me = await despMe(user); }catch(e){} const now = new Date().toISOString();
+      const before = { so:S.so, estimates:S.ests.map(e=>({ item_sl_no:e.item_sl_no, order_qty:e.order_qty, cancelled_qty:e.cancelled_qty||0, description:e.description, model:e.model, po_price_value:e.po_price_value, po_price_currency:e.po_price_currency, po_price_fx:e.po_price_fx, po_sales_price:e.po_sales_price })), terms:S.terms };
+      const rec = { contract_number:cn, amd_no:no, client_ref:h1.ref.trim(), client_date:h1.date, link:h1.link.trim(), what:h1.what.trim()||null,
+        changes:{ list:ch.map(c=>({ ...c })), new_sl:ch.filter(c=>c.k==="new").map(c=>c.sl) }, before, need_acc:needAcc, need_th:needTh, by_user:by, by_name:me||by };
+      const { data: A, error: ae } = await sb.from("so_amend_tbl").insert(rec).select().single();
+      if(ae) throw new Error(/so_amend_tbl/.test(ae.message||"") ? "Run "+AMD_SQL+" first." : ae.message);
+      // quantities (the order qty grows; what was cancelled stays cancelled)
+      for(const c of ch.filter(x=>x.k==="qty")){ const e = S.ests.find(x=>Number(x.item_sl_no)===c.sl); await sb.from("estimates").update({ order_qty: c.to + (Number(e.cancelled_qty)||0) }).eq("id",e.id); }
+      // prices: the PO figure in the order currency, its rupee value derived
+      for(const c of ch.filter(x=>x.k==="price")){ const e = S.ests.find(x=>Number(x.item_sl_no)===c.sl); const fx = Number(e.po_price_fx) || Number(S.so && S.so.conversion_rate) || 1;
+        await sb.from("estimates").update({ po_price_value:c.to, po_price_currency:e.po_price_currency||cur, po_price_fx:fx, po_sales_price:Number((c.to*fx).toFixed(2)), po_price_entered_by:by, po_price_entered_at:now }).eq("id",e.id); }
+      // terms
+      const tp = {}; ch.filter(x=>x.k==="terms").forEach(c=>{ tp[c.f] = c.to; });
+      if(Object.keys(tp).length){ const { error } = S.terms && S.terms.id ? await sb.from("quote_commercial_terms").update(tp).eq("id",S.terms.id) : await sb.from("quote_commercial_terms").insert({ reference_number:cn, ...tp }); if(error) throw new Error("Terms not saved: "+error.message); }
+      // delivery days + history
+      const dc = ch.find(x=>x.k==="days");
+      if(dc){ await sb.from("sale_order_tbl").update({ delivery_days:dc.to, delivery_answered_by:by, delivery_answered_at:now }).eq("contract_number",cn);
+        try{ await sb.from("delivery_date_history_tbl").insert({ contract_number:cn, event_type:"days_changed", field_changed:"Amendment "+no, value_before:(dc.from??"")+" days", value_after:dc.to+" days", reason:dayWhy.trim()+" (client "+h1.ref.trim()+")", changed_by:by, stages_shifted:0 }); }catch(e){} }
+      // item details: description now; lots / draft DCs not despatched of that Sl No go back to production
+      for(const c of ch.filter(x=>x.k==="item")){ const e = S.ests.find(x=>Number(x.item_sl_no)===c.sl); await sb.from("estimates").update({ description:c.to }).eq("id",e.id);
+        for(const l of lotsOf(c.sl)){ const d = S.dcs.find(x=>x.id===l.dc_id);
+          if(d && d.status!=="Draft") continue;   // a numbered DC stays — Accounts decides
+          if(d){ await sb.from("dc_serial_tbl").delete().eq("dc_id",d.id); await sb.from("dc_tbl").update({ status:"Cancelled", cancelled_by:by, cancelled_at:now, cancel_reason:"Amendment "+no+": item changed" }).eq("id",d.id).eq("status","Draft"); }
+          await sb.from("so_lot_tbl").update({ status:"Returned", returned_by:me||by, returned_at:now, return_note:"Amendment "+no+": item of Sl "+c.sl+" changed" }).eq("id",l.id);
+          for(const st of ["dc","qc","acc","ship","req"]) await osDone(l, st, me||by, "Amendment "+no); } }
+      // the Sale Order: amendment no. for the prints; approvals back where needed
+      const sp = { amd_no:no, amd_ref:h1.ref.trim(), amd_date:h1.date };
+      if(needAcc) Object.assign(sp, { commercial_approved_by:null, commercial_approved_at:null });
+      if(needAcc || needTh) sp.status = "Open";
+      const { error: se } = await sb.from("sale_order_tbl").update(sp).eq("contract_number",cn);
+      if(se) throw new Error(/amd_/.test(se.message||"") ? "Run "+AMD_SQL+" first." : se.message);
+      await loadPostPeople(true);
+      if(needAcc) await notifyPeople(postHolders("accounts"), "Sale Order "+cn+" — Amendment "+no+" ("+h1.ref.trim()+"): "+ch.filter(c=>c.acc).map(c=>c.txt).join("; ")+". Approve the Commercial Terms again.", "so_amend",
+        { kind:"act", open:{ contract:cn }, target:'[data-testid="so-approve-commercial_approved"]', group:"amdacc:"+A.id, help:{ btn:"Open the Sale Order", what:"Amendment "+no+" — Commercial Terms", do:["Check the changes in Amendments on the Sale Order.","Press Approve on Commercial Terms."] } });
+      if(needTh) await notifyPeople(postHolders("technical_head"), "Sale Order "+cn+" — Amendment "+no+": "+ch.filter(c=>c.th).map(c=>c.txt).join("; ")+". Technical approval needed.", "so_amend",
+        { kind:"act", open:{ contract:cn }, target:'[data-testid="amd-th-approve"]', group:"amdth:"+A.id, help:{ btn:"Open the Sale Order", what:"Amendment "+no+" — technical approval", do:["Check the changes (BOM, items, quantities).","Correct the Sale Order BOM if needed (✎ Edit BOM).","Press Approve Amendment "+no+"."] } });
+      await logAudit("UPDATE","sale_order_tbl",cn,"Amendment "+no+" ("+h1.ref.trim()+" dt "+h1.date+"): "+ch.map(c=>c.txt).join("; ")+(needAcc?" · Accounts to re-approve":"")+(needTh?" · Technical Head to approve":""),by,S.so,rec);
+      setBusy(false); alert("Amendment "+no+" saved."+(needAcc||needTh ? "\n\nWaiting for "+[needAcc?"Accounts (Commercial Terms)":"", needTh?"the Technical Head":""].filter(Boolean).join(" and ")+". Until then the Sale Order prints DRAFT; the O.A then goes as Rev "+no+"." : "")); onDone && onDone();
+    }catch(e){ setBusy(false); setErr("Stopped: "+(e.message||e)); }
+  };
+  const th = (t,w)=> h("th",{style:{textAlign:"left",padding:"5px 7px",fontSize:11,color:colors.muted,borderBottom:"2px solid "+colors.dark,width:w}},t);
+  const td = (c,s)=> h("td",{style:{padding:"5px 7px",borderBottom:"1px solid "+colors.border,fontSize:12.5,verticalAlign:"top",...(s||{})}},c);
+  const inp = (v, on, ph, w, type, tid)=> h("input",{"data-testid":tid,type:type||"text",value:v,placeholder:ph||"",onChange:e=>on(e.target.value),style:{...inputStyle,padding:"5px 7px",fontSize:12.5,width:w||"100%"}});
+  const note = (t, tone)=> h("div",{style:{fontSize:12,borderRadius:6,padding:"7px 10px",marginTop:8,background:tone==="warn"?"#fff4d6":"#eaf2fb",color:tone==="warn"?"#5a3a00":"#0c447c"}},t);
+  const cnt = (k)=> ch.filter(c=>c.k===k).length;
+  const TABS = [["qty","Quantity up"],["new","New Sl No"],["price","Price"],["terms","Commercial terms"],["days","Delivery"],["item","Item details"],["less","Quantity down / remove"]];
+  const tabBody = tab==="qty" ? h("div",null, h("table",{style:{borderCollapse:"collapse",width:"100%"}}, h("thead",null,h("tr",null,th("Sl No",50),th("Item / description"),th("Qty now",70),th("New qty",90))),
+        h("tbody",null, S.ests.map(e=>h("tr",{key:e.id}, td(e.item_sl_no), td(e.description||e.model||""), td(eff(e)), td(inp(qty[e.item_sl_no]??"", v=>{ const n = Number(v); setQty(q=>{ const x = { ...q }; if(v!=="" && n>eff(e)) x[e.item_sl_no] = n; else delete x[e.item_sl_no]; return x; }); }, String(eff(e)), 80, "number", "amd-qty")))))),
+        note("Only increases here. Reducing goes through Quantity down / remove (Cancel order)."))
+    : tab==="new" ? h("div",null,
+        h("div",{style:{fontSize:12.5,marginBottom:6}},"Add the new Sl No first with ", h("b",null,"+ Add new Sl No"), " on the Sale Order (it opens the Estimator), then tick it here. ",
+          h("button",{"data-testid":"amd-add-sl",onClick:()=>{ onClose(); setTimeout(()=>{ try{ window.dispatchEvent(new Event("flo-so-newsl")); }catch(x){} },50); },style:{...btnSmall,marginLeft:6}},"Close and add a Sl No →")),
+        h("table",{style:{borderCollapse:"collapse",width:"100%"}}, h("thead",null,h("tr",null,th("New in this amendment",120),th("Sl No",50),th("Item / description"),th("Qty",60),th("Unit price ("+cur+")",110))),
+          h("tbody",null, S.ests.filter(e=>!S.prevNew.has(Number(e.item_sl_no))).map(e=>h("tr",{key:e.id}, td(h("input",{type:"checkbox","data-testid":"amd-new-tick",checked:!!newSl[e.item_sl_no],onChange:ev=>setNewSl(s=>({ ...s, [e.item_sl_no]:ev.target.checked }))})), td(e.item_sl_no), td(e.description||e.model||""), td(eff(e)), td(poP(e)??h("span",{style:{color:"#a3312a"}},"no PO price yet")))))),
+        note("A new Sl No goes to the Technical Head (BOM — lines not in the master go for BOM approval as usual) and to Accounts (its price)."))
+    : tab==="price" ? h("div",null, h("table",{style:{borderCollapse:"collapse",width:"100%"}}, h("thead",null,h("tr",null,th("Sl No",50),th("Item / description"),th("In lots / on DCs",110),th("Unit price now ("+cur+")",130),th("New unit price",120))),
+        h("tbody",null, S.ests.map(e=>h("tr",{key:e.id}, td(e.item_sl_no), td(e.description||e.model||""), td(lotsOf(e.item_sl_no).length ? lotsOf(e.item_sl_no).map(osLotName).join(", ") : "—",{color:colors.muted}), td(poP(e)??"—"),
+          td(inp(price[e.item_sl_no]??"", v=>{ const n = Number(v); setPrice(p=>{ const x = { ...p }; if(v!=="" && n>0 && n!==poP(e)) x[e.item_sl_no] = n; else delete x[e.item_sl_no]; return x; }); }, String(poP(e)??""), 110, "number", "amd-price")))))),
+        note("The new price applies to everything not yet invoiced — including quantity already in a lot or on a DC. Invoices already made keep their price. Accounts re-approves the Commercial Terms. No code.","warn"))
+    : tab==="terms" ? h("div",null, h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:8}},
+        AMD_TERMS.map(([k,l])=>h("label",{key:k,style:{fontSize:11.5,color:colors.muted,display:"flex",flexDirection:"column",gap:3}}, l+" — now: "+(S.terms[k]||"—"),
+          inp(terms[k]??"", v=>setTerms(t=>{ const x = { ...t }; if(v.trim() && v.trim()!==(S.terms[k]||"")) x[k] = v.trim(); else delete x[k]; return x; }), S.terms[k]||"")))),
+        note("Any change goes back to Accounts (Commercial Terms). P&F amounts: change them on Commercial Terms after saving — Accounts is approving again anyway.","warn"))
+    : tab==="days" ? h("div",null, h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:8}},
+        h("label",{style:{fontSize:11.5,color:colors.muted}},"Delivery now: "+((S.so&&S.so.delivery_days)??"—")+" days"+((S.so&&S.so.delivery_trigger)?" from "+S.so.delivery_trigger:"")),
+        h("label",{style:{fontSize:11.5,color:colors.muted,display:"flex",flexDirection:"column",gap:3}},"New delivery (days)", inp(days, setDays, String((S.so&&S.so.delivery_days)??""), 100, "number", "amd-days")),
+        h("label",{style:{fontSize:11.5,color:colors.muted,display:"flex",flexDirection:"column",gap:3,gridColumn:"span 2"}},"Why (kept in the delivery history)", inp(dayWhy, setDayWhy, "e.g. client asked for later delivery"))),
+        note("After approval, the delivery changes only through an amendment. A delivery-only amendment needs no approval."))
+    : tab==="item" ? h("div",null, h("table",{style:{borderCollapse:"collapse",width:"100%"}}, h("thead",null,h("tr",null,th("Sl No",50),th("Description now"),th("New description"),th("Model / size / MOC change (for the Technical Head)"))),
+        h("tbody",null, S.ests.map(e=>{ const x = item[e.item_sl_no]||{}; const set = (p)=> setItem(s=>({ ...s, [e.item_sl_no]:{ ...(s[e.item_sl_no]||{}), ...p } }));
+          return h("tr",{key:e.id}, td(e.item_sl_no), td(e.description||e.model||""), td(inp(x.desc||"", v=>set({ desc:v }), "the new description")), td(inp(x.note||"", v=>set({ note:v }), "e.g. MOC WCB → CF8M"))); }))),
+        note((woRel ? "The work order is released: an item change is allowed only with the Technical Head's approval. " : "")+"Lots and draft DCs of a changed Sl No that are not despatched go back to production. The Technical Head corrects the BOM with ✎ Edit BOM.","warn"))
+    : h("div",null, note("Reducing a quantity or removing a Sl No is done in Cancel order… (part quantities) — one way to reduce, with the reason, the lots, DCs, serials, Purchase and Accounts handled."),
+        h("button",{onClick:()=>{ onClose(); setTimeout(()=>{ try{ window.dispatchEvent(new Event("flo-so-cancel")); }catch(x){} },50); },style:{...btnSecondary,color:colors.danger,borderColor:colors.danger,marginTop:8}},"Close and open Cancel order…"));
+  return h(OsModal,{ title:"Amend Sale Order "+cn+" — Amendment "+no, sub:(S.so&&S.so.customer_name?S.so.customer_name+" · ":"")+"Client PO "+(((S.ests[0]||{}).po_number)||"—")+(S.L.length?" · last: Amendment "+S.L[S.L.length-1].amd_no:""), onClose, width:1000 },
+    h("div",{style:{display:"flex",gap:6,margin:"0 0 10px"}}, ["1 · Client's amendment","2 · What changes","3 · Check and save"].map((t,i)=>h("span",{key:i,style:{fontSize:11.5,padding:"3px 10px",borderRadius:12,background:step===i+1?colors.dark:"#eeece4",color:step===i+1?"#fff":colors.muted}},t))),
+    step===1 ? h("div",null,
+      h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:8}},
+        h("label",{style:{fontSize:11.5,color:colors.muted,display:"flex",flexDirection:"column",gap:3}},"Amendment no. (given by the app)", h("input",{value:"Amendment "+no,disabled:true,style:{...inputStyle,padding:"5px 7px"}})),
+        h("label",{style:{fontSize:11.5,color:colors.muted,display:"flex",flexDirection:"column",gap:3}},"Client's amendment ref *", h("input",{"data-testid":"amd-ref",value:h1.ref,onChange:e=>setH1(x=>({...x,ref:e.target.value})),placeholder:"e.g. PO-77 Amd 1",style:{...inputStyle,padding:"5px 7px"}})),
+        h("label",{style:{fontSize:11.5,color:colors.muted,display:"flex",flexDirection:"column",gap:3}},"Client's amendment date *", h("input",{"data-testid":"amd-date",type:"date",value:h1.date,onChange:e=>setH1(x=>({...x,date:e.target.value})),style:{...inputStyle,padding:"5px 7px"}})),
+        h("label",{style:{fontSize:11.5,color:colors.muted,display:"flex",flexDirection:"column",gap:3}},"Link to the client's amendment *", h("input",{"data-testid":"amd-link",value:h1.link,onChange:e=>setH1(x=>({...x,link:e.target.value})),placeholder:"https://drive.google.com/…",style:{...inputStyle,padding:"5px 7px"}}))),
+      h("textarea",{rows:2,value:h1.what,onChange:e=>setH1(x=>({...x,what:e.target.value})),placeholder:"What the client asked (in short)",style:{...inputStyle,marginTop:8}}),
+      note("The amendment number prints on the O.A, DC, packing slip, tax invoice and PI."))
+    : step===2 ? h("div",null,
+      h("div",{style:{display:"flex",gap:4,flexWrap:"wrap",marginBottom:10}}, TABS.map(([k,l])=>h("button",{key:k,"data-testid":"amd-tab-"+k,onClick:()=>setTab(k),style:{...btnSmall,fontSize:12,padding:"4px 10px",background:tab===k?"#0c447c":"#fff",color:tab===k?"#fff":colors.text,borderColor:tab===k?"#0c447c":colors.border}},l+(cnt(k)?" ("+cnt(k)+")":"")))),
+      tabBody)
+    : h("div",null,
+      h("div",{style:{fontSize:12.5}}, h("b",null,"Amendment "+no), " · client ref "+h1.ref+" of "+fmtDMY(h1.date)),
+      h("div",{style:{border:"1px solid "+colors.border,borderRadius:8,padding:"8px 12px",marginTop:8,background:"#fcfbf7"}}, ch.map((c,i)=>h("div",{key:i,style:{fontSize:12.5,padding:"2px 0"}},"• "+c.txt))),
+      h("div",{style:{fontWeight:700,fontSize:13,margin:"12px 0 6px"}},"Approvals needed"),
+      h("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}}, needAcc ? h("span",{style:{fontSize:11.5,fontWeight:700,borderRadius:9,padding:"2px 9px",background:"#fff4d6",color:"#854f0b"}},"Accounts — Commercial Terms ("+postPersonShort("accounts")+")") : null,
+        needTh ? h("span",{style:{fontSize:11.5,fontWeight:700,borderRadius:9,padding:"2px 9px",background:"#fff4d6",color:"#854f0b"}},"Technical Head ("+postPersonShort("technical_head")+")") : null,
+        !needAcc && !needTh ? h("span",{style:{fontSize:11.5,fontWeight:700,borderRadius:9,padding:"2px 9px",background:"#e4f3ed",color:"#0f6b4f"}},"None — delivery only") : null),
+      needAcc || needTh ? note("Until they approve, the Sale Order prints DRAFT. The O.A goes as Rev "+no+"; Stage goes back to Open and the 3-day O.A rule starts again from the Accounts approval.","warn") : null,
+      note("The Sale Order exactly as it is now is kept with Amendment "+no+".")),
+    err ? h("div",{style:{color:colors.danger,fontSize:12.5,marginTop:8,whiteSpace:"pre-wrap"}},err) : null,
+    h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:12}},
+      step>1 ? h("button",{onClick:()=>{ setErr(""); setStep(step-1); },style:btnSecondary},"← Back") : null,
+      step<3 ? h("button",{"data-testid":"amd-next",onClick:next,style:btnPrimary},step===1?"Next — what changes":"Next — check and save")
+        : h("button",{"data-testid":"amd-save",onClick:save,disabled:busy,style:btnPrimary},busy?"Saving…":"Save Amendment "+no)));
+}
+// The button, the list and the Technical Head's approval on the Sale Order
+function SoAmendChip({ contractInfo, user, onChanged }){
+  const cn = contractInfo && contractInfo.contract_number ? String(contractInfo.contract_number) : "";
+  const [L,setL] = useState(null); const [can,setCan] = useState(false); const [isTh,setIsTh] = useState(false); const [open,setOpen] = useState(false); const [list,setList] = useState(false);
+  const load = async()=>{ if(!cn) return; setL(await amdList(cn)); };
+  useEffect(()=>{ let on = true; load(); amdCanAmend(user, contractInfo).then(v=>{ if(on) setCan(v); });
+    (async()=>{ try{ const { keys } = await myPostKeys(user); if(on) setIsTh(user?.role==="super_admin" || (keys||[]).includes("technical_head")); }catch(e){} })(); return ()=>{ on = false; }; },[cn, user && user.username, contractInfo && contractInfo.commercial_approved_at]);
+  useEffect(()=>{ const f = ()=>{ if(!can){ alert("Amending this Sale Order is for the person who made it, the Document Controller and Super Admins."); return; } const lt = (L||[]).length ? L[L.length-1] : null; const ww = amdWaiting(lt, contractInfo); if(ww.any){ alert("Amendment "+lt.amd_no+" is still waiting for approval. Finish it first."); return; } if(/cancel/i.test(contractInfo.status||"")){ alert("This Sale Order is cancelled."); return; } setOpen(true); }; window.addEventListener("flo-so-amend", f); return ()=>window.removeEventListener("flo-so-amend", f); });
+  if(!cn || L===null) return null;
+  const last = L.length ? L[L.length-1] : null; const w = amdWaiting(last, contractInfo);
+  const isCx = /cancel/i.test(contractInfo.status||"");
+  const start = ()=>{ if(w.any){ alert("Amendment "+last.amd_no+" is still waiting for "+[w.acc?"Accounts":"", w.th?"the Technical Head":""].filter(Boolean).join(" and ")+". Finish it first."); return; } setOpen(true); };
+  const thApprove = async()=>{
+    if(!confirm("Approve Amendment "+last.amd_no+" of "+cn+" (technical)?\n\n"+(((last.changes||{}).list)||[]).filter(c=>c.th).map(c=>"• "+c.txt).join("\n"))) return;
+    let me = ""; try{ me = await despMe(user); }catch(e){}
+    const { error } = await sb.from("so_amend_tbl").update({ th_by:me||user?.username||"", th_at:new Date().toISOString() }).eq("id",last.id).is("th_at",null);
+    if(error){ alert("Not saved: "+error.message); return; }
+    await notifDone("amdth:"+last.id, user?.username||"");
+    await logAudit("UPDATE","so_amend_tbl",cn,"Amendment "+last.amd_no+" approved by the Technical Head",user?.username||"",null,null);
+    await load(); onChanged && onChanged();
+  };
+  return h("span",{style:{display:"inline-flex",gap:6,alignItems:"center",flexWrap:"wrap"}},
+    last ? h("button",{"data-testid":"amd-list",onClick:()=>setList(true),title:"The amendments of this Sale Order",style:{...btnSmall,fontSize:11,padding:"3px 9px",background:w.any?"#fff4d6":"#e6f1fb",color:w.any?"#854f0b":"#0c447c",borderColor:w.any?"#e0b84a":"#9cc3e8",fontWeight:700}},
+      "Amendment "+last.amd_no+(w.any ? " — waiting: "+[w.acc?"Accounts":"", w.th?"Technical Head":""].filter(Boolean).join(", ") : " ✓")) : null,
+    last && w.th && isTh ? h("button",{"data-testid":"amd-th-approve",onClick:thApprove,style:{...btnSmall,fontSize:11,padding:"3px 9px",background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700}},"Approve Amendment "+last.amd_no) : null,
+    can && !isCx ? h("button",{"data-testid":"so-amend",onClick:start,title:"The client amended the PO",style:{...btnSmall,fontSize:11,padding:"3px 9px",color:"#0c447c",borderColor:"#0c447c"}},"Amend Sale Order…") : null,
+    open ? h(SoAmendDialog,{ contractInfo, user, onClose:()=>setOpen(false), onDone:async()=>{ setOpen(false); await load(); onChanged && onChanged(); } }) : null,
+    list ? h(OsModal,{ title:"Amendments — "+cn, onClose:()=>setList(false), width:900 },
+      L.slice().reverse().map(a=>{ const ww = amdWaiting(a, a===last ? contractInfo : { commercial_approved_by:"x", commercial_approved_at:"9999-12-31" });
+        return h("div",{key:a.id,style:{border:"1px solid "+colors.border,borderRadius:8,padding:"8px 12px",marginBottom:8}},
+          h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}, h("b",null,"Amendment "+a.amd_no),
+            h("span",{style:{fontSize:11.5,color:colors.muted}},"client ref "+(a.client_ref||"")+" of "+fmtDMY(a.client_date)+" · saved by "+(a.by_name||a.by_user)+" on "+fmtDMY(a.created_at)),
+            a.link ? h("a",{href:a.link,target:"_blank",rel:"noopener noreferrer",style:{fontSize:11.5}},"client's document") : null,
+            h("span",{style:{marginLeft:"auto",display:"flex",gap:4}}, a.need_acc ? h("span",{style:{fontSize:11,fontWeight:700,borderRadius:9,padding:"1px 8px",background:ww.acc?"#fff4d6":"#e4f3ed",color:ww.acc?"#854f0b":"#0f6b4f"}},"Accounts"+(ww.acc?" — waiting":" ✓")) : null,
+              a.need_th ? h("span",{style:{fontSize:11,fontWeight:700,borderRadius:9,padding:"1px 8px",background:ww.th?"#fff4d6":"#e4f3ed",color:ww.th?"#854f0b":"#0f6b4f"}},"Technical Head"+(ww.th?" — waiting":" ✓ "+(a.th_by||""))) : null)),
+          a.what ? h("div",{style:{fontSize:12,color:colors.muted,marginTop:3}},"“"+a.what+"”") : null,
+          h("div",{style:{marginTop:4}}, (((a.changes||{}).list)||[]).map((c,i)=>h("div",{key:i,style:{fontSize:12.5}},"• "+c.txt))),
+          h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:4}},"Before this amendment: "+(((a.before||{}).estimates)||[]).map(e=>"Sl "+e.item_sl_no+" × "+Math.max(0,(Number(e.order_qty)||0)-(Number(e.cancelled_qty)||0))+(e.po_price_value?" @ "+e.po_price_value:"")).join(", ")+((a.before||{}).terms && (a.before.terms.payment_term) ? " · payment "+a.before.terms.payment_term : ""))); })) : null);
+}
+// ===== 2026-11-01T06:00:00Z (batch Uma + the stages before production) =====
+// Contract Register line saved -> "Make the Sale Order" (Document Controller + Technical Head posts, 3 working days,
+// then daily to the Sales Head, VP Projects and Technical Head posts). The client's order is a PO (number mandatory),
+// an LOI or a verbal order; LOI / verbal are chased for the PO (daily list + the area FSE, up after 7 days).
+// Order Status board: 1 Sale Order pending · 2 W/O release · 3 BOM summary · 4 PR release · 5 Purchase approval ·
+// 6 Purchase – material in · 7 Production in progress (then the lot columns as before). Everything is routed by POST.
+const UMA_SQL = "structure_uma_order_stages_2026-11-01.sql";
+const UMA_BUILD_DAY = "2026-11-01";
+const wdIsWork = (d)=> d.getDay()!==0;   // Sunday off
+function wdAdd(iso, n){ const d = new Date(String(iso||new Date().toISOString()).slice(0,10)+"T12:00:00"); let k = 0; while(k<n){ d.setDate(d.getDate()+1); if(wdIsWork(d)) k++; } return toISODate(d); }
+function wdSince(iso){ if(!iso) return 0; const d = new Date(String(iso).slice(0,10)+"T12:00:00"), t = new Date(toISODate(new Date())+"T12:00:00"); let n = 0; while(d<t){ d.setDate(d.getDate()+1); if(wdIsWork(d)) n++; } return n; }
+const ospToday = ()=> toISODate(new Date());
+// the stages before production (board columns 1-6); "prod" = column 7 (the existing contract card)
+const OSP_COLS = [
+  { k:"so",  label:"Sale Order pending",       posts:["doc_controller","technical_head"],        tone:["#fdecea","#8a2a22"], days:3 },
+  { k:"wo",  label:"W/O release",              posts:["technical_head","doc_controller","vp_projects"], tone:["#f3ecfb","#5b3fa3"], days:7 },
+  { k:"bom", label:"BOM summary",              posts:["technical_head"],                          tone:["#e8f0fa","#2a5a96"], days:0 },
+  { k:"pr",  label:"PR release",               posts:["stores","purchase_manager"],               tone:["#e9f5ef","#0f6b4f"], days:2 },
+  { k:"pa",  label:"Purchase approval",        posts:[], sa:true,                                  tone:["#efe9fb","#5b3fa3"], days:2 },
+  { k:"pur", label:"Purchase – material in",   posts:["purchase_manager","purchase_engineer"],    tone:["#fff4e0","#8a5a00"], days:3 },
+];
+const OSP_ESC_SO = ["sales_head","vp_projects","technical_head"];
+const OSP_ESC_CHASE = ["sales_head","vp_projects"];
+const OSP_CHASE_LIST = ["sales_coordinator","sales_head"];
+const ospPostText = (ks, sa)=> [...(ks||[]).map(k=>postLabel(k)), ...(sa?["Super Admin"]:[])].join(" · ");
+async function ospNames(col){ await loadPostPeople(); const n = (col.posts||[]).flatMap(k=>postHolders(k)); if(col.sa) n.push(...(await superAdminNames())); return Array.from(new Set(n.filter(Boolean))); }
+async function ospMayAct(k, user){
+  if(!user) return false; if(user.role==="super_admin") return true;
+  const col = OSP_COLS.find(c=>c.k===k); if(!col || col.sa) return false;
+  try{ const { keys } = await myPostKeys(user); return (col.posts||[]).some(p=>(keys||[]).includes(p)); }catch(e){ return false; }
+}
+// everything the stages need, read in one go
+async function ospLoad(){
+  const M = { err:"", reg:new Map(), so:new Map(), plan:new Map(), fac:new Map(), rel:new Set(), po:new Set(), st:new Map(), lots:new Map(), placed:new Set(), missing:false };
+  const safe = async(fn)=>{ try{ return await fn(); }catch(e){ return []; } };
+  const [reg, sos, plans, lines, pos, st, lots, pl] = await Promise.all([
+    safe(()=>fetchPaged(()=>sb.from("contract_register_tbl").select("*").order("contract_number"))),
+    safe(()=>fetchPaged(()=>sb.from("sale_order_tbl").select("contract_number,customer_name,status,go_ahead_state,go_ahead_at,quote_reference_number,basis_number,created_at,prod_bom_link").order("contract_number"))),
+    safe(()=>fetchPaged(()=>sb.from("proc_plan_tbl").select("id,contract_number,forms,created_at,prod_bom_approved_at").order("id"))),
+    safe(()=>fetchPaged(()=>sb.from("proc_line_tbl").select("plan_id,line_key,act_date").not("act_date","is",null).order("id"))),
+    safe(()=>fetchPaged(()=>sb.from("po_register").select("contract_ref,stage,status").order("id"))),
+    (async()=>{ try{ const r = await sb.from("order_stage_tbl").select("*"); if(r.error){ M.missing = true; return []; } return r.data||[]; }catch(e){ M.missing = true; return []; } })(),
+    safe(async()=>{ const r = await sb.from("so_lot_tbl").select("contract_number,status").limit(5000); return r.data||[]; }),
+    safe(async()=>{ const r = await sb.from("os_place_tbl").select("contract_number"); return r.data||[]; }) ]);
+  (reg||[]).forEach(r=>M.reg.set(String(r.contract_number), r));
+  (sos||[]).forEach(s=>M.so.set(String(s.contract_number), s));
+  const planById = new Map(); (plans||[]).forEach(p=>{ M.plan.set(String(p.contract_number), p); planById.set(p.id, p); });
+  (lines||[]).forEach(l=>{ const p = planById.get(l.plan_id); if(!p) return; const cn = String(p.contract_number); const [k, f] = String(l.line_key||"").split("|");
+    if(k==="fac"){ if(!M.fac.has(cn)) M.fac.set(cn, new Set()); M.fac.get(cn).add(f); }
+    if(k==="rel") M.rel.add(cn); });
+  (pos||[]).forEach(p=>{ if(!p.contract_ref || /cancel/i.test(p.status||"") || /draft/i.test(p.stage||"")) return; String(p.contract_ref).split(/[,\/;&\s]+/).filter(Boolean).forEach(c=>M.po.add(c.trim())); });
+  (st||[]).forEach(r=>M.st.set(String(r.contract_number), r));
+  (lots||[]).forEach(l=>{ if(l.status==="Returned") return; const k = String(l.contract_number); M.lots.set(k,(M.lots.get(k)||0)+1); });
+  (pl||[]).forEach(p=>M.placed.add(String(p.contract_number)));
+  return M;
+}
+// where one contract stands before production
+function ospStage(cn, M){
+  cn = String(cn); const reg = M.reg.get(cn)||null, so = M.so.get(cn)||null, plan = M.plan.get(cn)||null, st = M.st.get(cn)||{};
+  const forms = plan ? pgForms(plan).map(f=>f.form) : []; const fac = M.fac.get(cn)||new Set();
+  const facN = forms.filter(f=>fac.has(f)).length; const pct = forms.length ? Math.round(facN/forms.length*100) : (plan ? 100 : 0);
+  const relPo = M.rel.has(cn) || M.po.has(cn);   // old orders by data: a PO already released = PR released and approved
+  const x = { cn, reg, so, plan, st, forms, fac, facN, pct, relPo, stage:null };
+  if(!so){
+    if(!reg || reg.status!=="Pending") return x;
+    if(!(reg.source==="register" || String(reg.quote_number||"").trim())) return x;   // legacy lines without a quote cannot get a Sale Order
+    x.stage = "so"; return x;
+  }
+  if(/cancel|closed/i.test(so.status||"")) return x;
+  if(M.lots.get(cn) || M.placed.has(cn)){ x.stage = "prod"; return x; }
+  if(!woReleased(so.go_ahead_state)){ x.stage = "wo"; return x; }
+  if(!plan){ x.stage = "bom"; return x; }
+  if(!(st.pr_released_at || relPo)){ x.stage = "pr"; return x; }
+  if(!(st.pur_approved_at || relPo)){ x.stage = "pa"; return x; }
+  const oldDone = plan.created_at && String(plan.created_at).slice(0,10) < UMA_BUILD_DAY && pct>=100;
+  if(!(st.prod_started_at || oldDone)){ x.stage = "pur"; return x; }
+  x.stage = "prod"; return x;
+}
+// PO awaited: the register line says LOI / verbal and no PO number yet
+function ospPoAwaited(reg){ return !!reg && /^(LOI|Verbal)$/.test(reg.order_basis||"") && !String(reg.po_no||"").trim(); }
+function ospChaseFrom(reg){ return (reg && (reg.order_basis==="LOI" ? reg.loi_date : reg.verbal_on)) || (reg && reg.created_at) || null; }
+async function ospStageUpsert(cn, patch){
+  const { data: ex } = await sb.from("order_stage_tbl").select("*").eq("contract_number",String(cn)).maybeSingle();
+  const row = { ...(ex||{ contract_number:String(cn), tasks:{}, opened:{}, esc:{} }), ...patch, updated_at:new Date().toISOString() };
+  const { error } = ex ? await sb.from("order_stage_tbl").update({ ...patch, updated_at:row.updated_at }).eq("contract_number",String(cn)) : await sb.from("order_stage_tbl").insert(row);
+  if(error) throw new Error(/order_stage_tbl/.test(error.message||"") ? "Run "+UMA_SQL+" first (both companies)." : error.message);
+  return row;
+}
+async function ospTaskCards(cn, client, names, postOf, title, due, note){
+  const ids = [];
+  for(const n of Array.from(new Set((names||[]).filter(Boolean)))){
+    try{ let dept = null; try{ const { data: e } = await sb.from("employee_tbl").select("department").eq("employee_name",n).limit(1).maybeSingle(); dept = (e && e.department)||null; }catch(x){}
+      const row = { title, assignee:n, department:dept, labels:["Order Status"], links:[], ref:String(cn), customer:client||null, created_by:"App", status:"open", checklists:[], due_date:due||null, notes:note||"Made by the app from the Order Status board. It closes itself when the step is done.", post_key:postOf(n)||null };
+      let { data: t, error } = await sb.from("task_tbl").insert(row).select().single();
+      if(error && /post_key/.test(error.message||"")){ delete row.post_key; ({ data: t, error } = await sb.from("task_tbl").insert(row).select().single()); }
+      if(t){ ids.push(t.id); try{ await taskLog(t.id, "App", "Made by the app: "+title); }catch(x){} }
+    }catch(e){ console.warn("stage task", e); }
+  }
+  return ids;
+}
+async function ospTasksClose(ids, by, what){ for(const id of (ids||[])){ try{ const now = new Date().toISOString();
+  await sb.from("task_tbl").update({ status:"done", approved_by:"App ("+(by||"")+")", approved_at:now, moved_by:by||"App", moved_at:now, moved_what:what||"Done" }).eq("id",id).neq("status","done"); await taskLog(id, by||"App", what||"Done"); }catch(e){} } }
+const OSP_TITLE = {
+  so:(cn,cl)=>"Make the Sale Order — "+cn+(cl?" "+cl:""),
+  wo:(cn,cl)=>"Release the W/O — "+cn+(cl?" "+cl:""),
+  pr:(cn,cl)=>"Stock check and PR release — "+cn+(cl?" "+cl:""),
+  pa:(cn,cl)=>"Approve purchase — "+cn+(cl?" "+cl:""),
+  start:(cn,cl)=>"Start production — "+cn+(cl?" "+cl:"")+" (all material in)",
+  prod:(cn,cl)=>"Production started — "+cn+(cl?" "+cl:"")+": make the items",
+  chase:(cn,cl)=>"Chase the PO — "+cn+(cl?" "+cl:""),
+};
+const OSP_DO = {
+  so:["Open the Contract Register line (or the Order Status board, column 1).","Press Sale Order + and make the Sale Order."],
+  wo:["Open the Sale Order.","Release the work order (Code 2 or Code 1) when the documents allow."],
+  pr:["Check the stock against the Production BOM.","Press PR released on the Order Status board (column 4)."],
+  pa:["Look at the purchase plan of this contract.","Press Approve purchase on the Order Status board (column 5). Until then its POs cannot be approved."],
+  start:["All material is at our factory.","Press Start production on the Order Status board (column 6) — within 3 days."],
+  prod:["Production can start on this contract.","Mark Items ready on the board when a lot is ready."],
+  chase:["Call / mail the client for the PO.","Log the chase, or Add PO when it arrives (Contract Register → PO awaited)."],
+};
+let OSP_SYNC_BUSY = false, OSP_SYNC_AT = 0;
+// Opens the task of the stage a contract is in, closes the tasks of stages it has left, escalates late ones, chases POs.
+// Idempotent: run it as often as you like (board load, log-in, after each step).
+async function ospSync(only, by, Min){
+  if(OSP_SYNC_BUSY) return; OSP_SYNC_BUSY = true;
+  try{
+    const M = Min || await ospLoad(); if(M.missing) return;
+    await loadPostPeople(true);
+    const supers = await superAdminNames();
+    const postOfName = {}; ["doc_controller","technical_head","vp_projects","stores","purchase_manager","purchase_engineer","production_manager","sales_head","sales_coordinator"].forEach(k=>postHolders(k).forEach(n=>{ if(!postOfName[n]) postOfName[n] = k; }));
+    const postOf = (n)=> postOfName[n]||null;
+    const cns = only && only.length ? only.map(String) : Array.from(new Set([...M.reg.keys(), ...M.so.keys()]));
+    const today = ospToday(); const chaseRows = [];
+    for(const cn of cns){
+      const x = ospStage(cn, M); const st = M.st.get(cn) || { contract_number:cn, tasks:{}, opened:{}, esc:{} };
+      const tasks = { ...(st.tasks||{}) }, opened = { ...(st.opened||{}) }, esc = { ...(st.esc||{}) }, closed = { ...((st.esc||{}).closed||{}) };
+      let dirty = false; const client = (x.so && x.so.customer_name) || (x.reg && x.reg.client) || "";
+      // which steps should be open now
+      const want = new Set();
+      if(x.stage && ["so","wo","pr","pa"].includes(x.stage)) want.add(x.stage);
+      if(x.stage==="pur" && x.pct>=100) want.add("start");
+      if(x.stage==="prod" && st.prod_started_at && !M.lots.get(cn)) want.add("prod");
+      if(ospPoAwaited(x.reg) && !(x.so && /cancel|closed/i.test(x.so.status||""))) want.add("chase");
+      // close what is no longer wanted
+      for(const k of Object.keys(tasks)){
+        if(want.has(k) || closed[k]) continue;
+        await ospTasksClose(tasks[k], by||"App", "Done — "+cn+" moved on");
+        await notifDone("osstage:"+cn+":"+k, by||"App");
+        closed[k] = today; dirty = true;
+      }
+      // open what is wanted and not yet open
+      for(const k of want){
+        if(tasks[k] && !closed[k]) continue;
+        let names = [];
+        if(k==="chase") names = await soFsePeople({ quote_reference_number:(x.reg&&x.reg.quote_number)||"", customer_name:client });
+        else if(k==="start") names = ["purchase_manager","purchase_engineer"].flatMap(p=>postHolders(p));
+        else if(k==="prod") names = postHolders("production_manager");
+        else names = await ospNames(OSP_COLS.find(c=>c.k===k));
+        if(k==="pa") names = supers;
+        const due = k==="so" ? wdAdd(today,3) : (k==="pr"||k==="pa") ? wdAdd(today,2) : k==="start" ? wdAdd(today,3) : null;
+        const title = OSP_TITLE[k](cn, client);
+        if(names.length){
+          const ids = await ospTaskCards(cn, client, names, postOf, title, due, null);
+          await notifyPeople(names, title+(due?" — by "+fmtDMY(due):"")+".", "order_status", { kind:"act", open:{ tab:"order_board" }, group:"osstage:"+cn+":"+k, help:{ btn:"Open the Order Status board", what:title, do:OSP_DO[k] } });
+          tasks[k] = ids;
+        } else tasks[k] = [];
+        opened[k] = new Date().toISOString(); delete closed[k]; dirty = true;
+      }
+      // escalations (once a day)
+      if(want.has("so") && opened.so && wdSince(opened.so)>3 && esc.so!==today){
+        const late = wdSince(opened.so)-3; const to = OSP_ESC_SO.flatMap(p=>postHolders(p));
+        await notifyPeople(to, "⏰ "+cn+(client?" "+client:"")+": Sale Order not made — "+late+" working day"+(late>1?"s":"")+" late. Owners: Document Controller, Technical Head.", "order_status", { kind:"open", open:{ tab:"order_board" } });
+        esc.so = today; dirty = true;
+      }
+      if(want.has("chase")){
+        const from = ospChaseFrom(x.reg); const d = osDays(from);
+        chaseRows.push({ cn, client, d, basis:x.reg.order_basis });
+        if(d>7 && esc.chase!==today){ const to = OSP_ESC_CHASE.flatMap(p=>postHolders(p));
+          await notifyPeople(to, "⏰ PO still not in — "+cn+(client?" "+client:"")+" · "+d+" days on "+(x.reg.order_basis==="LOI"?"LOI "+(x.reg.loi_ref||""):"a verbal order")+".", "order_status", { kind:"open", open:{ tab:"contract_register" } });
+          esc.chase = today; dirty = true; }
+      }
+      if(dirty){ esc.closed = closed; M.st.set(cn, { ...st, tasks, opened, esc });
+        try{ await ospStageUpsert(cn, { tasks, opened, esc }); }catch(e){ console.warn("order stage", e.message); } }
+    }
+    // the daily PO-awaited list (Sales Coordinator, Sales Head, Super Admins) — once a day for the company
+    if(!only){
+      const D = M.st.get("__daily__") || {}; const de = { ...(D.esc||{}) };
+      if(chaseRows.length && de.chase!==today){
+        const to = Array.from(new Set([...OSP_CHASE_LIST.flatMap(p=>postHolders(p)), ...supers]));
+        await notifyPeople(to, "PO awaited on "+chaseRows.length+" order"+(chaseRows.length>1?"s":"")+": "+chaseRows.sort((a,b)=>b.d-a.d).slice(0,12).map(r=>r.cn+" ("+r.d+" d)").join(", ")+(chaseRows.length>12?" …":"")+". Contract Register → PO awaited.", "order_status", { kind:"open", open:{ tab:"contract_register" } });
+        de.chase = today; try{ await ospStageUpsert("__daily__", { esc:de }); }catch(e){}
+      }
+    }
+    OSP_SYNC_AT = Date.now();
+  }catch(e){ console.warn("Order stages not synced", e); }
+  finally{ OSP_SYNC_BUSY = false; }
+}
+function ospSyncSoon(user){ if(Date.now()-OSP_SYNC_AT < 30*60000) return; setTimeout(()=>{ ospSync(null, (user&&user.username)||"App"); }, 4000); }
+// Purchase approval gate for the PO Register: a PO of a contract waiting for purchase approval cannot be approved
+async function ospPurGate(contractRef, poNo){
+  const cns = String(contractRef||"").split(/[,\/;&\s]+/).map(s=>s.trim()).filter(Boolean); if(!cns.length) return { ok:true };
+  try{
+    const M = await ospLoad(); if(M.missing) return { ok:true };
+    for(const cn of cns){ const x = ospStage(cn, M); if(x.stage==="pr" || x.stage==="pa") return { ok:false, cn, stage:x.stage }; }
+  }catch(e){}
+  return { ok:true };
+}
+// a step pressed on the board
+async function ospPress(k, cn, user, extra){
+  const by = user?.username||""; let me = ""; try{ me = await despMe(user); }catch(e){} const now = new Date().toISOString();
+  const patch = k==="pr" ? { pr_released_by:me||by, pr_released_at:now } : k==="pa" ? { pur_approved_by:me||by, pur_approved_at:now } : { prod_started_by:me||by, prod_started_at:now, prod_started_pct:(extra&&extra.pct)||0 };
+  await ospStageUpsert(cn, patch);
+  await logAudit("UPDATE","order_stage_tbl",String(cn), k==="pr"?"PR released":k==="pa"?"Purchase approved (Super Admin)":"Start production pressed ("+((extra&&extra.pct)||0)+"% of the material in)", by, null, patch);
+  await ospSync([String(cn)], me||by);
+  if(k==="pa"){ await loadPostPeople(true); await notifyPeople(["purchase_manager","purchase_engineer"].flatMap(p=>postHolders(p)), "✓ Purchase approved for "+cn+" by "+(me||by)+" — its POs can now be approved.", "order_status", { kind:"open", open:{ tab:"po_register" } }); }
+}
+// ---- Contract Register: PO awaited (chase) ----
+function CrPoChase({ user, onClose, onChanged, focus }){
+  const [rows,setRows] = useState(null); const [logs,setLogs] = useState([]); const [add,setAdd] = useState(null); const [ch,setCh] = useState(null); const [err,setErr] = useState("");
+  const load = async()=>{
+    try{ const { data, error } = await sb.from("contract_register_tbl").select("*").in("order_basis",["LOI","Verbal"]); if(error){ setErr(/order_basis/.test(error.message||"")?"Run "+UMA_SQL+" first (both companies).":error.message); setRows([]); return; }
+      const R = (data||[]).filter(ospPoAwaited); setRows(R);
+      if(R.length){ const { data: L } = await sb.from("po_chase_tbl").select("*").in("contract_number",R.map(r=>r.contract_number)).order("id"); setLogs(L||[]); }
+      const fse = {}; for(const r of R){ const f = await soFsePeople({ quote_reference_number:r.quote_number||"", customer_name:r.client||"" }); fse[r.contract_number] = f.join(", "); } setRows(R.map(r=>({ ...r, _fse:fse[r.contract_number]||"" })));
+    }catch(e){ setErr(String(e.message||e)); setRows([]); } };
+  useEffect(()=>{ load(); },[]);
+  useEffect(()=>{ if(focus && rows && rows.length){ const r = rows.find(x=>String(x.contract_number)===String(focus)); if(r && !add) setAdd({ r, no:"", dt:"", link:"" }); } },[rows]);
+  const saveAdd = async()=>{ const a = add; if(!String(a.no).trim() || !a.dt || !/^https?:\/\//i.test(String(a.link).trim())){ setAdd({ ...a, err:"PO number, PO date and the link are all needed." }); return; }
+    const by = user?.username||""; let me = ""; try{ me = await despMe(user); }catch(e){} const now = new Date().toISOString(); const cn = String(a.r.contract_number);
+    const { error } = await sb.from("contract_register_tbl").update({ po_no:a.no.trim(), po_date:a.dt, po_link:a.link.trim(), po_added_by:me||by, po_added_at:now }).eq("contract_number",cn);
+    if(error){ setAdd({ ...a, err:error.message }); return; }
+    try{ const { data: so } = await sb.from("sale_order_tbl").select("contract_number").eq("contract_number",cn).maybeSingle();
+      if(so) await sb.from("estimates").update({ po_number:a.no.trim(), po_date:a.dt }).eq("reference_number",cn); }catch(e){}
+    try{ await crHist(cn, by, "Client PO added: "+a.no.trim()+" dt "+fmtDMY(a.dt)+" (was on "+(a.r.order_basis==="LOI"?"LOI "+(a.r.loi_ref||""):"a verbal order")+")"); }catch(e){}
+    await logAudit("UPDATE","contract_register_tbl",cn,"Client PO added "+a.no.trim()+" dt "+a.dt+" — PO chase closed",by,null,null);
+    await ospSync([cn], me||by); setAdd(null); await load(); onChanged && onChanged(); };
+  const saveCh = async()=>{ const c = ch; if(!String(c.note||"").trim()){ setCh({ ...c, err:"Say what the client said." }); return; }
+    let me = ""; try{ me = await despMe(user); }catch(e){}
+    const { error } = await sb.from("po_chase_tbl").insert({ contract_number:String(c.r.contract_number), how:c.how||"Phone", spoke_to:c.who||null, note:c.note.trim(), promised_by:c.by||null, by_user:user?.username||"", by_name:me||user?.username||"" });
+    if(error){ setCh({ ...c, err:/po_chase_tbl/.test(error.message||"")?"Run "+UMA_SQL+" first.":error.message }); return; }
+    setCh(null); await load(); };
+  const inp = (v,on,ph,type)=> h("input",{type:type||"text",value:v||"",placeholder:ph||"",onChange:e=>on(e.target.value),style:{...inputStyle,padding:"5px 7px",fontSize:12.5,width:"100%"}});
+  const lab = (t,c)=> h("label",{style:{fontSize:11.5,color:colors.muted,display:"flex",flexDirection:"column",gap:3}},t,c);
+  return h(OsModal,{ title:"PO awaited — orders on an LOI or a verbal order", sub:"Chase the client for the PO. A row leaves this list the moment the PO is added.", onClose, width:1050 },
+    err ? h("div",{style:{color:colors.danger,fontSize:12.5}},err) : null,
+    rows===null ? h("div",{style:{color:colors.muted}},"Reading…") :
+    h("table",{"data-testid":"cr-chase-table",style:{borderCollapse:"collapse",width:"100%",fontSize:12.5}},
+      h("thead",null,h("tr",null,["Contract","Client","On","Area FSE","Days","Last chase","Client says PO by",""].map(t=>h("th",{key:t,style:{textAlign:"left",padding:"5px 7px",fontSize:11,color:colors.muted,borderBottom:"2px solid "+colors.dark}},t)))),
+      h("tbody",null, rows.length===0 ? h("tr",null,h("td",{colSpan:8,style:{padding:10,color:colors.mutedLight}},"None — every order has its PO.")) :
+        rows.map(r=>{ const L = logs.filter(x=>String(x.contract_number)===String(r.contract_number)); const c = L[L.length-1]; const d = osDays(ospChaseFrom(r));
+          const td = (x,s)=> h("td",{style:{padding:"5px 7px",borderBottom:"1px solid "+colors.border,verticalAlign:"top",...(s||{})}},x);
+          return h("tr",{key:r.contract_number}, td(h("b",null,r.contract_number)), td(r.client||""),
+            td(r.order_basis==="LOI" ? "LOI "+(r.loi_ref||"")+(r.loi_date?" dt "+fmtDMY(r.loi_date):"") : "Verbal — "+(r.verbal_by||"")+" with "+(r.verbal_with||"")+(r.verbal_on?" on "+fmtDMY(r.verbal_on):"")),
+            td(r._fse||h("span",{style:{color:colors.mutedLight}},"no FSE for the area")),
+            td(h("span",{style:{fontSize:11,fontWeight:700,borderRadius:9,padding:"1px 8px",background:d>7?"#fdecea":"#fff4d6",color:d>7?"#a3312a":"#854f0b"}},d)),
+            td(c ? fmtDMY(c.created_at)+" · "+(c.how||"")+(c.spoke_to?" · "+c.spoke_to:"")+": "+(c.note||"") : h("span",{style:{color:colors.mutedLight}},"never")),
+            td(c && c.promised_by ? fmtDMY(c.promised_by) : "—"),
+            td(h("span",{style:{display:"inline-flex",gap:4}}, h("button",{"data-testid":"cr-chase-log",onClick:()=>setCh({ r, how:"Phone" }),style:btnSmall},"Log a chase"),
+              h("button",{"data-testid":"cr-add-po",onClick:()=>setAdd({ r, no:"", dt:"", link:"" }),style:{...btnSmall,background:"#0c447c",color:"#fff",borderColor:"#0c447c"}},"Add PO…")),{whiteSpace:"nowrap"})); }))),
+    h("div",{style:{fontSize:12,borderRadius:6,padding:"7px 10px",marginTop:8,background:"#eaf2fb",color:"#0c447c"}},"Daily: the list goes to the Sales Coordinator, Sales Head and Super Admins; the FSE of the client's area has a chase task. After 7 days without the PO it goes daily to the Sales Head and VP Projects posts. The order and billing carry on meanwhile."),
+    add ? h(OsModal,{ title:"Add the client's PO — "+add.r.contract_number, sub:(add.r.client||"")+" · on "+(add.r.order_basis==="LOI"?"LOI "+(add.r.loi_ref||""):"a verbal order"), onClose:()=>setAdd(null), width:620 },
+      h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}, lab("PO number *", inp(add.no, v=>setAdd({ ...add, no:v }), "as printed on the PO")), lab("PO date *", inp(add.dt, v=>setAdd({ ...add, dt:v }), "", "date")),
+        h("div",{style:{gridColumn:"span 2"}}, lab("Link to the PO *", inp(add.link, v=>setAdd({ ...add, link:v }), "https://drive.google.com/…")))),
+      h("div",{style:{fontSize:12,marginTop:8,color:"#5a3a00",background:"#fff4d6",borderRadius:6,padding:"6px 10px"}},"If the PO differs from the quote / Sale Order, save it here and then use Amend Sale Order (or, before the Sale Order, revise the quote). If the Sale Order was made on an LOI, also attach the PO in its documents — the O.A block lifts from there."),
+      add.err ? h("div",{style:{color:colors.danger,fontSize:12.5,marginTop:6}},add.err) : null,
+      h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:10}}, h("button",{onClick:()=>setAdd(null),style:btnSecondary},"Cancel"), h("button",{"data-testid":"cr-add-po-save",onClick:saveAdd,style:btnPrimary},"Save PO — stop the chase"))) : null,
+    ch ? h(OsModal,{ title:"Chased the client — "+ch.r.contract_number, onClose:()=>setCh(null), width:620 },
+      h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}},
+        lab("How", h("select",{value:ch.how,onChange:e=>setCh({ ...ch, how:e.target.value }),style:{...inputStyle,padding:"5px 7px"}}, ["Phone","Email","WhatsApp","Visit"].map(o=>h("option",{key:o},o)))),
+        lab("Spoke to", inp(ch.who, v=>setCh({ ...ch, who:v }), "client's person")), lab("Client says PO by", inp(ch.by, v=>setCh({ ...ch, by:v }), "", "date")),
+        h("div",{style:{gridColumn:"span 2"}}, lab("What they said *", inp(ch.note, v=>setCh({ ...ch, note:v }), "e.g. PO in approval, expected next week")))),
+      ch.err ? h("div",{style:{color:colors.danger,fontSize:12.5,marginTop:6}},ch.err) : null,
+      h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:10}}, h("button",{onClick:()=>setCh(null),style:btnSecondary},"Cancel"), h("button",{"data-testid":"cr-chase-save",onClick:saveCh,style:btnPrimary},"Save"))) : null);
 }
 // ---- DC list ----------------------------------------------------------------------------------------
 function DespatchScreen({ user }){
@@ -71068,7 +71964,7 @@ function AccSalesEntry({ user, A, C, editing, onDone, onClose, onOpenVoucher, ty
   const today = toISODate(new Date());
   const [companies,setCompanies] = useState([]);
   const [s,setS] = useState(()=>{
-    const d0 = today < C.entryFrom ? C.entryFrom : today;
+    const d0 = (C.test && today < C.entryFrom) ? C.entryFrom : today;
     return { date:d0, invNo: accNextInvoiceNo(C, d0), custRef:"", party:null, partyLabel:"", pos:"", posHow:"", gstMode:"auto", narration:"", narrTouched:false,
       rows:[accSalesBlankItem(C)], _nc:!!noContract, ncReason:"", ncWhy:"", scrapDc:"", irn:"", ackNo:"", ackDate:"", einvNa:false, einvNaWhy:"" }; });
   const [nc,setNc] = useState({ me:"", fd:false, open:[] });   // 249
@@ -71106,7 +72002,7 @@ function AccSalesEntry({ user, A, C, editing, onDone, onClose, onOpenVoucher, ty
   const problems = ()=>{
     const out = [];
     if(!s.date) out.push("Give the voucher date.");
-    if(s.date && s.date < C.entryFrom && !(!C.test && A && A.tree && s.date>=C.booksStart)) out.push(C.test ? "In the test books, vouchers start on "+fmtDMY(C.entryFrom)+"." : "Vouchers before go-live ("+fmtDMY(C.goLive)+") are corrections to the FFS years: only the Finance & Accounts Manager, Finance Director and super admins enter them.");
+    if(s.date && C.test && s.date < C.entryFrom) out.push(C.test ? "In the test books, vouchers start on "+fmtDMY(C.entryFrom)+"." : "Vouchers before go-live ("+fmtDMY(C.goLive)+") are corrections to the FFS years: only the Finance & Accounts Manager, Finance Director and super admins enter them.");
     if(s.date && s.date < (C.booksStart||"")) out.push("The books start on "+fmtDMY(C.booksStart)+".");
     if(s.date && accMonthLocked(C, s.date)) out.push(accMonthLabel(accMonthOf(s.date))+" is locked. Pick a date in an open month, or ask a super admin to unlock it.");
     if(s.date && editing && accFySuffix(s.date)!==accFySuffix(editing.voucher_date)) out.push("The date can't move to another financial year. Cancel this voucher and enter a new one.");
@@ -71320,7 +72216,7 @@ function AccBankForm({ user, A, C, vtype, editing, onDone, onClose, onOpenVouche
       return { acct:acc.ledger_id||"", date:editing.voucher_date, mode: m.mode, refNo: m.refNo, narration:editing.narration||"", touched:true,
         lines: ls.filter(x=>x!==acc).map(x=>{ const l = C.lById[x.ledger_id]; const a = al.find(y=>y.party_ledger_id===x.ledger_id && y.bill_voucher_id); return { ...accPayBlank(), ledger_id:x.ledger_id, label:l?accLedgerLabel(l):"", amt:String(Number(x.dr)||Number(x.cr)), bill:a?String(a.bill_voucher_id):"", note:x.note||"" }; }) }; }
     const rem = ACC_NAV["acct_"+vtype]; const first = accts.find(l=>l.id===rem) || accts[0];
-    return { acct:first?first.id:"", date: today < C.entryFrom ? C.entryFrom : today, mode: first && M.cash.has(first.group_id) ? "Cash" : "NEFT", refNo:"", narration:"", touched:false, lines:[accPayBlank()] }; };
+    return { acct:first?first.id:"", date: (C.test && today < C.entryFrom) ? C.entryFrom : today, mode: first && M.cash.has(first.group_id) ? "Cash" : "NEFT", refNo:"", narration:"", touched:false, lines:[accPayBlank()] }; };
   const [s,setS] = useState(init);
   const [dirty,setDirty] = useState(false); const [busy,setBusy] = useState(false); const [last,setLast] = useState(null);
   const [modes,setModes] = useState(ACC_MODES||ACC_MODES_FIXED); const [addMode,setAddMode] = useState(false);   // 249
@@ -71349,7 +72245,7 @@ function AccBankForm({ user, A, C, vtype, editing, onDone, onClose, onOpenVouche
   const problems = ()=>{ const out = [];
     if(!acct) out.push("Pick the "+(contra?"account the money goes from":dir==="in"?"bank or cash account the money comes into":"bank, cash or card account it is paid from")+".");
     if(!s.date) out.push("Give the date.");
-    if(s.date && s.date < C.entryFrom && !(editing && editing.source==="FFS") && !(!C.test && A && A.tree && s.date>=C.booksStart)) out.push(C.test ? "In the test books, vouchers start on "+fmtDMY(C.entryFrom)+"." : "Vouchers before go-live ("+fmtDMY(C.goLive)+") are corrections to the FFS years: only the Finance & Accounts Manager, Finance Director and super admins enter them.");
+    if(s.date && C.test && s.date < C.entryFrom) out.push(C.test ? "In the test books, vouchers start on "+fmtDMY(C.entryFrom)+"." : "Vouchers before go-live ("+fmtDMY(C.goLive)+") are corrections to the FFS years: only the Finance & Accounts Manager, Finance Director and super admins enter them.");
     if(s.date && s.date < (C.booksStart||"")) out.push("The books start on "+fmtDMY(C.booksStart)+".");
     if(s.date && accMonthLocked(C, s.date)) out.push(accMonthLabel(accMonthOf(s.date))+" is locked. Pick a date in an open month, or ask a super admin to unlock it.");
     if(s.date && editing && accFySuffix(s.date)!==accFySuffix(editing.voucher_date)) out.push("The date can't move to another financial year. Cancel this voucher and enter a new one.");
@@ -71931,7 +72827,7 @@ async function pbLoad(){
   const lk = await sb.from("acc_voucher_po_link_tbl").select("*").limit(1);
   if(lk.error) return { missing:true, err:lk.error.message };
   const [pos, its, links, grns] = await Promise.all([
-    fetchPaged(()=>sb.from("po_register").select("id,po_no,po_kind,po_date,vendor_name,stage,status,contract_ref,net_amt,total_amt,currency,gst_mode,source")),
+    fetchPaged(()=>sb.from("po_register").select("id,po_no,po_kind,po_date,vendor_name,stage,status,contract_ref,net_amt,total_amt,total_addition,total_tax,currency,gst_mode,source")),
     fetchPaged(()=>sb.from("po_register_items").select("po_no,sl,shape,spec,grade,size,description,item,hsn,qty,count_uom,rate,price_basis,unit_wt,amount,received_qty,line_kind,source,gst_pct")),
     fetchPaged(()=>sb.from("acc_voucher_po_link_tbl").select("*")),
     fetchPaged(()=>sb.from("grn_header").select("grn_no,grn_date,po_no,bill_no,status")).catch(()=>[]) ]);
@@ -72189,7 +73085,7 @@ function AccPurchaseEntry({ user, A, C, editing, onDone, onClose, onOpenVoucher,
   const tdsL = useMemo(()=>{ const set = accGroupSet(C,/^tds payable$/i); return C.ledgers.filter(l=>set.has(l.group_id) && l.is_active!==false).sort((a,b)=>(C.entryCount[b.id]||0)-(C.entryCount[a.id]||0)); },[C]);
   const payL = useMemo(()=>C.ledgers.filter(l=>l.is_active!==false && (M.bank.has(l.group_id)||M.cash.has(l.group_id)||M.cred.has(l.group_id))).sort((a,b)=>a.name.localeCompare(b.name)),[C]);
   const today = toISODate(new Date());
-  const blank = ()=>{ const d0 = today < C.entryFrom ? C.entryFrom : today;
+  const blank = ()=>{ const d0 = (C.test && today < C.entryFrom) ? C.entryFrom : today;
     return { date:d0, billNo:"", billDate:"", poNo:"", poPick:[], noPo:false, noPoReason:"", poOverWhy:"", party:null, partyLabel:"", pos:"", posHow:"", gstMode:"auto", kind:"goods", eligible:true, billTotal:"", link:"",
       tdsLedger:"", tdsPct:"", boeNo:"", boeDate:"", boeAssess:"", boeDuty:"", boeRate:"18", boeVia:"", narration:"", narrTouched:false, rows:[accPurchBlankItem(C)] }; };
   const [vendors,setVendors] = useState([]);
@@ -72229,7 +73125,7 @@ function AccPurchaseEntry({ user, A, C, editing, onDone, onClose, onOpenVoucher,
     const g = accPartyGst(l, vendors); set({ partyLabel:label, party:l.id, pos: g ? g.code : "", posHow: g ? g.how : "" }); };
   const problems = ()=>{ const out = [];
     if(!s.date) out.push("Give our date (the date it goes into the books).");
-    if(s.date && s.date < C.entryFrom && !(!C.test && A && A.tree && s.date>=C.booksStart)) out.push(C.test ? "In the test books, vouchers start on "+fmtDMY(C.entryFrom)+"." : "Vouchers before go-live ("+fmtDMY(C.goLive)+") are corrections to the FFS years: only the Finance & Accounts Manager, Finance Director and super admins enter them.");
+    if(s.date && C.test && s.date < C.entryFrom) out.push(C.test ? "In the test books, vouchers start on "+fmtDMY(C.entryFrom)+"." : "Vouchers before go-live ("+fmtDMY(C.goLive)+") are corrections to the FFS years: only the Finance & Accounts Manager, Finance Director and super admins enter them.");
     if(s.date && s.date < (C.booksStart||"")) out.push("The books start on "+fmtDMY(C.booksStart)+".");
     if(s.date && accMonthLocked(C, s.date)) out.push(accMonthLabel(accMonthOf(s.date))+" is locked. Pick a date in an open month, or ask a super admin to unlock it.");
     if(s.date && editing && accFySuffix(s.date)!==accFySuffix(editing.voucher_date)) out.push("The date can't move to another financial year. Cancel this voucher and enter a new one.");
@@ -72384,8 +73280,8 @@ function AccPurchaseEntry({ user, A, C, editing, onDone, onClose, onOpenVoucher,
         s.tdsLedger ? h("label",null,h("span",{style:lab},"TDS % (on the value before GST)"),h("input",{value:s.tdsPct,onChange:e=>set({ tdsPct:e.target.value }),style:num})) : null,
         h("label",null,h("span",{style:lab},"Total printed on the supplier's bill"),h("input",{value:s.billTotal,onChange:e=>set({ billTotal:e.target.value }),style:{ ...num, ...(String(s.billTotal||"").trim()!=="" && !billOk ? { background:"#fdecea", borderColor:"#e0b4ae" } : {}) }}),
           h("div",{style:{fontSize:11,marginTop:2,color: billOk ? "#0f6e56" : colors.muted}}, billOk ? "✔ matches the rows" : "must match "+accInr(k.total))),
-        h("label",{style:{gridColumn:"span 2"}},h("span",{style:lab},"Supplier bill (OneDrive link)",accTip("Paste the OneDrive link of the supplier's bill PDF. It can be added later, but after 3 days without it the person who entered the bill can't use Accounts until it is added; the Finance & Accounts Manager and then super admins are told.")),
-          h("input",{value:s.link,onChange:e=>set({ link:e.target.value }),placeholder:"https://… (can be added within 3 days)",style:inp}))),
+        h("label",{style:{gridColumn:"span 2"}},h("span",{style:lab},"Supplier bill link (optional)",accTip("If you have the supplier's bill PDF on the drive, paste its link here. It is optional — nothing is blocked without it.")),
+          h("input",{value:s.link,onChange:e=>set({ link:e.target.value }),placeholder:"https://… (optional)",style:inp}))),
       k.mode==="import" ? h("div",{style:{marginTop:10,border:"1px solid #e8c84a",background:"#fffaf0",borderRadius:8,padding:10}},
         h("div",{style:{fontWeight:700,fontSize:12.5,marginBottom:6}},"Bill of Entry (customs) — same screen"),
         h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:10}},
@@ -72411,7 +73307,8 @@ function AccPurchaseEntry({ user, A, C, editing, onDone, onClose, onOpenVoucher,
 // ---- supplier bill link: 3 days, then blocked; Finance & Accounts Manager told, then super admins
 const ACC_LINK_DAYS = 3, ACC_LINK_ESC2_DAYS = 2;
 const accIsPurch = v => /^(purchase|supplier invoice - service)$/i.test(v.vtype||"");
-function accLinkOverdue(C){ const cut = Date.now() - ACC_LINK_DAYS*86400000;
+function accLinkOverdue(C){ return [];   // 2026-10-31T12:00:00Z: the supplier bill link is optional — no lock-out, no reminders
+  const cut = Date.now() - ACC_LINK_DAYS*86400000;
   return C.vouchers.filter(v=>v.source==="App" && accIsPurch(v) && v.status!=="Cancelled" && !v.is_test && !String(v.bill_link||"").trim() && v.created_at && new Date(v.created_at).getTime() < cut); }
 let ACC_LINK_ESC_AT = 0;
 async function accLinkEscalate(C, user){
@@ -72453,7 +73350,7 @@ function AccVoucherEntry({ user, A, C, editId, onDone, onClose, onOpenVoucher })
   const [d,setD] = useState(()=> editing
     ? { vtype:editing.vtype, date:editing.voucher_date, ref:editing.ref||"", narration:editing.narration||"", orig:accNoteOrigInit(editing),
         lines:(editing._lines||[]).map(ln=>({ ...accBlankLine(), ledger_id:ln.ledger_id, label:C.lById[ln.ledger_id]?accLedgerLabel(C.lById[ln.ledger_id]):"", dr:Number(ln.dr)?String(ln.dr):"", cr:Number(ln.cr)?String(ln.cr):"", note:ln.note||"" })) }
-    : { vtype:(ACC_VTYPES.some(x=>x.t===ACC_NAV.lastType) ? ACC_NAV.lastType : "Payment"), date: today < C.entryFrom ? C.entryFrom : today, ref:"", narration:"", orig:accNoteOrigInit(null), lines:[accBlankLine(), accBlankLine()] });
+    : { vtype:(ACC_VTYPES.some(x=>x.t===ACC_NAV.lastType) ? ACC_NAV.lastType : "Payment"), date: (C.test && today < C.entryFrom) ? C.entryFrom : today, ref:"", narration:"", orig:accNoteOrigInit(null), lines:[accBlankLine(), accBlankLine()] });
   const [dirty,setDirty] = useState(false); const [busy,setBusy] = useState(false); const [last,setLast] = useState(null);
   useEffect(()=>{ setUnsavedGuard(dirty, "This voucher isn't saved. Leave anyway?"); return ()=>setUnsavedGuard(false); },[dirty]);
   const active = useMemo(()=>C.ledgers.filter(l=>l.is_active!==false && !accIsStock(l) && l.code!==ACC_STK.ppa && l.source!=="System").sort((a,b)=>a.name.localeCompare(b.name)),[C]);
@@ -72471,7 +73368,7 @@ function AccVoucherEntry({ user, A, C, editId, onDone, onClose, onOpenVoucher })
   const problems = ()=>{
     const out = [];
     if(!d.date) out.push("Give the voucher date.");
-    if(d.date && d.date < C.entryFrom && !(editing && editing.source==="FFS") && !(!C.test && A && A.tree && d.date>=C.booksStart)) out.push(C.test ? "In the test books, vouchers start on "+fmtDMY(C.entryFrom)+"." : "Vouchers before go-live ("+fmtDMY(C.goLive)+") are corrections to the FFS years: only the Finance & Accounts Manager, Finance Director and super admins enter them.");
+    if(d.date && C.test && d.date < C.entryFrom) out.push(C.test ? "In the test books, vouchers start on "+fmtDMY(C.entryFrom)+"." : "Vouchers before go-live ("+fmtDMY(C.goLive)+") are corrections to the FFS years: only the Finance & Accounts Manager, Finance Director and super admins enter them.");
     if(d.date && d.date < (C.booksStart||"")) out.push("The books start on "+fmtDMY(C.booksStart)+".");
     if(d.date && accMonthLocked(C, d.date)) out.push(accMonthLabel(accMonthOf(d.date))+" is locked. Pick a date in an open month, or ask a super admin to unlock it.");
     if(d.date && editing && accFySuffix(d.date)!==accFySuffix(editing.voucher_date)) out.push("The date can't move to another financial year (the number belongs to "+accFySuffix(editing.voucher_date)+"). Cancel this one and enter a new voucher.");
@@ -76225,6 +77122,8 @@ async function crCanEdit(user){
 }
 async function crHist(cn, by, what){ try{ await sb.from("contract_register_hist_tbl").insert({ contract_number:cn, by_user:by||"unknown", what }); }catch(e){} }
 // Everything on one list: register rows + Sale Orders, joined by contract number.
+// 2026-11-01T06:00:00Z (Uma): what the client gave (PO / LOI / verbal) and whether the PO is still awaited
+const crBasisOf = (r)=> ({ basis:(r&&r.order_basis)||"", loiRef:(r&&r.loi_ref)||"", loiDate:(r&&r.loi_date)||"", vBy:(r&&r.verbal_by)||"", vWith:(r&&r.verbal_with)||"", vOn:(r&&r.verbal_on)||"", poAwaited:ospPoAwaited(r), chaseDays: ospPoAwaited(r) ? osDays(ospChaseFrom(r)) : 0 });
 async function crLoadAll(){
   const [reg, regLines, sos, dues] = await Promise.all([
     fetchPaged(()=>sb.from("contract_register_tbl").select("*").order("contract_number")),
@@ -76263,7 +77162,7 @@ async function crLoadAll(){
       po: so.basis_number || head.po_number || r.po_no || "", poDate: toISODate(so.basis_date || head.po_date || so.oa_issued_on || so.created_at) || r.po_date || "",
       ccy, fx, valCcy, valInr: sn ? Number(sn.total_value)||0 : (valCcy!=null && fx ? valCcy*fx : null),
       status:r.status||"Pending", reason:r.status_reason||"", pay:tm.payment_term||"", freight:tm.freight||"", inco:tm.incoterms||"", endUser:r.end_user||head.end_user_name||"", vendorRule:r.vendor_rule||"", avlLink:r.avl_link||"",
-      tpi:r.tpi||"", tpiAgency:r.tpi_agency||"", cert:r.material_cert||"", remarks:r.remarks||"", hasReg:!!r.contract_number,
+      tpi:r.tpi||"", tpiAgency:r.tpi_agency||"", cert:r.material_cert||"", remarks:r.remarks||"", hasReg:!!r.contract_number, ...crBasisOf(r),
       lines: es.map(e=>({ key:"sl:"+e.item_sl_no, sl:e.item_sl_no, d:[e.description, e.model&&!String(e.description||"").includes(e.model)?e.model:""].filter(Boolean).join(" · "), q:Number(e.order_qty)||null, r:null, v:null, due:dueBy.get(cn+"|"+e.item_sl_no)||"", est:e })),
       checkCcy:false, country:soCountry, isExport: ccy!=="INR" || (!!soCountry && !/^india$/i.test(soCountry)) });
   });
@@ -76275,7 +77174,7 @@ async function crLoadAll(){
     const country = countryOf.get(String(r.client||"").trim().toLowerCase())||"";
     out.push({ cn, docsListed:r.docs_listed_at||null, source:r.source||"legacy", quote:r.quote_number||"", legacyRef:r.legacy_ref||"", client:r.client||"", po:r.po_no||"", poDate:r.po_date||"", poDateText:r.po_date_text||"",
       ccy, fx, valCcy, valInr: fx ? valCcy*fx : null, status:r.status||"Pending", reason:r.status_reason||"", pay:r.payment_terms||"", freight:r.freight||"", inco:r.incoterm||"", endUser:r.end_user||"", vendorRule:r.vendor_rule||"", avlLink:r.avl_link||"",
-      tpi:r.tpi||"", tpiAgency:r.tpi_agency||"", cert:r.material_cert||"", remarks:r.remarks||"", hasReg:true, lines:ls,
+      tpi:r.tpi||"", tpiAgency:r.tpi_agency||"", cert:r.material_cert||"", remarks:r.remarks||"", hasReg:true, lines:ls, ...crBasisOf(r),
       checkCcy: ccy==="INR" && !!country && !/^india$/i.test(country), country, isExport: ccy!=="INR" || (!!country && !/^india$/i.test(country)) });
   });
   out.sort((a,b)=> String(b.cn).localeCompare(String(a.cn)));
@@ -76442,9 +77341,11 @@ function ContractRegisterScreen({ user, onOpenQuote, onOpenContract, onGoToTab, 
   useEffect(()=>{ const f = ()=> setIsFull(!!rootRef.current && document.fullscreenElement===rootRef.current); document.addEventListener("fullscreenchange",f); return ()=>document.removeEventListener("fullscreenchange",f); },[]);
   // 171: a new contract is typed as a line, like a new row in the Excel
   const [nl,setNl] = useState(null);   // {num, quote, po, poDate, opts, hit, busy}
+  const [crEmps,setCrEmps] = useState([]); const [chaseOpen,setChaseOpen] = useState(null);   // 2026-11-01T06:00:00Z (Uma)
   const startNewLine = async()=>{
     if(nl) return;
-    setNl({ num:"…", quote:"", po:"", poDate:toISODate(new Date()), opts:null, busy:false });
+    setNl({ num:"…", quote:"", po:"", poDate:toISODate(new Date()), opts:null, busy:false, basis:"PO", vBy:"", vWith:"", vNote:"" });
+    if(!crEmps.length){ try{ const { data } = await sb.from("employee_tbl").select("employee_name,status").order("employee_name"); setCrEmps((data||[]).filter(e=>!/inactive|left|relieved|resigned/i.test(e.status||"")).map(e=>e.employee_name).filter(Boolean)); }catch(e){} }
     const [num, est, sos] = await Promise.all([ suggestNextContractNumber(),
       fetchPaged(()=>sb.from("estimates").select("reference_number,customer_name,quote_status,currency,conversion_rate").order("reference_number")),
       fetchPaged(()=>sb.from("sale_order_tbl").select("contract_number,quote_reference_number")) ]);
@@ -76462,14 +77363,22 @@ function ContractRegisterScreen({ user, onOpenQuote, onOpenContract, onGoToTab, 
   const saveNewLine = async()=>{
     const hit = (nl.opts||[]).find(o=>nlLabel(o)===nl.quote);
     if(!hit){ alert("Pick the won quote from the list — it is required."); return; }
-    if(!String(nl.po||"").trim()){ if(!confirm("No PO / LOI number yet. Save the line anyway? (it can be added later)")) return; }
+    // 2026-11-01T06:00:00Z (Uma): PO -> number and date mandatory; LOI -> ref and date; verbal -> who, with whom, when
+    const bs = nl.basis||"PO";
+    if(bs==="PO" && (!String(nl.po||"").trim() || !nl.poDate)){ alert("Give the PO number and the PO date. If the client gave an LOI or a verbal go-ahead, choose that instead."); return; }
+    if(bs==="LOI" && (!String(nl.po||"").trim() || !nl.poDate)){ alert("Give the LOI reference and its date."); return; }
+    if(bs==="Verbal" && (!String(nl.vBy||"").trim() || !String(nl.vWith||"").trim() || !nl.poDate)){ alert("Say who agreed it (our side), with whom at the client, and on which date."); return; }
     setNl(x=>({...x,busy:true}));
     try{
       const num = await suggestNextContractNumber();   // read again at the moment of saving
       if(!num){ alert("Contract numbering has not been set up yet (Setup → Company → Contract Numbering)."); setNl(x=>({...x,busy:false})); return; }
       const fx = hit.ccy==="INR" ? 1 : hit.fx;
-      const { error } = await sb.from("contract_register_tbl").insert({ contract_number:num, source:"register", quote_number:hit.latestRef, client:hit.customer, po_no:String(nl.po||"").trim()||null,
-        po_date:toISODate(nl.poDate)||null, currency:hit.ccy, fx_rate:fx, status:"Pending", created_by:user?.username||"unknown" });
+      const crRow = { contract_number:num, source:"register", quote_number:hit.latestRef, client:hit.customer, po_no: bs==="PO" ? (String(nl.po||"").trim()||null) : null,
+        po_date: bs==="PO" ? (toISODate(nl.poDate)||null) : null, currency:hit.ccy, fx_rate:fx, status:"Pending", created_by:user?.username||"unknown",
+        order_basis:bs, loi_ref: bs==="LOI" ? String(nl.po||"").trim() : null, loi_date: bs==="LOI" ? toISODate(nl.poDate) : null,
+        verbal_by: bs==="Verbal" ? String(nl.vBy).trim() : null, verbal_with: bs==="Verbal" ? String(nl.vWith).trim() : null, verbal_on: bs==="Verbal" ? toISODate(nl.poDate) : null, verbal_note: bs==="Verbal" ? (String(nl.vNote||"").trim()||null) : null };
+      let { error } = await sb.from("contract_register_tbl").insert(crRow);
+      if(error && /order_basis|loi_|verbal_/.test(error.message||"")){ alert("Run "+UMA_SQL+" first (both companies) — the register cannot record PO / LOI / verbal yet."); setNl(x=>({...x,busy:false})); return; }
       if(error){ alert(/duplicate|unique/i.test(error.message) ? "That contract number or quote was taken a moment ago — press + New contract again." : "Could not save: "+error.message); setNl(x=>({...x,busy:false})); return; }
       // the quote's items, priced as the quote prints them
       try{
@@ -76479,7 +77388,8 @@ function ContractRegisterScreen({ user, onOpenQuote, onOpenContract, onGoToTab, 
           const q = Number(e.order_qty)||1; ins.push({ contract_number:num, sl:i+1, description:[e.description, e.model&&!String(e.description||"").includes(e.model)?e.model:""].filter(Boolean).join(" · ")||null, qty:q, rate:u, value:Math.round(u*q*100)/100 }); }
         if(ins.length) await sb.from("contract_register_line_tbl").insert(ins);
       }catch(e){ console.error("register lines from quote", e); }
-      await crHist(num, user?.username, "Contract line added from quote "+hit.latestRef+(nl.po?" · PO "+nl.po:""));
+      await crHist(num, user?.username, "Contract line added from quote "+hit.latestRef+(bs==="PO"?" · PO "+nl.po:bs==="LOI"?" · LOI "+nl.po+" (PO awaited)":" · verbal order, agreed by "+nl.vBy+" with "+nl.vWith+" (PO awaited)"));
+      try{ setTimeout(()=>{ ospSync([String(num)], user?.username||"App"); }, 800); }catch(e){}   // "Make the Sale Order" to the Document Controller and Technical Head posts
       await logAudit("CREATE","contract_register_tbl",num,"Contract line from quote "+hit.latestRef+" ("+hit.customer+")",user?.username||"unknown",null,null);
       setNl(null);
       const ck = await contractDocChecklist({ cn:num, quoteRef:hit.latestRef, client:hit.customer, stage:"register", user });   // 228
@@ -76488,7 +77398,7 @@ function ContractRegisterScreen({ user, onOpenQuote, onOpenContract, onGoToTab, 
   };
   const saleOrderBtn = (c)=>{
     if(c.source==="app") return h("button",{onClick:e=>{ e.stopPropagation(); openSaleOrder(c.cn); },title:"Open the Sale Order",style:{...btnSmall,color:"#0f7a5c",borderColor:"#0f7a5c",fontWeight:700,whiteSpace:"nowrap"}},"Sale Order \u2197");
-    if(c.quote && canEdit) return h("button",{onClick:e=>{ e.stopPropagation(); onStartSaleOrder && onStartSaleOrder({ num:c.cn, quoteRef:c.quote, client:c.client, po:c.po, poDate:c.poDate, ccy:c.ccy }); },title:"Create the Sale Order from quote "+c.quote+" — only the PO / LOI document is asked",style:{...btnSmall,background:colors.dark,color:"#fff",borderColor:colors.dark,fontWeight:700,whiteSpace:"nowrap"}},"Sale Order +");
+    if(c.quote && canEdit) return h("button",{onClick:e=>{ e.stopPropagation(); onStartSaleOrder && onStartSaleOrder({ num:c.cn, quoteRef:c.quote, client:c.client, po:c.po, poDate:c.poDate, ccy:c.ccy, basis:c.basis||"", loiRef:c.loiRef||"", loiDate:c.loiDate||"", vBy:c.vBy||"", vWith:c.vWith||"", vOn:c.vOn||"" }); },title:"Create the Sale Order from quote "+c.quote+" — only the PO / LOI document is asked",style:{...btnSmall,background:colors.dark,color:"#fff",borderColor:colors.dark,fontWeight:700,whiteSpace:"nowrap"}},"Sale Order +");
     return h("span",{title:c.source==="legacy"?"Legacy contract — add its quotation number to make a Sale Order":"",style:{fontSize:10.5,color:colors.mutedLight}}, c.source==="legacy"?"Legacy":"\u2014");
   };
   // 228: the document checklist of a line, any time
@@ -76564,7 +77474,7 @@ function ContractRegisterScreen({ user, onOpenQuote, onOpenContract, onGoToTab, 
         shown.flatMap(c=>{ const isOpen = !!open[c.cn];
           const r1 = h("tr",{key:c.cn,onClick:()=>{ setEdit(c); priceApp(c); },style:{cursor:"pointer"}},
             cell(h("button",{onClick:e=>{ e.stopPropagation(); setOpen(o=>({...o,[c.cn]:!o[c.cn]})); if(!isOpen) priceApp(c); },title:"Show the items",style:{...btnSmall,padding:"0 6px"}},isOpen?"▾":"▸"),"t"),
-            cell(h(CtRef,{ct:c.cn,name:c.client,mono:true,compact:true}),"cn"), cell(quoteCell(c),"q"), cell(c.poDate?fmtDMY(c.poDate):(c.poDateText||"—"),"pd"), cell(c.client,"cl"), cell(c.po||"—","po"),
+            cell(h(CtRef,{ct:c.cn,name:c.client,mono:true,compact:true}),"cn"), cell(quoteCell(c),"q"), cell(c.poDate?fmtDMY(c.poDate):(c.poDateText||"—"),"pd"), cell(c.client,"cl"), cell(c.poAwaited ? h("span",null, h("div",{style:{fontSize:11.5}},c.basis==="LOI"?"LOI "+(c.loiRef||""):"Verbal ("+(c.vBy||"")+")"), h("button",{"data-testid":"cr-po-awaited",onClick:e=>{ e.stopPropagation(); setChaseOpen(c.cn); },title:"Chase the client for the PO, or add it",style:{fontSize:10.5,fontWeight:700,borderRadius:9,padding:"1px 8px",border:"none",cursor:"pointer",background:c.chaseDays>7?"#fdecea":"#fff4d6",color:c.chaseDays>7?"#a3312a":"#854f0b"}},"PO awaited · "+c.chaseDays+" d")) : (c.po||"—"),"po"),
             cols.items ? cell(c.lines.length+" · qty "+c.lines.reduce((n,l)=>n+(Number(l.q)||0),0),"it",{whiteSpace:"nowrap"}) : null,
             ...on.map(k=>{ const v = optText(c,k); return cell(v || h("span",{style:{color:colors.mutedLight}},"—"),k,{minWidth:k==="pay"||k==="due"?150:undefined}); }),
             cell(ccyCell(c),"ccy"), num(c.ccy==="INR"&&c.valCcy!=null?crN0(c.valCcy):"","vi"), num(c.ccy!=="INR"&&c.valCcy!=null?(c.ccy==="USD"?"":c.ccy+" ")+crN2(c.valCcy):"","vu"),
@@ -76585,9 +77495,18 @@ function ContractRegisterScreen({ user, onOpenQuote, onOpenContract, onGoToTab, 
           return h("tr",{key:"__new"},
             td("\u270e"), td(h("div",null,h("b",{style:{fontFamily:"monospace"}},nl.num),h("div",{style:{fontSize:10,color:colors.mutedLight}},"automatic"))),
             td(nl.opts ? h(LimitToListCombo,{value:nl.quote,onChange:v=>setNl(x=>({...x,quote:v})),options:nl.opts.map(nlLabel),placeholder:"Won quote…",style:{...inputStyle,padding:"5px 7px",fontSize:12,minWidth:210}}) : h("span",{style:{fontSize:11.5,color:colors.mutedLight}},"reading quotes…"),{minWidth:220}),
-            td(h("input",{type:"date",value:nl.poDate||"",onChange:e=>{ const v=e.target.value; setNl(x=>({...x,poDate:v})); },style:{...inputStyle,padding:"5px 7px",fontSize:12,width:140}})),
+            td(h("div",null, h("input",{type:"date","data-testid":"cr-nl-date",value:nl.poDate||"",onChange:e=>{ const v=e.target.value; setNl(x=>({...x,poDate:v})); },style:{...inputStyle,padding:"5px 7px",fontSize:12,width:140}}),
+              h("div",{style:{fontSize:10,color:colors.mutedLight}},(nl.basis||"PO")==="PO"?"PO date *":nl.basis==="LOI"?"LOI date *":"Agreed on *"))),
             td(hit ? hit.customer : h("span",{style:{fontSize:11.5,color:colors.mutedLight}},"from the quote")),
-            td(h("input",{value:nl.po,placeholder:"PO / LOI no",onChange:e=>{ const v=e.target.value; setNl(x=>({...x,po:v})); },style:{...inputStyle,padding:"5px 7px",fontSize:12,width:150}})),
+            td(h("div",{style:{display:"flex",flexDirection:"column",gap:4,minWidth:170}},
+              h("select",{"data-testid":"cr-nl-basis",value:nl.basis||"PO",onChange:e=>{ const v=e.target.value; setNl(x=>({...x,basis:v})); },style:{...inputStyle,padding:"4px 6px",fontSize:12}},
+                h("option",{value:"PO"},"Purchase Order"), h("option",{value:"LOI"},"LOI — PO awaited"), h("option",{value:"Verbal"},"Verbal order — PO awaited")),
+              (nl.basis||"PO")!=="Verbal" ? h("input",{"data-testid":"cr-nl-po",value:nl.po,placeholder:(nl.basis||"PO")==="PO"?"PO number *":"LOI reference *",onChange:e=>{ const v=e.target.value; setNl(x=>({...x,po:v})); },style:{...inputStyle,padding:"5px 7px",fontSize:12,width:160}})
+                : h(React.Fragment,null,
+                  h("input",{"data-testid":"cr-nl-vby",list:"cr-emp-list",value:nl.vBy,placeholder:"Agreed by (our side) *",onChange:e=>{ const v=e.target.value; setNl(x=>({...x,vBy:v})); },style:{...inputStyle,padding:"5px 7px",fontSize:12,width:160}}),
+                  h("datalist",{id:"cr-emp-list"}, crEmps.map(n=>h("option",{key:n,value:n}))),
+                  h("input",{"data-testid":"cr-nl-vwith",value:nl.vWith,placeholder:"With (client's person) *",onChange:e=>{ const v=e.target.value; setNl(x=>({...x,vWith:v})); },style:{...inputStyle,padding:"5px 7px",fontSize:12,width:160}}),
+                  h("input",{value:nl.vNote,placeholder:"What was agreed",onChange:e=>{ const v=e.target.value; setNl(x=>({...x,vNote:v})); },style:{...inputStyle,padding:"5px 7px",fontSize:12,width:160}})))),
             ...(cols.items?[td("")]:[]), ...on.map(k=>td("")),
             td(hit ? (hit.ccy==="INR" ? "INR" : hit.ccy+" \u20b9"+hit.fx) : ""), td(""), td(""), td(h("span",{style:{fontSize:11,color:colors.mutedLight}},"items and value from the quote")),
             td(crPill("Pending")),
@@ -76651,6 +77570,7 @@ function ContractRegisterScreen({ user, onOpenQuote, onOpenContract, onGoToTab, 
       h("button",{onClick:()=>crDownloadExcel(shown),style:{...btnSecondary,fontSize:12,padding:"6px 12px"}},"Download Excel"),
       h("button",{onClick:load,disabled:loading,title:loadedAt?"Loaded "+loadedAt.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):"",style:{...btnSecondary,fontSize:12,padding:"6px 12px"}},loading?"Loading…":"↻ Refresh"+(loadedAt?" · "+loadedAt.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):"")),
       h("button",{onClick:toggleFull,style:{...btnSecondary,fontSize:12,padding:"6px 12px"}},isFull?"Exit full screen":"⛶ Full screen"),
+      h("button",{"data-testid":"cr-chase-open",onClick:()=>setChaseOpen(true),title:"Orders on an LOI or a verbal order — chase the client for the PO",style:{...btnSmall,fontSize:12,padding:"7px 12px",background:(list||[]).some(c=>c.poAwaited)?"#fff4d6":"#fff",borderColor:(list||[]).some(c=>c.poAwaited)?"#e0b84a":colors.border}},"PO awaited ("+(list||[]).filter(c=>c.poAwaited).length+")"),
       canEdit ? h("button",{onClick:startNewLine,disabled:!!nl,title:"Adds a line at the bottom: the number is given, pick the won quote, type the PO number and date",style:{...btnPrimary,fontSize:12,padding:"7px 14px"}},"+ New contract") : null),
     h("div",{style:{display:"grid",gridTemplateColumns:"repeat(12,minmax(0,1fr))",gap:4,background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"8px 10px",marginBottom:6}},
       months.map((m,i)=>{ cum += m.v; const fut = i>thisMonthIdx; return h("div",{key:m.m,style:{display:"flex",flexDirection:"column",gap:2,fontSize:10.5,color:colors.muted,opacity:fut?0.45:1,minWidth:0}},
@@ -76660,6 +77580,7 @@ function ContractRegisterScreen({ user, onOpenQuote, onOpenContract, onGoToTab, 
     h("div",{style:{overflow:"auto",maxHeight:isFull?"calc(100vh - 230px)":"calc(100vh - 330px)",minHeight:260,background:"#fff",border:"1px solid #cfe3dd",borderRadius:6}}, body),
     edit ? h(ContractRegisterDrawer,{ c:edit, user, canEdit, priced, onOpenQuote:(ref)=>onOpenQuote&&onOpenQuote(ref), onOpenSaleOrder:openSaleOrder,
       onClose:()=>setEdit(null), onSaved:(t)=>{ setEdit(null); setToast(t); setTimeout(()=>setToast(""),2500); load(); } }) : null,
+    chaseOpen ? h(CrPoChase,{ user, focus: chaseOpen===true ? null : chaseOpen, onClose:()=>setChaseOpen(null), onChanged:load }) : null,   // 2026-11-01T06:00:00Z (Uma)
     toast ? h("div",{style:{position:"fixed",left:"50%",bottom:24,transform:"translateX(-50%)",background:colors.dark,color:"#fff",padding:"8px 16px",borderRadius:6,fontSize:12.5,zIndex:1400}},toast) : null);
 }
 
