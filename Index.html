@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-11-01T19:00:00Z";
+  var APP_BUILD_VERSION = "2026-11-01T21:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -34731,6 +34731,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"1 Nov 2026 (300)", summary:"Task sheets: open on the employee in focus on the Calendar (the one picked in the employee drop-down, or the Show list: me / a department / all) and on the period on screen (Day view \u2192 that day; Week / Month view \u2192 that month). A preview opens straight away with the four sheets as tabs (Daily summary, Tasks completed, Worked on, Other app work) and their row counts; change the employee, day or month and the preview follows. \u2b07 Download Excel gives exactly what is previewed. No SQL." },
+  { date:"1 Nov 2026 (299)", summary:"Calendar: uncompleted task cards carry over. A card not done by its due date shows on today in red (\u21bb, \u201ccarried over from dd/mm/yyyy \u00b7 N days\u201d) and keeps moving to the next day until it is done; its old due date keeps a faint \u2192 marker. The due date on the card is not changed, so overdue counts and \u201clate\u201d flags stay true. The 📅 drop-down and its count include carried-over cards; the day report lists them under tomorrow as \u201ccarried over from \u2026\u201d. No SQL." },
   { date:"1 Nov 2026 (298)", summary:"Calendar: a \u201cGo to\u201d row \u2014 Yesterday, Today, Tomorrow (day view), Previous week, This week, Next week (week view), Last month, This month (month view); the one you are on is highlighted. Next to Show there is now an employee drop-down that lists only the employees in the chosen Show list (Me, a department, or all) \u2014 pick one to see just that person, or \u201cAll N employees\u201d. Changing Show resets it. No SQL." },
   { date:"1 Nov 2026 (297)", summary:"HSN default (Flometriq only): when neither the Sl No nor the item master gives an HSN, PIs, tax invoices, direct sales invoices and DC lines take 84212900 instead of showing \u201cmissing\u201d. On every draft PI, tax invoice and direct invoice the HSN is now a box on the line \u2014 change it whenever needed (4\u20138 digits); it is saved with the line and printed. \u201cdefault\u201d shows under it when the default is used. Issued documents are not touched by the app; data_hsn_default_FLOMETRIQ_2026-11-01.sql fills the gaps already in the database. No structure SQL." },
   { date:"1 Nov 2026 (296)", summary:"DC: serial numbers are picked from QC → Serial Number Register with one drop-down per piece (was a row of tick boxes). Each list holds only that Sl No's free serials (not on another DC, not kept unused) plus Excel serials with no Sl No on record (marked *); a serial picked in one box leaves the others. Filled in order by itself; above 4 pieces, \u201cFill N from\u201d picks a block from any first serial. Typing serials and \u201cNo serial for this item\u201d are gone: every piece needs a register serial before Save as complete / Done. No serials given yet → \u201c📨 Ask QC to give the serials\u201d: a task card and a bell to the QC post (one per contract and Sl No), closed by itself when QC gives serials for that contract. Old DCs that went with \u201cno serial\u201d still print as before. No SQL." },
@@ -70358,7 +70360,7 @@ async function calLoad(from, to, names){
   const endTs = calAdd(to,1)+"T00:00:00";
   const [evR, tR, dR, hR] = await Promise.all([
     sb.from("cal_event_tbl").select("*").lt("start_at", endTs),
-    sb.from("task_tbl").select("id,title,assignee,due_date,status,ref,customer,task_type,department").in("assignee", nm).neq("status","done").gte("due_date", from).lte("due_date", to),
+    sb.from("task_tbl").select("id,title,assignee,due_date,status,ref,customer,task_type,department").in("assignee", nm).neq("status","done").lte("due_date", to),   // 299: no lower bound — overdue cards carry over to today
     sb.from("task_tbl").select("id,title,assignee,due_date,status,ref,customer,task_type,approved_at,moved_at").in("assignee", nm).eq("status","done").gte("approved_at", from+"T00:00:00").lt("approved_at", endTs),
     sb.from("cal_holiday_tbl").select("*").eq("status","Approved").gte("holiday_date", from).lte("holiday_date", to),
   ]);
@@ -70381,13 +70383,20 @@ async function calLoad(from, to, names){
         allDay: !!ev.all_day || ev.kind==="leave" || span>0, start: ev.all_day ? null : calMin(ev.start_at), end: ev.all_day||!ev.end_at ? null : calMin(ev.end_at),
         ev, badge: ev.created_by_emp && ev.created_by_emp!==ev.owner ? "added by "+ev.created_by_emp : (w!==ev.owner ? "with "+ev.owner : "") })); } });
   });
-  (tR.data||[]).forEach(t=> out.items.push({ key:"t"+t.id, kind:"task", who:t.assignee, title:t.title, date:String(t.due_date).slice(0,10), allDay:true, task:t,
-    badge: t.status==="progress" ? "in progress" : t.status==="approval" ? "under approval" : "" }));
+  // 299: an uncompleted card carries over — it shows on today ("carried over from …"); its old due date keeps a faint marker
+  const tdy = toISODate(new Date());
+  (tR.data||[]).forEach(t=>{ const due = String(t.due_date||"").slice(0,10); if(!due) return;
+    const st = t.status==="progress" ? "in progress" : t.status==="approval" ? "under approval" : "";
+    if(due>=tdy){ if(due>=from) out.items.push({ key:"t"+t.id, kind:"task", who:t.assignee, title:t.title, date:due, allDay:true, task:t, badge:st }); return; }
+    const days = Math.round((new Date(tdy+"T12:00:00")-new Date(due+"T12:00:00"))/864e5);
+    if(due>=from) out.items.push({ key:"tm"+t.id, kind:"moved", who:t.assignee, title:t.title, date:due, allDay:true, task:t, badge:"not done — carried over to today" });
+    if(tdy>=from && tdy<=to) out.items.push({ key:"t"+t.id, kind:"over", who:t.assignee, title:t.title, date:tdy, allDay:true, task:t, carriedFrom:due,
+      badge:"carried over from "+fmtDMY(due)+" · "+days+" day"+(days===1?"":"s")+(st?" · "+st:"") }); });
   (dR.data||[]).forEach(t=> out.items.push({ key:"d"+t.id, kind:"done", who:t.assignee, title:t.title, date:calD(t.approved_at||t.moved_at), allDay:true, task:t, badge:"done "+calHM(t.approved_at||t.moved_at) }));
   (hR.error?[]:(hR.data||[])).forEach(x=> out.items.push({ key:"h"+x.id, kind:"holiday", who:"*", title:x.name, date:String(x.holiday_date).slice(0,10), allDay:true }));
   return out;
 }
-const CAL_KIND = { event:{ c:null, l:"Event" }, meeting:{ c:"#8e24aa", l:"Meeting" }, leave:{ c:"#9e9e9e", l:"Leave" }, task:{ c:"#e37400", l:"Task due" }, done:{ c:"#9aa39a", l:"Task done" }, holiday:{ c:"#757575", l:"Holiday" } };
+const CAL_KIND = { event:{ c:null, l:"Event" }, meeting:{ c:"#8e24aa", l:"Meeting" }, leave:{ c:"#9e9e9e", l:"Leave" }, task:{ c:"#e37400", l:"Task due" }, over:{ c:"#c62828", l:"Carried over (not done)" }, moved:{ c:"#e9c3a3", l:"Was due (moved to today)" }, done:{ c:"#9aa39a", l:"Task done" }, holiday:{ c:"#757575", l:"Holiday" } };
 const calItemColor = (it, ctx)=> it.kind==="event" ? (ctx.color[it.who]||"#1a73e8") : CAL_KIND[it.kind].c;
 
 // ---- the screen: Tasks › Calendar ----
@@ -70440,7 +70449,7 @@ function CalendarScreen({ user, company }){
   const groups = {}; people.forEach(n=>{ const e = ctx.empOf(n); const d = (e&&e.department)||"(no department)"; (groups[d]=groups[d]||[]).push(n); });
   const chip = (it, compact)=> h("div",{key:it.key, title:(it.who!=="*"?it.who+" · ":"")+it.title+(it.badge?" ("+it.badge+")":""), onClick:e=>{ e.stopPropagation(); openItem(it); },
     style:{ background:calItemColor(it,ctx), color:"#fff", borderRadius:4, padding:"1px 6px", fontSize:11, margin:"1px 0", cursor:(it.task||it.ev)?"pointer":"default", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", textDecoration: it.kind==="done" ? "line-through" : "none" }},
-    (it.kind==="done"?"✓ ":"")+(people.length>1 && it.who!=="*" ? String(it.who).split(" ")[0]+": " : "")+(compact && it.start!=null && !it.allDay ? calHM(new Date(2000,0,1,0,it.start))+" " : "")+it.title+(it.badge && it.badge.startsWith("added by") ? " ✎" : ""));
+    (it.kind==="done"?"✓ ":it.kind==="over"?"↻ ":it.kind==="moved"?"→ ":"")+(people.length>1 && it.who!=="*" ? String(it.who).split(" ")[0]+": " : "")+(compact && it.start!=null && !it.allDay ? calHM(new Date(2000,0,1,0,it.start))+" " : "")+it.title+(it.badge && it.badge.startsWith("added by") ? " ✎" : ""));
   // ---- week / day grid ----
   const H0 = 7, H1 = 21, HP = 40;
   const days = view==="day" ? [anchor] : view==="week" ? Array.from({length:7},(_,i)=>calAdd(range[0],i)) : [];
@@ -70500,12 +70509,14 @@ function CalendarScreen({ user, company }){
             h("input",{type:"checkbox",checked:!off[n],onChange:e=>setOff(o=>({...o,[n]:!e.target.checked}))}),
             h("i",{style:{width:11,height:11,borderRadius:3,background:ctx.color[n]||"#1a73e8",display:"inline-block"}}), n)))),
         h("div",{style:{marginTop:14,borderTop:"1px solid "+colors.border,paddingTop:8}},
-          ["event","meeting","leave","task","done","holiday"].map(k=> h("div",{key:k,style:{display:"flex",gap:6,alignItems:"center",fontSize:11.5,color:colors.muted,margin:"2px 0"}},
+          ["event","meeting","leave","task","over","moved","done","holiday"].map(k=> h("div",{key:k,style:{display:"flex",gap:6,alignItems:"center",fontSize:11.5,color:colors.muted,margin:"2px 0"}},
             h("i",{style:{width:10,height:10,borderRadius:2,display:"inline-block",background: CAL_KIND[k].c || pal.p}}), k==="event" ? "Event (person's colour)" : CAL_KIND[k].l))),
         h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:10}},"Double-click a day or an hour to add an event. Click a task to open its card.")),
       h("div",{style:{flex:1,overflow:"auto",background:"#fff"}}, !data ? h("div",{style:{padding:20,color:colors.muted}},"Loading…") : (view==="month" ? monthGrid() : timeGrid()))),
     edit ? h(CalEventModal,{ user, ctx, pal, ev:edit, onClose:()=>setEdit(null), onSaved:()=>{ setEdit(null); setTick(x=>x+1); } }) : null,
-    sheets ? h(CalTaskSheetsModal,{ user, ctx, pal, onClose:()=>setSheets(false) }) : null);
+    sheets ? h(CalTaskSheetsModal,{ user, ctx, pal, onClose:()=>setSheets(false),
+      initWho: people.length===1 ? (people[0]===ctx.me ? "me" : "p:"+people[0]) : show.startsWith("dept:") ? "d:"+show.slice(5) : show==="all" ? "all" : "me",
+      initPer: view==="day" ? "day" : "month", initDate: view==="day" ? anchor : (view==="week" ? range[0] : anchor) }) : null);
 }
 
 // ---- add / edit an event ----
@@ -70632,7 +70643,7 @@ function calDayText(d, me, emp){
   const nx = [];
   for(let x=calAdd(d.day,1); x<d.next; x=calAdd(x,1)) if(calDow(x)!==0) nx.push(fmtDMY(x)+" is a holiday");
   d.events.forEach(it=> nx.push((it.start!=null && !it.allDay ? calHM(new Date(2000,0,1,0,it.start))+" " : "")+it.title+(it.kind==="leave"?" (leave)":it.kind==="holiday"?" (holiday)":"")));
-  d.nextTasks.forEach(t=>{ const due = t.due_date ? String(t.due_date).slice(0,10) : ""; nx.push(t.title+(t.ref&&!String(t.title).includes(t.ref)?" — "+t.ref:"")+(t.status==="progress"?" (in progress)":due && due<d.day?" (overdue)":"")); });
+  d.nextTasks.forEach(t=>{ const due = t.due_date ? String(t.due_date).slice(0,10) : ""; nx.push(t.title+(t.ref&&!String(t.title).includes(t.ref)?" — "+t.ref:"")+(due && due<=d.day?" (carried over from "+fmtDMY(due)+")":t.status==="progress"?" (in progress)":"")); });
   if(!nx.length) L.push("— nothing due"); nx.forEach((x,i)=>L.push((i+1)+". "+x));
   return L.join("\n");
 }
@@ -70668,8 +70679,8 @@ function DayReportModal({ user, company, day, forced, onClose }){
         st.d.app.length ? sec("Other entries in the app ("+st.d.app.length+")", st.d.app.slice(0,25).map((a,i)=>h("tr",{key:i}, h("td",{style:td},a.record_summary||a.action+" "+a.table_name), h("td",{style:{...td,whiteSpace:"nowrap",color:colors.muted}},calHM(a.performed_at))))) : null,
         sec((st.d.next===calAdd(day,1)?"Tomorrow":"Next working day")+" — "+fmtDMY(st.d.next), [
           ...st.d.events.map(it=>h("tr",{key:it.key}, h("td",{style:td},"📅 "+(it.start!=null&&!it.allDay?calHM(new Date(2000,0,1,0,it.start))+" ":"")+it.title), h("td",{style:{...td,color:colors.muted}},CAL_KIND[it.kind].l))),
-          ...st.d.nextTasks.map(t=>{ const due = t.due_date?String(t.due_date).slice(0,10):""; const od = due && due<day;
-            return h("tr",{key:"n"+t.id}, h("td",{style:td},"• "+t.title), h("td",{style:{...td,whiteSpace:"nowrap",color:od?colors.danger:colors.muted}}, t.status==="progress"?"in progress":od?"overdue "+fmtDMY(due):"due "+fmtDMY(due))); }) ]),
+          ...st.d.nextTasks.map(t=>{ const due = t.due_date?String(t.due_date).slice(0,10):""; const od = due && due<=day;
+            return h("tr",{key:"n"+t.id}, h("td",{style:td},"• "+t.title), h("td",{style:{...td,whiteSpace:"nowrap",color:od?colors.danger:colors.muted}}, od?"↻ carried over from "+fmtDMY(due):t.status==="progress"?"in progress":"due "+fmtDMY(due))); }) ]),
         h("div",{style:{marginTop:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}, h("b",null,"Text to paste"), h("span",{style:{background:"#25d366",color:"#fff",borderRadius:6,padding:"1px 8px",fontSize:11,fontWeight:700}},"WhatsApp")),
         h("textarea",{readOnly:true,value:st.text,style:{width:"100%",boxSizing:"border-box",minHeight:180,marginTop:4,background:"#f4fbf6",border:"1px solid #cfe9d8",borderRadius:8,padding:10,fontSize:12.5,fontFamily:"inherit"}}),
         msg ? h("div",{style:{color:colors.danger,fontSize:12}},msg) : null),
@@ -70711,7 +70722,7 @@ function CalTopButton({ user, company }){
     const t0 = setTimeout(()=>check(true), 20000);   /* after the login pop-ups */ const t = setInterval(()=>check(false), 60000);
     return ()=>{ dead = true; clearTimeout(t0); clearInterval(t); }; },[user?.id]);
   const its = !st ? [] : (scope==="dept" && st.dept ? st.dept : st.mine).filter(it=>it.kind!=="done");
-  const todayN = !st ? 0 : st.mine.filter(it=>it.date===st.today && it.kind!=="done" && it.kind!=="holiday").length;
+  const todayN = !st ? 0 : st.mine.filter(it=>it.date===st.today && it.kind!=="done" && it.kind!=="holiday" && it.kind!=="moved").length;
   const line = (it)=> h("div",{key:it.key,onClick:()=>{ setOpen(false); if(it.task) appOpenCard(it.task.id); else appOpenTab("calendar"); },style:{padding:"5px 12px",borderBottom:"1px solid #f1efe8",display:"flex",gap:8,fontSize:12.5,cursor:"pointer",color:colors.text}},
     h("i",{style:{width:8,height:8,borderRadius:2,marginTop:5,flex:"none",background: calItemColor(it, st.ctx)}}),
     h("span",null, scope==="dept" && it.who!=="*" ? h("b",null,String(it.who).split(" ")[0]+" · ") : null, (it.start!=null&&!it.allDay?calHM(new Date(2000,0,1,0,it.start))+" ":"")+it.title, it.badge ? h("span",{style:{color:colors.muted}}," ("+it.badge+")") : null));
@@ -70779,40 +70790,62 @@ function calSheetBook(ctx, names, from, to, D){
   const ap = [["Date","Time","Employee","Action","Where","Record","What"]];
   D.audit.forEach(a=> ap.push([fmtDMY(a.performed_at), calHM(a.performed_at), a.emp, a.action||"", a.table_name||"", a.record_id||"", a.record_summary||""]));
   const wb = XLSX.utils.book_new();
-  const add = (rows, name, widths)=>{ const ws = XLSX.utils.aoa_to_sheet(rows); ws["!cols"] = widths.map(w=>({ wch:w })); XLSX.utils.book_append_sheet(wb, ws, name); };
+  wb._rows = {};   // 300: kept for the on-screen preview
+  const add = (rows, name, widths)=>{ wb._rows[name] = rows; const ws = XLSX.utils.aoa_to_sheet(rows); ws["!cols"] = widths.map(w=>({ wch:w })); XLSX.utils.book_append_sheet(wb, ws, name); };
   add(sum, "Daily summary", [11,5,22,16,18,11,12,10,8,6,10,10,22,22]);
   add(tk, "Tasks completed", [12,7,22,16,50,18,14,26,11,8,14,12,20,40]);
   add(wk, "Worked on", [11,7,22,50,14,12,40]);
   add(ap, "Other app work", [11,7,22,10,22,16,60]);
   return wb;
 }
-function CalTaskSheetsModal({ user, ctx, pal, onClose }){
+function CalTaskSheetsModal({ user, ctx, pal, onClose, initWho, initPer, initDate }){
+  // 300: opens on the employee in focus on the calendar (or the Show list) and the period on screen, with a preview before the download
   const today = toISODate(new Date());
-  const [per,setPer] = useState("day");
-  const [day,setDay] = useState(today);
-  const [mon,setMon] = useState(today.slice(0,7));
-  const [who,setWho] = useState("me");
-  const [busy,setBusy] = useState(false); const [msg,setMsg] = useState("");
+  const d0 = initDate && initDate<=today ? initDate : today;
+  const [per,setPer] = useState(initPer||"day");
+  const [day,setDay] = useState(d0);
+  const [mon,setMon] = useState(d0.slice(0,7));
   const opts = [["me","Me — "+ctx.me], ...ctx.visible.filter(n=>n!==ctx.me).map(n=>["p:"+n, n]), ...ctx.headDepts.map(d=>["d:"+d, "Department: "+d+" (everyone)"]), ...(ctx.isSA?[["all","All employees"]]:[])];
-  const go = async()=>{
-    const names = who==="me" ? [ctx.me] : who.startsWith("p:") ? [who.slice(2)] : who==="all" ? ctx.visible : ctx.emps.filter(e=>empBoards(e).includes(who.slice(2)) && ctx.visible.includes(e.employee_name)).map(e=>e.employee_name);
-    const [from,to] = per==="day" ? [day,day] : [mon+"-01", toISODate(new Date(Number(mon.slice(0,4)), Number(mon.slice(5,7)), 0, 12))];
-    setBusy(true); setMsg("");
-    try{ const D = await calSheetData(ctx, names, from, to); const wb = calSheetBook(ctx, names, from, to, D);
-      const lbl = who==="me" ? ctx.me : who.startsWith("p:") ? who.slice(2) : who==="all" ? "All" : who.slice(2);
-      XLSX.writeFile(wb, ("Task_sheet_"+lbl+"_"+(per==="day"?day:mon)).replace(/[^\w\-]+/g,"_")+".xlsx");
-      try{ await logAudit("EXPORT","task_sheet",lbl,"Task sheet "+(per==="day"?fmtDMY(day):mon)+" · "+lbl,user?.username||"unknown",null,null); }catch(e){}
-    }catch(e){ setMsg("Could not make the sheet: "+(e.message||e)); }
-    setBusy(false);
-  };
-  const lab = (t, el)=> h("label",{style:{display:"block",fontSize:11.5,color:colors.muted,marginTop:10}}, t, h("div",{style:{marginTop:3}}, el));
-  return h(OsModal,{ title:"⬇ Task sheets", sub:"Excel — only what was done in the app: task cards completed, cards worked on, other entries, first and last time in the app, day report", width:520, onClose },
-    h("div",{style:{display:"flex",gap:6}}, [["day","Daily"],["month","Monthly"]].map(o=>h("button",{key:o[0],onClick:()=>setPer(o[0]),style:{...btnSecondary,padding:"6px 14px",...(per===o[0]?{background:pal.pl,borderColor:pal.p,color:pal.pd,fontWeight:600}:{})}},o[1]))),
-    per==="day" ? lab("Day", h("input",{type:"date",value:day,max:today,onChange:e=>setDay(e.target.value),style:{...inputStyle,width:180}})) : lab("Month", h("input",{type:"month",value:mon,max:today.slice(0,7),onChange:e=>setMon(e.target.value),style:{...inputStyle,width:180}})),
-    lab("Employee", h("select",{value:who,onChange:e=>setWho(e.target.value),style:inputStyle}, opts.map(o=>h("option",{key:o[0],value:o[0]},o[1])))),
-    h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:10,lineHeight:1.5}},"Sheets: Daily summary (one row per person per day) · Tasks completed (every card, with contract, customer, due and days late) · Worked on (every move on a card) · Other app work (quotes, POs, DCs… from the audit log). “First in app / Last activity” is the first and last thing done in the app that day — not a punch clock."),
-    msg ? h("div",{style:{color:colors.danger,fontSize:12.5,marginTop:8}},msg) : null,
-    h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:14}}, h("button",{onClick:onClose,style:btnSecondary},"Close"), h("button",{disabled:busy,onClick:go,style:{...btnPrimary,background:pal.p}}, busy?"Making…":"⬇ Download Excel")));
+  const [who,setWho] = useState(()=> initWho && opts.some(o=>o[0]===initWho) ? initWho : "me");
+  const [busy,setBusy] = useState(false); const [msg,setMsg] = useState("");
+  const [pv,setPv] = useState(null); const [tab,setTab] = useState("Daily summary");
+  const names = who==="me" ? [ctx.me] : who.startsWith("p:") ? [who.slice(2)] : who==="all" ? ctx.visible : ctx.emps.filter(e=>empBoards(e).includes(who.slice(2)) && ctx.visible.includes(e.employee_name)).map(e=>e.employee_name);
+  const [from,to] = per==="day" ? [day,day] : [mon+"-01", toISODate(new Date(Number(mon.slice(0,4)), Number(mon.slice(5,7)), 0, 12))];
+  const lbl = who==="me" ? ctx.me : who.startsWith("p:") ? who.slice(2) : who==="all" ? "All" : who.slice(2);
+  const key = who+"|"+from+"|"+to;
+  useEffect(()=>{ let dead = false; setPv(null); setMsg(""); setBusy(true);
+    (async()=>{ try{ const D = await calSheetData(ctx, names, from, to); const wb = calSheetBook(ctx, names, from, to, D); if(!dead) setPv({ key, wb }); }
+      catch(e){ if(!dead) setMsg("Could not make the sheet: "+(e.message||e)); }
+      if(!dead) setBusy(false); })();
+    return ()=>{ dead = true; }; },[key]);
+  const go = async()=>{ if(!pv) return;
+    XLSX.writeFile(pv.wb, ("Task_sheet_"+lbl+"_"+(per==="day"?day:mon)).replace(/[^\w\-]+/g,"_")+".xlsx");
+    try{ await logAudit("EXPORT","task_sheet",lbl,"Task sheet "+(per==="day"?fmtDMY(day):mon)+" · "+lbl,user?.username||"unknown",null,null); }catch(e){} };
+  const lab = (t, el)=> h("label",{style:{fontSize:11.5,color:colors.muted}}, t, h("div",{style:{marginTop:3}}, el));
+  const rows = pv && pv.wb._rows ? (pv.wb._rows[tab]||[]) : [];
+  const MAX = 300;
+  const th = { textAlign:"left", fontSize:11, color:colors.muted, padding:"5px 7px", borderBottom:"2px solid "+colors.text, background:"#fff", position:"sticky", top:0, whiteSpace:"nowrap" };
+  const td = { fontSize:12, padding:"4px 7px", borderBottom:"1px solid #f0eee6", verticalAlign:"top", maxWidth:360 };
+  const counts = pv && pv.wb._rows ? Object.fromEntries(Object.entries(pv.wb._rows).map(([k,v])=>[k, Math.max(0,v.length-1)])) : {};
+  return h(OsModal,{ title:"⬇ Task sheets — "+lbl, sub:(per==="day"?fmtDMY(day):new Date(mon+"-01T12:00:00").toLocaleDateString("en-GB",{month:"long",year:"numeric"}))+" · only what was done in the app. Preview below; the Excel has the same four sheets.", width:1150, onClose },
+    h("div",{style:{display:"flex",gap:14,alignItems:"flex-end",flexWrap:"wrap"}},
+      h("div",{style:{display:"flex",gap:6}}, [["day","Daily"],["month","Monthly"]].map(o=>h("button",{key:o[0],onClick:()=>setPer(o[0]),style:{...btnSecondary,padding:"6px 14px",...(per===o[0]?{background:pal.pl,borderColor:pal.p,color:pal.pd,fontWeight:600}:{})}},o[1]))),
+      per==="day" ? lab("Day", h("input",{type:"date",value:day,max:today,onChange:e=>e.target.value&&setDay(e.target.value),style:{...inputStyle,width:160}})) : lab("Month", h("input",{type:"month",value:mon,max:today.slice(0,7),onChange:e=>e.target.value&&setMon(e.target.value),style:{...inputStyle,width:160}})),
+      lab("Employee", h("select",{value:who,onChange:e=>setWho(e.target.value),style:{...inputStyle,width:280}}, opts.map(o=>h("option",{key:o[0],value:o[0]},o[1])))),
+      h("span",{style:{flex:1}}),
+      h("button",{disabled:busy||!pv,onClick:go,style:{...btnPrimary,background:pal.p,opacity:busy||!pv?.6:1}}, "⬇ Download Excel")),
+    h("div",{style:{display:"flex",gap:4,marginTop:12,borderBottom:"1px solid "+colors.border}},
+      ["Daily summary","Tasks completed","Worked on","Other app work"].map(t=> h("button",{key:t,onClick:()=>setTab(t),style:{border:"none",background:"none",padding:"6px 12px",cursor:"pointer",fontSize:12.5,
+        borderBottom: tab===t ? "3px solid "+pal.p : "3px solid transparent", color: tab===t ? pal.pd : colors.muted, fontWeight: tab===t ? 700 : 500}}, t+(pv?" ("+(counts[t]||0)+")":"")))),
+    h("div",{style:{maxHeight:"55vh",overflow:"auto",marginTop:4,border:"1px solid "+colors.border,borderTop:"none"}},
+      busy ? h("div",{style:{padding:20,color:colors.muted}},"Making the preview…")
+      : msg ? h("div",{style:{padding:14,color:colors.danger,fontSize:12.5}},msg)
+      : rows.length<=1 ? h("div",{style:{padding:20,color:colors.muted,fontSize:12.5}},"Nothing in this sheet for "+lbl+" in this period.")
+      : h("table",{style:{width:"100%",borderCollapse:"collapse"}},
+          h("thead",null, h("tr",null, rows[0].map((c,i)=>h("th",{key:i,style:th},c)))),
+          h("tbody",null, rows.slice(1,MAX+1).map((r,i)=> h("tr",{key:i}, r.map((c,j)=>h("td",{key:j,style:td}, c==null?"":String(c)))))))),
+    rows.length-1>MAX ? h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:4}},"Showing the first "+MAX+" of "+(rows.length-1)+" rows — the Excel has all of them.") : null,
+    h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:12}}, h("button",{onClick:onClose,style:btnSecondary},"Close")));
 }
 function TaskSheetsScreen({ user, company }){
   const [ctx,setCtx] = useState(null);
