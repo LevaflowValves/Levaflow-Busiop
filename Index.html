@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-11-02T10:00:00Z";
+  var APP_BUILD_VERSION = "2026-11-02T13:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -27256,10 +27256,12 @@ function AddPackageHandledModal({ companyName, user, onCancel, onSaved }){
 // Names are matched to the Customer Master by a normalised name; a name can be grouped under a parent customer
 // (companies.parent_company_id, structure_customer_insights_2026-11-02.sql) and then adds up into the parent.
 const CI_SQL = "structure_customer_insights_2026-11-02.sql";
+const CI_ALIAS_SQL = "structure_customer_name_alias_2026-11-02.sql";   // 2026-11-02T13:00:00Z
 const CI_RW_DEFAULT = [["vol","Enquiries we get",15],["conv","Conversion (quotes won)",20],["val","Order value",20],["pay","Pays on time vs terms",15],["over","Nothing long overdue",10],["terms","Payment terms (advance / LC)",10],["rec","Recent activity",10]];
 const CI_GRADES = [["A+",80],["A",65],["B",50],["C",35],["D",0]];
 const CI_GTONE = { "A+":["#e1f5ee","#0f6e56"], "A":["#e8f4ee","#1f5c40"], "B":["#eef1f6","#2f4f7a"], "C":["#fff4d6","#854f0b"], "D":["#fdecea","#a3312a"] };
 function ciNorm(s){ return String(s||"").toLowerCase().replace(/&/g," and ").replace(/[^a-z0-9 ]+/g," ")
+  .replace(/\bengg\b|\bengrs?\b/g,"engineering").replace(/\bintl\b/g,"international").replace(/\bmfg\b/g,"manufacturing").replace(/\btechnologies\b|\btechnology\b/g,"tech")
   .replace(/\b(m s|ms|the|pvt|private|ltd|limited|llc|l l c|fze|fzco|fz llc|co|company|inc|corp|corporation|india|plc|wll|w l l|spc|est|establishment)\b/g," ").replace(/\s+/g," ").trim(); }
 function ciFyOf(iso){ const d = String(iso||"").slice(0,10); if(!/^\d{4}-\d{2}/.test(d)) return null; const y = +d.slice(0,4), m = +d.slice(5,7); const s = m>=4 ? y : y-1; return s+"-"+String((s+1)%100).padStart(2,"0"); }
 function ciQtrOf(iso){ const m = +String(iso||"").slice(5,7); return m>=4&&m<=6 ? 1 : m>=7&&m<=9 ? 2 : m>=10 ? 3 : 4; }
@@ -27296,6 +27298,8 @@ async function ciLoad(){
     ciSafe(()=>fetchPaged(()=>sb.from("quote_commercial_terms").select("reference_number,payment_term").order("id"))),
     ciSafe(()=>fetchPaged(()=>sb.from("activity_log_tbl").select("company_name,created_at").order("id"))) ]);
   D.hasParent = comps.some(c=>"parent_company_id" in c);
+  D.hasAlias = false; let aliasRows = [];
+  try{ const r = await sb.from("cust_name_alias_tbl").select("alias,company_id"); if(!r.error){ D.hasAlias = true; aliasRows = r.data||[]; } }catch(e){}
   try{ const r = await sb.from("cust_rating_weights_tbl").select("*"); if(!r.error){ D.hasRw = true; (r.data||[]).forEach(w=>{ const x = D.rw.find(z=>z[0]===w.k); if(x && w.w!=null) x[2] = Number(w.w); }); } }catch(e){}
   // customers (live ones; archived kept out unless they have business) and the name index
   const byId = new Map(), byNorm = new Map();
@@ -27306,26 +27310,49 @@ async function ciLoad(){
   // a grouped name adds up into its parent
   const root = (o)=>{ let x = o, n = 0; while(x && x.parent && byId.has(x.parent) && n<5){ x = byId.get(x.parent); n++; } return x; };
   byId.forEach(o=>{ if(o.parent && byId.has(o.parent)){ const r = root(o); if(r!==o) r.kids.push(o.name); } });
-  const find = (name)=>{ const o = byNorm.get(ciNorm(name)); return o ? root(o) : null; };
-  let un = 0;
+  // name -> customer: exact (Pvt/Ltd/LLC etc. ignored), a name linked with "Belongs to…" (cust_name_alias_tbl),
+  // then a close match (one name starts the other, or the same first two words) when only one customer fits.
+  const byAlias = new Map(); aliasRows.forEach(a=>{ const o = byId.get(a.company_id); const k = ciNorm(a.alias); if(o && k) byAlias.set(k, o); });
+  const keys = Array.from(byNorm.keys()); const fz = new Map();
+  const close = (k)=>{ if(fz.has(k)) return fz.get(k); let hit = null;
+    if(k.length>=6){ const c = keys.filter(x=> x.length>=6 && (x.startsWith(k+" ") || k.startsWith(x+" ") || x.startsWith(k) || k.startsWith(x))); if(c.length===1) hit = byNorm.get(c[0]); }
+    if(!hit){ const w = k.split(" ").slice(0,2).join(" "); if(w.split(" ").length===2 && w.length>=8){ const c = keys.filter(x=>x.split(" ").slice(0,2).join(" ")===w); if(c.length===1) hit = byNorm.get(c[0]); } }
+    fz.set(k, hit); return hit; };
+  const find = (name)=>{ const k = ciNorm(name); if(!k) return null; const o = byNorm.get(k) || byAlias.get(k) || close(k); return o ? root(o) : null; };
+  let un = 0; const unNames = new Map();
+  const miss = (name, ref, value)=>{ un++; const n = String(name||"").trim()||"(no name)"; const u = unNames.get(n) || { name:n, n:0, value:0, refs:[] }; u.n++; u.value += value||0; if(u.refs.length<5) u.refs.push(ref); unNames.set(n, u); };
   enqs.forEach(e=>{ const o = find(e.company_name || e.customer_name); if(!o) return; o.enq.push({ no:e.enquiry_number||"", date:String(e.enquiry_date||e.created_at||"").slice(0,10), status:e.status||"" }); });
   const snapV = new Map(); snaps.forEach(s=>snapV.set(String(s.reference_number), Number(s.total_value)||0));
-  const qByRef = new Map();
-  ests.forEach(e=>{ const ref = String(e.reference_number||""); if(!ref || /^\d{6}$/.test(ref)) return;
-    let q = qByRef.get(ref); if(!q){ q = { ref, cust:e.customer_name||"", date:String(e.quote_date||e.created_at||"").slice(0,10), stage:e.quote_status||"Draft", reason:e.status_reason||"", abandoned:!!e.abandoned_flag, items:new Set() }; qByRef.set(ref, q); }
+  // quotes: one per quote number (all revisions of FS260043, FS260043-R01, -R02 are one quote). It counts in the period it was
+  // FIRST SENT; value, stage and customer come from its LATEST revision. A blank stage counts as sent when the quote has a value.
+  const revs = new Map();
+  ests.forEach(e=>{ const ref = String(e.reference_number||"").trim(); if(!ref || /^\d{6}$/.test(ref)) return;
+    let q = revs.get(ref); if(!q){ q = { ref, fam:qFamily(ref), rev:qRevNum(ref), cust:e.customer_name||"", date:String(e.quote_date||e.created_at||"").slice(0,10), stage:e.quote_status||"", reason:e.status_reason||"", abandoned:!!e.abandoned_flag, items:new Set(), value:snapV.get(ref)||0 }; revs.set(ref, q); }
+    if(!q.stage && e.quote_status) q.stage = e.quote_status;
     if(e.model || e.description) q.items.add(String(e.model||"").trim() || String(e.description||"").split(/[,(]/)[0].trim()); });
-  qByRef.forEach(q=>{ if(q.abandoned || /draft/i.test(q.stage)) return; const o = find(q.cust); if(!o){ un++; return; }
-    o.quotes.push({ ref:q.ref, date:q.date, value:snapV.get(q.ref)||0, stage:q.stage, kind:stageKind(q.stage), reason:q.reason, items:Array.from(q.items).filter(Boolean) }); });
-  legacy.forEach(l=>{ const ref = String(l.reference_number||""); if(!ref || qByRef.has(ref)) return; const o = find(l.customer_name); if(!o){ un++; return; }
-    o.quotes.push({ ref, date:String(l.reference_date||"").slice(0,10), value:(String(l.quote_currency||"INR").toUpperCase()==="INR" ? Number(l.quote_value)||0 : 0), stage:l.quote_status||"Offer Sent", kind:stageKind(l.quote_status||"Offer Sent"), reason:l.status_reason||"", legacy:true, items:[] }); });
-  D.unmatched = un;
+  legacy.forEach(l=>{ const ref = String(l.reference_number||"").trim(); if(!ref || revs.has(ref)) return;
+    revs.set(ref, { ref, fam:qFamily(ref), rev:qRevNum(ref), cust:l.customer_name||"", date:String(l.reference_date||"").slice(0,10), stage:l.quote_status||"Offer Sent", reason:l.status_reason||"", abandoned:false, items:new Set(), legacy:true,
+      value:(String(l.quote_currency||"INR").toUpperCase()==="INR" ? Number(l.quote_value)||0 : 0) }); });
+  const fams = new Map(); revs.forEach(q=>{ if(q.abandoned) return; (fams.get(q.fam) || fams.set(q.fam, []).get(q.fam)).push(q); });
+  let revN = 0; const famV = new Map();
+  fams.forEach((list, fam)=>{
+    const sent = list.filter(q=> q.stage ? !/^draft$/i.test(String(q.stage).trim()) : (q.value>0 || q.legacy));
+    if(!sent.length) return;
+    sent.sort((a,b)=> a.rev-b.rev || String(a.date).localeCompare(String(b.date)));
+    const last = sent[sent.length-1]; const stage = last.stage || "Offer Sent";
+    const first = list.map(q=>q.date).filter(Boolean).sort()[0] || last.date;
+    revN += sent.length; famV.set(fam, last.value);
+    const o = find(last.cust); if(!o){ miss(last.cust, last.ref, last.value); return; }
+    o.quotes.push({ ref:last.ref, fam, rev:last.rev, date:first, lastDate:last.date, value:last.value, stage, kind:stageKind(stage), reason:last.reason, legacy:!!last.legacy,
+      items:Array.from(new Set(sent.flatMap(q=>Array.from(q.items)))).filter(Boolean), earlier:sent.slice(0,-1).reverse().map(q=>({ ref:q.ref, date:q.date, value:q.value })) }); });
+  D.unmatched = un; D.unNames = Array.from(unNames.values()).sort((a,b)=>b.n-a.n || b.value-a.value); D.revN = revN;
   // orders: Sale Orders (not cancelled), then Contract Register lines that have none yet
   const termBy = new Map(); terms.forEach(t=>termBy.set(String(t.reference_number), t.payment_term||""));
   const regVal = new Map(); regLines.forEach(l=>regVal.set(String(l.contract_number), (regVal.get(String(l.contract_number))||0)+(Number(l.value)||0)));
   const soCns = new Set();
   sos.forEach(s=>{ const cn = String(s.contract_number||""); soCns.add(cn); if(/cancel/i.test(s.status||"")) return; const o = find(s.customer_name); if(!o) return;
     const inr = String(s.basis_currency||"INR").toUpperCase()==="INR";
-    o.orders.push({ cn, date:String(s.basis_date||s.created_at||"").slice(0,10), value: snapV.get(cn) || regVal.get(cn) || snapV.get(String(s.quote_reference_number||"")) || (inr ? Number(s.basis_value)||0 : 0), po:s.basis_number||"", quote:s.quote_reference_number||"", status:s.status||"", term:termBy.get(cn)||"" }); });
+    o.orders.push({ cn, date:String(s.basis_date||s.created_at||"").slice(0,10), value: snapV.get(cn) || regVal.get(cn) || (famV.get(qFamily(String(s.quote_reference_number||""))) || snapV.get(String(s.quote_reference_number||""))) || (inr ? Number(s.basis_value)||0 : 0), po:s.basis_number||"", quote:s.quote_reference_number||"", status:s.status||"", term:termBy.get(cn)||"" }); });
   reg.forEach(r=>{ const cn = String(r.contract_number||""); if(!cn || soCns.has(cn) || /cancel/i.test(r.status||"")) return; const o = find(r.client); if(!o) return;
     o.orders.push({ cn, date:String(r.po_date||r.loi_date||r.created_at||"").slice(0,10), value:regVal.get(cn)||0, po:r.po_no||"", quote:r.quote_number||"", status:"Register", term:"" }); });
   invs.forEach(v=>{ if(/cancel|draft/i.test(v.status||"")) return; const o = find(v.customer_name); if(!o) return;
@@ -27374,7 +27401,7 @@ function ciMetrics(o, fy, q){
   const ords = o.orders.filter(x=>ciIn(x.date,fy,q)); const invs = o.invs.filter(x=>ciIn(x.date,fy,q)); const mon = ciMoney(o);
   const recd = mon ? mon.recs.filter(r=>ciIn(r.date,fy,q)).reduce((s,r)=>s+r.amt,0) : 0;
   const invd = invs.length ? invs.reduce((s,x)=>s+x.amt,0) : (mon ? mon.bills.filter(b=>ciIn(b.date,fy,q)).reduce((s,b)=>s+b.amt,0) : 0);
-  const dates = [...o.enq.map(x=>x.date), ...o.quotes.map(x=>x.date), ...o.orders.map(x=>x.date), ...o.acts].filter(Boolean).sort(); const last = dates.length ? dates[dates.length-1] : null;
+  const dates = [...o.enq.map(x=>x.date), ...o.quotes.map(x=>x.lastDate||x.date), ...o.orders.map(x=>x.date), ...o.acts].filter(Boolean).sort(); const last = dates.length ? dates[dates.length-1] : null;
   const perQ = [1,2,3,4].map(k=>({ e:o.enq.filter(x=>ciIn(x.date,fy,k)).length, q:o.quotes.filter(x=>ciIn(x.date,fy,k)).length, o:o.orders.filter(x=>ciIn(x.date,fy,k)).reduce((s,x)=>s+x.value,0) }));
   return { enqN:enq.length, qN:qs.length, qv:qs.reduce((s,x)=>s+x.value,0), wonN:won.length, wonV:won.reduce((s,x)=>s+x.value,0), lostN:lost.length, parkedN:parked.length, openN:qs.length-won.length-lost.length-parked.length,
     ordN:ords.length, ov:ords.reduce((s,x)=>s+x.value,0), invd, recd, pend:mon?mon.pend:0, over60:mon?mon.over60:0, age:mon?mon.age:null, avgDays:mon?mon.avgDays:null, hasMoney:!!mon,
@@ -27403,7 +27430,7 @@ function CustomerInsightsScreen({ user }){
   const [fy,setFy] = useState(()=>lsg("fy", ciFyOf(toISODate(new Date())))); const [qtr,setQtr] = useState(()=>Number(lsg("qtr","0"))||0);
   const [F,setF] = useState(()=>{ try{ return JSON.parse(lsg("f","{}"))||{}; }catch(e){ return {}; } });
   const [sortK,setSortK] = useState(()=>lsg("sk","ov")); const [sortD,setSortD] = useState(()=>Number(lsg("sd","-1"))||-1);
-  const [sel,setSel] = useState(null); const [tabs,setTabs] = useState([]); const [cur,setCur] = useState(""); const [rwOpen,setRwOpen] = useState(false); const [grp,setGrp] = useState(null);
+  const [sel,setSel] = useState(null); const [view,setView] = useState("cust"); const [rwOpen,setRwOpen] = useState(false); const [grp,setGrp] = useState(null); const [unOpen,setUnOpen] = useState(false);
   const lbRef = useRef(null);
   useEffect(()=>{ ciCanOpen(user).then(setOk); },[user && user.id]);
   const load = useCallback(async()=>{ setBusy(true); try{ setD(await ciLoad()); }catch(e){ setD({ err:String(e.message||e), comps:[], rw:CI_RW_DEFAULT }); } setBusy(false); },[]);
@@ -27421,8 +27448,9 @@ function CustomerInsightsScreen({ user }){
       if(q && !(o.name+" "+o.city+" "+o.kids.join(" ")).toLowerCase().includes(q)) return false; return true; })
       .sort((a,b)=>{ const v = x=> ({ name:x.o.name, city:x.o.city, country:x.o.country, zone:x.o.zone, owner:x.o.owner, score:x.r.score, last:x.m.last||"" })[sortK] ?? x.m[sortK] ?? 0;
         const A = v(a), B = v(b); return (typeof A==="string" ? A.localeCompare(B) : (A>B?1:A<B?-1:0))*sortD; }); },[all, F, sortK, sortD]);
-  const open = (id)=>{ if(id==null) return; const k = String(id); setTabs(t=>t.includes(k)?t:[...t,k]); setCur(k); setTimeout(()=>{ const el = document.getElementById("ci-work"); if(el) el.scrollIntoView({block:"start",behavior:"smooth"}); }, 60); };
-  const close = (k)=>{ setTabs(t=>{ const n = t.filter(x=>x!==k); if(cur===k) setCur(n[n.length-1]||""); return n; }); };
+  // one panel under the list: it shows the selected customer and follows the selection (no tabs)
+  const open = (id)=>{ if(id==null) return; setSel(id); setView("cust"); setTimeout(()=>{ const tr = lbRef.current && lbRef.current.querySelector('[data-id="'+id+'"]'); if(tr) tr.scrollIntoView({block:"nearest"}); }, 30); };
+  useEffect(()=>{ if(sel==null && rows.length) setSel(rows[0].o.id); },[rows]);
   if(ok===null) return h("div",{style:{padding:30,color:colors.muted}},"Checking access…");
   if(!ok) return h("div",{style:{padding:30,color:colors.muted,maxWidth:640}},"Customer Insights is open to Sales, FSE, Telecaller, Sales Admin, Sales Manager, BDE and Super Admins. Ask a Super Admin if you need it.");
   if(!D) return h("div",{style:{padding:30,color:colors.muted}},"Reading customers, enquiries, quotes, orders and payments…");
@@ -27434,7 +27462,6 @@ function CustomerInsightsScreen({ user }){
   const num = { ...td, textAlign:"right", fontVariantNumeric:"tabular-nums" };
   const keyNav = (e)=>{ if(!rows.length) return; let i = rows.findIndex(x=>String(x.o.id)===String(sel));
     if(e.key==="ArrowDown"||e.key==="ArrowUp"){ e.preventDefault(); i = Math.max(0, Math.min(rows.length-1, i+(e.key==="ArrowDown"?1:-1))); setSel(rows[i].o.id); const tr = lbRef.current && lbRef.current.querySelector('[data-id="'+rows[i].o.id+'"]'); if(tr) tr.scrollIntoView({block:"nearest"}); }
-    else if(e.key==="Enter" && sel!=null){ e.preventDefault(); open(sel); }
     else if(/^[a-z0-9]$/i.test(e.key)){ const k = e.key.toLowerCase(); let j = rows.findIndex((x,n)=>n>i && x.o.name.toLowerCase().startsWith(k)); if(j<0) j = rows.findIndex(x=>x.o.name.toLowerCase().startsWith(k)); if(j>=0){ setSel(rows[j].o.id); const tr = lbRef.current && lbRef.current.querySelector('[data-id="'+rows[j].o.id+'"]'); if(tr) tr.scrollIntoView({block:"nearest"}); } } };
   const S = k=> rows.reduce((s,x)=>s+(Number(x.m[k])||0),0);
   const perL = "FY "+fy+(qtr?" · Q"+qtr:"");
@@ -27447,8 +27474,9 @@ function CustomerInsightsScreen({ user }){
       h("div",{style:{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:8}},
         h("b",{style:{fontSize:17}},"Customer Insights"), h("span",{style:{color:colors.muted,fontSize:12.5}},"— "+perL+" · "+D.comps.length+" customers · "+rows.length+" shown"),
         h("span",{style:{flex:1}}),
-        h("button",{style:btnSmall,"data-testid":"ci-open",onClick:()=>{ if(sel!=null) open(sel); else if(lbRef.current) lbRef.current.focus(); }},"Open ↗"),
-        h("button",{style:btnSmall,"data-testid":"ci-dash",onClick:()=>open("dash")},"Dashboard"),
+        h("span",{role:"group","aria-label":"Show below",style:{display:"inline-flex"}},
+          [["cust","Customer","ci-vcust"],["dash","Dashboard","ci-dash"]].map(([v,l,t],i)=>h("button",{key:v,"data-testid":t,"aria-pressed":view===v,onClick:()=>setView(v),
+            style:{...btnSmall,borderRadius:i?"0 6px 6px 0":"6px 0 0 6px",marginLeft:i?-1:0,background:view===v?"#1f1e1a":"#fff",color:view===v?"#fff":colors.text,borderColor:view===v?"#1f1e1a":colors.border}},l))),
         h("button",{style:btnSmall,onClick:()=>exportRowsToExcel(xlCols, rows, "Customer Insights", "Customer_Insights_"+fy+(qtr?"_Q"+qtr:"")+".xlsx")},"Excel"),
         h("button",{style:btnSmall,onClick:()=>exportRowsToPdf("Customer Insights — "+perL, xlCols.filter(c=>!/Quoted|Over 60|Score/.test(c.label)), rows, "Customer_Insights_"+fy+(qtr?"_Q"+qtr:"")+".pdf")},"PDF"),
         user.role==="super_admin" ? h("button",{style:btnSmall,title:"Rating weights",onClick:()=>setRwOpen(true)},"⚙ Rating") : null,
@@ -27465,7 +27493,7 @@ function CustomerInsightsScreen({ user }){
           h("table",{style:{borderCollapse:"collapse",width:"100%"}},
             h("thead",null,h("tr",null, COLS.map(([k,l,n])=>h("th",{key:k,style:{...th,textAlign:n?"right":"left"},onClick:()=>{ if(sortK===k){ setSortD(-sortD); lss("sd",String(-sortD)); } else { setSortK(k); const d = n ? -1 : 1; setSortD(d); lss("sk",k); lss("sd",String(d)); } }}, l+(sortK===k?(sortD>0?" ▲":" ▼"):""))))),
             h("tbody",null, rows.length ? rows.map(x=>{ const on = String(x.o.id)===String(sel); const c = on ? { background:"#0a5fb4", color:"#fff" } : {};
-              return h("tr",{key:x.o.id,"data-id":x.o.id,role:"option","aria-selected":on,onClick:()=>setSel(x.o.id),onDoubleClick:()=>open(x.o.id),style:{cursor:"default"}},
+              return h("tr",{key:x.o.id,"data-id":x.o.id,role:"option","aria-selected":on,onClick:()=>{ setSel(x.o.id); setView("cust"); },style:{cursor:"default"}},
                 h("td",{style:{...td,...c}}, x.o.name, x.o.kids.length ? h("span",{style:{opacity:.7,fontSize:11}}," (+"+x.o.kids.length+")") : null),
                 h("td",{style:{...num,...c}}, ciChip(x.r)), h("td",{style:{...td,...c}},x.o.city), h("td",{style:{...td,...c}},x.o.country), h("td",{style:{...td,...c}},x.o.zone), h("td",{style:{...td,...c}},x.o.owner),
                 h("td",{style:{...num,...c}},x.m.enqN), h("td",{style:{...num,...c}},x.m.qN), h("td",{style:{...num,...c}},x.m.ordN), h("td",{style:{...num,...c}},Math.round(x.m.ov).toLocaleString("en-IN")),
@@ -27475,15 +27503,15 @@ function CustomerInsightsScreen({ user }){
       h("div",{style:{display:"flex",gap:16,flexWrap:"wrap",fontSize:12,color:colors.muted,marginTop:6}},
         "Shown:", h("span",null,"enquiries ",h("b",null,S("enqN"))), h("span",null,"quotes ",h("b",null,S("qN"))), h("span",null,"orders ",h("b",null,S("ordN"))), h("span",null,"order value ",h("b",null,ciLakh(S("ov")))),
         h("span",null,"conversion ",h("b",null,(S("qN")?Math.round(S("wonN")/S("qN")*100):0)+"%")), h("span",null,"received ",h("b",null,ciLakh(S("recd")))), h("span",null,"pending ",h("b",null,ciLakh(S("pend")))),
-        D.unmatched ? h("span",{title:"Quotes whose customer name is not in the Customer Master are left out"},D.unmatched+" quote"+(D.unmatched===1?"":"s")+" with a name not in the Customer Master") : null,
+        h("span",{title:"Each quote counts once (all its revisions together), in the period it was first sent; value and stage from its latest revision"},"latest revisions only · "+(D.revN||0)+" revisions in all"),
+        D.unmatched ? h("button",{"data-testid":"ci-unmatched",onClick:()=>setUnOpen(true),style:{border:"none",background:"transparent",color:"#a3312a",textDecoration:"underline",cursor:"pointer",padding:0,fontSize:12}},D.unmatched+" quote"+(D.unmatched===1?"":"s")+" with a name not in the Customer Master — link them") : null,
         !D.hasParent ? h("span",{style:{color:"#854f0b"}},"Run "+CI_SQL+" to group several names under one customer") : null),
-      h("div",{style:{fontSize:11.5,color:colors.mutedLight,marginTop:3}},"Click a row to select it; double-click, Enter or Open ↗ opens the customer in its own tab. Click a heading to sort; ↑ ↓ move; a letter jumps.")),
-    tabs.length ? h("div",{id:"ci-work",style:{marginTop:14}},
-      h("div",{style:{display:"flex",gap:3,flexWrap:"wrap"}}, tabs.map(k=>{ const x = k==="dash" ? null : all.find(z=>String(z.o.id)===k); const on = k===cur;
-        return h("div",{key:k,role:"button",tabIndex:0,onClick:()=>setCur(k),onKeyDown:e=>{ if(e.key==="Enter") setCur(k); },style:{border:"1px solid "+colors.border,borderBottom:"none",borderRadius:"7px 7px 0 0",background:on?"#fff":"#ebe8dd",padding:"6px 12px",cursor:"pointer",display:"flex",gap:8,alignItems:"center",fontWeight:on?700:400,fontSize:13}},
-          k==="dash" ? "Dashboard" : (x ? x.o.name : "Customer"), h("button",{onClick:e=>{ e.stopPropagation(); close(k); },"aria-label":"Close",style:{border:"none",background:"transparent",cursor:"pointer",color:colors.muted,padding:0}},"✕")); })),
-      h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:"0 9px 9px 9px",padding:14}},
-        cur==="dash" ? h(CiDashboard,{ rows, perL, onOpen:open }) : (()=>{ const x = all.find(z=>String(z.o.id)===cur); return x ? h(CiCustomer,{ x, fy, qtr, perL, rw:D.rw, canGroup, hasParent:D.hasParent, comps:D.comps, onGroup:()=>setGrp(x), onUngroup:async(name)=>{ await ciUngroup(name, D); load(); } }) : h("div",{style:{color:colors.muted}},"This customer is not in the list any more."); })())) : null,
+      h("div",{style:{fontSize:11.5,color:colors.mutedLight,marginTop:3}},"Click a row — its insights show below and follow as you move with ↑ ↓ or jump with a letter. Click a heading to sort.")),
+    h("div",{id:"ci-work",style:{marginTop:14,background:"#fff",border:"1px solid "+colors.border,borderRadius:9,padding:14}},
+      view==="dash" ? h(CiDashboard,{ rows, perL, onOpen:open }) : (()=>{ const x = all.find(z=>String(z.o.id)===String(sel));
+        return x ? h(CiCustomer,{ key:x.o.id, x, fy, qtr, perL, rw:D.rw, canGroup, hasParent:D.hasParent, comps:D.comps, onGroup:()=>setGrp(x), onUngroup:async(name)=>{ await ciUngroup(name, D); load(); } })
+          : h("div",{style:{color:colors.muted,padding:10}},"Click a customer in the list — its insights show here."); })()),
+    unOpen ? h(CiUnmatchedDlg,{ D, user, canLink:true, onClose:()=>setUnOpen(false), onSaved:()=>{ setUnOpen(false); load(); } }) : null,
     rwOpen ? h(CiWeights,{ D, user, onClose:()=>setRwOpen(false), onSaved:()=>{ setRwOpen(false); load(); } }) : null,
     grp ? h(CiGroupDlg,{ x:grp, D, user, onClose:()=>setGrp(null), onSaved:()=>{ setGrp(null); load(); } }) : null);
 }
@@ -27501,12 +27529,16 @@ function ciBars(perQ, qtr){ const W = 460, H = 172, L = 8, B = 140, gw = (W-L-8)
     h("div",{style:{display:"flex",gap:12,fontSize:11.5,color:colors.muted,flexWrap:"wrap"}}, [["#7fa6d6","Enquiries"],["#c98a1b","Quotes"],["#1f5c40","Orders (₹ lakh)"]].map(([c,l])=>h("span",{key:l},h("i",{style:{display:"inline-block",width:10,height:10,borderRadius:2,background:c,marginRight:4,verticalAlign:-1}}),l)), h("span",null,"each on its own scale"))); }
 function CiCustomer({ x, fy, qtr, perL, rw, canGroup, hasParent, comps, onGroup, onUngroup }){
   const o = x.o, m = x.m, r = x.r; const box = { border:"1px solid "+colors.border, borderRadius:8, padding:"9px 11px", minWidth:0 };
+  const [qf,setQf] = useState("all"); const [showRev,setShowRev] = useState(false);
+  const qKind = q=> q.kind==="won"||q.kind==="lost"||q.kind==="parked" ? q.kind : "open";
+  const qN = k2=> k2==="all" ? m.qs.length : m.qs.filter(q=>qKind(q)===k2).length;
+  const revAll = m.qs.reduce((n,q)=>n+1+((q.earlier||[]).length),0);
   const k = (v,l,c)=>h("div",{style:{border:"1px solid "+colors.border,borderRadius:7,padding:"7px 9px",background:"#faf9f4"}}, h("div",{style:{fontSize:18,fontWeight:600,color:c||colors.text,fontVariantNumeric:"tabular-nums"}},v), h("div",{style:{fontSize:11.5,color:colors.muted}},l));
   const why = []; const p = r.parts;
   if(p.conv<0.4 && m.qN) why.push("low conversion"); if(r.late!=null && r.late>0) why.push("pays "+r.late+" days beyond terms"); if(m.over60>0) why.push(ciLakh(m.over60)+" over 60 days");
   if(p.val>0.8) why.push("among our largest buyers"); if(o.terms && (o.terms.adv>=20 || o.terms.lc)) why.push("pays in advance / LC"); if(m.silent>90 && m.silent<9999) why.push("quiet for "+m.silent+" days");
   const fun = (n, c, l)=> h("div",{style:{height:22,borderRadius:4,margin:"4px 0",color:"#fff",fontSize:12,lineHeight:"22px",paddingLeft:8,whiteSpace:"nowrap",overflow:"hidden",background:c,width:(m.enqN||m.qN?Math.max(10,Math.round(n/Math.max(1,m.enqN,m.qN)*100)):10)+"%"}}, l);
-  const items = {}; m.ords.forEach(od=>{ const q = o.quotes.find(z=>z.ref===od.quote); (q && q.items.length ? q.items : ["(items not known)"]).forEach(it=>{ items[it] = items[it] || { n:0, v:0 }; items[it].n++; items[it].v += od.value/Math.max(1,(q&&q.items.length)||1); }); });
+  const items = {}; m.ords.forEach(od=>{ const q = o.quotes.find(z=>z.fam===qFamily(od.quote||"")); (q && q.items.length ? q.items : ["(items not known)"]).forEach(it=>{ items[it] = items[it] || { n:0, v:0 }; items[it].n++; items[it].v += od.value/Math.max(1,(q&&q.items.length)||1); }); });
   const tbl = (head, body, empty)=> h("div",{style:{overflowX:"auto"}}, h("table",{style:{borderCollapse:"collapse",width:"100%",fontSize:12.5}}, h("thead",null,h("tr",null, head.map((t,i)=>h("th",{key:i,style:{textAlign:/₹|Orders|Value/.test(t)?"right":"left",padding:"4px 6px",borderBottom:"1px solid "+colors.border,background:"#faf9f4",fontWeight:600}},t)))),
     h("tbody",null, body.length ? body : h("tr",null,h("td",{colSpan:head.length,style:{padding:10,color:colors.muted}},empty)))));
   const tdc = { padding:"4px 6px", borderBottom:"1px solid #f1efe8" }, tdn = { ...tdc, textAlign:"right", fontVariantNumeric:"tabular-nums" };
@@ -27530,18 +27562,26 @@ function CiCustomer({ x, fy, qtr, perL, rw, canGroup, hasParent, comps, onGroup,
         h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:4}}, "Terms: "+(o.terms ? o.terms.txt : "not known (neutral)")+" · average days to pay: "+(m.avgDays!=null?m.avgDays:"—"))),
       h("div",{style:box}, h("b",null,"Quarter by quarter · FY "+fy), ciBars(m.perQ, qtr)),
       h("div",{style:box}, h("b",null,"Funnel"),
-        fun(m.enqN,"#7fa6d6",m.enqN+" enquiries"), fun(m.qN,"#4f7fb8",m.qN+" quotes sent · "+ciLakh(m.qv)), fun(m.openN+m.parkedN,"#c98a1b",(m.openN+m.parkedN)+" still open / parked"), fun(m.lostN,"#a3312a",m.lostN+" lost"), fun(m.wonN,"#1f5c40",m.wonN+" won · "+ciLakh(m.wonV)),
+        fun(m.enqN,"#7fa6d6",m.enqN+" enquiries"), fun(m.qN,"#4f7fb8",m.qN+" quotes sent (latest rev) · "+ciLakh(m.qv)), fun(m.openN+m.parkedN,"#c98a1b",(m.openN+m.parkedN)+" still open / parked"), fun(m.lostN,"#a3312a",m.lostN+" lost"), fun(m.wonN,"#1f5c40",m.wonN+" won · "+ciLakh(m.wonV)),
         lostTxt ? h("div",{style:{fontSize:12,color:colors.muted,marginTop:4}},"Lost reasons: "+lostTxt) : null),
       h("div",{style:box}, h("b",null,"Payments (today)"),
         m.age ? tbl(["Up to 30 d","31–60 d","61–90 d","Over 90 d"], [h("tr",{key:1}, [m.age.nd,m.age.d60,m.age.d90,m.age.o90].map((v,i)=>h("td",{key:i,style:{...tdn,...(i>=2&&v>0?{color:"#a3312a",fontWeight:700}:{})}},ciLakh(v))))], "") : h("div",{style:{color:colors.muted,fontSize:12.5,marginTop:4}},"No ledger for this customer in Accounts yet."),
         h("div",{style:{marginTop:10}}, h("b",null,"What they buy")),
         tbl(["Item","Orders","₹"], Object.entries(items).sort((a,b)=>b[1].v-a[1].v).slice(0,6).map(([it,v])=>h("tr",{key:it}, h("td",{style:tdc},it), h("td",{style:tdn},v.n), h("td",{style:tdn},ciLakh(v.v)))), "No orders in this period."))),
     h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(420px,1fr))",gap:12,marginTop:12}},
-      h("div",{style:box}, h("b",null,"Quotations ("+m.qN+")"),
-        tbl(["Quote","Date","Value ₹","Stage"], m.qs.slice().sort((a,b)=>String(b.date).localeCompare(String(a.date))).slice(0,40).map(q=>h("tr",{key:q.ref},
+      h("div",{style:box,"data-testid":"ci-quotes"}, h("b",null,"Quotations ("+m.qN+") — latest revision of each"),
+        h("div",{style:{fontSize:11.5,color:colors.muted,margin:"2px 0 5px"}}, m.qN+" quotes · "+revAll+" revisions in all. Each quote counts once, in the period it was first sent; value and stage come from its latest revision. ",
+          h("label",{style:{whiteSpace:"nowrap",cursor:"pointer"}}, h("input",{type:"checkbox","data-testid":"ci-showrev",checked:showRev,onChange:e=>setShowRev(e.target.checked),style:{verticalAlign:-2,marginRight:3}}),"show earlier revisions")),
+        h("div",{style:{display:"flex",gap:5,flexWrap:"wrap",marginBottom:6}}, [["all","All"],["open","Open"],["won","Won"],["lost","Lost"],["parked","Parked"]].map(([k2,l])=>h("button",{key:k2,"data-qf":k2,onClick:()=>setQf(k2),
+          style:{border:"1px solid "+(qf===k2?"#2f4f7a":colors.border),background:qf===k2?"#2f4f7a":"transparent",color:qf===k2?"#fff":colors.text,borderRadius:12,padding:"1px 10px",fontSize:12,cursor:"pointer"}}, l+" "+qN(k2)))),
+        h("div",{style:{maxHeight:320,overflowY:"auto"}},
+        tbl(["Quote","Rev","First sent","Latest rev","Value ₹","Stage"], m.qs.filter(q=>qf==="all"||qKind(q)===qf).sort((a,b)=>String(b.date).localeCompare(String(a.date))).flatMap(q=>[h("tr",{key:q.ref},
           h("td",{style:tdc}, q.legacy ? q.ref : h("span",{style:{color:"#0c447c",cursor:"pointer",textDecoration:"underline"},onClick:()=>window.dispatchEvent(new CustomEvent("flo-goto",{ detail:{ quote:q.ref } }))},q.ref)),
-          h("td",{style:tdc},q.date?fmtDMY(q.date):""), h("td",{style:tdn},q.value?Math.round(q.value).toLocaleString("en-IN"):"—"),
-          h("td",{style:{...tdc,color:q.kind==="won"?"#0f6e56":q.kind==="lost"?"#a3312a":colors.text}}, q.stage+(q.kind==="lost"&&q.reason?" · "+q.reason:"")))), "No quotes in this period.")),
+          h("td",{style:tdc}, "R"+String(q.rev||0).padStart(2,"0"), (q.earlier||[]).length ? h("span",{style:{color:colors.muted}}," · "+q.earlier.length+" earlier") : null),
+          h("td",{style:tdc},q.date?fmtDMY(q.date):""), h("td",{style:tdc},q.lastDate?fmtDMY(q.lastDate):""), h("td",{style:tdn},q.value?Math.round(q.value).toLocaleString("en-IN"):"—"),
+          h("td",{style:{...tdc,color:q.kind==="won"?"#0f6e56":q.kind==="lost"?"#a3312a":colors.text}}, q.stage+(q.kind==="lost"&&q.reason?" · "+q.reason:""))),
+          ...(showRev ? (q.earlier||[]).map(e=>h("tr",{key:q.ref+"|"+e.ref,style:{background:"#f6f5ef",color:colors.muted,fontSize:12}},
+            h("td",{style:tdc},"↳ "+e.ref), h("td",{style:tdc},"superseded"), h("td",{style:tdc}), h("td",{style:tdc},e.date?fmtDMY(e.date):""), h("td",{style:tdn},e.value?Math.round(e.value).toLocaleString("en-IN"):"—"), h("td",{style:tdc},"not counted"))) : [])]), "No quotes in this period."))),
       h("div",{style:box}, h("b",null,"Orders ("+m.ordN+")"),
         tbl(["Contract","PO","Date","Value ₹","Invoiced ₹"], m.ords.slice().sort((a,b)=>String(b.date).localeCompare(String(a.date))).map(od=>h("tr",{key:od.cn},
           h("td",{style:tdc}, h(CtRef,{ ct:od.cn, compact:true })), h("td",{style:tdc},od.po), h("td",{style:tdc},od.date?fmtDMY(od.date):""), h("td",{style:tdn},od.value?Math.round(od.value).toLocaleString("en-IN"):"—"),
@@ -27600,6 +27640,28 @@ function CiGroupDlg({ x, D, user, onClose, onSaved }){
     h("div",{style:{border:"2px inset #d8d4c7",height:240,overflowY:"auto"}}, list.map(o=>h("div",{key:o.id,onClick:()=>setPick(o),style:{padding:"3px 8px",cursor:"default",background:pick&&pick.id===o.id?"#0a5fb4":"transparent",color:pick&&pick.id===o.id?"#fff":colors.text}}, o.name+(o.city?" · "+o.city:"")))),
     err ? h("div",{style:{color:colors.danger,fontSize:12.5,marginTop:6}},err) : null,
     h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}, h("button",{style:btnSecondary,onClick:onClose},"Cancel"), h("button",{style:btnPrimary,disabled:!pick,onClick:save},"Group under "+x.o.name)));
+}
+// quote names that match no customer: link each to the right customer ("Belongs to…"), saved in cust_name_alias_tbl
+function CiUnmatchedDlg({ D, user, canLink, onClose, onSaved }){
+  const [pick,setPick] = useState(null); const [cust,setCust] = useState(null); const [q,setQ] = useState(""); const [err,setErr] = useState(""); const [busy,setBusy] = useState(false);
+  const comps = useMemo(()=>Array.from(D.byId.values()).filter(o=>!o.archived).sort((a,b)=>a.name.localeCompare(b.name)),[D]);
+  const list = comps.filter(o=>!q.trim() || o.name.toLowerCase().includes(q.trim().toLowerCase())).slice(0,300);
+  const link = async()=>{ if(!pick || !cust) return; if(!D.hasAlias){ setErr("Run "+CI_ALIAS_SQL+" first (both companies)."); return; } setBusy(true);
+    const { error } = await sb.from("cust_name_alias_tbl").upsert({ alias:pick.name, company_id:cust.id, created_by:user.username||"", created_at:new Date().toISOString() }, { onConflict:"alias" });
+    setBusy(false); if(error){ setErr(error.message); return; } try{ await logAudit("INSERT","cust_name_alias_tbl",pick.name,"Quote name linked to "+cust.name+" for Customer Insights",user.username||""); }catch(e){} onSaved(); };
+  const row = (sel)=>({ padding:"3px 8px", cursor:"default", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", fontSize:12.5, background:sel?"#0a5fb4":"transparent", color:sel?"#fff":colors.text });
+  return h(OsModal,{ title:"Quote names not in the Customer Master", width:900, onClose },
+    h("div",{style:{fontSize:12.5,color:colors.muted,marginBottom:8}},"These quotes are left out of Customer Insights because their customer name matches no customer. Pick a name on the left, the customer it belongs to on the right, then Link. Every quote with that name then counts for that customer."),
+    h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}},
+      h("div",null, h("b",{style:{fontSize:12.5}},"Name on the quotes (quotes · latest value)"),
+        h("div",{"data-testid":"ci-un-list",style:{border:"2px inset #d8d4c7",height:300,overflowY:"auto",marginTop:4}}, (D.unNames||[]).map(u=>h("div",{key:u.name,onClick:()=>setPick(u),title:u.refs.join(", "),style:row(pick&&pick.name===u.name)}, u.name+" · "+u.n+" · "+ciLakh(u.value))))),
+      h("div",null, h("b",{style:{fontSize:12.5}},"Belongs to customer"),
+        h("input",{value:q,onChange:e=>setQ(e.target.value),placeholder:"Type to narrow",style:{...inputStyle,width:"100%",marginTop:4}}),
+        h("div",{style:{border:"2px inset #d8d4c7",height:262,overflowY:"auto",marginTop:4}}, list.map(o=>h("div",{key:o.id,onClick:()=>setCust(o),style:row(cust&&cust.id===o.id)}, o.name+(o.city?" · "+o.city:"")))))),
+    !canLink ? h("div",{style:{fontSize:12.5,color:colors.muted,marginTop:6}},"Only Sales and Admins can link names.") : null,
+    err ? h("div",{style:{color:colors.danger,fontSize:12.5,marginTop:6}},err) : null,
+    h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}, h("button",{style:btnSecondary,onClick:onClose},"Close"),
+      h("button",{style:btnPrimary,"data-testid":"ci-un-link",disabled:!canLink||!pick||!cust||busy,onClick:link}, pick&&cust ? "Link “"+pick.name+"” to "+cust.name : "Link")));
 }
 async function ciUngroup(name, D){ const o = Array.from(D.byId.values()).find(z=>z.name.toLowerCase()===String(name).toLowerCase()); if(!o){ alert("“"+name+"” is not one of the grouped names."); return; }
   const { error } = await sb.from("companies").update({ parent_company_id:null }).eq("id",o.id); if(error) alert(error.message); }
@@ -35115,6 +35177,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"2 Nov 2026 (306)", summary:"Built on 2026-11-02T13:00:00Z, on top of 2026-11-02T10:00:00Z. SQL (both companies): structure_customer_name_alias_2026-11-02.sql \u2014 needed only to link quote names to customers. CUSTOMER INSIGHTS: (1) No more tabs \u2014 one panel under the list shows the selected customer and follows the selection (click a row, \u2191 \u2193, or a letter); a Customer | Dashboard switch chooses what the panel shows. (2) LATEST REVISION ONLY: all revisions of a quote (FS260043, -R01, -R02\u2026) are one quote. It counts once, in the period it was FIRST SENT; its value, stage and customer come from its LATEST revision \u2014 everywhere: list, totals, funnel, conversion, rating, quarter bars, dashboard. The quotations list shows Rev, First sent and Latest rev; tick \u201cshow earlier revisions\u201d to see the superseded ones in grey (not counted). Stage buttons All / Open / Won / Lost / Parked with counts. (3) A quote with a blank stage counts as sent when it has a value (it was being left out as a draft). (4) Customer names: Engg / Intl / Mfg / Technologies read the same as the full words, and a close name (one starts the other, or the same first two words) counts when only one customer fits. (5) Under the list, \u201cN quotes with a name not in the Customer Master \u2014 link them\u201d opens the list of those names; pick the customer each belongs to and Link \u2014 its quotes then count for that customer." },
   { date:"2 Nov 2026 (305)", summary:"Built on 2026-11-02T10:00:00Z, on top of 2026-11-02T08:00:00Z. SQL (optional, both companies): structure_customer_insights_2026-11-02.sql \u2014 grouping names under a parent customer and the rating weights; everything else works without it. CRM \u203a Customers: the Customer field is now a box \u201cCustomer details\u201d with a list box of every customer (A\u2013Z) under it, narrowed as you type; click a name to open it in the same form as before (\u2191 \u2193 move). NEW CRM \u203a Customers \u203a Customer Insights (Sales, FSE, Telecaller, Sales Admin, Sales Manager, BDE, Super Admins): financial year and Whole year / Q1\u2013Q4; filters zone, country, state, owner, CRM status, rating, show (with activity / all / ordered / quoted never ordered / payment pending / silent 90+ days) and text; an Access-style list box (sortable headings, \u2191 \u2193, type a letter to jump, totals of the rows shown) with Customer, Rating, City, Country, Zone, Owner, Enquiries, Quotes, Orders, Order value, Conversion %, Pending, Last activity; Excel and PDF. Double-click / Enter / Open \u2197 opens the customer in its own tab: 8 figures (enquiries, quotes sent, orders, conversion by count and by value, invoiced, received, pending with over 60 days), the rating card (grade, score out of 100, reasons, a bar per measure, terms, average days to pay), quarter-by-quarter bars, funnel with lost reasons, payment ageing from the customer's ledger, what they buy, quotes (open the quote) and orders (open the contract). Dashboard tab: top 10 by order value, customers by rating, conversion by zone, pending payments, quoted never ordered, silent 90+ days, by owner. RATING out of 100: enquiries 15, conversion 20, order value 20, pays on time vs terms 15, nothing over 60 days 10, payment terms 10, recent activity 10; A+ 80+, A 65+, B 50+, C 35+, D below 35. A Super Admin can change the weights (\u2699 Rating) and group names (a site, a branch, a second spelling) under one customer so they add up." },
   { date:"2 Nov 2026 (304)", summary:"Built on 2026-11-02T08:00:00Z, on top of 2026-11-02T05:00:00Z. No SQL. CONTRACT STATUS FLAG: wherever one contract is chosen (Sale Order, Order Insights \u2014 one order, Procurement Gantt, Document Control \u2014 one contract, Order Status board \u2014 one order) a coloured flag in the board column's colour says where the order stands: the step (e.g. Step 1 \u00b7 Orders pending doc approval), what is holding it (e.g. Datasheet with the client for 34 days \u00b7 1 of 3 Full Hold documents open), days at the step (late when past the step's days), delivery date and days left, and who it is waiting on (post holders by name). \u25be Steps & action opens two lists: STEPS (done \u2713 / now \u25cf / to come, with the post holders' names) and RECOMMENDED ACTION worked out by rules \u2014 chase letters at 7 / 14 / 21 days and a call by the VP Projects after 21, submit / resubmit, release W/O, approve BOM summary, PR, purchase approval, chase vendors, start production, DC, QC letter, Accounts clearance, gate pass, payment, delivery past or within 14 days, advance or balance milestone not received; red = overdue or blocking. A faint diagonal watermark with the step sits over the page (switch it off with \u201cwatermark on\u201d; remembered). CANCELLED (red), CLOSED (grey) and All lots paid shown as such. PDFs (internal only): Order Insights for one order, Procurement Gantt, Document Status Report (internal version, one contract) get a closing page with the steps and actions, and on every page a corner stamp, a faint watermark and a footer line with the status and print date. Customer and vendor papers are never stamped." },
   { date:"2 Nov 2026 (303)", summary:"PURCHASE INSIGHTS (Purchase \u2192 Procurement): for the buyer (his own orders \u2014 the procurement cards he holds) and the Purchase Manager / Super Admins (every buyer, with a buyer filter). Planning: the clock starts at the BOM summary approval; every step of every form needs its planned dates within 3 calendar days \u2014 Clock column green / last day / red, forms still without dates; on the 4th day one bell to the Purchase Manager. PO planning (PO Draft / Approval / Release) and Material (RFI stamping / RFI test / at our factory) are always apart, each with Past the due date \u2014 urgent and Due in the next 7 days. Summary \u2014 contract-wise: PO and Material side by side (late / due 7 d / done), worst delay, status; click for the lines. Every line: \ud83d\udce8 Chase (line in the procurement card + bell) and Re-plan (opens the Gantt at that form). Excel and PDF with the same lists. TEAM REPORT (Tasks \u2192 Team report): Super Admins see everyone (department filter), a head of department his team including himself. Today / This week / This month / dates: overdue, due today, due in 7 days, done and % on time, days carried over, day-report squares, leave and events, last time in the app, status (needs attention: 3+ overdue, a card carried 7+ days or 2+ reports missed; watch; on track). \u25b8 for the open cards, the name opens the person\u2019s calendar. Excel and PDF. No SQL." },
