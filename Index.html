@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-11-02T15:00:00Z";
+  var APP_BUILD_VERSION = "2026-11-02T17:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -27409,21 +27409,34 @@ function ciMetrics(o, fy, q){
     lostWhy: lost.reduce((m,x)=>{ const k = String(x.reason||"other").split(/[–—:-]/)[0].trim().toLowerCase()||"other"; m[k] = (m[k]||0)+1; return m; },{}), qs, ords };
 }
 function ciPct(vals){ const s = vals.slice().sort((a,b)=>a-b); return v=> s.length<2 ? 0.5 : s.filter(x=>x<v).length/(s.length-1); }
-function ciRate(list, rw){   // list: [{o, m}] -> sets x.r = { score, grade, parts }
+function ciRate(list, rw){   // list: [{o, m}] -> sets x.r = { score, grade, parts, math, nr }
+  // 2026-11-02T17:00:00Z: no free points. No enquiry, quote or order in the period -> NOT RATED. Conversion scores only with
+  // quotes; payments / terms score only for customers who ordered (half while not yet invoiced). Each measure carries its working.
   const act = list.filter(x=>x.m.enqN || x.m.qN || x.m.ordN);
   const rv = ciPct(act.map(x=>Math.log(1+x.m.enqN))), ro = ciPct(act.filter(x=>x.m.ov>0).map(x=>Math.log(1+x.m.ov)));
-  const tw = rw.reduce((s,x)=>s+(Number(x[2])||0),0) || 100;
+  const tw = rw.reduce((s,x)=>s+(Number(x[2])||0),0) || 100; const pc = v=> Math.round(v*100)+"%";
   list.forEach(x=>{ const m = x.m, o = x.o, t = o.terms;
-    const late = (m.avgDays!=null) ? m.avgDays - (t ? t.days : 30) : null;
-    const p = { vol: m.enqN ? rv(Math.log(1+m.enqN)) : 0, conv: Math.min(1, ((m.wonN+0.5)/(m.qN+3))/0.4), val: m.ov>0 ? 0.2+0.8*ro(Math.log(1+m.ov)) : 0,
-      pay: late==null ? 0.5 : Math.max(0, Math.min(1, 1 - Math.max(0,late)/45)),
-      over: m.hasMoney && (m.pend+m.invd)>0 ? Math.max(0, 1 - (m.over60/Math.max(1, m.pend+m.invd))*4) : 0.5,
-      terms: !t ? 0.5 : (t.adv>=100||t.lc) ? 1 : t.adv>=20 ? 0.8 : t.adv>=10 ? 0.6 : t.days<=30 ? 0.45 : 0.3,
-      rec: m.silent<=30 ? 1 : m.silent<=90 ? 0.6 : 0.2 };
+    if(!(m.enqN || m.qN || m.ordN)){ x.r = { score:null, grade:"—", nr:true, parts:{}, math:{} }; return; }
+    const ordered = m.ordN>0, p = {}, math = {};
+    if(m.enqN){ const r = rv(Math.log(1+m.enqN)); p.vol = r; math.vol = m.enqN+" enquir"+(m.enqN===1?"y":"ies")+" · more than "+pc(r)+" of active customers"; } else { p.vol = 0; math.vol = "no enquiries"; }
+    if(m.qN){ const sm = (m.wonN+0.5)/(m.qN+3); p.conv = Math.min(1, sm/0.4); math.conv = m.wonN+" won of "+m.qN+" quote"+(m.qN===1?"":"s")+" · smoothed "+pc(sm)+" ÷ target 40% = "+pc(p.conv); } else { p.conv = 0; math.conv = "no quotes"; }
+    if(m.ov>0){ const r = ro(Math.log(1+m.ov)); p.val = 0.2+0.8*r; math.val = ciLakh(m.ov)+" ordered · 20% + 80% × above "+pc(r)+" of buyers = "+pc(p.val); } else { p.val = 0; math.val = "no orders"; }
+    const terms = t ? t.days : 30; let late = null;
+    if(m.avgDays!=null && (ordered || m.invd>0)){ late = m.avgDays - terms; const l = Math.max(0, late); p.pay = Math.max(0, Math.min(1, 1 - l/45)); math.pay = "pays in "+m.avgDays+" d vs "+terms+" d terms → "+(l?l+" d late":"on time")+" · 1 − "+l+"/45 = "+pc(p.pay); }
+    else if(ordered){ p.pay = 0.5; math.pay = "ordered, nothing paid against bills yet · half"; } else { p.pay = 0; math.pay = "no orders"; }
+    const base = m.pend + m.invd;
+    if(m.hasMoney && base>0 && (ordered || m.invd>0)){ const sh = m.over60/base; p.over = Math.max(0, 1 - sh*4); math.over = ciLakh(m.over60)+" over 60 d of "+ciLakh(base)+" (pending + invoiced, "+pc(sh)+") · 1 − 4 × "+pc(sh)+" = "+pc(p.over); }
+    else if(ordered){ p.over = 0.5; math.over = "nothing invoiced yet · half"; } else { p.over = 0; math.over = "no orders"; }
+    if(ordered && t){ p.terms = (t.adv>=100||t.lc) ? 1 : t.adv>=20 ? 0.8 : t.adv>=10 ? 0.6 : t.days<=30 ? 0.45 : 0.3;
+      math.terms = (t.txt.length>60 ? t.txt.slice(0,58)+"…" : t.txt)+" · "+((t.adv>=100||t.lc)?"LC / 100% advance = 100%":t.adv>=20?"≥20% advance = 80%":t.adv>=10?"≥10% advance = 60%":t.days<=30?"credit ≤30 d = 45%":"longer credit = 30%"); }
+    else if(ordered){ p.terms = 0.5; math.terms = "terms not known · half"; } else { p.terms = 0; math.terms = "no orders"; }
+    p.rec = m.silent<=30 ? 1 : m.silent<=90 ? 0.6 : 0.2; math.rec = m.silent<9999 ? "last heard "+m.silent+" d ago · "+(m.silent<=30?"≤30 d = 100%":m.silent<=90?"≤90 d = 60%":"over 90 d = 20%") : "no activity on record · 20%";
     const score = Math.round(rw.reduce((s,[k,,w])=>s+(p[k]||0)*(Number(w)||0),0)/tw*100);
-    x.r = { score, grade:(CI_GRADES.find(g=>score>=g[1])||CI_GRADES[4])[0], parts:p, late }; });
+    x.r = { score, grade:(CI_GRADES.find(g=>score>=g[1])||CI_GRADES[4])[0], parts:p, math, late, tw }; });
 }
-function ciChip(r, big){ if(!r) return null; const t = CI_GTONE[r.grade]||CI_GTONE.B; return h("span",{title:"Rating score "+r.score+" of 100",style:{display:"inline-block",borderRadius:10,padding:big?"2px 10px":"0 7px",fontSize:big?13:11.5,fontWeight:700,background:t[0],color:t[1],border:"1px solid "+t[1]+"55",whiteSpace:"nowrap"}}, r.grade+" · "+r.score); }
+function ciChip(r, big){ if(!r) return null;
+  if(r.nr) return h("span",{title:"No enquiries, quotes or orders in this period",style:{display:"inline-block",borderRadius:10,padding:big?"2px 10px":"0 7px",fontSize:big?13:11.5,color:colors.muted,border:"1px dashed "+colors.border,whiteSpace:"nowrap"}},"— not rated");
+  const t = CI_GTONE[r.grade]||CI_GTONE.B; return h("span",{title:"Rating score "+r.score+" of 100",style:{display:"inline-block",borderRadius:10,padding:big?"2px 10px":"0 7px",fontSize:big?13:11.5,fontWeight:700,background:t[0],color:t[1],border:"1px solid "+t[1]+"55",whiteSpace:"nowrap"}}, r.grade+" · "+r.score); }
 function CustomerInsightsScreen({ user }){
   const [ok,setOk] = useState(null); const [D,setD] = useState(null); const [busy,setBusy] = useState(false);
   const lsg = (k,d)=>{ try{ const v = localStorage.getItem("ci_"+k); return v==null?d:v; }catch(e){ return d; } }; const lss = (k,v)=>{ try{ localStorage.setItem("ci_"+k, v); }catch(e){} };
@@ -27431,7 +27444,9 @@ function CustomerInsightsScreen({ user }){
   const [F,setF] = useState(()=>{ try{ return JSON.parse(lsg("f","{}"))||{}; }catch(e){ return {}; } });
   const [sortK,setSortK] = useState(()=>lsg("sk","ov")); const [sortD,setSortD] = useState(()=>Number(lsg("sd","-1"))||-1);
   const [sel,setSel] = useState(null); const [view,setView] = useState("cust"); const [rwOpen,setRwOpen] = useState(false); const [grp,setGrp] = useState(null); const [unOpen,setUnOpen] = useState(false);
-  const [full,setFull] = useState(null); const fullRef = useRef(null); const fullReal = useRef(false); const fullIdRef = useRef(null); fullIdRef.current = full;   // 2026-11-02T15:00:00Z: full-screen customer page
+  const [full,setFull] = useState(null); const fullRef = useRef(null); const fullReal = useRef(false); const fullIdRef = useRef(null); fullIdRef.current = full;
+  const fitNow = ()=> window.innerWidth>=1000 && window.innerHeight>=640; const [fitOK,setFitOK] = useState(fitNow);
+  useEffect(()=>{ const f = ()=>setFitOK(fitNow()); window.addEventListener("resize", f); return ()=>window.removeEventListener("resize", f); },[]);   // 2026-11-02T15:00:00Z: full-screen customer page
   const lbRef = useRef(null);
   useEffect(()=>{ ciCanOpen(user).then(setOk); },[user && user.id]);
   const load = useCallback(async()=>{ setBusy(true); try{ setD(await ciLoad()); }catch(e){ setD({ err:String(e.message||e), comps:[], rw:CI_RW_DEFAULT }); } setBusy(false); },[]);
@@ -27442,12 +27457,12 @@ function CustomerInsightsScreen({ user }){
   const rows = useMemo(()=>{ const q = String(F.q||"").trim().toLowerCase();
     return all.filter(x=>{ const o = x.o, m = x.m; if(o.archived && !(m.enqN||m.qN||m.ordN)) return false;
       if(F.zone && o.zone!==F.zone) return false; if(F.country && o.country!==F.country) return false; if(F.state && o.state!==F.state) return false;
-      if(F.owner && o.owner!==F.owner) return false; if(F.crm && o.crm!==F.crm) return false; if(F.rate && x.r.grade!==F.rate) return false;
+      if(F.owner && o.owner!==F.owner) return false; if(F.crm && o.crm!==F.crm) return false; if(F.rate && (F.rate==="nr" ? !x.r.nr : x.r.grade!==F.rate)) return false;
       const sh = F.show||"act";
       if(sh==="act" && !(m.enqN||m.qN||m.ordN)) return false; if(sh==="ord" && !m.ordN) return false; if(sh==="never" && !(m.qN && !m.wonN && !m.ordN)) return false;
       if(sh==="pend" && !(m.pend>0)) return false; if(sh==="silent" && m.silent<90) return false;
       if(q && !(o.name+" "+o.city+" "+o.kids.join(" ")).toLowerCase().includes(q)) return false; return true; })
-      .sort((a,b)=>{ const v = x=> ({ name:x.o.name, city:x.o.city, country:x.o.country, zone:x.o.zone, owner:x.o.owner, score:x.r.score, last:x.m.last||"" })[sortK] ?? x.m[sortK] ?? 0;
+      .sort((a,b)=>{ const v = x=> ({ name:x.o.name, city:x.o.city, country:x.o.country, zone:x.o.zone, owner:x.o.owner, score:(x.r.score==null?-1:x.r.score), last:x.m.last||"" })[sortK] ?? x.m[sortK] ?? 0;
         const A = v(a), B = v(b); return (typeof A==="string" ? A.localeCompare(B) : (A>B?1:A<B?-1:0))*sortD; }); },[all, F, sortK, sortD]);
   // one panel under the list: it shows the selected customer and follows the selection (no tabs)
   const open = (id)=>{ if(id==null) return; setSel(id); setView("cust"); setTimeout(()=>{ const tr = lbRef.current && lbRef.current.querySelector('[data-id="'+id+'"]'); if(tr) tr.scrollIntoView({block:"nearest"}); }, 30); };
@@ -27481,7 +27496,7 @@ function CustomerInsightsScreen({ user }){
     else if(/^[a-z0-9]$/i.test(e.key)){ const k = e.key.toLowerCase(); let j = rows.findIndex((x,n)=>n>i && x.o.name.toLowerCase().startsWith(k)); if(j<0) j = rows.findIndex(x=>x.o.name.toLowerCase().startsWith(k)); if(j>=0){ setSel(rows[j].o.id); const tr = lbRef.current && lbRef.current.querySelector('[data-id="'+rows[j].o.id+'"]'); if(tr) tr.scrollIntoView({block:"nearest"}); } } };
   const S = k=> rows.reduce((s,x)=>s+(Number(x.m[k])||0),0);
   const perL = "FY "+fy+(qtr?" · Q"+qtr:"");
-  const xlCols = [{label:"Customer",get:x=>x.o.name},{label:"Rating",get:x=>x.r.grade},{label:"Score",get:x=>x.r.score},{label:"City",get:x=>x.o.city},{label:"Country",get:x=>x.o.country},{label:"Zone",get:x=>x.o.zone},{label:"Owner",get:x=>x.o.owner},
+  const xlCols = [{label:"Customer",get:x=>x.o.name},{label:"Rating",get:x=>x.r.nr?"Not rated":x.r.grade},{label:"Score",get:x=>x.r.nr?"":x.r.score},{label:"City",get:x=>x.o.city},{label:"Country",get:x=>x.o.country},{label:"Zone",get:x=>x.o.zone},{label:"Owner",get:x=>x.o.owner},
     {label:"Enquiries",get:x=>x.m.enqN},{label:"Quotes",get:x=>x.m.qN},{label:"Quoted ₹",get:x=>Math.round(x.m.qv)},{label:"Won",get:x=>x.m.wonN},{label:"Orders",get:x=>x.m.ordN},{label:"Order value ₹",get:x=>Math.round(x.m.ov)},
     {label:"Conversion %",get:x=>x.m.conv},{label:"Received ₹",get:x=>Math.round(x.m.recd)},{label:"Pending ₹",get:x=>Math.round(x.m.pend)},{label:"Over 60 d ₹",get:x=>Math.round(x.m.over60)},{label:"Last activity",get:x=>x.m.last?fmtDMY(x.m.last):""}];
   const canGroup = user.role==="super_admin" || user.role==="admin";
@@ -27501,7 +27516,7 @@ function CustomerInsightsScreen({ user }){
         h("select",{value:fy,"data-testid":"ci-fy",onChange:e=>{ setFy(e.target.value); lss("fy",e.target.value); },style:sel2,"aria-label":"Financial year"}, (D.fys.includes(fy)?D.fys:[fy, ...D.fys]).map(f=>h("option",{key:f,value:f},"FY "+f))),
         h("select",{value:qtr,"data-testid":"ci-qtr",onChange:e=>{ setQtr(Number(e.target.value)); lss("qtr",e.target.value); },style:sel2,"aria-label":"Quarter"}, ciQLabel.map((l,i)=>h("option",{key:i,value:i},l))),
         opts("zone","Zone",uniq("zone")), opts("country","Country",uniq("country")), opts("state","State",uniq("state")), opts("owner","Owner",uniq("owner")), opts("crm","CRM status",uniq("crm")),
-        h("select",{value:F.rate||"",onChange:e=>setFv("rate",e.target.value),style:sel2,"aria-label":"Rating"}, h("option",{value:""},"Rating: all"), CI_GRADES.map(g=>h("option",{key:g[0],value:g[0]},g[0]))),
+        h("select",{value:F.rate||"",onChange:e=>setFv("rate",e.target.value),style:sel2,"aria-label":"Rating"}, h("option",{value:""},"Rating: all"), CI_GRADES.map(g=>h("option",{key:g[0],value:g[0]},g[0])), h("option",{value:"nr"},"Not rated")),
         h("select",{value:F.show||"act",onChange:e=>setFv("show",e.target.value),style:sel2,"aria-label":"Show"}, [["act","With activity in the period"],["all","All customers"],["ord","Ordered in the period"],["never","Quoted, never ordered"],["pend","Payment pending"],["silent","Silent 90+ days"]].map(([k,l])=>h("option",{key:k,value:k},l))),
         h("input",{value:F.q||"",onChange:e=>setFv("q",e.target.value),placeholder:"Filter list…",style:{...sel2,width:150}})),
       h("div",{style:{overflowX:"auto"}},
@@ -27541,9 +27556,9 @@ function CustomerInsightsScreen({ user }){
           h("span",{style:{flex:1}}), h("span",{style:{color:colors.muted,fontSize:12.5}},perL),
           x ? h("button",{style:btnSmall,onClick:()=>exportRowsToExcel(fx, fRows, "Customer", "Customer_Insights_"+fn+".xlsx")},"Excel") : null,
           x ? h("button",{style:btnSmall,onClick:()=>exportRowsToPdf("Customer Insights — "+x.o.name+" — "+perL, fx, fRows, "Customer_Insights_"+fn+".pdf")},"PDF") : null),
-        h("div",{"data-ci-fbody":1,style:{flex:1,overflow:"auto",padding:"14px 16px 24px"}},
-          h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:9,padding:14}},
-            x ? h(CiCustomer,{ key:x.o.id, x, fy, qtr, perL, rw:D.rw, canGroup, hasParent:D.hasParent, comps:D.comps, onGroup:()=>{ closeFull(); setGrp(x); }, onUngroup:async(name)=>{ closeFull(); await ciUngroup(name, D); load(); } })
+        h("div",{"data-ci-fbody":1,style:fitOK?{flex:1,minHeight:0,overflow:"hidden",padding:"10px 16px 10px",display:"flex",flexDirection:"column"}:{flex:1,overflow:"auto",padding:"14px 16px 24px"}},
+          h("div",{style:fitOK?{background:"#fff",border:"1px solid "+colors.border,borderRadius:9,padding:10,flex:1,minHeight:0,display:"flex",flexDirection:"column"}:{background:"#fff",border:"1px solid "+colors.border,borderRadius:9,padding:14}},
+            x ? h(CiCustomer,{ key:x.o.id, fit:fitOK, x, fy, qtr, perL, rw:D.rw, canGroup, hasParent:D.hasParent, comps:D.comps, onGroup:()=>{ closeFull(); setGrp(x); }, onUngroup:async(name)=>{ closeFull(); await ciUngroup(name, D); load(); } })
               : h("div",{style:{color:colors.muted}},"This customer is not in the list any more.")))); })() : null,
     unOpen ? h(CiUnmatchedDlg,{ D, user, canLink:true, onClose:()=>setUnOpen(false), onSaved:()=>{ setUnOpen(false); load(); } }) : null,
     rwOpen ? h(CiWeights,{ D, user, onClose:()=>setRwOpen(false), onSaved:()=>{ setRwOpen(false); load(); } }) : null,
@@ -27561,7 +27576,7 @@ function ciBars(perQ, qtr){ const W = 460, H = 172, L = 8, B = 140, gw = (W-L-8)
     g.push(h("text",{key:"x"+i,x:L+i*gw+gw/2,y:B+15,fontSize:11,textAnchor:"middle",fill:"#6c6a60",fontWeight:qtr===i+1?700:400},"Q"+(i+1)+" · "+["Apr–Jun","Jul–Sep","Oct–Dec","Jan–Mar"][i])); });
   return h("div",null, h("svg",{viewBox:"0 0 "+W+" "+H,width:"100%",role:"img","aria-label":"Enquiries, quotes and orders by quarter"}, g),
     h("div",{style:{display:"flex",gap:12,fontSize:11.5,color:colors.muted,flexWrap:"wrap"}}, [["#7fa6d6","Enquiries"],["#c98a1b","Quotes"],["#1f5c40","Orders (₹ lakh)"]].map(([c,l])=>h("span",{key:l},h("i",{style:{display:"inline-block",width:10,height:10,borderRadius:2,background:c,marginRight:4,verticalAlign:-1}}),l)), h("span",null,"each on its own scale"))); }
-function CiCustomer({ x, fy, qtr, perL, rw, canGroup, hasParent, comps, onGroup, onUngroup }){
+function CiCustomer({ x, fy, qtr, perL, rw, canGroup, hasParent, comps, onGroup, onUngroup, fit }){
   const o = x.o, m = x.m, r = x.r; const box = { border:"1px solid "+colors.border, borderRadius:8, padding:"9px 11px", minWidth:0 };
   const [qf,setQf] = useState("all"); const [showRev,setShowRev] = useState(false);
   const qKind = q=> q.kind==="won"||q.kind==="lost"||q.kind==="parked" ? q.kind : "open";
@@ -27577,38 +27592,47 @@ function CiCustomer({ x, fy, qtr, perL, rw, canGroup, hasParent, comps, onGroup,
     h("tbody",null, body.length ? body : h("tr",null,h("td",{colSpan:head.length,style:{padding:10,color:colors.muted}},empty)))));
   const tdc = { padding:"4px 6px", borderBottom:"1px solid #f1efe8" }, tdn = { ...tdc, textAlign:"right", fontVariantNumeric:"tabular-nums" };
   const lostTxt = Object.entries(m.lostWhy).map(([k2,v])=>k2+" "+v).join(", ");
-  return h("div",{"data-testid":"ci-customer"},
-    h("div",{style:{display:"flex",gap:10,alignItems:"baseline",flexWrap:"wrap",marginBottom:10}}, h("b",{style:{fontSize:18}},o.name), ciChip(r, true),
+  const none = !(m.enqN || m.qN || m.ordN);
+  return h("div",{"data-testid":"ci-customer",style:fit?{display:"flex",flexDirection:"column",height:"100%",minHeight:0}:null},
+    h("div",{style:{display:"flex",gap:10,alignItems:"baseline",flexWrap:"wrap",marginBottom:fit?6:10}}, h("b",{style:{fontSize:fit?20:18}},o.name), ciChip(r, true),
       h("span",{style:{color:colors.muted,fontSize:12.5}}, [o.city, o.state, o.country, o.zone, o.owner?"Owner: "+o.owner:"", perL].filter(Boolean).join(" · ")),
       o.kids.length ? h("span",{style:{fontSize:12,color:"#2f4f7a"}},"Includes: "+o.kids.join(", ")) : null,
       h("span",{style:{flex:1}}),
       canGroup && hasParent ? h("button",{style:btnSmall,onClick:onGroup,title:"Add another customer name under this one, so its business adds up here"},"Group names…") : null,
       canGroup && hasParent && o.kids.length ? h("button",{style:btnSmall,onClick:()=>{ const n = prompt("Take which name out of the group?\n\n"+o.kids.join("\n")); if(n) onUngroup(n.trim()); }},"Ungroup…") : null),
-    h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:8}},
+    h("div",{style:{display:"grid",gridTemplateColumns:fit?"repeat(8,minmax(0,1fr))":"repeat(auto-fit,minmax(130px,1fr))",gap:8,flex:"0 0 auto"}},
       k(m.enqN,"Enquiries"), k(m.qN,"Quotes sent · "+ciLakh(m.qv)), k(m.ordN,"Orders · "+ciLakh(m.ov)), k(m.conv+"%","Conversion by count","#0f6e56"), k(m.convV+"%","Conversion by value","#0f6e56"),
       k(ciLakh(m.invd),"Invoiced"), k(ciLakh(m.recd),"Payments received","#0f6e56"), k(m.hasMoney?ciLakh(m.pend):"—", m.hasMoney ? "Pending today"+(m.over60?" · "+ciLakh(m.over60)+" over 60 d":"") : "No ledger in Accounts", m.pend?"#a3312a":null)),
-    h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(290px,1fr))",gap:12,marginTop:12}},
-      h("div",{style:box}, h("b",null,"Customer rating · "+perL),
-        h("div",{style:{display:"flex",gap:12,alignItems:"baseline",flexWrap:"wrap",margin:"4px 0 6px"}}, h("span",{style:{fontSize:30,fontWeight:600,color:(CI_GTONE[r.grade]||CI_GTONE.B)[1]}},r.grade), h("span",{style:{fontSize:20}},r.score,h("span",{style:{fontSize:12,color:colors.muted}}," / 100")), h("span",{style:{color:colors.muted,fontSize:12.5}}, why.length?why.join(" · "):"steady on every count")),
-        rw.map(([key,l,w])=>h("div",{key,style:{display:"grid",gridTemplateColumns:"minmax(140px,1fr) 2fr 44px",gap:8,alignItems:"center",fontSize:12.5,margin:"3px 0"}},
-          h("span",null,l,h("span",{style:{color:colors.muted}}," ("+w+")")), h("span",{style:{height:9,background:"#f1efe8",borderRadius:5,overflow:"hidden",border:"1px solid "+colors.border}}, h("i",{style:{display:"block",height:"100%",width:Math.round((p[key]||0)*100)+"%",background:"#1f5c40"}})),
-          h("span",{style:{textAlign:"right",fontVariantNumeric:"tabular-nums"}},((p[key]||0)*w).toFixed(1)))),
-        h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:4}}, "Terms: "+(o.terms ? o.terms.txt : "not known (neutral)")+" · average days to pay: "+(m.avgDays!=null?m.avgDays:"—"))),
-      h("div",{style:box}, h("b",null,"Quarter by quarter · FY "+fy), ciBars(m.perQ, qtr)),
-      h("div",{style:box}, h("b",null,"Funnel"),
-        fun(m.enqN,"#7fa6d6",m.enqN+" enquiries"), fun(m.qN,"#4f7fb8",m.qN+" quotes sent (latest rev) · "+ciLakh(m.qv)), fun(m.openN+m.parkedN,"#c98a1b",(m.openN+m.parkedN)+" still open / parked"), fun(m.lostN,"#a3312a",m.lostN+" lost"), fun(m.wonN,"#1f5c40",m.wonN+" won · "+ciLakh(m.wonV)),
+    h("div",{style:{display:"grid",gridTemplateColumns:fit?"minmax(0,1.5fr) repeat(3,minmax(0,1fr))":"repeat(auto-fit,minmax(290px,1fr))",gap:fit?8:12,marginTop:fit?8:12,flex:"0 0 auto"}},
+      h("div",{style:{...box,gridColumn:fit?"auto":"1 / -1"},"data-testid":"ci-points"}, h("b",null,"Points · "+perL),
+        r.nr ? h("div",null, h("div",{style:{display:"flex",gap:10,alignItems:"baseline",margin:"4px 0"}}, h("span",{style:{fontSize:26,color:colors.muted}},"—"), h("span",null,"not rated")),
+            h("div",{style:{fontSize:12.5,color:colors.muted}},"No enquiries, quotes or orders in this period, so no points are given.", m.pend>0 ? h("b",{style:{color:"#a3312a"}}," "+ciLakh(m.pend)+" still pending from earlier orders.") : null))
+        : h("div",null,
+          h("div",{style:{display:"flex",gap:12,alignItems:"baseline",flexWrap:"wrap",margin:"2px 0 6px"}}, h("span",{style:{fontSize:fit?22:28,fontWeight:600,color:(CI_GTONE[r.grade]||CI_GTONE.B)[1]}},r.grade), h("span",{style:{fontSize:fit?18:20}},r.score,h("span",{style:{fontSize:12,color:colors.muted}}," / 100")),
+            h("span",{style:{color:colors.muted,fontSize:11.5}},"A+ 80+ · A 65+ · B 50+ · C 35+ · D below 35")),
+          h("div",{style:{overflowX:"auto"}}, h("table",{style:{borderCollapse:"collapse",width:"100%",fontSize:fit?12:12.5}},
+            h("thead",null,h("tr",null, h("th",{style:{textAlign:"left",padding:"3px 6px",borderBottom:"1px solid "+colors.border,background:"#faf9f4"}},"Measure"), h("th",{style:{textAlign:"left",padding:"3px 6px",borderBottom:"1px solid "+colors.border,background:"#faf9f4"}},"How the points are worked out"), h("th",{style:{textAlign:"right",padding:"3px 6px",borderBottom:"1px solid "+colors.border,background:"#faf9f4",whiteSpace:"nowrap"}},"Points"))),
+            h("tbody",null, rw.map(([key,l,w])=>{ const pt = (p[key]||0)*w*100/(r.tw||100); const zero = !(p[key]>0);
+              return h("tr",{key}, h("td",{style:{padding:"3px 6px",borderBottom:"1px solid #f1efe8",verticalAlign:"top"}},l),
+                h("td",{style:{padding:"3px 6px",borderBottom:"1px solid #f1efe8"}}, h("span",{style:{display:"inline-block",border:"1px "+(zero?"dashed":"solid")+" "+colors.border,background:zero?"transparent":"#f6f5ef",color:zero?colors.muted:colors.text,borderRadius:10,padding:"1px 8px",fontSize:fit?10.5:11.5,lineHeight:1.35}}, (r.math||{})[key]||"")),
+                h("td",{style:{padding:"3px 6px",borderBottom:"1px solid #f1efe8",textAlign:"right",whiteSpace:"nowrap",verticalAlign:"top",fontVariantNumeric:"tabular-nums"}}, h("b",null,pt.toFixed(1)), h("span",{style:{color:colors.muted}}," / "+Math.round(w*100/(r.tw||100))))); }),
+              h("tr",null, h("td",{colSpan:2,style:{padding:"4px 6px",borderTop:"2px solid "+colors.border,fontWeight:600}},"Total"), h("td",{style:{padding:"4px 6px",borderTop:"2px solid "+colors.border,textAlign:"right",whiteSpace:"nowrap"}}, h("b",null,r.score), h("span",{style:{color:colors.muted}}," / 100")))))),
+          fit ? null : h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:3}}, "Terms: "+(o.terms ? o.terms.txt : "not known")+" · average days to pay: "+(m.avgDays!=null?m.avgDays:"—")))),
+      h("div",{style:box}, h("b",null,"Quarter by quarter · FY "+fy), m.perQ.some(q2=>q2.e||q2.q||q2.o) ? ciBars(m.perQ, qtr) : h("div",{style:{color:colors.muted,fontSize:12.5,marginTop:6}},"No enquiries, quotes or orders this year.")),
+      h("div",{style:box}, h("b",null,"Funnel"), none ? h("div",{style:{color:colors.muted,fontSize:12.5,marginTop:6}},"No enquiries or quotes in this period.") : null,
+        none ? null : fun(m.enqN,"#7fa6d6",m.enqN+" enquiries"), none ? null : fun(m.qN,"#4f7fb8",m.qN+" quotes sent (latest rev) · "+ciLakh(m.qv)), none ? null : fun(m.openN+m.parkedN,"#c98a1b",(m.openN+m.parkedN)+" still open / parked"), none ? null : fun(m.lostN,"#a3312a",m.lostN+" lost"), none ? null : fun(m.wonN,"#1f5c40",m.wonN+" won · "+ciLakh(m.wonV)),
         lostTxt ? h("div",{style:{fontSize:12,color:colors.muted,marginTop:4}},"Lost reasons: "+lostTxt) : null),
       h("div",{style:box}, h("b",null,"Payments (today)"),
         m.age ? tbl(["Up to 30 d","31–60 d","61–90 d","Over 90 d"], [h("tr",{key:1}, [m.age.nd,m.age.d60,m.age.d90,m.age.o90].map((v,i)=>h("td",{key:i,style:{...tdn,...(i>=2&&v>0?{color:"#a3312a",fontWeight:700}:{})}},ciLakh(v))))], "") : h("div",{style:{color:colors.muted,fontSize:12.5,marginTop:4}},"No ledger for this customer in Accounts yet."),
         h("div",{style:{marginTop:10}}, h("b",null,"What they buy")),
         tbl(["Item","Orders","₹"], Object.entries(items).sort((a,b)=>b[1].v-a[1].v).slice(0,6).map(([it,v])=>h("tr",{key:it}, h("td",{style:tdc},it), h("td",{style:tdn},v.n), h("td",{style:tdn},ciLakh(v.v)))), "No orders in this period."))),
-    h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(420px,1fr))",gap:12,marginTop:12}},
-      h("div",{style:box,"data-testid":"ci-quotes"}, h("b",null,"Quotations ("+m.qN+") — latest revision of each"),
+    h("div",{style:fit?{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8,marginTop:8,flex:1,minHeight:0}:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(420px,1fr))",gap:12,marginTop:12}},
+      h("div",{style:fit?{...box,display:"flex",flexDirection:"column",minHeight:0}:box,"data-testid":"ci-quotes"}, h("b",null,"Quotations ("+m.qN+") — latest revision of each"),
         h("div",{style:{fontSize:11.5,color:colors.muted,margin:"2px 0 5px"}}, m.qN+" quotes · "+revAll+" revisions in all. Each quote counts once, in the period it was first sent; value and stage come from its latest revision. ",
           h("label",{style:{whiteSpace:"nowrap",cursor:"pointer"}}, h("input",{type:"checkbox","data-testid":"ci-showrev",checked:showRev,onChange:e=>setShowRev(e.target.checked),style:{verticalAlign:-2,marginRight:3}}),"show earlier revisions")),
         h("div",{style:{display:"flex",gap:5,flexWrap:"wrap",marginBottom:6}}, [["all","All"],["open","Open"],["won","Won"],["lost","Lost"],["parked","Parked"]].map(([k2,l])=>h("button",{key:k2,"data-qf":k2,onClick:()=>setQf(k2),
           style:{border:"1px solid "+(qf===k2?"#2f4f7a":colors.border),background:qf===k2?"#2f4f7a":"transparent",color:qf===k2?"#fff":colors.text,borderRadius:12,padding:"1px 10px",fontSize:12,cursor:"pointer"}}, l+" "+qN(k2)))),
-        h("div",{style:{maxHeight:320,overflowY:"auto"}},
+        h("div",{style:fit?{flex:1,minHeight:0,overflowY:"auto"}:{maxHeight:320,overflowY:"auto"}},
         tbl(["Quote","Rev","First sent","Latest rev","Value ₹","Stage"], m.qs.filter(q=>qf==="all"||qKind(q)===qf).sort((a,b)=>String(b.date).localeCompare(String(a.date))).flatMap(q=>[h("tr",{key:q.ref},
           h("td",{style:tdc}, q.legacy ? q.ref : h("span",{style:{color:"#0c447c",cursor:"pointer",textDecoration:"underline"},onClick:()=>window.dispatchEvent(new CustomEvent("flo-goto",{ detail:{ quote:q.ref } }))},q.ref)),
           h("td",{style:tdc}, "R"+String(q.rev||0).padStart(2,"0"), (q.earlier||[]).length ? h("span",{style:{color:colors.muted}}," · "+q.earlier.length+" earlier") : null),
@@ -27616,10 +27640,10 @@ function CiCustomer({ x, fy, qtr, perL, rw, canGroup, hasParent, comps, onGroup,
           h("td",{style:{...tdc,color:q.kind==="won"?"#0f6e56":q.kind==="lost"?"#a3312a":colors.text}}, q.stage+(q.kind==="lost"&&q.reason?" · "+q.reason:""))),
           ...(showRev ? (q.earlier||[]).map(e=>h("tr",{key:q.ref+"|"+e.ref,style:{background:"#f6f5ef",color:colors.muted,fontSize:12}},
             h("td",{style:tdc},"↳ "+e.ref), h("td",{style:tdc},"superseded"), h("td",{style:tdc}), h("td",{style:tdc},e.date?fmtDMY(e.date):""), h("td",{style:tdn},e.value?Math.round(e.value).toLocaleString("en-IN"):"—"), h("td",{style:tdc},"not counted"))) : [])]), "No quotes in this period."))),
-      h("div",{style:box}, h("b",null,"Orders ("+m.ordN+")"),
-        tbl(["Contract","PO","Date","Value ₹","Invoiced ₹"], m.ords.slice().sort((a,b)=>String(b.date).localeCompare(String(a.date))).map(od=>h("tr",{key:od.cn},
+      h("div",{style:fit?{...box,display:"flex",flexDirection:"column",minHeight:0}:box}, h("b",null,"Orders ("+m.ordN+")"),
+        h("div",{style:fit?{flex:1,minHeight:0,overflowY:"auto"}:null}, tbl(["Contract","PO","Date","Value ₹","Invoiced ₹"], m.ords.slice().sort((a,b)=>String(b.date).localeCompare(String(a.date))).map(od=>h("tr",{key:od.cn},
           h("td",{style:tdc}, h(CtRef,{ ct:od.cn, compact:true })), h("td",{style:tdc},od.po), h("td",{style:tdc},od.date?fmtDMY(od.date):""), h("td",{style:tdn},od.value?Math.round(od.value).toLocaleString("en-IN"):"—"),
-          h("td",{style:tdn}, Math.round(o.invs.filter(v=>String(v.cn)===String(od.cn)).reduce((s,v)=>s+v.amt,0)).toLocaleString("en-IN")))), "No orders in this period."))));
+          h("td",{style:tdn}, Math.round(o.invs.filter(v=>String(v.cn)===String(od.cn)).reduce((s,v)=>s+v.amt,0)).toLocaleString("en-IN")))), "No orders in this period.")))));
 }
 function CiDashboard({ rows, perL, onOpen }){
   const box = { border:"1px solid "+colors.border, borderRadius:8, padding:"9px 11px", minWidth:0 };
@@ -27637,7 +27661,7 @@ function CiDashboard({ rows, perL, onOpen }){
       h("div",{style:box}, h("b",null,"Top 10 by order value"),
         top.length ? h("svg",{viewBox:"0 0 300 "+(top.length*20+6),width:"100%",role:"img","aria-label":"Top customers by order value",style:{cursor:"pointer"}}, top.map((x,i)=>{ const w = Math.max(2, x.m.ov/mx*105); return h("g",{key:i,onClick:()=>onOpen(x.o.id)}, h("title",null,x.o.name+" · "+ciLakh(x.m.ov)), h("text",{x:0,y:i*20+14,fontSize:10,fill:"#444"},x.o.name.length>24?x.o.name.slice(0,23)+"…":x.o.name), h("rect",{x:130,y:i*20+4,width:w,height:12,rx:2,fill:"#1f5c40"}), h("text",{x:134+w,y:i*20+14,fontSize:9.5,fill:"#555"},ciLakh(x.m.ov))); })) : h("div",{style:{color:colors.muted,fontSize:12.5,marginTop:6}},"No orders in this period.")),
       h("div",{style:box}, h("b",null,"Customers by rating"),
-        T(["Rating","Customers","Order value","Pending"], CI_GRADES.map(([g])=>{ const xs = rows.filter(x=>x.r.grade===g); return h("tr",{key:g}, h("td",{style:tdc},h("span",{style:{display:"inline-block",borderRadius:10,padding:"0 9px",fontSize:11.5,fontWeight:700,background:(CI_GTONE[g]||CI_GTONE.B)[0],color:(CI_GTONE[g]||CI_GTONE.B)[1]}},g)), h("td",{style:tdn},xs.length), h("td",{style:tdn},ciLakh(xs.reduce((s,x)=>s+x.m.ov,0))), h("td",{style:tdn},ciLakh(xs.reduce((s,x)=>s+x.m.pend,0)))); })),
+        T(["Rating","Customers","Order value","Pending"], [...CI_GRADES, ["—"]].map(([g])=>{ const xs = rows.filter(x=>x.r.grade===g); return h("tr",{key:g}, h("td",{style:tdc},g==="—" ? h("span",{style:{color:colors.muted,fontSize:12}},"Not rated") : h("span",{style:{display:"inline-block",borderRadius:10,padding:"0 9px",fontSize:11.5,fontWeight:700,background:(CI_GTONE[g]||CI_GTONE.B)[0],color:(CI_GTONE[g]||CI_GTONE.B)[1]}},g)), h("td",{style:tdn},xs.length), h("td",{style:tdn},ciLakh(xs.reduce((s,x)=>s+x.m.ov,0))), h("td",{style:tdn},ciLakh(xs.reduce((s,x)=>s+x.m.pend,0)))); })),
         h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:4}},"A+ 80 and above · A 65–79 · B 50–64 · C 35–49 · D below 35")),
       h("div",{style:box}, h("b",null,"Conversion by zone"),
         T(["Zone","Quotes","Won","Count %","Value %"], Object.entries(zones).sort((a,b)=>b[1].q-a[1].q).map(([z,v])=>h("tr",{key:z}, h("td",{style:tdc},z), h("td",{style:tdn},v.q), h("td",{style:tdn},v.w), h("td",{style:tdn},v.q?Math.round(v.w/v.q*100):0), h("td",{style:tdn},v.qv?Math.round(v.wv/v.qv*100):0))))),
@@ -35211,6 +35235,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"2 Nov 2026 (308)", summary:"Built on 2026-11-02T17:00:00Z, on top of 2026-11-02T15:00:00Z. No SQL. CUSTOMER INSIGHTS. (1) POINTS card replaces the rating card: grade and score, then one row per measure \u2014 the measure, a badge with the working in plain words (e.g. \u201c8 won of 26 quotes \u00b7 smoothed 29% \u00f7 target 40% = 73%\u201d, \u201cpays in 45 d vs 30 d terms \u2192 15 d late \u00b7 1 \u2212 15/45 = 67%\u201d) and the points out of the maximum \u2014 and a Total row. (2) NO FREE POINTS: a customer with no enquiry, quote or order in the period is NOT RATED (\u201c\u2014 not rated\u201d; any amount still pending is shown); conversion scores only when there are quotes; payments, overdue and terms score only for customers who ordered (half while nothing is invoiced / paid yet). Rating filter and dashboard get a Not rated line. (3) Empty funnel / quarter chart say so instead of zero bars. (4) The full-screen customer page FITS ONE SCREEN (windows 1000 \u00d7 640 and larger): the 8 figures in one row, Points beside Quarter / Funnel / Payments, and Quotations | Orders filling the rest, each scrolling inside its own box; smaller windows scroll as before." },
   { date:"2 Nov 2026 (307)", summary:"Built on 2026-11-02T15:00:00Z, on top of 2026-11-02T13:00:00Z. No SQL. CUSTOMER INSIGHTS: double-click a customer (or Enter) and it opens on a FULL-SCREEN page (the browser's own full screen where it allows, else the whole window). The bar at the top: \u2715 Close, \u2039 \u203a for the previous / next customer in the list (PgUp / PgDn too), the position (e.g. 4 of 34), the period, and Excel / PDF of that customer's figures. Close or Esc brings you back to Customer Insights exactly as you left it \u2014 same filters, sort and scroll \u2014 with the customer you were last on highlighted. Single-click still shows the customer in the panel under the list." },
   { date:"2 Nov 2026 (306)", summary:"Built on 2026-11-02T13:00:00Z, on top of 2026-11-02T10:00:00Z. SQL (both companies): structure_customer_name_alias_2026-11-02.sql \u2014 needed only to link quote names to customers. CUSTOMER INSIGHTS: (1) No more tabs \u2014 one panel under the list shows the selected customer and follows the selection (click a row, \u2191 \u2193, or a letter); a Customer | Dashboard switch chooses what the panel shows. (2) LATEST REVISION ONLY: all revisions of a quote (FS260043, -R01, -R02\u2026) are one quote. It counts once, in the period it was FIRST SENT; its value, stage and customer come from its LATEST revision \u2014 everywhere: list, totals, funnel, conversion, rating, quarter bars, dashboard. The quotations list shows Rev, First sent and Latest rev; tick \u201cshow earlier revisions\u201d to see the superseded ones in grey (not counted). Stage buttons All / Open / Won / Lost / Parked with counts. (3) A quote with a blank stage counts as sent when it has a value (it was being left out as a draft). (4) Customer names: Engg / Intl / Mfg / Technologies read the same as the full words, and a close name (one starts the other, or the same first two words) counts when only one customer fits. (5) Under the list, \u201cN quotes with a name not in the Customer Master \u2014 link them\u201d opens the list of those names; pick the customer each belongs to and Link \u2014 its quotes then count for that customer." },
   { date:"2 Nov 2026 (305)", summary:"Built on 2026-11-02T10:00:00Z, on top of 2026-11-02T08:00:00Z. SQL (optional, both companies): structure_customer_insights_2026-11-02.sql \u2014 grouping names under a parent customer and the rating weights; everything else works without it. CRM \u203a Customers: the Customer field is now a box \u201cCustomer details\u201d with a list box of every customer (A\u2013Z) under it, narrowed as you type; click a name to open it in the same form as before (\u2191 \u2193 move). NEW CRM \u203a Customers \u203a Customer Insights (Sales, FSE, Telecaller, Sales Admin, Sales Manager, BDE, Super Admins): financial year and Whole year / Q1\u2013Q4; filters zone, country, state, owner, CRM status, rating, show (with activity / all / ordered / quoted never ordered / payment pending / silent 90+ days) and text; an Access-style list box (sortable headings, \u2191 \u2193, type a letter to jump, totals of the rows shown) with Customer, Rating, City, Country, Zone, Owner, Enquiries, Quotes, Orders, Order value, Conversion %, Pending, Last activity; Excel and PDF. Double-click / Enter / Open \u2197 opens the customer in its own tab: 8 figures (enquiries, quotes sent, orders, conversion by count and by value, invoiced, received, pending with over 60 days), the rating card (grade, score out of 100, reasons, a bar per measure, terms, average days to pay), quarter-by-quarter bars, funnel with lost reasons, payment ageing from the customer's ledger, what they buy, quotes (open the quote) and orders (open the contract). Dashboard tab: top 10 by order value, customers by rating, conversion by zone, pending payments, quoted never ordered, silent 90+ days, by owner. RATING out of 100: enquiries 15, conversion 20, order value 20, pays on time vs terms 15, nothing over 60 days 10, payment terms 10, recent activity 10; A+ 80+, A 65+, B 50+, C 35+, D below 35. A Super Admin can change the weights (\u2699 Rating) and group names (a site, a branch, a second spelling) under one customer so they add up." },
