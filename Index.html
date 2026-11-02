@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-11-01T21:00:00Z";
+  var APP_BUILD_VERSION = "2026-11-02T04:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -2594,6 +2594,7 @@ async function accessLoad(user){
     if(r1.error){ out.missing = true; ACC_ACCESS = out; window.__access = out; return out; }
     (r1.data||[]).forEach(x=>{ if(x.department && !depts.includes(x.department)) depts.push(x.department); });
     out.depts = depts;
+    window.__poAll = depts.some(d=>/purchase|accounts|finance/i.test(String(d||"")));   // 301
     if(depts.length){ const { data: dm } = await sb.from("dept_menu_tbl").select("department,menu").in("department",depts); (dm||[]).forEach(x=>{ if(x.menu && x.menu!=="Accounts" && x.menu!=="Admin") out.own.add(x.menu); }); }
     const { data: ua } = await sb.from("user_access_tbl").select("menu,mode").eq("username",user.username||"");
     (ua||[]).forEach(x=>{ if(x.mode==="block") out.blocked.add(x.menu); else if(x.menu==="Accounts") out.accounts = true; else out.own.add(x.menu); });
@@ -2679,7 +2680,9 @@ async function modLoad(user){
 }
 const modLevel = (key)=> (MOD_ME && MOD_ME[key]) || "";
 const modOfTab = (tab)=> MOD_TAB[tab] || null;
-const modTabLevel = (tab)=>{ const m = modOfTab(tab); return m ? modLevel(m) : ""; };
+const modTabLevel = (tab)=>{ const m = modOfTab(tab); let lv = m ? modLevel(m) : "";
+  if(tab==="po_register" && window.__poAll && (lv==="none" || lv==="link")) lv = "view";   // 301: everyone in Purchase and Accounts can open every PO
+  return lv; };
 const modGrants = (tab)=>{ const lv = modTabLevel(tab); return lv==="view" || lv==="user" || lv==="add" || lv==="admin"; };
 // The current screen's module is "admin" and that module needs no codes: Super Admin codes are skipped.
 function modFree(){ const c = window.__modCur; return !!(c && c.level==="admin" && c.codeFree); }
@@ -2707,6 +2710,8 @@ function modMenuOverlay(groups, user){
       if(g.tabs) g.tabs.push(...add);
       else { let sg = g.subgroups.find(s=>s.label===e.sub); if(!sg){ sg = { label:e.sub, tabs:[] }; g.subgroups.push(sg); } sg.tabs.push(...add); }
       miss.forEach(([k])=>has.add(k)); }); });
+  if(window.__poAll && !has.has("po_register")){ let g = out.find(x=>x.label==="Purchase"); if(!g){ g = { label:"Purchase", subgroups:[] }; out.push(g); }   // 301
+    const t = { key:"po_register", label:"Purchase Register", _mod:true }; if(g.tabs) g.tabs.push(t); else { let sg = g.subgroups.find(x=>x.label==="Registers"); if(!sg){ sg = { label:"Registers", tabs:[] }; g.subgroups.push(sg); } sg.tabs.push(t); } }
   return out.map(g=> g.tabs ? g : ({ ...g, subgroups:g.subgroups.filter(sg=>sg.tabs.length) })).filter(g=> g.tabs ? g.tabs.length : g.subgroups.length);
 }
 // Deleting a master row still used elsewhere: say where, then "Delete anyway?"
@@ -14349,6 +14354,7 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
     if(!oaDate){ setOaErr("Enter the date the OA actually went out."); return; }
     if(oaDate > new Date().toISOString().slice(0,10)){ setOaErr("That date is in the future."); return; }
     if(!allApproved){ setOaErr("All three approvals must be in before the OA can be issued."); return; }
+    { const mb = await mtcBlockCheck(contractInfo.contract_number, contractInfo); if(mb.block){ setOaErr("OA blocked — "+mb.block); return; } if(mb.warn && !confirm(mb.warn+"\n\nIssue the OA anyway?")) return; }   // 301
     setOaBusy(true);
     const { error } = await sb.from("sale_order_tbl").update({
       oa_issued_on: oaDate,
@@ -14761,7 +14767,7 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
     const L = []; const N = await soApproverNames();
     if(!canApproveAtAll){ const miss = [...otherMissing, billingMissing?"Billing Address":null].filter(Boolean);
       L.push({ t:"Required Sale Order details are missing: "+miss.join(", ")+".", fix:"Open “"+(otherMissing.length+(billingMissing?1:0))+" to fix before approval” on this Sale Order and fill them"+(outstandingDocs.length?"; add the mandatory documents in Documents":"")+(billingMissing?"; Billing Address can be overridden and flagged for later":"")+". "+(isSuperAdmin?"Or use Super Admin: enter code to override.":"If they can't be filled yet, a super admin can override with a code.") }); }
-    if(field==="technical_approved"){ const g = await mtcSoGate(contractInfo.contract_number);
+    if(field==="technical_approved" || field==="commercial_approved"){ const g = await mtcSoGate(contractInfo.contract_number);   // 301: blocks both approvals
       if(g) L.push({ t:"MTC & AVL is not saved for this contract.", fix:"The Technical Head ("+soList(N.tech)+") opens MTC & AVL on this Sale Order, fills the MTC and the vendor of each component and saves."+(/^MTC is 3\.1/.test(g)?" "+g:"") }); }
     if(!mayApproveField(field)) L.push({ t:"You can't approve "+SO_SECTION[field]+".", fix: field==="technical_approved"
       ? "It is approved by the FSE of this order ("+(soFse.length?soFse.join(", "):"none credited")+") or the Sales Head ("+soList(N.sales)+"), or a super admin. Ask one of them."
@@ -25107,6 +25113,8 @@ async function woReleaseRun({ ct, toState, expectFrom, username, reason, bom, cl
 // work order for everything not yet issued.
 async function setGoAheadState(contractNumber, fromState, toState, username, reason){
   const backward = GO_AHEAD_STATES.indexOf(toState) < GO_AHEAD_STATES.indexOf(fromState||"Hold");
+  if(!backward && woReleased(toState)){ try{ const { data: so0 } = await sb.from("sale_order_tbl").select("commercial_approved_at,technical_approved_at").eq("contract_number",contractNumber).maybeSingle();   // 301
+    const mb = await mtcBlockCheck(contractNumber, so0); if(mb.block) return { error:"Work order release blocked — "+mb.block }; }catch(e){} }
   const { error } = await sb.from("sale_order_tbl").update({
     go_ahead_state:toState, go_ahead_by:username||"unknown", go_ahead_at:new Date().toISOString(),
     go_ahead_note:reason||null
@@ -34731,6 +34739,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"2 Nov 2026 (302)", summary:"Insights: One order is now a type-ahead box \u2014 type the contract number or any words of the customer\u2019s name, pick with the arrows + Enter or the mouse. Calendar: drag a task card to another day to move its due date (week, day and month views; the card\u2019s history keeps it and the person gets a bell if someone else moved it); drag an event to another day or hour to move it (guests are told; a repeating event moves the whole series after a confirm). Procurement sub-tasks keep their Gantt dates and do not drag. Back from a card (or any screen) returns to the calendar exactly as it was \u2014 the same view, date, Show list, employee and ticked people; a card opened from the calendar has \u201c\u2190 Back to the calendar\u201d. No SQL." },
+  { date:"2 Nov 2026 (301)", summary:"MTC (EN 10204) and Insights. SALE ORDER \u2192 MTC & AVL: one choice for the order \u2014 3.1 (every shape 3.1, locked) or 3.2 (every shape starts 3.2 with Select all ticked; untick the shapes that are 3.1; \u25b8 components lets one component be 3.1, the shape then shows 3.1 + 3.2). Paint and Name plate carry an MTC; Packing shows no MTC. Paint on an ADNOC end user is marked critical \u2014 3.1 on it needs a reason. Changing 3.2 \u2192 3.1 on a saved shape asks a reason and rings the buyers of the contract\u2019s 3.2 POs. Until MTC & AVL is saved the Sale Order is blocked: no Commercial or Everything else approval, no OA, no work order release (Sale Orders approved before 2 Nov 2026 get a warning only). PROCUREMENT GANTT: reads 3.1 / 3.2 live from the Sale Order (no copy, no silent 3.1); a shape with both becomes two rows \u2014 \u201cFlanges \u00b7 3.2\u201d (keeps its dates) and \u201cFlanges \u00b7 3.1\u201d; 3.1 PO lines go to the 3.1 row; Paint gets RFI steps. INSIGHTS: Materials holding us \u2014 PO vs material: per form and certificate, PO pending, Material pending, 3.2 inspection (RFI not raised, witness booked, witnessed \u2014 MTC awaited), past plan (PO / 3.2 / Material), average days late and a status (critically failing / falling behind / on plan); certificate filter All / 3.1 / 3.2; Gantt steps past plan now include PO Draft, PO Approval and 3.2 inspection; Certificates on order; click a number for its orders. To chase: 📨 Chase / Chase selected adds a line inside the contract\u2019s procurement card (due in 2 working days) and rings a bell by name (buyer, Purchase Manager, QC Head, Technical Head as the step needs); chasing again moves the date; the line ticks itself when the step is done. Names of the post holders everywhere instead of post names. PO numbers open the PO. Where we stand and corrective actions on screen and in the PDF; the PDF carries everything on the screen. Everyone in Purchase and Accounts can open every PO (Purchase Register, view). No SQL." },
   { date:"1 Nov 2026 (300)", summary:"Task sheets: open on the employee in focus on the Calendar (the one picked in the employee drop-down, or the Show list: me / a department / all) and on the period on screen (Day view \u2192 that day; Week / Month view \u2192 that month). A preview opens straight away with the four sheets as tabs (Daily summary, Tasks completed, Worked on, Other app work) and their row counts; change the employee, day or month and the preview follows. \u2b07 Download Excel gives exactly what is previewed. No SQL." },
   { date:"1 Nov 2026 (299)", summary:"Calendar: uncompleted task cards carry over. A card not done by its due date shows on today in red (\u21bb, \u201ccarried over from dd/mm/yyyy \u00b7 N days\u201d) and keeps moving to the next day until it is done; its old due date keeps a faint \u2192 marker. The due date on the card is not changed, so overdue counts and \u201clate\u201d flags stay true. The 📅 drop-down and its count include carried-over cards; the day report lists them under tomorrow as \u201ccarried over from \u2026\u201d. No SQL." },
   { date:"1 Nov 2026 (298)", summary:"Calendar: a \u201cGo to\u201d row \u2014 Yesterday, Today, Tomorrow (day view), Previous week, This week, Next week (week view), Last month, This month (month view); the one you are on is highlighted. Next to Show there is now an employee drop-down that lists only the employees in the chosen Show list (Me, a department, or all) \u2014 pick one to see just that person, or \u201cAll N employees\u201d. Changing Show resets it. No SQL." },
@@ -42217,7 +42227,7 @@ function RegisterTabsPeopleScreen({ user, onGoToTab }){
 // Task card: one per contract, to whoever made the plan (logged in); one sub-task per form (+ General), each with its
 // steps as its checklist. The Gantt and the cards stay in step both ways (pgSyncTasks / pgTaskChanged).
 const PG_FORMS = ["Pipe","Fittings","Flanges","Plate / Sheet","Perforated sheet","Wire mesh","Bars & sections","Fasteners","Gaskets","Castings","Forgings","Rubber","Paint","Packing","Welding consumables","Bought-out items"];   // 147: last two from the batch-1 BOMs
-const PG_NO_RFI = ["Paint","Packing"];
+const PG_NO_RFI = ["Packing"];   // 301: Paint has a 3.2 inspection (DFT / adhesion witness) like any other form
 const PG_STEPS = [["draft","PO Draft","#4f7fbf"],["appr","PO Approval","#7b5ea7"],["rel","PO Release","#c08a1e"],["rs","RFI Stamping","#c2185b"],["rt","RFI Test","#c2185b"],["fac","at Our Factory","#2f8f6b"]];
 const PG_GEN = [["bom","BOM Received","#4f7fbf"],["pbom","Purchase BOM Approval","#7b5ea7"]];
 const PG_CUSTOM_COLOR = "#8a8f7e";
@@ -42236,7 +42246,47 @@ const pgToday = ()=> toISODate(new Date());
 // forms: [{form, cert:"3.1"|"3.2"|"3.1 + 3.2", rfi:bool, lines:[{sheet,part,desc,qty,uom,cert}]}]; plans from build 138 had {form,detail} + plan.cert
 function pgFormsAll(plan){ return (Array.isArray(plan && plan.forms) ? plan.forms : []).map(f=> typeof f==="string" ? {form:f} : f).filter(f=>f && f.form)
   .map(f=>({ ...f, rfi: f.rfi!==undefined ? !!f.rfi : (plan.cert==="3.2" && !PG_NO_RFI.includes(f.form)), cert: f.cert || plan.cert || "3.1" })); }
-function pgForms(plan){ return pgFormsAll(plan).filter(f=>!f.hidden); }   // 223: a hidden form stays in the plan's record, off the Gantt
+function pgForms(plan){ return pgMtcView(plan, pgFormsAll(plan).filter(f=>!f.hidden)); }
+// 301: the Sale Order's MTC & AVL is the only source of 3.1 / 3.2 — read live (MTC_CM cache), never copied.
+// A form with both 3.1 and 3.2 shows as two rows: the form itself (3.2, keeps its dates) and "<form> · 3.1".
+let MTC_CM = { at:0, map:new Map(), loaded:false };
+async function mtcCacheLoad(force){
+  if(!force && MTC_CM.loaded && Date.now()-MTC_CM.at<60000) return MTC_CM;
+  try{ const rows = await fetchPaged(()=>sb.from("contract_mtc_tbl").select("contract_number,mtc,lines,end_user").order("contract_number"));
+    MTC_CM = { at:Date.now(), map:new Map((rows||[]).map(r=>[String(r.contract_number), r])), loaded:true }; }
+  catch(e){ MTC_CM = { at:Date.now(), map:MTC_CM.map||new Map(), loaded:true }; }
+  return MTC_CM;
+}
+function pgMtcView(plan, forms){
+  const cn = String((plan && plan.contract_number)||""); const cm = MTC_CM.map.get(cn);
+  if(!cm) return forms.map(f=> f._half ? f : ({ ...f, mtcSet: MTC_CM.loaded ? false : undefined }));
+  const L = (cm.lines||[]).filter(l=>l && (l.mtc==="3.1"||l.mtc==="3.2"));
+  const names = forms.filter(f=>!f._split31).map(f=>f._base||f.form);
+  const out = [];
+  forms.forEach(f=>{
+    if(f._half){ out.push(f); return; }   // already the live view (editor state)
+    const nr = !PG_NO_RFI.includes(f.form);
+    if(mtcIsPack(f.form)){ out.push({ ...f, _rawCert:f.cert, cert:"none", rfi:false, mtcSet:true }); return; }
+    const mine = L.filter(l=> pgaFormOf({ shape:l.shape, description:l.component }, names)===f.form);
+    const set = new Set(mine.map(l=>l.mtc));
+    const c = set.size>1 ? "mixed" : set.size===1 ? [...set][0] : (cm.mtc==="3.1"||cm.mtc==="3.2" ? cm.mtc : "");
+    if(!c){ out.push({ ...f, mtcSet:true }); return; }
+    if(c!=="mixed"){ out.push({ ...f, _rawCert:f.cert, cert:c, rfi: c==="3.2" && nr, lines:(f.lines||[]).map(x=>({ ...x, cert:c })), mtcSet:true }); return; }
+    const certOf = (x)=>{ const hit = mine.find(l=>euNorm(l.component)===euNorm(x.part)) || mine.find(l=>euNorm(x.desc||"").includes(euNorm(l.component))); return hit ? hit.mtc : "3.2"; };
+    const l32 = [], l31 = []; (f.lines||[]).forEach(x=>{ const lc = certOf(x); (lc==="3.1" ? l31 : l32).push({ ...x, cert:lc }); });
+    out.push({ ...f, _rawCert:f.cert, cert:"3.2", rfi:nr, lines:l32, _half:"3.2", _base:f.form, mtcSet:true });
+    out.push({ ...f, form:f.form+" · 3.1", _rawCert:f.cert, cert:"3.1", rfi:false, lines:l31, _half:"3.1", _split31:true, _base:f.form, mtcSet:true, hidden:undefined });
+  });
+  return out;
+}
+// back to what is stored in proc_plan_tbl.forms (drop the live view)
+function pgFormsRaw(list){
+  return (list||[]).filter(f=>!f._split31).map(f=>{ const { _half, _base, _rawCert, mtcSet, _split31, ...r } = f;
+    if(_rawCert!==undefined) r.cert = _rawCert;
+    if(_half==="3.2"){ const p = (list||[]).find(x=>x._split31 && x._base===f.form); if(p) r.lines = [...(f.lines||[]), ...(p.lines||[])]; }
+    return r; });
+}
+const pgFormTitle = (f)=> f && f._half ? f._base+" · "+f._half : (f ? f.form : "");   // 223: a hidden form stays in the plan's record, off the Gantt
 const pgFormsHidden = (plan)=> pgFormsAll(plan).filter(f=>f.hidden);
 const pgAddedTag = (f)=> f && f.added && !f.added.in_bom;   // 223: added on the Gantt, not yet in the BOM
 // 223: who may add or hide a material form — Purchase (the Gantt editors), Production, the Technical Head; not Stores
@@ -42253,7 +42303,7 @@ function pgRows(plan, d, extra){
   const place = (steps, group)=>{ (extra||[]).filter(x=>(x.form||"")===group).forEach(x=>{ const i = steps.findIndex(s=>s.key===x.pred); const st = mk(x.key,x.label,PG_CUSTOM_COLOR,group,x.pred,true); if(i>=0) steps.splice(i+1,0,st); else steps.push(st); }); return steps; };
   const rows = [{ form:"", title:"Contract-wide steps", gen:true, steps: place(PG_GEN.map(([k,l,c],i)=>mk(k,l,c,"",i?PG_GEN[i-1][0]:null)), "") }];
   pgForms(plan).forEach(f=>{ const S = PG_STEPS.filter(s=>f.rfi || (s[0]!=="rs" && s[0]!=="rt"));
-    rows.push({ form:f.form, title:f.form+(pgAddedTag(f)?" · added on the Gantt":""), f, steps: place(S.map(([k,l,c],i)=>mk(k+"|"+f.form,l,c,f.form,i ? S[i-1][0]+"|"+f.form : "pbom")), f.form) }); });
+    rows.push({ form:f.form, title:pgFormTitle(f)+(pgAddedTag(f)?" · added on the Gantt":""), f, steps: place(S.map(([k,l,c],i)=>mk(k+"|"+f.form,l,c,f.form,i ? S[i-1][0]+"|"+f.form : "pbom")), f.form) }); });
   return rows;
 }
 function pgStat(st, today){ const ps = pgDue(st.plan.s), pe = pgDue(st.plan.e), ae = pgDue(st.act.e); let as = pgDue(st.act.s); if(as && !ae && as>today) as = "";   // 157: an actual start after today does not count
@@ -42482,12 +42532,25 @@ async function mtcBomRows(cn){
   return [...m.values()].sort((a,b)=>a.shape.localeCompare(b.shape)||a.component.localeCompare(b.component)).map(x=>({ ...x, sl_nos:x.sl_nos.sort((a,b)=>a-b) }));
 }
 // Gateway 2 is required before the Technical Head's approval of the Sale Order (only once the SQL is in)
+// 301: one choice per order (3.1 / 3.2); Packing carries no MTC; Paint on an ADNOC order is critical
+const mtcIsPack = (sh)=> /^\s*pack(ing)?\b/i.test(String(sh||"")) && !/gasket|gland/i.test(String(sh||""));
+const mtcIsPaint = (sh)=> /paint|coating/i.test(String(sh||""));
+const mtcChoiceOf = (m)=> m==="3.1" ? "3.1" : (m==="3.2" || m==="3.1 & 3.2") ? "3.2" : "";
+const mtcLineDefault = (shape, choice)=> mtcIsPack(shape) ? "Not critical" : (choice||"");
+const MTC_BLOCK_FROM = "2026-11-02";   // Sale Orders approved before this keep moving with a warning
 async function mtcSoGate(cn){
   try{ const { data, error } = await sb.from("contract_mtc_tbl").select("*").eq("contract_number",String(cn)).maybeSingle();
     if(error) return null;
     if(!data) return "Fill MTC & AVL first (the MTC & AVL button on this Sale Order): the MTC of the contract, the vendor rule and the MTC / AVL of each component.";
     if(data.mtc==="3.1 & 3.2" && (data.lines||[]).some(l=>!l.mtc)) return "MTC is 3.1 & 3.2: pick the MTC of every component line in MTC & AVL first.";
     return null; }catch(e){ return null; }
+}
+// 301: the block on OA issue and work order release — Sale Orders approved before MTC_BLOCK_FROM only get a warning
+async function mtcBlockCheck(cn, so){
+  const g = await mtcSoGate(cn); if(!g) return { block:null, warn:null };
+  const old = so && ((so.commercial_approved_at && String(so.commercial_approved_at).slice(0,10) < MTC_BLOCK_FROM) || (so.technical_approved_at && String(so.technical_approved_at).slice(0,10) < MTC_BLOCK_FROM));
+  const msg = "MTC & AVL is not saved for contract "+cn+". The Technical Head opens MTC & AVL on the Sale Order, picks 3.1 or 3.2 and saves.";
+  return old ? { block:null, warn:msg+" (Approved before "+fmtDMY(MTC_BLOCK_FROM)+", so this is a warning only.)" } : { block:msg, warn:null };
 }
 // The Procurement Gantt takes its 3.1 / 3.2 per material form from the Sale Order's MTC & AVL table
 function mtcApplyForms(forms, cm){
@@ -42687,14 +42750,34 @@ function SoMtcAvlDialog({ ctx, cn, user, can, onClose, onSaved }){
     let bom = await mtcBomRows(cn).catch(()=>[]); const cm = ctx.cm||{};
     let whole = false; if(!bom.length){ bom = await mtcItemRows(cn); whole = bom.length>0; }   // 251
     const mtc = cm.mtc || ctx.mtc || ""; const vendor = cm.vendor_rule || ctx.vendor || "";
+    const choice = mtcChoiceOf(mtc);   // 301: one choice for the order — 3.1 or 3.2
     const saved = cm.lines||[];
-    const lines = bom.map(b=>{ const s = saved.find(x=>key(x)===key(b)); return s ? { ...s, sl_nos:b.sl_nos, gone:false } : { shape:b.shape, component:b.component, sl_nos:b.sl_nos, mtc: mtc==="3.1 & 3.2" ? "" : mtc, avl: mtcDefAvl(vendor) }; });
+    const lines = bom.map(b=>{ const s = saved.find(x=>key(x)===key(b)); return s ? { ...s, sl_nos:b.sl_nos, gone:false } : { shape:b.shape, component:b.component, sl_nos:b.sl_nos, mtc: mtcLineDefault(b.shape, choice), avl: mtcDefAvl(vendor), _new:true }; });
     saved.filter(s=>!bom.some(b=>key(b)===key(s))).forEach(s=>lines.push({ ...s, gone:!s.manual }));
-    setD({ mtc, vendor, link: cm.avl_link || ctx.avlLink || "", lines, bomCount:bom.length, bom, whole });
+    lines.forEach(l=>{ if(mtcIsPack(l.shape)) l.mtc = "Not critical"; else if(choice==="3.1") l.mtc = "3.1"; else if(choice==="3.2" && l.mtc!=="3.1" && l.mtc!=="3.2") l.mtc = "3.2"; });
+    setD({ mtc, choice, vendor, link: cm.avl_link || ctx.avlLink || "", lines, bomCount:bom.length, bom, whole, open:{}, newShapes: cm.mtc && choice==="3.2" ? Array.from(new Set(lines.filter(l=>l._new && !l.gone && !mtcIsPack(l.shape)).map(l=>l.shape))) : [] });
     try{ const { data } = await sb.from("materials_shape").select("shape").order("shape"); setShapes((data||[]).map(r=>r.shape).filter(Boolean)); }catch(e){}
   })(); },[]);
   const ro = !can;
-  const setMtc = (v)=> setD(x=>({ ...x, mtc:v, lines:x.lines.map(l=> v==="3.1 & 3.2" ? { ...l, mtc:"", ovr_reason:null, ovr_by:null, ovr_at:null } : { ...l, mtc:v, ovr_reason:null, ovr_by:null, ovr_at:null }) }));
+  // 301: the order is 3.1 (every shape 3.1, locked) or 3.2 (every shape starts 3.2; untick the ones that are 3.1)
+  const critOf = (shape)=> mtcIsPaint(shape) && /adnoc/i.test(String(ctx.endUser||""));
+  const askCrit = (shape)=>{ const r = prompt(shape+" is critical for ADNOC — 3.2 is expected.\n\nReason for 3.1 on "+shape+" (kept on the line):"); return r && String(r).trim().length>=4 ? String(r).trim() : null; };
+  const setChoice = (v)=>{
+    if(ro || v===d.choice) return;
+    if(d.choice==="3.2" && v==="3.1" && !confirm("Make the whole order 3.1?\n\nEvery shape becomes 3.1 and the per-shape picks are cleared.")) return;
+    setD(x=>({ ...x, choice:v, lines:x.lines.map(l=>({ ...l, mtc: mtcIsPack(l.shape) ? "Not critical" : v, ovr_reason:null, ovr_by:null, ovr_at:null })) })); };
+  const setShapeMtc = (sk, v)=>{ if(ro || d.choice!=="3.2") return;
+    const sh = (d.lines.find(l=>euNorm(l.shape)===sk)||{}).shape||"";
+    let why = null; if(v==="3.1" && critOf(sh)){ why = askCrit(sh); if(!why) return; }
+    const now = new Date().toISOString();
+    setD(x=>({ ...x, lines:x.lines.map(l=> euNorm(l.shape)!==sk || mtcIsPack(l.shape) ? l : { ...l, mtc:v, ovr_reason:why, ovr_by:why?user.username:null, ovr_at:why?now:null }) })); };
+  const setCompMtc = (i, v)=>{ if(ro || d.choice!=="3.2") return; const l0 = d.lines[i];
+    let why = null; if(v==="3.1" && critOf(l0.shape)){ why = askCrit(l0.shape); if(!why) return; }
+    setLine(i,{ mtc:v, ovr_reason:why, ovr_by:why?user.username:null, ovr_at:why?new Date().toISOString():null }); };
+  const selectAll = (on)=>{ if(ro || d.choice!=="3.2") return;
+    let why = null; if(!on && d.lines.some(l=>!l.gone && critOf(l.shape))){ why = askCrit("Paint"); if(!why) return; }
+    const now = new Date().toISOString();
+    setD(x=>({ ...x, lines:x.lines.map(l=> mtcIsPack(l.shape) ? l : { ...l, mtc: on ? "3.2" : "3.1", ovr_reason: !on && critOf(l.shape) ? why : null, ovr_by: !on && critOf(l.shape) ? user.username : null, ovr_at: !on && critOf(l.shape) ? now : null }) })); };
   const setVendor = (v)=> setD(x=>({ ...x, vendor:v, lines:x.lines.map(l=>({ ...l, avl:mtcDefAvl(v), avl_ovr:null })) }));
   const setLine = (i, patch)=> setD(x=>({ ...x, lines:x.lines.map((l,j)=>j===i ? { ...l, ...patch } : l) }));
   const inp = { ...inputStyle, padding:"5px 7px", fontSize:12 };
@@ -42712,9 +42795,17 @@ function SoMtcAvlDialog({ ctx, cn, user, can, onClose, onSaved }){
   const cm = ctx.cm||{}; const left = cm.avl_missing_since && !cm.avl_link ? avlDaysLeft(cm) : null;
   const save = async()=>{
     setErr("");
-    if(!d.mtc){ setErr("Pick the MTC of the contract."); return; }
+    if(!d.choice){ setErr("Pick the material certificate of the order: 3.1 or 3.2."); return; }
     if(!d.vendor){ setErr("Pick the vendor rule: As per AVL or Any vendor."); return; }
-    if(missing){ setErr("MTC is 3.1 & 3.2: pick the MTC of every line ("+missing+" still to fill)."); return; }
+    { const certL = live.filter(l=>!mtcIsPack(l.shape)); const miss = certL.filter(l=>l.mtc!=="3.1" && l.mtc!=="3.2").length;
+      if(miss){ setErr(miss+" line"+(miss===1?"":"s")+" without 3.1 / 3.2."); return; }
+      d.mtc = d.choice==="3.1" ? "3.1" : (certL.every(l=>l.mtc==="3.2") ? "3.2" : "3.1 & 3.2"); }
+    // 301: 3.2 → 3.1 on a shape that was saved 3.2 needs a reason; the buyers of POs already out are told
+    const downs = live.filter(l=>l.mtc==="3.1" && ((cm.lines||[]).find(x=>key(x)===key(l))||{}).mtc==="3.2");
+    let downWhy = "";
+    if(downs.length){ const sh = Array.from(new Set(downs.map(l=>l.shape)));
+      downWhy = prompt("3.2 → 3.1 on: "+sh.join(", ")+"\n\nThe buyers of POs already out for this contract get a bell to amend them.\n\nReason (kept in the history):") || "";
+      if(String(downWhy).trim().length<4){ setErr("Give the reason for changing 3.2 to 3.1."); return; } }
     if(live.some(l=>l.manual && (!String(l.shape||"").trim() || !String(l.component||"").trim()))){ setErr("A line you added needs its shape and its component."); return; }
     { const seen = new Set(); const dup = live.find(l=>{ const k = key(l); if(seen.has(k)) return true; seen.add(k); return false; });   // 251: shape + component is the key
       if(dup){ setErr("“"+dup.shape+" / "+dup.component+"” is listed twice. Remove one."); return; }
@@ -42743,7 +42834,14 @@ function SoMtcAvlDialog({ ctx, cn, user, can, onClose, onSaved }){
       if(ov.length) ch.push("Overridden: "+ov.join("; "));
       ch.push(live.length+" component line"+(live.length===1?"":"s"));
       if(need && !link) ch.push("saved WITHOUT the AVL link (owed by "+row.avl_owner+")");
+      if(downs.length) ch.push("3.2 → 3.1 on "+Array.from(new Set(downs.map(l=>l.shape))).join(", ")+" — "+String(downWhy).trim());
       await logAudit("UPDATE","contract_mtc_tbl",cn,"MTC & AVL saved: "+ch.join("; "),user.username||"");
+      if(downs.length){ try{ const sh = Array.from(new Set(downs.map(l=>l.shape)));
+        const { data: pos } = await sb.from("po_register").select("po_no,owner_name,status,mtc").eq("contract_ref",cn);
+        const live2 = (pos||[]).filter(p=>!/cancel/i.test(p.status||"") && mtcIs32(p.mtc));
+        const byOwner = {}; live2.forEach(p=>{ if(p.owner_name) (byOwner[p.owner_name]=byOwner[p.owner_name]||[]).push(p.po_no); });
+        for(const o of Object.keys(byOwner)) await notifyPeople([o], "Contract "+cn+": MTC changed 3.2 → 3.1 on "+sh.join(", ")+" ("+String(downWhy).trim()+"). Amend "+byOwner[o].join(", ")+" if needed.", "warn");
+      }catch(e){} }
       if(need && !link && !waiting) await notifyPeople([row.avl_owner], "Contract "+cn+": MTC & AVL saved without the AVL link. Fill it within "+AVL_GRACE_DAYS+" days (Sale Order → MTC & AVL), or the app makes no PDFs for you after that.", "warn");
       try{ await avlLoadMine(user, me); }catch(e){}
       onSaved && onSaved();
@@ -42769,42 +42867,74 @@ function SoMtcAvlDialog({ ctx, cn, user, can, onClose, onSaved }){
     h("div",{role:"dialog","aria-label":"MTC & AVL "+cn,"data-testid":"so-mtc-dialog",style:{background:"#fff",borderRadius:10,maxWidth:980,margin:"0 auto",padding:"14px 18px 16px",boxShadow:"0 8px 30px rgba(0,0,0,.25)"}},
       h("div",{style:{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:4}},
         h("b",{style:{fontSize:16}},"MTC & AVL — contract "+cn), h("span",{style:{flex:1}}), h("button",{onClick:onClose,style:btnSmall},"Close")),
-      h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:8}},"The Technical Head fills this. The Sale Order's Everything else approval (FSE / Sales Head) waits for it. The PO takes its MTC from here; the vendor follows the AVL where a line says so."+(ro?" View only — the Technical Head or a super admin changes it.":"")),
+      h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:8}},"The Technical Head fills this. Until it is saved the Sale Order is blocked: no Commercial or Everything else approval, no OA, no work order release. The PO takes its MTC from here; the vendor follows the AVL where a line says so."+(ro?" View only — the Technical Head or a super admin changes it.":"")),
       mtcMsgBox(mtcRuleMsg(ctx.endUser, ctx.rule, ctx.nosql),{marginBottom:8}),
       h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:10,marginBottom:8}},
         h("label",{style:{display:"flex",flexDirection:"column",gap:3,fontSize:11,color:colors.muted}},"End user", h("input",{value:ctx.endUser||"",disabled:true,placeholder:"Not given — set it in the Contract Register",style:inp})),
-        h("label",{style:{display:"flex",flexDirection:"column",gap:3,fontSize:11,color:colors.muted}},"MTC of the contract", h("select",{"data-testid":"so-mtc-mtc",value:d.mtc,disabled:ro,onChange:e=>setMtc(e.target.value),style:inp}, h("option",{value:""},"— pick —"), MTC_OPTS.map(o=>h("option",{key:o,value:o},o)))),
         h("label",{style:{display:"flex",flexDirection:"column",gap:3,fontSize:11,color:colors.muted}},"Vendor", h("select",{"data-testid":"so-mtc-vendor",value:d.vendor,disabled:ro,onChange:e=>setVendor(e.target.value),style:inp}, h("option",{value:""},"— pick —"), AVL_OPTS.map(o=>h("option",{key:o,value:o},o))))),
       need ? h("label",{style:{display:"flex",flexDirection:"column",gap:3,fontSize:11,color:colors.muted,marginBottom:6}},"AVL file link (Google Drive / OneDrive) — required at this stage",
         h("div",{style:{display:"flex",gap:6}}, h("input",{"data-testid":"so-mtc-link",value:d.link,disabled:ro,onChange:e=>setD(x=>({ ...x, link:e.target.value })),placeholder:"Paste the Drive link of the client's AVL",style:{...inp,flex:1}}),
           !ro && !d.link && ctx.rule && ctx.rule.avl_link ? h("button",{onClick:()=>setD(x=>({ ...x, link:ctx.rule.avl_link })),style:btnSmall,title:ctx.rule.avl_link},"Use the "+(ctx.rule.group_name||ctx.rule.end_user)+" AVL from End User Rules") : null,
           d.link ? h("a",{href:d.link,target:"_blank",rel:"noreferrer",style:{...btnSmall,textDecoration:"none"}},"Open") : null)) : null,
       need && !String(d.link||"").trim() ? mtcMsgBox({ tone: left!=null && left<=0 ? "bad" : "warn", text: left!=null ? (left>0 ? "Saved without the AVL link "+fmtDMY(cm.avl_missing_since)+" by "+(cm.avl_owner||"?")+": "+left+" day"+(left>1?"s":"")+" left before "+(cm.avl_owner||"they")+" get no PDFs." : "The AVL link is overdue: "+(cm.avl_owner||"the person who saved it")+" gets no PDFs until it is filled (or with a PDF unblock code from a super admin).") : "No AVL link yet. You can save without it: you then have "+AVL_GRACE_DAYS+" days, after which the app makes no PDFs for you until the link is filled." },{marginBottom:8}) : null,
-      mixed ? mtcMsgBox({ tone:"info", text:"MTC is 3.1 & 3.2: pick the certificate of every component line." },{marginBottom:6})
-        : d.mtc ? mtcMsgBox({ tone:"ok", text:"MTC "+d.mtc+" is on every line. To change one line, use Override (a reason and a confirmation)." },{marginBottom:6}) : null,
-      h("div",{style:{overflowX:"auto",border:"1px solid "+colors.border,borderRadius:8}},
-        h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:720}},
-          h("thead",null,h("tr",null, ["Shape","Component","Sl Nos","MTC","AVL",""].map((x,i)=>h("th",{key:i,style:th},x)))),
-          h("tbody",null,
-            !d.lines.length ? h("tr",null,h("td",{colSpan:6,style:{...td,color:colors.muted}},"Nothing on this Sale Order yet: no BOM lines with a shape and no Sl Nos. Fill the Sale Order and open this again.")) : null,
-            d.lines.map((l,i)=>h("tr",{key:i,style:{opacity:l.gone?0.5:1}},
-              h("td",{style:{...td,fontWeight:700}}, l.manual && !ro ? h("select",{"data-testid":"so-mtc-shape-"+i,value:l.shape||"",onChange:e=>setLine(i,{ shape:e.target.value, component:"", sl_nos:[] }),style:inp}, h("option",{value:""},"— shape from the BOM —"),
-                  Array.from(new Set([...(l.shape?[l.shape]:[]), ...freeShapes(i)])).map(s=>h("option",{key:s,value:s},s))) : l.shape),
-              h("td",{style:td}, l.manual && !ro ? h("select",{"data-testid":"so-mtc-comp-"+i,value:l.component||"",disabled:!l.shape,onChange:e=>{ const v = e.target.value; const b = (d.bom||[]).find(x=>euNorm(x.shape)===euNorm(l.shape) && euNorm(x.component)===euNorm(v)); setLine(i,{ component:v, sl_nos:b?b.sl_nos:[] }); },style:inp}, h("option",{value:""},l.shape?"— component —":"— pick the shape first —"),
-                  Array.from(new Set([...(l.component?[l.component]:[]), ...freeComps(i, l.shape)])).map(c=>h("option",{key:c,value:c},c))) : l.component, l.gone ? h("div",{style:{fontSize:10.5,color:colors.danger}},"Not in the BOM now — dropped when you save") : null),
-              h("td",{style:{...td,color:colors.muted,fontSize:11.5}}, (l.sl_nos||[]).length ? (l.sl_nos||[]).join(", ") : (l.manual?"added by hand":"—")),
-              h("td",{style:{...td,whiteSpace:"nowrap"}}, mixed
-                ? h("select",{"data-testid":"so-mtc-line-"+i,value:l.mtc||"",disabled:ro||l.gone,onChange:e=>setLine(i,{ mtc:e.target.value }),style:{...inp,borderColor:!l.mtc&&!l.gone?"#c47a00":colors.border}}, h("option",{value:""},"— pick —"), ["3.1","3.2","Not critical"].map(o=>h("option",{key:o,value:o},o)))
-                : h("span",{style:{display:"inline-flex",gap:6,alignItems:"center"}}, mtcPill(l.mtc),
-                    l.ovr_reason ? h("span",{title:l.ovr_reason+" — "+(l.ovr_by||""),style:{fontSize:10,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#fff4d6",color:"#854f0b"}},"overridden") : null,
-                    !ro && d.mtc && !l.gone ? h("button",{onClick:()=>setOvr({ i, what:"mtc", val:l.mtc===d.mtc ? (d.mtc==="3.2"?"3.1":"3.2") : l.mtc, why:"", ok:false }),style:{...btnSmall,padding:"1px 7px",fontSize:10.5}},"Override…") : null)),
-              h("td",{style:{...td,whiteSpace:"nowrap"}}, d.vendor==="Any vendor"
-                ? h("span",{style:{display:"inline-flex",gap:6,alignItems:"center"}}, l.avl||"Any vendor", l.avl_ovr ? h("span",{title:l.avl_ovr.reason,style:{fontSize:10,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#fff4d6",color:"#854f0b"}},"overridden") : null,
-                    !ro && !l.gone ? h("button",{onClick:()=>setOvr({ i, what:"avl", val:"As per AVL attached", why:"", ok:false }),style:{...btnSmall,padding:"1px 7px",fontSize:10.5}},"Override…") : null)
-                : h("select",{value:l.avl||"",disabled:ro||l.gone,onChange:e=>setLine(i,{ avl:e.target.value }),style:inp}, h("option",{value:""},"— pick —"), AVL_LINE_OPTS.map(o=>h("option",{key:o,value:o},o)))),
-              h("td",{style:{...td,width:30}}, l.manual && !ro ? h("button",{title:"Remove this line",onClick:()=>setD(x=>({ ...x, lines:x.lines.filter((_,j)=>j!==i) })),style:{...btnSmall,padding:"1px 7px"}},"×") : null)))))),
+      // 301: one choice for the order, then the shapes
+      h("div",{style:{fontSize:12.5,fontWeight:700,margin:"4px 0 4px"}},"Material certificate (EN 10204) ", h("span",{style:{fontWeight:400,color:colors.muted,fontSize:11.5}},"— pick one for the whole order")),
+      h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",marginBottom:8}},
+        [["3.1","Every shape 3.1. Nothing more to pick."],["3.2","Every shape starts 3.2 — untick the ones that are 3.1."]].map(([v,t])=> h("div",{key:v,"data-testid":"so-mtc-choice-"+v,onClick:()=>setChoice(v),
+          style:{border:"2px solid "+(d.choice===v?"#1a56c9":colors.border),background:d.choice===v?"#f2f6fe":"#fff",borderRadius:10,padding:"8px 14px",cursor:ro?"default":"pointer",minWidth:230}},
+          h("b",{style:{fontSize:15}},v), h("div",{style:{fontSize:11.5,color:colors.muted}},t)))),
+      (d.newShapes||[]).length ? mtcMsgBox({ tone:"warn", text:"New in the BOM since the last save: "+d.newShapes.join(", ")+" — added as 3.2. Check and save." },{marginBottom:6}) : null,
+      (()=>{ const sk = {}; live.forEach((l,i)=>{ const k = euNorm(l.shape); (sk[k]=sk[k]||{ k, shape:l.shape, idx:[] }).idx.push(d.lines.indexOf(l)); });
+        const G = Object.values(sk); const certG = G.filter(g=>!mtcIsPack(g.shape));
+        const valOf = (g)=>{ if(mtcIsPack(g.shape)) return "none"; const v = new Set(g.idx.map(i=>d.lines[i].mtc)); return v.size>1 ? "3.1 + 3.2" : [...v][0]||""; };
+        const n32 = certG.filter(g=>valOf(g)==="3.2").length, all32 = certG.length>0 && n32===certG.length;
+        const pill = (v)=> v==="3.2" ? h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:8,padding:"1px 7px",background:"#e3edfb",color:"#1a4fa0"}},"3.2")
+          : v==="3.1 + 3.2" ? h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:8,padding:"1px 7px",background:"#fff4d6",color:"#7a5200"}},"3.1 + 3.2")
+          : v==="3.1" ? h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:8,padding:"1px 7px",background:"#eeece4",color:"#5c5a50"}},"3.1")
+          : v==="none" ? h("span",{style:{fontSize:11,color:colors.muted}},"no MTC") : h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:8,padding:"1px 7px",background:"#fdecea",color:"#a3312a"}},"not set");
+        const seg = (cur, on, dis, tid)=> h("span",{style:{display:"inline-flex",border:"1px solid "+colors.border,borderRadius:7,overflow:"hidden"}},
+          ["3.1","3.2"].map(v=>h("button",{key:v,"data-testid":tid?tid+"-"+v:undefined,disabled:dis,onClick:()=>on(v),style:{border:"none",padding:"3px 10px",fontSize:12,cursor:dis?"not-allowed":"pointer",background:cur===v?"#1a56c9":"#fff",color:cur===v?"#fff":(dis?"#aaa":colors.text)}},v)));
+        const lock = ro || d.choice!=="3.2";
+        return h("div",null,
+          d.choice==="3.2" ? h("label",{style:{display:"flex",gap:6,alignItems:"center",fontSize:12,margin:"2px 0 6px",cursor:ro?"default":"pointer"}},
+            h("input",{type:"checkbox","data-testid":"so-mtc-selall",disabled:ro,checked:all32,onChange:e=>selectAll(e.target.checked)}), h("b",null,"Select all"), " — every shape 3.2",
+            h("span",{style:{color:colors.muted}}," · "+n32+" of "+certG.length+" shapes 3.2, the rest 3.1")) : null,
+          h("div",{style:{overflowX:"auto",border:"1px solid "+colors.border,borderRadius:8}},
+            h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:760}},
+              h("thead",null,h("tr",null, [d.choice==="3.2" ? h("input",{type:"checkbox",disabled:ro,checked:all32,onChange:e=>selectAll(e.target.checked),title:"Select all — every shape 3.2"}) : "","Shape","Components in the BOM","Sl Nos","Certificate","Vendor (AVL)"].map((x,i)=>h("th",{key:i,style:{...th,width:i===0?30:undefined}},x)))),
+              h("tbody",null,
+                !G.length ? h("tr",null,h("td",{colSpan:6,style:{...td,color:colors.muted}},"Nothing on this Sale Order yet: no BOM lines with a shape and no Sl Nos. Fill the Sale Order and open this again.")) : null,
+                G.map(g=>{ const v = valOf(g); const pack = mtcIsPack(g.shape); const crit = critOf(g.shape); const op = !!(d.open||{})[g.k];
+                  const comps = g.idx.map(i=>d.lines[i]); const sl = Array.from(new Set(comps.flatMap(l=>l.sl_nos||[]))).sort((a,b)=>a-b);
+                  const avls = Array.from(new Set(comps.map(l=>l.avl||(d.vendor||"")).filter(Boolean)));
+                  const why = comps.map(l=>l.ovr_reason).filter(Boolean)[0];
+                  const rowsOut = [h("tr",{key:g.k},
+                    h("td",{style:td}, !pack && d.choice==="3.2" ? h("input",{type:"checkbox","data-testid":"so-mtc-tick-"+g.k,disabled:ro,checked:v==="3.2",onChange:e=>setShapeMtc(g.k, e.target.checked?"3.2":"3.1")}) : null),
+                    h("td",{style:{...td,fontWeight:700}}, g.shape, crit ? h("span",{title:"End user ADNOC: the paint certificate and paint inspection are critical",style:{marginLeft:6,fontSize:10,fontWeight:700,borderRadius:8,padding:"1px 6px",background:"#fdecea",color:"#a3312a"}},"critical · ADNOC") : null,
+                      " ", h("a",{href:"#",onClick:e=>{ e.preventDefault(); setD(x=>({ ...x, open:{ ...(x.open||{}), [g.k]:!op } })); },style:{fontSize:11,fontWeight:400,color:"#1a56c9"}},(op?"▾ ":"▸ ")+comps.length+" component"+(comps.length===1?"":"s")),
+                      why ? h("div",{style:{fontSize:10.5,fontWeight:400,color:"#a3312a"}},"3.1 — "+why) : null,
+                      comps.some(l=>l.gone) ? h("div",{style:{fontSize:10.5,fontWeight:400,color:colors.danger}},"some lines not in the BOM now — dropped when you save") : null),
+                    h("td",{style:{...td,fontSize:11.5}}, comps.map(l=>l.component).join(", ")),
+                    h("td",{style:{...td,fontSize:11.5,color:colors.muted}}, sl.length ? sl.join(", ") : "—"),
+                    h("td",{style:{...td,whiteSpace:"nowrap"}}, pack ? pill("none") : h("span",{style:{display:"inline-flex",gap:6,alignItems:"center"}}, seg(v==="3.1 + 3.2" ? "" : v, (x)=>setShapeMtc(g.k, x), lock, "so-mtc-seg-"+g.k), pill(v))),
+                    h("td",{style:{...td,fontSize:11.5}}, avls.join(" / ")||"—"))];
+                  if(op) comps.forEach(l=>{ const i = d.lines.indexOf(l); rowsOut.push(h("tr",{key:g.k+"|"+i,style:{background:"#faf9f5",opacity:l.gone?0.5:1}},
+                    h("td",{style:td}),
+                    h("td",{style:{...td,paddingLeft:22,fontSize:12}}, "↳ ", l.manual && !ro ? h("select",{value:l.shape||"",onChange:e=>setLine(i,{ shape:e.target.value, component:"", sl_nos:[] }),style:inp}, Array.from(new Set([...(l.shape?[l.shape]:[]), ...freeShapes(i)])).map(x=>h("option",{key:x,value:x},x))) : null),
+                    h("td",{style:{...td,fontSize:12}}, l.manual && !ro ? h("select",{value:l.component||"",disabled:!l.shape,onChange:e=>{ const vv = e.target.value; const b = (d.bom||[]).find(x=>euNorm(x.shape)===euNorm(l.shape) && euNorm(x.component)===euNorm(vv)); setLine(i,{ component:vv, sl_nos:b?b.sl_nos:[] }); },style:inp}, h("option",{value:""},"— component —"),
+                        Array.from(new Set([...(l.component?[l.component]:[]), ...freeComps(i, l.shape)])).map(c=>h("option",{key:c,value:c},c))) : l.component,
+                      l.manual && !ro ? h("button",{title:"Remove this line",onClick:()=>setD(x=>({ ...x, lines:x.lines.filter((_,j)=>j!==i) })),style:{...btnSmall,padding:"1px 7px",marginLeft:6}},"×") : null),
+                    h("td",{style:{...td,fontSize:11.5,color:colors.muted}}, (l.sl_nos||[]).length ? (l.sl_nos||[]).join(", ") : (l.manual?"added by hand":"—")),
+                    h("td",{style:{...td,whiteSpace:"nowrap"}}, pack ? pill("none") : h("span",{style:{display:"inline-flex",gap:6,alignItems:"center"}}, seg(l.mtc, (x)=>setCompMtc(i, x), lock), pill(l.mtc))),
+                    h("td",{style:{...td,whiteSpace:"nowrap"}}, d.vendor==="Any vendor"
+                      ? h("span",{style:{display:"inline-flex",gap:6,alignItems:"center",fontSize:11.5}}, l.avl||"Any vendor", l.avl_ovr ? h("span",{title:l.avl_ovr.reason,style:{fontSize:10,fontWeight:700,borderRadius:8,padding:"0 6px",background:"#fff4d6",color:"#854f0b"}},"overridden") : null,
+                          !ro && !l.gone ? h("button",{onClick:()=>setOvr({ i, what:"avl", val:"As per AVL attached", why:"", ok:false }),style:{...btnSmall,padding:"1px 7px",fontSize:10.5}},"Override…") : null)
+                      : h("select",{value:l.avl||"",disabled:ro||l.gone,onChange:e=>setLine(i,{ avl:e.target.value }),style:inp}, h("option",{value:""},"— pick —"), AVL_LINE_OPTS.map(o=>h("option",{key:o,value:o},o)))))); });
+                  return rowsOut; })))),
+          h("div",{style:{fontSize:11.5,marginTop:6,color: !d.choice ? colors.danger : colors.muted}}, !d.choice ? "Pick 3.1 or 3.2 for the order." : d.choice==="3.1" ? "All "+certG.length+" shapes 3.1." : n32+" shape"+(n32===1?"":"s")+" 3.2 · "+(certG.length-n32)+" not fully 3.2"+(certG.some(g=>valOf(g)==="3.1 + 3.2")?" (some 3.1 + 3.2 — two rows on the Procurement Gantt)":"")+"."));
+      })(),
       h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginTop:10}},
-        !ro ? h("button",{onClick:()=>{ if(!freePairs(-1).length) return; setD(x=>({ ...x, lines:[...x.lines,{ shape:"", component:"", sl_nos:[], mtc: x.mtc==="3.1 & 3.2" ? "" : x.mtc, avl: mtcDefAvl(x.vendor), manual:true }] })); },disabled:!freePairs(-1).length,
+        !ro ? h("button",{onClick:()=>{ if(!freePairs(-1).length) return; setD(x=>({ ...x, open:{ ...(x.open||{}), "":true }, lines:[...x.lines,{ shape:"", component:"", sl_nos:[], mtc: x.choice||"", avl: mtcDefAvl(x.vendor), manual:true }] })); },disabled:!freePairs(-1).length,
           title: freePairs(-1).length ? "Add a shape / component of this Sale Order's BOM" : "Every shape / component of the BOM is already listed",style:{...btnSmall,opacity:freePairs(-1).length?1:0.5}},"+ Line") : null,
         h("span",{style:{fontSize:11.5,color:colors.muted}}, d.whole ? d.bomCount+" Sl No"+(d.bomCount===1?"":"s")+" — no BOM with shapes on this order, so one line per Sl No (the whole item)" : d.bomCount+" component line"+(d.bomCount===1?"":"s")+" from the BOM"+(cm.saved_at?" · last saved "+fmtDMY(cm.saved_at)+(cm.saved_by?" by "+cm.saved_by:""):" · not saved yet")),
         h("span",{style:{flex:1}}),
@@ -43134,9 +43264,10 @@ async function pgCreateTasks(plan, me, dept){
   return card;
 }
 async function pgSyncTasks(planId, me){
+  await mtcCacheLoad();
   try{
     const [{ data: plan },{ data: rowsDb },{ data: tks, error: tErr }] = await Promise.all([
-      sb.from("proc_plan_tbl").select("*").eq("id",planId).maybeSingle(),
+      sb.from("proc_plan_tbl").select("*").eq("id",planId).maybeSingle().then(async r=>{ await mtcCacheLoad(); return r; }),
       sb.from("proc_line_tbl").select("*").eq("plan_id",planId),
       sb.from("task_tbl").select("*").eq("proc_plan_id",planId)]);
     if(!plan || tErr) return;
@@ -43399,7 +43530,7 @@ function ProdBomApproveChip({ contractInfo, user }){
   const [busy,setBusy] = useState(false);
   const cn = contractInfo && contractInfo.contract_number;
   const can = user && (user.role==="technical_head" || user.role==="admin" || user.role==="super_admin");
-  const load = async()=>{ if(!cn){ setPlan(null); return; } const { data, error } = await sb.from("proc_plan_tbl").select("*").eq("contract_number",cn).maybeSingle(); setPlan(error ? "nosql" : (data||null)); };
+  const load = async()=>{ if(!cn){ setPlan(null); return; } await mtcCacheLoad(); const { data, error } = await sb.from("proc_plan_tbl").select("*").eq("contract_number",cn).maybeSingle(); setPlan(error ? "nosql" : (data||null)); };
   useEffect(()=>{ load(); },[cn]);
   if(plan===undefined || plan==="nosql") return null;
   if(plan && plan.bom_changed_at && !plan.bom_reapproved_at){   // 224: the BOM changed after approval — back to the Technical Head
@@ -43829,7 +43960,7 @@ function pgExportPdf(plan, rows, today, scale, lvl){
   for(let i=1;i<=n;i++){ doc.setPage(i); doc.setFontSize(7); doc.setTextColor(150); doc.text("Page "+i+" of "+n, W-M, H-5, {align:"right"}); doc.text(pdfFooterCompanyName(null)+" | Procurement Gantt "+plan.contract_number, M, H-5); }
   pdfShow(doc, pgFileBase(plan)+".pdf");
 }
-function pgCertPill(c){ if(!c) return null; const st = c==="3.2" ? {background:"#fbe4ee",color:"#c2185b"} : c==="3.1" ? {background:"#e6f1fb",color:"#2a6db0"} : {background:"linear-gradient(90deg,#e6f1fb 50%,#fbe4ee 50%)",color:colors.text};
+function pgCertPill(c){ if(!c) return null; if(c==="none") return h("span",{style:{fontSize:10.5,color:colors.muted}},"no MTC"); const st = c==="3.2" ? {background:"#fbe4ee",color:"#c2185b"} : c==="3.1" ? {background:"#e6f1fb",color:"#2a6db0"} : {background:"linear-gradient(90deg,#e6f1fb 50%,#fbe4ee 50%)",color:colors.text};
   return h("span",{style:{fontSize:10,fontWeight:700,borderRadius:8,padding:"1px 6px",whiteSpace:"nowrap",...st}},c); }
 // ---- 154 (Build Y): planned-date changes keep the first plan (baseline) and every revision ----
 const PG_MOVE_REASONS = ["Vendor delay","Client change / hold","Payment / approval delay","Transport","Re-planned internally","Other"];
@@ -43903,7 +44034,7 @@ function ProcListScreen({ user, onOpenCard, onOpenGantt }){
   const [err,setErr] = useState("");
   const load = async()=>{
     try{
-      const emp = await pgEmp(user); setMe((emp && emp.employee_name) || "");
+      const emp = await pgEmp(user); setMe((emp && emp.employee_name) || ""); await mtcCacheLoad();
       const { data: ps, error } = await sb.from("proc_plan_tbl").select("*").order("contract_number",{ascending:false});
       if(error){ setErr(error.message); setRows([]); return; }
       const lines = await fetchPaged(()=>sb.from("proc_line_tbl").select("*").order("id"));
@@ -44021,7 +44152,7 @@ function ProcReportsScreen({ user, onOpenGantt }){
   const [matView,setMatView] = useState("sum");   // 184c: Pending Material Status — sum | det
   const [matForm,setMatForm] = useState(""); const [matClient,setMatClient] = useState(""); const [matPend,setMatPend] = useState(true);
   const [busy,setBusy] = useState(false);
-  useEffect(()=>{ (async()=>{
+  useEffect(()=>{ (async()=>{ await mtcCacheLoad();
     const { data: plans, error } = await sb.from("proc_plan_tbl").select("*").order("contract_number",{ascending:false});
     if(error){ setData({ err:error.message }); return; }
     const lines = await fetchPaged(()=>sb.from("proc_line_tbl").select("*").order("id"));
@@ -44365,7 +44496,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
 
   useEffect(()=>{ (async()=>{ const emp = await pgEmp(user); setMe((emp&&emp.employee_name)||user?.username||""); const ce = await pgCanEdit(user); setCanEdit(ce); pgFormCan(user, ce).then(setCanForm).catch(()=>{}); setStoresOnly(!ce && await pgStoresCan(user)); })(); },[user && user.id]);
   const load = async()=>{
-    setLoading(true);
+    setLoading(true); await mtcCacheLoad(true);
     const { data: ps, error } = await sb.from("proc_plan_tbl").select("*").order("contract_number",{ascending:false});
     if(error){ setSqlErr(error.message); setLoading(false); return; }
     let rows = [], from = 0;
@@ -44460,7 +44591,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
       const formsChanged = JSON.stringify(ed.forms)!==JSON.stringify(pgForms(plan));
       const cs = [...new Set(ed.forms.map(f=>f.cert))];
       const info = ed.info ? { po_no:String(ed.info.po||"").trim()||null, delivery_date:ed.info.deliv||null } : {};   // 142
-      await sb.from("proc_plan_tbl").update({ ...(formsChanged?{ forms:[...ed.forms, ...pgFormsHidden(plan)], cert: cs.length===1 ? cs[0] : "Mixed" }:{}), ...info, updated_by:me, updated_at:now }).eq("id",plan.id);
+      await sb.from("proc_plan_tbl").update({ ...(formsChanged?{ forms:[...pgFormsRaw(ed.forms), ...pgFormsHidden(plan)], cert: cs.length===1 ? cs[0] : "Mixed" }:{}), ...info, updated_by:me, updated_at:now }).eq("id",plan.id);
       await logAudit("UPDATE","proc_line_tbl",plan.contract_number,"Procurement Gantt dates saved ("+ups.length+" steps"+(ed.removed.length?", "+ed.removed.length+" inserted step(s) removed":"")+(formsChanged?", RFI / certification changed":"")+")",user?.username||"");
       // 154: the moves, logged with their reason (the first one of a step keeps the original plan)
       if(opts && opts.reason && (opts.moves||[]).length){
@@ -56204,7 +56335,8 @@ function App() {
   const _mLv = (user && user.role!=="super_admin") ? modTabLevel(tab) : "";   // 2026-10-30T08:00:00Z: Rights Grid wins over the department rule
   const _codeTab = tab==="authorization_codes" || tab==="deletion_codes";   // 2026-10-30T12:00:00Z: every admin makes codes
   const uTab = _codeTab && user && user.role!=="super_admin" && isCodeAdmin(user) ? { ...user, role:"admin", baseRole:user.role } : _mLv ? modUserFor(tab, user) : accessUserFor(tab, user);
-  const accTabMode = _codeTab ? (isCodeAdmin(user) ? "full" : "none") : _mLv ? (_mLv==="none" ? "none" : "full") : accessMenuMode(accessTabMenu(tab)); void accTick;
+  let accTabMode = _codeTab ? (isCodeAdmin(user) ? "full" : "none") : _mLv ? (_mLv==="none" ? "none" : "full") : accessMenuMode(accessTabMenu(tab)); void accTick;
+  if(tab==="po_register" && window.__poAll && accTabMode==="none") accTabMode = "view";   // 301
   { const _mk = modOfTab(tab); const _md = MOD_DEFS.find(m=>m.key===_mk); window.__modCur = { tab, module:_mk, level:_mLv, codeFree:!!(_md && _md.codeFree) }; window.__roGuard = _mLv==="view" || _mLv==="link"; }   // 2026-10-28T08:00:00Z
   return h("div",{style:{minHeight:"100vh"}},
     h(ReferencePanel,{user,open:refOpen,onClose:()=>setRefOpen(false)}),   // 2026-10-30T15:00:00Z
@@ -65529,7 +65661,7 @@ function EmployeePerformance({ name, tasks, emps, onBack, onOpenBoard, onGoToTab
   const maxW = Math.max(1, ...weeks.map(w=>w.on+w.late));
   useEffect(()=>{ (async()=>{
     if(isSales && emp.app_user_id){ try{ const { data: u } = await sb.from("app_users").select("username").eq("id",emp.app_user_id).maybeSingle(); if(u){ const d = await loadMyDayData({ username:u.username }, null, true); setCalls(myDayCounts(d)); } }catch(e){} }
-    try{ const { data: ps, error } = await sb.from("proc_plan_tbl").select("*"); if(error || !(ps||[]).length){ setSteps([]); return; }
+    try{ await mtcCacheLoad(); const { data: ps, error } = await sb.from("proc_plan_tbl").select("*"); if(error || !(ps||[]).length){ setSteps([]); return; }
       const lines = await fetchPaged(()=>sb.from("proc_line_tbl").select("*").order("id"));
       const tk = await fetchPaged(()=>sb.from("task_tbl").select("id,proc_plan_id,parent_id,proc_form,assignee").not("proc_plan_id","is",null).order("id"));
       const out = [];
@@ -68891,6 +69023,7 @@ async function ospMayAct(k, user){
 // everything the stages need, read in one go
 async function ospLoad(){
   const M = { err:"", reg:new Map(), so:new Map(), plan:new Map(), fac:new Map(), rel:new Set(), po:new Set(), st:new Map(), lots:new Map(), placed:new Set(), missing:false };
+  try{ await mtcCacheLoad(); }catch(e){}
   const safe = async(fn)=>{ try{ return await fn(); }catch(e){ return []; } };
   const [reg, sos, plans, lines, pos, st, lots, pl] = await Promise.all([
     safe(()=>fetchPaged(()=>sb.from("contract_register_tbl").select("*").order("contract_number"))),
@@ -69181,7 +69314,7 @@ const pgaMax = (a)=> { const v = a.filter(Boolean).sort(); return v[v.length-1]|
 const pgaIsManual = (r)=> !!r && (r.act_manual===true || (r.act_manual==null && !!(r.act_date || r.act_start)));
 // read everything once (null = all live plans)
 async function pgaLoad(cns){
-  const M = { plans:[], lines:[], pos:[], items:[], grns:[], gitems:[] };
+  const M = { plans:[], lines:[], pos:[], items:[], grns:[], gitems:[] }; await mtcCacheLoad();
   let q = sb.from("proc_plan_tbl").select("*"); if(cns && cns.length) q = q.in("contract_number", cns.map(String));
   const { data: ps } = await q; M.plans = ps||[]; if(!M.plans.length) return M;
   const ids = M.plans.map(p=>p.id);
@@ -69209,7 +69342,8 @@ function pgaCompute(plan, M){
     const grns = M.grns.filter(g=>g.po_no===po.po_no);
     const gi = M.gitems.filter(x=>grns.some(g=>g.grn_no===x.grn_no));
     const per = {};
-    lines.forEach(l=>{ const f = pgaFormOf(l, forms); if(!f){ unplaced.push({ po:po.po_no, id:l.id, sl:l.sl, text:[l.shape,l.spec,l.grade,l.size,l.description].filter(Boolean).join(" ") }); return; }
+    lines.forEach(l=>{ let f = pgaFormOf(l, forms); if(f && forms.includes(f+" · 3.1") && ((l.mtc||((po.mtc||{}).type))==="3.1")) f = f+" · 3.1";   // 301: a 3.1 PO line goes to the 3.1 row
+      if(!f){ unplaced.push({ po:po.po_no, id:l.id, sl:l.sl, text:[l.shape,l.spec,l.grade,l.size,l.description].filter(Boolean).join(" ") }); return; }
       (per[f] = per[f] || { qty:0, rec:0 }); per[f].qty += Number(l.qty)||0; per[f].rec += Number(l.received_qty)||0; });
     Object.keys(per).forEach(f=>{
       const gq = gi.filter(x=>pgaFormOf({ shape:x.shape, item:x.spec, description:x.description }, forms)===f);
@@ -69960,13 +70094,85 @@ async function crqSweep(){
 }
 // ---------------------------------------------------------------- Order Insights
 const INS_TARGET = { so:3, wo:7, pr:2, pa:2, start:3 };
+// 301: how badly a material (form + certificate) is doing
+function insSev(g){
+  const rfi = (g.insp||{})["RFI not raised"]||0;
+  if(g.past>=2 || (g.past>=1 && (g.avg||0)>=14) || (String(g.cert).includes("3.2") && rfi && g.past>=1)) return { n:3, t:"critically failing", c:"#a3312a", bg:"#fdecea" };
+  if(g.past>=1 || rfi) return { n:2, t:"falling behind", c:"#8a5a00", bg:"#fff4d6" };
+  return { n:1, t:"on plan", c:"#0b5a40", bg:"#e4f3ed" };
+}
+let INS_SA = [];
+const INS_POST_OF = { "Document Controller":"doc_controller", "Technical Head":"technical_head", "Stores":"stores", "Purchase Manager":"purchase_manager", "Purchase Engineer":"purchase_engineer", "Sales Head":"sales_head", "QC Head":"qc", "VP Projects":"vp_projects" };
+const insNamesOf = (k)=>{ const n = postHolders(k)||[]; return n.length ? n.join(", ") : postLabel(k); };
+const insWho = (who)=> String(who||"").split(/\s*·\s*/).map(w=> INS_POST_OF[w] ? insNamesOf(INS_POST_OF[w]) : w).join(" · ");
+// 301: a chase from Insights = a checklist line inside the contract's procurement card (+2 working days) and a bell, by name
+async function insChase(items, user){
+  let me = ""; try{ me = await stepMyName(user); }catch(e){} me = me || user.username || "";
+  const due = wdAdd(insToday(), 2); const dd = insDmy(insToday()).slice(0,5);
+  const byCard = new Map(); const out = { lines:0, again:0, bells:0, nocard:0 };
+  for(const m of items){
+    const text = m.todo+" — "+m.form+(m.cert && m.cert!=="not set" && m.cert!=="none" ? " ("+m.cert+")" : "")+" · "+m.cn+((m.pos||[]).length ? " · "+m.pos.map(p=>p.po_no+(p.vendor_name?" "+p.vendor_name:"")).join(", ") : "")+(m.late ? " · "+m.late+" d late" : "");
+    if(m.card){ const cur = byCard.get(m.card.id) || JSON.parse(JSON.stringify(m.card.checklists||[])); const id = "ins|"+m.cn+"|"+(m.kind==="set"?"all":m.f.form)+"|"+m.step;
+      let ck = cur.find(c=>c.id==="ins_chase"); if(!ck){ ck = { id:"ins_chase", name:"Chased from Insights", items:[] }; cur.push(ck); }
+      const ex = (ck.items||[]).find(i=>i.id===id && !i.done);
+      if(ex){ ex.due = due; ex.text = String(ex.text).replace(/ · chased again .*$/,"")+" · chased again "+dd; out.again++; }
+      else { ck.items = [...(ck.items||[]), { id, text, due, done:false, items:[], by:me, at:new Date().toISOString() }]; out.lines++; }
+      byCard.set(m.card.id, cur); m.card.checklists = cur; } else out.nocard++;
+    const to = Array.from(new Set([...(m.to||[]), ...(m.cc||[])].filter(Boolean)));
+    try{ await notifyPeople(to, "📨 "+me+": "+text+" — by "+insDmy(due), "warn", m.card ? { kind:"open", open:{ task:m.card.id } } : { kind:"open", open:{ tab:"os_insights" } }); out.bells += to.length; }catch(e){}
+  }
+  for(const [id, cl] of byCard){ const { error } = await sb.from("task_tbl").update({ checklists:cl }).eq("id",id); if(error) throw new Error(error.message); }
+  try{ await logAudit("UPDATE","task_tbl",Array.from(new Set(items.map(m=>m.cn))).join(", "),"Chased from Insights: "+items.map(m=>m.todo+" "+m.form+" "+m.cn).join("; "),user.username||""); }catch(e){}
+  return out;
+}
+// 301: where we stand + the corrective actions, in words (screen and PDF)
+function insNarrative(B){
+  const stand = [], lecture = [];
+  const nm = (L, k)=> (L||[]).length ? L.join(", ") : postLabel(k);
+  const PM = nm(B.PMN,"purchase_manager"), QC = nm(B.QCN,"qc"), TH = nm(B.THN,"technical_head");
+  const lateM = B.mats.filter(m=>m.late>0); const lPo = lateM.filter(m=>m.kind==="po"), lMat = lateM.filter(m=>m.kind==="mat" && m.step==="fac"), l32 = lateM.filter(m=>m.step==="rs"||m.step==="rt");
+  stand.push("Purchase: "+B.inPur.length+" order"+(B.inPur.length===1?"":"s")+" in purchase, "+B.mats.filter(m=>m.kind!=="set").length+" material lines not yet at our factory, "+lateM.length+" of them past plan — "+lPo.length+" are our own PO delays, "+lMat.length+" are vendor delays, "+l32.length+" are 3.2 inspections.");
+  B.matRows.filter(g=>g.sev.n>=2).slice(0,10).forEach(g=>{
+    const wh = Object.entries(g.where).sort((a,b)=>b[1]-a[1])[0]; const ins = Object.entries(g.insp).map(([k,v])=>v+" "+k).join(", ");
+    stand.push(g.form+" "+(g.cert||"")+" — "+g.sev.t+": "+(g.po+g.mat)+" order"+((g.po+g.mat)===1?"":"s")+" waiting ("+g.po+" PO pending, "+g.mat+" material pending)"+(g.past ? "; "+g.past+" past plan, avg "+g.avg+" days late (worst "+g.max+")"+(wh?", mostly at "+wh[0]:"") : "")+(ins?"; 3.2: "+ins:"")+"."); });
+  if(!B.matRows.some(g=>g.sev.n>=2)) stand.push("Materials: every form is on plan.");
+  if(B.certN.unset) stand.push(B.certN.unset+" order"+(B.certN.unset===1?"":"s")+" in purchase still "+(B.certN.unset===1?"has":"have")+" no MTC & AVL on the Sale Order — the certificate of their material is unknown.");
+  if(B.withClient7.length || B.notSub.length) stand.push("Documents: "+B.withClient7.length+" with clients over 7 days, "+B.notSub.length+" not yet submitted.");
+  if(lPo.length){ const who = Array.from(new Set(lPo.filter(m=>m.step!=="appr").flatMap(m=>m.to))).join(", ") || "The buyers";
+    lecture.push({ t:"Our POs are late — this is our own delay", x:"A PO that is not made, approved or released on its planned day holds the order before any vendor is involved. "+who+": release every PO within 2 working days of the Purchase BOM approval. "+PM+": approve a PO the same day it is sent and go through the PO-pending list every morning. Orders now: "+Array.from(new Set(lPo.map(m=>m.cn+" "+m.form))).slice(0,12).join("; ")+"." }); }
+  if(lMat.length){ const forms = Array.from(new Set(lMat.map(m=>m.base))).join(", ");
+    lecture.push({ t:"Vendors are late — chase on the day, not a week later", x:"Material past its at-our-factory date: "+forms+". The buyer calls the vendor on the day the plan is missed and gets a despatch date in writing; a second miss goes to "+PM+" to move the balance to another approved vendor. "+PM+": review the lead times of "+forms+" and plan the next orders with the real lead time, not the quoted one." }); }
+  if(l32.length || B.certN.rfi){
+    lecture.push({ t:"3.2 material needs the witness booked early", x:"A 3.2 certificate is only as fast as the inspector. Raise the RFI the day the PO is released, ask the vendor for the material-ready date and book the TPI / customer inspector 7 days before it. "+QC+": confirm every booking and chase the vendor's MTC the day after the witness. On ADNOC orders Paint is critical — the DFT / adhesion witness is booked like any other 3.2 test."+(B.certN.rfi ? " Now: "+B.certN.rfi+" line"+(B.certN.rfi===1?"":"s")+" with no RFI raised." : "") }); }
+  if(B.certN.unset) lecture.push({ t:"Fill MTC & AVL at the Sale Order", x:TH+": pick 3.1 or 3.2 for every order before it is approved. Without it the order is blocked and Purchase cannot know what certificate to buy." });
+  if(B.withClient7.length) lecture.push({ t:"Documents with the client", x:insNamesOf("doc_controller")+": send the chase letter on the 7th day for every document still with the client ("+B.withClient7.length+" now)." });
+  lecture.push({ t:"Every missed date gets a new date — the same day", x:"Whoever holds a step that misses its plan puts in a new date with the reason on the Gantt the same day. A date left in the past tells nobody anything; a new date with a reason tells the order owner what to tell the client." });
+  return { stand, lecture };
+}
 async function insLoad(){
   await delEffCheck();
   const M = await ospLoad();
-  let lines = []; try{ lines = await fetchPaged(()=>sb.from("proc_line_tbl").select("plan_id,line_key,form,plan_date,act_date").order("id")); }catch(e){}
+  let lines = []; try{ lines = await fetchPaged(()=>sb.from("proc_line_tbl").select("plan_id,line_key,form,plan_date,act_start,act_date").order("id")); }catch(e){}
   let dels = []; try{ dels = await delLoadAll(); }catch(e){}
   let reqs = []; try{ const r = await sb.from("customer_request_tbl").select("*").eq("status","Open").limit(1000); if(!r.error) reqs = r.data||[]; }catch(e){}
-  return { M, lines, dels, reqs };
+  // 301: the procurement cards (who holds each contract's purchase) and the POs of contracts with a Gantt
+  try{ await loadPostPeople(); }catch(e){}
+  try{ INS_SA = await superAdminNames(); }catch(e){}
+  let cards = []; try{ cards = (await fetchPaged(()=>sb.from("task_tbl").select("id,proc_plan_id,parent_id,assignee,checklists,title,status,due_date").not("proc_plan_id","is",null).order("id"))||[]).filter(t=>!t.parent_id); }catch(e){}
+  let pos = [], items = [];
+  try{ const planCns = new Set([...M.plan.keys()]);
+    pos = ((await fetchPaged(()=>sb.from("po_register").select("id,po_no,contract_ref,vendor_name,owner_name,stage,status,mtc,source").order("id")))||[])
+      .filter(p=>!/cancel/i.test(p.status||"") && String(p.contract_ref||"").split(/[,\/;&\s]+/).some(c=>planCns.has(c.trim())));
+    const nos = pos.map(p=>p.po_no).filter(Boolean);
+    for(let i=0;i<nos.length;i+=150){ const { data } = await sb.from("po_register_items").select("po_no,shape,item,description,mtc,pg_form,line_kind").in("po_no",nos.slice(i,i+150)); items = items.concat(data||[]); } }catch(e){}
+  // a chase line ticks itself once its step is done
+  try{ const lk = {}; lines.forEach(l=>{ lk[l.plan_id+"|"+l.line_key] = l; });
+    for(const c of cards){ const ck = (c.checklists||[]).find(x=>x.id==="ins_chase"); if(!ck) continue; let ch = false;
+      (ck.items||[]).forEach(it=>{ if(it.done) return; const [, cn, form, step] = String(it.id||"").split("|");
+        const ok = step==="set" ? MTC_CM.map.has(String(cn)) : !!(lk[c.proc_plan_id+"|"+step+"|"+form] && lk[c.proc_plan_id+"|"+step+"|"+form].act_date);
+        if(ok){ it.done = true; it.done_at = new Date().toISOString(); it.done_by = "App (step done)"; ch = true; } });
+      if(ch) await sb.from("task_tbl").update({ checklists:c.checklists }).eq("id",c.id); } }catch(e){}
+  return { M, lines, dels, reqs, cards, pos, items };
 }
 function insBuild(D, scope, one){
   const M = D.M; const today = insToday();
@@ -69976,7 +70182,7 @@ function insBuild(D, scope, one){
   const cl = (o)=> (o.x.so && o.x.so.customer_name) || (o.x.reg && o.x.reg.client) || "";
   const opened = (o,k)=> ((o.x.st||{}).opened||{})[k];
   const wdIn = (o,k)=> opened(o,k) ? wdSince(opened(o,k)) : 0;
-  const own = (k)=>{ const c = OSP_COLS.find(z=>z.k===k)||{}; return { posts:ospPostText(c.posts, c.sa), names:[...(c.posts||[]).map(p=>postHolders(p).join(", "))].filter(Boolean).join(" · ") }; };
+  const own = (k)=>{ const c = OSP_COLS.find(z=>z.k===k)||{}; return { posts:ospPostText(c.posts, c.sa), names:[...(c.posts||[]).map(p=>postHolders(p).join(", ")), ...(c.sa ? [INS_SA.join(", ")] : [])].filter(Boolean).join(" · ") }; };
   // documents
   const allDocs = X.flatMap(o=>o.d.open.map(d=>({ ...d, cn:o.cn, client:cl(o), age: d.since ? osDays(d.since) : null })));
   const withClient7 = allDocs.filter(d=>d.list==="client" && (d.age||0)>7);
@@ -69996,10 +70202,53 @@ function insBuild(D, scope, one){
     const late = L.filter(o=> k==="pr" ? wdIn(o,"pr")>INS_TARGET.pr : k==="pa" ? wdIn(o,(o.x.st||{}).pa_sent_at?"pa":"pas")>INS_TARGET.pa : k==="pur" ? (o.x.pct>=100 ? wdIn(o,"start")>INS_TARGET.start : past.some(p=>p.cn===o.cn)) : false);
     return { k, label:ospLabelOf(k), n:L.length, late:late.length, ...own(k) }; });
   const inPur = X.filter(o=>["bom","pr","pa","pur"].includes(o.x.stage));
-  const byForm = {}; inPur.forEach(o=>(o.x.forms||[]).forEach(f=>{ if(o.x.fac.has(f)) return; const b = byForm[f] = byForm[f] || { form:f, wait:0, past:0, lates:[] }; b.wait++; }));
-  past.filter(p=>p.step==="fac" || p.step==="rel").forEach(p=>{ const b = byForm[p.form] = byForm[p.form] || { form:p.form, wait:0, past:0, lates:[] }; b.past++; b.lates.push(p.late); });
-  const formRows = Object.values(byForm).map(b=>({ ...b, avg: b.lates.length ? Math.round(b.lates.reduce((a,c)=>a+c,0)/b.lates.length) : null })).sort((a,b)=>b.past-a.past || b.wait-a.wait).slice(0,10);
-  const stepN = ["draft","appr","rel","fac"].map(s=>({ s, label:{ draft:"PO Draft", appr:"PO Approval", rel:"PO Release", fac:"At our factory" }[s], n:past.filter(p=>p.step===s).length }));
+  // 301: materials — where each form of each order in purchase is stuck (PO vs material), with its certificate
+  const lk = {}; (D.lines||[]).forEach(l=>{ lk[l.plan_id+"|"+l.line_key] = l; });
+  const cardOf = {}; (D.cards||[]).forEach(t=>{ if(!cardOf[t.proc_plan_id]) cardOf[t.proc_plan_id] = t; });
+  const PMN = postHolders("purchase_manager")||[], QCN = postHolders("qc")||[], THN = postHolders("technical_head")||[];
+  const mats = [];
+  inPur.forEach(o=>{ const plan = o.x.plan; if(!plan) return; const fs = pgForms(plan); const names = fs.map(f=>f.form);
+    const card = cardOf[plan.id]||null; const holder = card && card.assignee && card.assignee!=="Unassigned" ? card.assignee : "";
+    const hold = holder ? [holder] : PMN;
+    const poL = (D.pos||[]).filter(p=>String(p.contract_ref||"").split(/[,\/;&\s]+/).some(c=>c.trim()===o.cn));
+    if(fs.some(f=>f.mtcSet===false)) mats.push({ kind:"set", cn:o.cn, client:cl(o), plan, card, holder, form:"All shapes", base:"All shapes", cert:"not set", where:"MTC & AVL not filled on the Sale Order", step:"set", late:0, insp:"", pos:[], todo:"Fill MTC & AVL", to:THN.length?THN:[postLabel("technical_head")], cc:[] });
+    fs.forEach(f=>{
+      const L = (k)=> lk[plan.id+"|"+k+"|"+f.form] || null; const done = (k)=> !!(L(k) && L(k).act_date);
+      if(done("fac")) return;
+      const cur = ["draft","appr","rel"].find(k=>!done(k));
+      let kind, where, insp = "", step;
+      if(cur){ kind = "po"; step = cur; where = { draft:"PO Draft", appr:"PO Approval", rel:"PO Release" }[cur]; }
+      else { kind = "mat"; where = f.rfi ? "3.2 inspection" : "At our factory"; step = "fac";
+        if(f.rfi){ const rs = L("rs"), rt = L("rt");
+          if(!(rs && (rs.act_start || rs.act_date))){ insp = "RFI not raised"; step = "rs"; }
+          else if(!rs.act_date){ insp = "Stamping witness booked"; step = "rs"; }
+          else if(!(rt && rt.act_date)){ insp = rt && rt.act_start ? "Test witness booked" : "Test witness pending"; step = "rt"; }
+          else { insp = "Witnessed — MTC awaited"; where = "At our factory"; } } }
+      const ln = L(step); const pd = ln && ln.plan_date ? String(ln.plan_date).slice(0,10) : "";
+      const late = pd && pd < today ? insDays(pd, today) : 0;
+      const myPos = poL.filter(p=> (D.items||[]).some(it=>{ if(it.po_no!==p.po_no || it.line_kind==="charge") return false; let g = pgaFormOf(it, names);
+        if(g && names.includes(g+" · 3.1") && ((it.mtc||((p.mtc||{}).type))==="3.1")) g = g+" · 3.1"; return g===f.form; }));
+      const base = f._base || f.form; const cert = f.mtcSet===false ? "not set" : (f.cert||"");
+      let todo, to, cc = [];
+      if(kind==="po"){ if(step==="appr"){ todo = "Approve PO"; to = PMN; } else { todo = step==="draft" ? "Make PO" : "Release PO"; to = hold; } }
+      else if(insp==="RFI not raised"){ todo = "Raise RFI"; to = hold; cc = QCN; }
+      else if(insp==="Witnessed — MTC awaited"){ todo = "Get MTC"; to = hold; }
+      else if(insp){ todo = "Chase the witness"; to = hold; cc = QCN; }
+      else { todo = "Chase vendor"; to = hold; cc = PMN.filter(n=>!hold.includes(n)); }
+      mats.push({ kind, cn:o.cn, client:cl(o), plan, card, holder, f, form:pgFormTitle(f), base, cert, where, step, insp, late, pd, pos:myPos, todo, to:(to&&to.length)?to:[postLabel("purchase_manager")], cc });
+    }); });
+  const mg = {}; mats.filter(m=>m.kind!=="set").forEach(m=>{ const k = m.base+"|"+m.cert;
+    const g = mg[k] = mg[k] || { key:k, form:m.base, cert:m.cert, po:0, mat:0, insp:{}, past:0, pastPo:0, pastMat:0, past32:0, lates:[], items:[], where:{} };
+    g.items.push(m); if(m.kind==="po") g.po++; else g.mat++; if(m.insp) g.insp[m.insp] = (g.insp[m.insp]||0)+1;
+    if(m.late>0){ g.past++; g.lates.push(m.late); g.where[m.where] = (g.where[m.where]||0)+1; if(m.kind==="po") g.pastPo++; else if(m.step==="rs"||m.step==="rt") g.past32++; else g.pastMat++; } });
+  const matRows = Object.values(mg).map(g=>{ const avg = g.lates.length ? Math.round(g.lates.reduce((a,c)=>a+c,0)/g.lates.length) : null; const x = { ...g, avg, max: g.lates.length ? Math.max(...g.lates) : 0 };
+      x.sev = insSev(x); return x; })
+    .sort((a,b)=>b.sev.n-a.sev.n || b.past-a.past || (b.avg||0)-(a.avg||0) || (b.po+b.mat)-(a.po+a.mat));
+  const formRows = matRows.map(g=>({ form:g.form+(g.cert?" ("+g.cert+")":""), wait:g.po+g.mat, past:g.past, avg:g.avg }));   // for the recommendations
+  const lateM = mats.filter(m=>m.late>0);
+  const stepN = [["draft","PO Draft",["draft"],"po"],["appr","PO Approval",["appr"],"po"],["rel","PO Release",["rel"],"po"],["insp","3.2 inspection",["rs","rt"],"insp"],["fac","At our factory",["fac"],"mat"]]
+    .map(([s,label,ks,tone])=>({ s, label, tone, n:lateM.filter(m=>ks.includes(m.step)).length }));
+  const certN = { "3.1":matRows.filter(g=>g.cert==="3.1").length, "3.2":matRows.filter(g=>g.cert==="3.2").length, rfi:mats.filter(m=>m.insp==="RFI not raised").length, mtc:mats.filter(m=>m.insp==="Witnessed — MTC awaited").length, unset:mats.filter(m=>m.kind==="set").length };
   const purX = X.filter(o=>o.x.stage==="pur"); const avgPct = purX.length ? Math.round(purX.reduce((a,o)=>a+(o.x.pct||0),0)/purX.length) : null;
   const paX = X.filter(o=>(o.x.st||{}).pa_pct!=null); const avgPa = paX.length ? Math.round(paX.reduce((a,o)=>a+Number(o.x.st.pa_pct),0)/paX.length*10)/10 : null;
   // urgent actions (rules), worst first
@@ -70023,14 +70272,39 @@ function insBuild(D, scope, one){
   if(withClient7.length >= 5) recs.push(withClient7.length+" documents are with clients over 7 days — a weekly chase letter run from Document Control would clear most of them.");
   if(notSub.length >= 3) recs.push(notSub.length+" documents are not yet submitted — the Document Controller's list is the bottleneck; check the cards have owners.");
   const prL = purStage.find(s=>s.k==="pr"); if(prL && prL.late>=2) recs.push("PR release is late on "+prL.late+" orders — check the stock check is not waiting on the Stores post alone.");
-  if(formRows[0] && formRows[0].past>=2) recs.push(formRows[0].form+" is late on "+formRows[0].past+" orders (avg "+(formRows[0].avg||0)+" days past plan) — review the vendors' lead times for it.");
+  if(matRows[0] && matRows[0].sev.n>=3) recs.push(matRows[0].form+" "+(matRows[0].cert||"")+" is critically late on "+matRows[0].past+" order"+(matRows[0].past===1?"":"s")+" (avg "+(matRows[0].avg||0)+" days past plan) — "+(matRows[0].pastPo>=matRows[0].pastMat+matRows[0].past32 ? "our PO is the delay." : "the vendor / inspection is the delay."));
+  if(certN.rfi) recs.push(certN.rfi+" 3.2 material line"+(certN.rfi===1?" has":"s have")+" no RFI raised yet — raise the RFI when the PO is released, not when the material is ready.");
   const woL = docStage.find(s=>s.k==="wo"); if(woL && woL.late>=2) recs.push(woL.late+" orders have clear documents but no work order after "+INS_TARGET.wo+" working days — see W/O Release pending.");
   const ovr = (D.dels||[]).filter(r=>inX.has(r.cn) && r.bucket==="over"); if(ovr.length) recs.push(ovr.length+" order"+(ovr.length>1?"s are":" is")+" past the delivery date; "+ovr.filter(r=>/doc|Sale Order|W\/O/i.test(r.where)).length+" of them are still before production.");
   if(!recs.length) recs.push("Nothing stands out — every list is within its target.");
-  return { X, cl, docStage, docRows, ageB, allDocs, withClient7, notSub, purStage, formRows, stepN, past, inPur, avgPct, avgPa, act, recs };
+  return { X, cl, docStage, docRows, ageB, allDocs, withClient7, notSub, purStage, formRows, stepN, past, inPur, avgPct, avgPa, act, recs, mats, matRows, certN, PMN, QCN, THN };
+}
+// 302: one order — type the contract number or any part of the customer's name, pick from the list
+function InsOrderCombo({ value, onPick, options }){
+  const [q,setQ] = useState(""); const [open,setOpen] = useState(false); const [hi,setHi] = useState(0); const ref = useRef(null);
+  const cur = options.find(o=>o.cn===value);
+  const norm = (x)=> String(x||"").toLowerCase();
+  const words = norm(q).split(/\s+/).filter(Boolean);
+  const list = (words.length ? options.filter(o=>{ const t = norm(o.cn+" "+o.name); return words.every(w=>t.includes(w)); }) : options)
+    .sort((a,b)=> (words.length && norm(a.cn).startsWith(words[0]) ? 0 : 1) - (words.length && norm(b.cn).startsWith(words[0]) ? 0 : 1) || String(b.cn).localeCompare(String(a.cn))).slice(0,40);
+  useEffect(()=>{ if(!open) return; const f = (e)=>{ if(ref.current && !ref.current.contains(e.target)) setOpen(false); }; document.addEventListener("mousedown", f); return ()=>document.removeEventListener("mousedown", f); },[open]);
+  const pick = (o)=>{ onPick(o.cn); setQ(""); setOpen(false); };
+  const mark = (txt)=>{ if(!words.length) return txt; const t = String(txt); const i = norm(t).indexOf(words[0]); if(i<0) return t; return [t.slice(0,i), h("b",{key:"m",style:{background:"#fff3b0"}},t.slice(i,i+words[0].length)), t.slice(i+words[0].length)]; };
+  return h("span",{ref,style:{position:"relative",display:"inline-block"}},
+    h("input",{"data-testid":"ins-one",value: open ? q : (cur ? cur.cn+" – "+cur.name : q), placeholder:"Type contract or customer…", onFocus:()=>{ setOpen(true); setQ(""); setHi(0); },
+      onChange:e=>{ setQ(e.target.value); setOpen(true); setHi(0); },
+      onKeyDown:e=>{ if(e.key==="ArrowDown"){ e.preventDefault(); setOpen(true); setHi(x=>Math.min(x+1, list.length-1)); } else if(e.key==="ArrowUp"){ e.preventDefault(); setHi(x=>Math.max(x-1,0)); }
+        else if(e.key==="Enter"){ e.preventDefault(); if(list[hi]) pick(list[hi]); } else if(e.key==="Escape"){ setOpen(false); e.currentTarget.blur(); } },
+      style:{...inputStyle,width:280,padding:"5px 8px"}}),
+    open ? h("div",{"data-testid":"ins-one-list",style:{position:"absolute",top:"100%",left:0,width:360,maxHeight:300,overflowY:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8,boxShadow:"0 6px 20px rgba(0,0,0,.18)",zIndex:50,marginTop:2}},
+      list.length ? list.map((o,i)=>h("div",{key:o.cn,onMouseDown:e=>{ e.preventDefault(); pick(o); },onMouseEnter:()=>setHi(i),
+        style:{padding:"6px 10px",fontSize:12.5,cursor:"pointer",background:i===hi?"#eef3fb":"#fff",borderBottom:"1px solid #f2f0e8"}}, h("b",null,mark(o.cn)), h("span",{style:{color:colors.muted}}," – ",mark(o.name))))
+        : h("div",{style:{padding:"8px 10px",fontSize:12,color:colors.muted}},"No order matches “"+q+"”.")) : null);
 }
 function InsightsScreen({ user, onOpenContract }){
   const [D,setD] = useState(null); const [scope,setScope] = useState("all"); const [one,setOne] = useState(""); const [err,setErr] = useState("");
+  const [certF,setCertF] = useState("all"); const [grp,setGrp] = useState(null); const [sel,setSel] = useState([]); const [poOpen,setPoOpen] = useState(null); const [canChase,setCanChase] = useState(false); const [chBusy,setChBusy] = useState(false);   // 301
+  useEffect(()=>{ let dead = false; (async()=>{ if(user && user.role==="super_admin"){ setCanChase(true); return; } try{ const { keys } = await myPostKeys(user); if(!dead) setCanChase((keys||[]).includes("purchase_manager")); }catch(e){} })(); return ()=>{ dead = true; }; },[user && user.username]);
   const load = async()=>{ setD(null); try{ setD(await insLoad()); }catch(e){ setErr(String(e.message||e)); setD({}); } };
   useEffect(()=>{ load(); },[]);
   if(!D) return h("div",{style:{padding:16,color:colors.muted}},"Reading the orders…");
@@ -70043,20 +70317,85 @@ function InsightsScreen({ user, onOpenContract }){
   const td = (x,st)=> h("td",{style:{padding:"5px 7px",borderBottom:"1px solid #f0eee6",verticalAlign:"top",...(st||{})}},x);
   const tbl = (heads, rows)=> h("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:12}}, h("thead",null,h("tr",null,heads.map(th))), h("tbody",null,rows));
   const bar = (n, late)=> h("div",{style:{display:"flex",height:12,borderRadius:5,overflow:"hidden",background:"#eeece4",minWidth:120}}, h("span",{style:{width:(n?100-late/n*100:0)+"%",background:"#9fd0b9"}}), h("span",{style:{width:(n?late/n*100:0)+"%",background:"#e7aaa3"}}));
-  const stageTbl = (L)=> tbl(["Step","Orders","Late","","Waiting on"], L.map(s=>h("tr",{key:s.k}, td(s.label), td(s.n), td(s.late,{color:s.late?"#a3312a":colors.text,fontWeight:s.late?700:400}), td(bar(s.n,s.late),{width:"28%"}), td(h("span",null,s.posts,h("div",{style:{fontSize:11,color:colors.muted}},s.names))))));
+  const stageTbl = (L)=> tbl(["Step","Orders","Late","","Waiting on"], L.map(s=>h("tr",{key:s.k}, td(s.label), td(s.n), td(s.late,{color:s.late?"#a3312a":colors.text,fontWeight:s.late?700:400}), td(bar(s.n,s.late),{width:"28%"}), td(h("span",{title:s.posts}, s.names || s.posts)))));   // 301: names, not posts
   const chap = (n, title, sub, body)=> h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:12,marginBottom:14,overflow:"hidden"}},
     h("div",{style:{display:"flex",gap:10,alignItems:"center",padding:"10px 14px",borderBottom:"1px solid "+colors.border,background:"#faf8f2"}}, h("span",{style:{background:colors.dark,color:"#fff",borderRadius:"50%",width:22,height:22,display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:11.5}},n), h("b",{style:{fontSize:15}},title), h("span",{style:{fontSize:12,color:colors.muted}},sub)),
     h("div",{style:{padding:"10px 14px"}},body));
   const actRows = B.act.slice(0, scope==="one" ? 50 : 15);
+  // 301: Materials holding us — PO vs material, certificate, 3.2 inspection; chase from here
+  const NAR = insNarrative(B);
+  const certOk = (c)=> certF==="all" ? true : certF==="3.1" ? c==="3.1" : c==="3.2";
+  const mRows = B.matRows.filter(g=>certOk(g.cert));
+  const actItems = B.mats.filter(m=> (certF==="all" || certOk(m.cert)) && (grp ? (grp.key==="__set" ? m.kind==="set" : (m.base+"|"+m.cert)===grp.key && (!grp.kind || (grp.kind==="po" ? m.kind==="po" : m.kind==="mat"))) : (m.late>0 || m.insp==="RFI not raised" || m.kind==="set")))
+    .sort((a,b)=>b.late-a.late || String(a.cn).localeCompare(String(b.cn)));
+  const mKey = (m)=> m.cn+"|"+m.form+"|"+m.step;
+  const certPill = (c)=> c==="3.2" ? h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:8,padding:"1px 7px",background:"#e3edfb",color:"#1a4fa0"}},"3.2")
+    : c==="3.1" ? h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:8,padding:"1px 7px",background:"#eeece4",color:"#5c5a50"}},"3.1")
+    : c==="not set" ? h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:8,padding:"1px 7px",background:"#fdecea",color:"#a3312a"}},"not set")
+    : h("span",{style:{fontSize:11,color:colors.muted}},"no MTC");
+  const kindPill = (m)=> h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:8,padding:"1px 7px",marginRight:5,...(m.kind==="po"?{background:"#fdecea",color:"#a3312a"}:m.kind==="set"?{background:"#fdecea",color:"#a3312a"}:m.step==="rs"||m.step==="rt"?{background:"#e3edfb",color:"#1a4fa0"}:{background:"#fff1e0",color:"#9a5a00"})}}, m.kind==="po"?"PO":m.kind==="set"?"SO":(m.step==="rs"||m.step==="rt")?"3.2":"Material");
+  const num = (v, g, kind, tone)=> v ? h("span",{role:"button",onClick:()=>{ setGrp({ key:g.key, kind, label:g.form+" "+g.cert }); setSel([]); },style:{display:"inline-block",minWidth:22,padding:"1px 6px",borderRadius:6,cursor:"pointer",fontWeight:700,background:tone[0],color:tone[1]}}, v) : h("span",{style:{color:"#bbb"}},"0");
+  const doChase = async(list)=>{ if(!canChase){ noPermission("chase from Insights",{posts:["purchase_manager"],roles:["super_admin"]}); return; } if(!list.length) return;
+    setChBusy(true); try{ const r = await insChase(list, user); appToast("📨 "+(r.lines?r.lines+" line"+(r.lines>1?"s":"")+" added":"")+(r.again?(r.lines?", ":"")+r.again+" chased again":"")+(r.nocard?" · "+r.nocard+" without a procurement card (bell only)":"")+" · "+r.bells+" bell"+(r.bells===1?"":"s")); setSel([]); setD(x=>({ ...x })); }
+    catch(e){ alert("Could not chase: "+(e.message||e)); } setChBusy(false); };
+  const matsSection = ()=> h("div",{"data-testid":"ins-mats",style:{marginTop:12}},
+    h("div",{style:{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginBottom:6}},
+      h("b",{style:{fontSize:13}},"Materials holding us — PO vs material"), h("span",{style:{flex:1}}),
+      h("span",{style:{fontSize:11.5,color:colors.muted}},"Certificate:"),
+      [["all","All"],["3.1","3.1"],["3.2","3.2"]].map(([k,l])=>h("button",{key:k,"data-testid":"ins-cert-"+k,onClick:()=>{ setCertF(k); setGrp(null); setSel([]); },style:{...btnSmall,background:certF===k?colors.dark:"#fff",color:certF===k?"#fff":colors.text}},l))),
+    h("div",{style:{display:"grid",gridTemplateColumns:"minmax(0,1.7fr) minmax(0,1fr)",gap:18}},
+      h("div",null, tbl(["Form","Certificate","PO pending","Material pending","3.2 inspection","Past plan","Avg. late",""], mRows.map(g=>h("tr",{key:g.key,style:{background:grp&&grp.key===g.key?"#f6f3ea":"transparent"}},
+        td(h("b",null,g.form)), td(certPill(g.cert)), td(num(g.po,g,"po",["#fdecea","#a3312a"])), td(num(g.mat,g,"mat",["#fff1e0","#9a5a00"])),
+        td(Object.keys(g.insp).length ? Object.entries(g.insp).map(([k,v])=>h("div",{key:k,style:{fontSize:11,color:/not raised/.test(k)?"#a3312a":"#1a4fa0"}},v+" "+k)) : h("span",{style:{color:"#bbb"}},"—")),
+        td(g.past ? h("span",null, h("b",{style:{color:"#a3312a"}},g.past), " ", [g.pastPo?g.pastPo+" PO":"", g.past32?g.past32+" 3.2":"", g.pastMat?g.pastMat+" Material":""].filter(Boolean).join(" · ")) : h("span",{style:{color:"#bbb"}},"0")),
+        td(g.avg==null?"—":g.avg+" d"), td(h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:8,padding:"1px 7px",background:g.sev.bg,color:g.sev.c,whiteSpace:"nowrap"}},g.sev.t))))) ,
+        !mRows.length ? h("div",{style:{fontSize:12,color:colors.muted,padding:6}},"No material waiting"+(certF!=="all"?" with "+certF:"")+".") : null),
+      h("div",null,
+        h("b",{style:{fontSize:12.5}},"Gantt steps past their plan"),
+        B.stepN.map(st=>{ const mx = Math.max(1, ...B.stepN.map(z=>z.n)); const col = st.tone==="po"?"#e7aaa3":st.tone==="insp"?"#9db8e6":"#f0c27a";
+          return h("div",{key:st.s,style:{display:"flex",gap:8,alignItems:"center",margin:"5px 0",fontSize:12}}, h("span",{style:{width:110}},st.label), h("div",{style:{flex:1,height:12,background:"#eeece4",borderRadius:5,overflow:"hidden"}},h("div",{style:{width:(st.n/mx*100)+"%",height:"100%",background:col}})), h("b",null,st.n)); }),
+        h("b",{style:{fontSize:12.5,display:"block",marginTop:12}},"Certificates on order"),
+        h("div",{style:{fontSize:12,lineHeight:1.9}}, certPill("3.1")," ",B.certN["3.1"]," form"+(B.certN["3.1"]===1?"":"s")+"  ",certPill("3.2")," ",B.certN["3.2"]," form"+(B.certN["3.2"]===1?"":"s"),
+          h("div",null, h("span",{style:{color:"#a3312a"}},B.certN.rfi+" RFI not raised")," · ",h("span",{style:{color:"#1a4fa0"}},B.certN.mtc+" witnessed, MTC awaited"),
+            B.certN.unset ? h("span",null," · ",h("a",{href:"#",onClick:e=>{ e.preventDefault(); setGrp({ key:"__set", label:"MTC not set" }); },style:{color:"#a3312a",fontWeight:700}},B.certN.unset+" MTC & AVL not set")) : null)))),
+    h("div",{style:{marginTop:12,border:"1px solid "+colors.border,borderRadius:9,padding:"8px 10px",background:"#fffdf8"}},
+      h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:4}},
+        h("b",{style:{fontSize:12.5}}, grp ? (grp.label+(grp.kind?" — "+(grp.kind==="po"?"PO pending":"material pending"):"")) : "To chase — past plan, RFI not raised, MTC not set"),
+        grp ? h("button",{onClick:()=>{ setGrp(null); setSel([]); },style:{...btnSmall,fontSize:11}},"Show all to chase") : null,
+        h("span",{style:{flex:1}}),
+        h("span",{style:{fontSize:11.5,color:colors.muted}},sel.length+" selected"),
+        h("button",{"data-testid":"ins-chase-sel",disabled:!sel.length||chBusy,onClick:()=>doChase(actItems.filter(m=>sel.includes(mKey(m)))),style:{...btnSmall,background:sel.length?"#1a56c9":"#fff",color:sel.length?"#fff":colors.muted,borderColor:sel.length?"#1a56c9":colors.border}},chBusy?"Sending…":"📨 Chase selected")),
+      actItems.length ? tbl([h("input",{type:"checkbox",checked:actItems.length>0 && actItems.every(m=>sel.includes(mKey(m))),onChange:e=>setSel(e.target.checked?actItems.map(mKey):[]),title:"Select all"}),"Contract","Form","Certificate","Where it is stuck","Vendor · PO","Late","Action → to",""],
+        actItems.slice(0,200).map(m=>{ const k = mKey(m); const ex = m.card && ((m.card.checklists||[]).find(c=>c.id==="ins_chase")||{items:[]}).items.find(i=>i.id==="ins|"+m.cn+"|"+(m.kind==="set"?"all":m.f.form)+"|"+m.step && !i.done);
+          return h("tr",{key:k},
+          td(h("input",{type:"checkbox",checked:sel.includes(k),onChange:e=>setSel(x=>e.target.checked?[...x,k]:x.filter(y=>y!==k))})),
+          td(h(CtRef,{ct:m.cn,name:m.client,compact:true}),{whiteSpace:"nowrap",fontWeight:700}), td(m.form), td(certPill(m.cert)),
+          td(h("span",null,kindPill(m), m.insp||m.where)),
+          td((m.pos||[]).length ? (m.pos||[]).map(p=>h("div",{key:p.po_no,style:{fontSize:11.5}}, p.vendor_name||"", " · ", h("a",{href:"#","data-testid":"ins-po-"+p.po_no,onClick:e=>{ e.preventDefault(); setPoOpen(p.id); },style:{color:"#1a56c9"}},p.po_no))) : h("span",{style:{color:"#bbb"}},"—")),
+          td(m.late ? h("b",{style:{color:"#a3312a"}},m.late+" d") : h("span",{style:{color:colors.muted}},"on plan")),
+          td(h("span",null,h("b",null,m.todo),h("div",{style:{fontSize:11,color:colors.muted}},"→ "+(m.to||[]).join(", ")+((m.cc||[]).length?" · copy "+m.cc.join(", "):"")), ex ? h("div",{style:{fontSize:11,color:"#0b5a40"}},"chased "+fmtDMY(String(ex.at||"").slice(0,10))+(/chased again/.test(ex.text)?" · again":"")+" · due "+fmtDMY(ex.due)) : null),{fontSize:12}),
+          td(h("button",{"data-testid":"ins-chase-"+k,disabled:chBusy,onClick:()=>doChase([m]),style:{...btnSmall,fontSize:11,whiteSpace:"nowrap"}}, ex?"📨 Chase again":"📨 Chase"))); }))
+        : h("div",{style:{fontSize:12,color:colors.muted,padding:6}},"Nothing to chase."),
+      h("div",{style:{fontSize:11,color:colors.muted,marginTop:4}},"A chase adds a line inside the contract's procurement card (due in 2 working days) and rings a bell. Purchase and Accounts can open every PO.")));
   const pdf = ()=>{ const { jsPDF } = window.jspdf; const doc = new jsPDF({ orientation:"landscape", unit:"mm", format:"a4" });
-    doc.setFontSize(14); doc.text("Order Insights — "+(scope==="all"?"all orders":scope==="rel"?"W/O released":"order "+one)+" — "+insDmy(insToday()), 10, 12);
-    const T = (title, head, body)=>{ let y = (doc.lastAutoTable ? doc.lastAutoTable.finalY : 14) + 8; if(y>180){ doc.addPage(); y = 14; } doc.setFontSize(11); doc.text(title, 10, y); doc.autoTable({ startY:y+2, head:[head], body, styles:{ fontSize:8 }, headStyles:{ fillColor:[26,43,74] }, margin:{ left:10, right:10 } }); };
-    T("Urgent actions", ["Contract","Client","What","Do","Who"], actRows.map(a=>[a.cn,a.client,a.what,a.todo,a.who]));
+    const W = 277; let y = 12;
+    const head = (t)=>{ y = (doc.lastAutoTable && doc.lastAutoTable.finalY > y ? doc.lastAutoTable.finalY : y) + 8; if(y>185){ doc.addPage(); y = 14; } doc.setFontSize(11.5); doc.setFont(undefined,"bold"); doc.text(t, 10, y); doc.setFont(undefined,"normal"); y += 2; };
+    const para = (t, bullet)=>{ doc.setFontSize(9); const L = doc.splitTextToSize((bullet?"• ":"")+t, W-(bullet?4:0)); if(y + L.length*4.2 > 195){ doc.addPage(); y = 14; } doc.text(L, bullet?12:10, y+4); y += L.length*4.2 + 1; };
+    const T = (title, headRow, body)=>{ head(title); doc.autoTable({ startY:y+1, head:[headRow], body, styles:{ fontSize:8 }, headStyles:{ fillColor:[26,43,74] }, margin:{ left:10, right:10 } }); y = doc.lastAutoTable.finalY; };
+    doc.setFontSize(14); doc.setFont(undefined,"bold"); doc.text("Order Insights — "+(scope==="all"?"all orders":scope==="rel"?"W/O released":"order "+one)+" — "+insDmy(insToday()), 10, y); doc.setFont(undefined,"normal");
+    head("Where we stand"); NAR.stand.forEach(t=>para(t,true));
+    head("Corrective actions"); NAR.lecture.forEach((l,i)=>{ doc.setFontSize(9.5); doc.setFont(undefined,"bold"); if(y>190){ doc.addPage(); y = 14; } doc.text((i+1)+". "+l.t, 10, y+4); y += 5; doc.setFont(undefined,"normal"); para(l.x); });
+    doc.lastAutoTable = null;
+    T("Urgent actions", ["Contract","Client","What","Do","Who"], actRows.map(a=>[a.cn,a.client,a.what,a.todo,insWho(a.who)]));
     T("Recommendations", ["#","Recommendation"], B.recs.map((r,i)=>[i+1,r]));
-    T("1 · Document control — where orders wait", ["Step","Orders","Late","Waiting on"], B.docStage.map(s=>[s.label,s.n,s.late,s.posts+" — "+s.names]));
+    T("1 · Document control — where orders wait", ["Step","Orders","Late","Waiting on"], B.docStage.map(s=>[s.label,s.n,s.late,s.names||s.posts]));
     T("Which documents hold us", ["Document","Open","With client > 7 d","Avg. age (d)"], B.docRows.map(d=>[d.name,d.open,d.c7,d.avg==null?"":d.avg]));
-    T("2 · Purchase — where orders wait", ["Step","Orders","Late","Waiting on"], B.purStage.map(s=>[s.label,s.n,s.late,s.posts+" — "+s.names]));
-    T("Materials holding us", ["Form","Orders waiting","Past plan","Avg. late (d)"], B.formRows.map(f=>[f.form,f.wait,f.past,f.avg==null?"":f.avg]));
+    T("Age of open documents", ["0–7 d","8–15 d","16–30 d","over 30 d"], [B.ageB]);
+    T("2 · Purchase — where orders wait", ["Step","Orders","Late","Waiting on"], B.purStage.map(s=>[s.label,s.n,s.late,s.names||s.posts]));
+    T("Materials holding us — PO vs material", ["Form","Certificate","PO pending","Material pending","3.2 inspection","Past plan","Avg. late (d)","Status"], B.matRows.map(g=>[g.form,g.cert,g.po,g.mat,Object.entries(g.insp).map(([k,v])=>v+" "+k).join(", "),g.past?g.past+" ("+[g.pastPo?g.pastPo+" PO":"",g.past32?g.past32+" 3.2":"",g.pastMat?g.pastMat+" Material":""].filter(Boolean).join(", ")+")":"0",g.avg==null?"":g.avg,g.sev.t]));
+    T("Gantt steps past their plan", ["Step","Past plan"], B.stepN.map(st=>[st.label, st.n]));
+    T("Certificates on order", ["3.1 forms","3.2 forms","RFI not raised","Witnessed — MTC awaited","MTC & AVL not set"], [[B.certN["3.1"],B.certN["3.2"],B.certN.rfi,B.certN.mtc,B.certN.unset]]);
+    T("To chase — by name", ["Contract","Client","Form","Cert.","Where stuck","Vendor · PO","Late (d)","Action","To"], B.mats.filter(m=>m.late>0 || m.insp==="RFI not raised" || m.kind==="set").sort((a,b)=>b.late-a.late).map(m=>[m.cn,m.client,m.form,m.cert,m.insp||m.where,(m.pos||[]).map(p=>(p.vendor_name||"")+" "+p.po_no).join(", "),m.late||"",m.todo,(m.to||[]).join(", ")+((m.cc||[]).length?" (copy "+m.cc.join(", ")+")":"")]));
     pdfShow(doc, "Order_Insights_"+insToday()+".pdf"); };
   const delB = (D.dels||[]).filter(r=>B.X.some(o=>o.cn===r.cn) || scope==="all");
   return h("div",{"data-testid":"ins-screen",style:{padding:"12px 16px",maxWidth:1280}},
@@ -70064,12 +70403,15 @@ function InsightsScreen({ user, onOpenContract }){
       h("div",{style:{fontSize:20,fontWeight:700}},"Order Insights — where we are lagging"),
       h("span",{style:{flex:1}}),
       [["all","All orders"],["rel","W/O released"],["one","One order"]].map(([k,l])=>h("button",{key:k,"data-testid":"ins-scope-"+k,onClick:()=>setScope(k),style:{...btnSmall,background:scope===k?colors.dark:"#fff",color:scope===k?"#fff":colors.text}},l)),
-      scope==="one" ? h("select",{"data-testid":"ins-one",value:one,onChange:e=>setOne(e.target.value),style:{...inputStyle,width:170,padding:"5px 7px"}}, h("option",{value:""},"— pick —"), oneList.map(cn=>h("option",{key:cn,value:cn},cn+" – "+((D.M.so.get(cn)||{}).customer_name||"")))) : null,
+      scope==="one" ? h(InsOrderCombo,{ value:one, onPick:setOne, options:oneList.map(cn=>({ cn, name:(D.M.so.get(cn)||{}).customer_name||"" })) }) : null,
       h("button",{onClick:pdf,style:btnSmall},"PDF"), h("button",{onClick:load,style:btnSmall},"Refresh")),
     h("div",{"data-testid":"ins-urgent",style:{background:"#fff",border:"1px solid #e7aaa3",borderRadius:12,padding:"10px 14px",marginBottom:14}},
       h("b",{style:{fontSize:15,color:"#a3312a"}},"Urgent actions ("+B.act.length+")"),
-      actRows.length ? tbl(["Contract","What is stuck","Do","Who",""], actRows.map((a,i)=>h("tr",{key:i}, td(h(CtRef,{ct:a.cn,name:a.client,compact:true}),{fontWeight:700,whiteSpace:"nowrap"}), td(a.what), td(h("b",null,a.todo)), td(a.who,{fontSize:11.5}), td(h("button",{onClick:()=>appOpenTab(a.tab),style:{...btnSmall,fontSize:11}},"Open →"))))) : h("div",{style:{fontSize:12,color:colors.muted,marginTop:4}},"Nothing urgent."),
-      h("div",{"data-testid":"ins-recs",style:{marginTop:10}}, h("b",{style:{fontSize:13,color:"#5b3fa3"}},"Recommendations"), h("ul",{style:{margin:"4px 0 0 18px",padding:0,fontSize:12.5}}, B.recs.map((r,i)=>h("li",{key:i,style:{margin:"2px 0"}},r))))),
+      actRows.length ? tbl(["Contract","What is stuck","Do","Who",""], actRows.map((a,i)=>h("tr",{key:i}, td(h(CtRef,{ct:a.cn,name:a.client,compact:true}),{fontWeight:700,whiteSpace:"nowrap"}), td(a.what), td(h("b",null,a.todo)), td(insWho(a.who),{fontSize:11.5}), td(h("button",{onClick:()=>appOpenTab(a.tab),style:{...btnSmall,fontSize:11}},"Open →"))))) : h("div",{style:{fontSize:12,color:colors.muted,marginTop:4}},"Nothing urgent."),
+      h("div",{"data-testid":"ins-recs",style:{marginTop:10}}, h("b",{style:{fontSize:13,color:"#5b3fa3"}},"Recommendations"), h("ul",{style:{margin:"4px 0 0 18px",padding:0,fontSize:12.5}}, B.recs.map((r,i)=>h("li",{key:i,style:{margin:"2px 0"}},r)))),
+      h("details",{"data-testid":"ins-stand",style:{marginTop:10}}, h("summary",{style:{cursor:"pointer",fontSize:13,fontWeight:700,color:"#1a2b4a"}},"Where we stand and corrective actions (also in the PDF)"),
+        h("ul",{style:{margin:"6px 0 0 18px",padding:0,fontSize:12.5}}, NAR.stand.map((t,i)=>h("li",{key:i,style:{margin:"2px 0"}},t))),
+        h("ol",{style:{margin:"8px 0 0 18px",padding:0,fontSize:12.5}}, NAR.lecture.map((l,i)=>h("li",{key:i,style:{margin:"4px 0"}},h("b",null,l.t),h("div",{style:{color:colors.muted}},l.x)))))),
     scope!=="one" ? h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:8,marginBottom:14}}, DEL_BUCKETS.filter(b=>["over","w0","w1","m0","m1","q0","nf","hold"].includes(b[0])).map(([k,l])=>{ const n = delB.filter(r=>r.bucket===k).length;
       return h("div",{key:k,role:"button",onClick:()=>appOpenTab("os_delivery"),style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:9,padding:"6px 10px",cursor:"pointer"}}, h("div",{style:{fontSize:18,fontWeight:800,color:k==="over"&&n?"#a3312a":colors.text}},n), h("div",{style:{fontSize:11,color:colors.muted}},"Delivery: "+l)); })) : null,
     chap(1,"Document control","Sale Order pending · documents · production hold · W/O release pending", h(React.Fragment,null,
@@ -70082,10 +70424,9 @@ function InsightsScreen({ user, onOpenContract }){
     chap(2,"Purchase","BOM summary · PR · approval · material in · Gantt", h(React.Fragment,null,
       kpis([[B.inPur.length,"Orders in purchase"],[B.purStage.find(s=>s.k==="pr").n,"PR release pending","a"],[B.purStage.find(s=>s.k==="pa").n,"Purchase approval waiting","a"],[B.past.length,"Gantt steps past plan","r"],[B.avgPct==null?"—":B.avgPct+"%","Avg. material in"],[B.avgPa==null?"—":B.avgPa+"%","Avg. approved material %"]]),
       stageTbl(B.purStage),
-      h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(360px,1fr))",gap:16,marginTop:10}},
-        h("div",null,h("b",{style:{fontSize:12.5}},"Materials holding us"), tbl(["Form","Orders waiting","Past plan","Avg. late"], B.formRows.map(f=>h("tr",{key:f.form}, td(f.form), td(f.wait), td(f.past,{color:f.past?"#a3312a":colors.text,fontWeight:f.past?700:400}), td(f.avg==null?"—":f.avg+" d"))))),
-        h("div",null,h("b",{style:{fontSize:12.5}},"Gantt steps past their plan"), B.stepN.map(s=>{ const mx = Math.max(1, ...B.stepN.map(z=>z.n)); return h("div",{key:s.s,style:{display:"flex",gap:8,alignItems:"center",margin:"5px 0",fontSize:12}}, h("span",{style:{width:100}},s.label), h("div",{style:{flex:1,height:12,background:"#eeece4",borderRadius:5,overflow:"hidden"}},h("div",{style:{width:(s.n/mx*100)+"%",height:"100%",background:"#e7aaa3"}})), h("b",null,s.n)); }))))),
-    chap(3,"Production","", h("div",{style:{fontSize:12.5,color:colors.muted}},"Comes with the production module.")));
+      matsSection())),
+    chap(3,"Production","", h("div",{style:{fontSize:12.5,color:colors.muted}},"Comes with the production module.")),
+    poOpen ? h(PurchaseOrderEditor,{ user, poId:poOpen, onClose:()=>setPoOpen(null), onChanged:()=>{} }) : null);
 }
 
 // ===== 2026-11-01T14:00:00Z: payment milestones — every PI says what it is for =====
@@ -70360,7 +70701,7 @@ async function calLoad(from, to, names){
   const endTs = calAdd(to,1)+"T00:00:00";
   const [evR, tR, dR, hR] = await Promise.all([
     sb.from("cal_event_tbl").select("*").lt("start_at", endTs),
-    sb.from("task_tbl").select("id,title,assignee,due_date,status,ref,customer,task_type,department").in("assignee", nm).neq("status","done").lte("due_date", to),   // 299: no lower bound — overdue cards carry over to today
+    sb.from("task_tbl").select("id,title,assignee,due_date,status,ref,customer,task_type,department,parent_id,proc_plan_id").in("assignee", nm).neq("status","done").lte("due_date", to),   // 299: no lower bound — overdue cards carry over to today
     sb.from("task_tbl").select("id,title,assignee,due_date,status,ref,customer,task_type,approved_at,moved_at").in("assignee", nm).eq("status","done").gte("approved_at", from+"T00:00:00").lt("approved_at", endTs),
     sb.from("cal_holiday_tbl").select("*").eq("status","Approved").gte("holiday_date", from).lte("holiday_date", to),
   ]);
@@ -70399,21 +70740,50 @@ async function calLoad(from, to, names){
 const CAL_KIND = { event:{ c:null, l:"Event" }, meeting:{ c:"#8e24aa", l:"Meeting" }, leave:{ c:"#9e9e9e", l:"Leave" }, task:{ c:"#e37400", l:"Task due" }, over:{ c:"#c62828", l:"Carried over (not done)" }, moved:{ c:"#e9c3a3", l:"Was due (moved to today)" }, done:{ c:"#9aa39a", l:"Task done" }, holiday:{ c:"#757575", l:"Holiday" } };
 const calItemColor = (it, ctx)=> it.kind==="event" ? (ctx.color[it.who]||"#1a73e8") : CAL_KIND[it.kind].c;
 
+// 302: the calendar's view / date / filters, kept for the session (Back returns to the same filtered page)
+function calUiGet(user){ try{ const x = JSON.parse(sessionStorage.getItem("calUI")||"null"); return x && x.u===(user&&user.username) ? x : null; }catch(e){ return null; } }
+function calUiSet(user, v){ try{ sessionStorage.setItem("calUI", JSON.stringify({ ...v, u:user&&user.username })); }catch(e){} }
+// 302: move a task card's due date / an event's date (and time) by dropping it on another day
+async function calMoveItem(it, date, min, user, ctx){
+  const me = ctx.me || user?.username || "";
+  if(it.task){ const t = it.task; const from = String(t.due_date||"").slice(0,10); if(from===date) return;
+    if(date < toISODate(new Date()) && !confirm("Move “"+t.title+"” to "+fmtDMY(date)+" — a day already gone?")) return;
+    const { error } = await sb.from("task_tbl").update({ due_date:date }).eq("id",t.id);
+    if(error){ alert("Could not move the task: "+error.message); return; }
+    await taskLog(t.id, me, "Due date "+(from?fmtDMY(from):"none")+" → "+fmtDMY(date)+" (moved on the calendar)", t.title);
+    if(t.assignee && t.assignee!==me) try{ await notifyPeople([t.assignee], "📅 "+me+" moved your task “"+t.title+"” to "+fmtDMY(date)+".", "info", { kind:"open", open:{ task:t.id } }); }catch(e){}
+    appToast("📅 “"+t.title+"” now due "+fmtDMY(date)); return; }
+  if(it.ev){ const ev = it.ev; const s0 = new Date(ev.start_at), e0 = ev.end_at ? new Date(ev.end_at) : null;
+    if((ev.repeat==="weekly"||ev.repeat==="monthly") && !confirm("“"+ev.title+"” repeats — the whole series moves. Go on?")) return;
+    const dayDiff = Math.round((new Date(date+"T12:00:00") - new Date(it.date+"T12:00:00"))/864e5);
+    let ns = new Date(s0.getTime() + dayDiff*864e5), ne = e0 ? new Date(e0.getTime() + dayDiff*864e5) : null;
+    if(min!=null && !ev.all_day && ev.kind!=="leave"){ const dur = e0 ? e0 - s0 : 3600e3; ns = new Date(date+"T00:00:00"); ns.setMinutes(min); ne = new Date(ns.getTime()+dur); }
+    if(ns.getTime()===s0.getTime()) return;
+    const { error } = await sb.from("cal_event_tbl").update({ start_at:ns.toISOString(), end_at:ne?ne.toISOString():null, updated_by:user?.username||"", updated_at:new Date().toISOString() }).eq("id",ev.id);
+    if(error){ alert("Could not move the event: "+error.message); return; }
+    const when = fmtDMY(toISODate(ns))+(ev.all_day ? "" : " "+calHM(ns.toISOString()));
+    const tell = [ev.owner, ...(Array.isArray(ev.guests)?ev.guests:[])].filter(n=>n && n!==me);
+    if(tell.length) try{ await notifyPeople(tell, "📅 "+me+" moved “"+ev.title+"” to "+when+".", "info", { kind:"open", open:{ tab:"calendar" } }); }catch(e){}
+    appToast("📅 “"+ev.title+"” moved to "+when); }
+}
 // ---- the screen: Tasks › Calendar ----
 function CalendarScreen({ user, company }){
   const pal = calPal(company);
   const today = toISODate(new Date());
   const [ctx,setCtx] = useState(null);
-  const [view,setView] = useState(()=>{ try{ return localStorage.getItem("calView")||"week"; }catch(e){ return "week"; } });
-  const [anchor,setAnchor] = useState(today);
-  const [show,setShow] = useState("me");
-  const [emp,setEmp] = useState("");   // 298: one employee from the Show list ("" = everyone in it)
-  const [off,setOff] = useState({});
+  const U0 = calUiGet(user);   // 302: back from a card (or any screen) lands on the same view, date and filters
+  const [view,setView] = useState(()=>{ if(U0 && U0.view) return U0.view; try{ return localStorage.getItem("calView")||"week"; }catch(e){ return "week"; } });
+  const [anchor,setAnchor] = useState(U0 && U0.anchor ? U0.anchor : today);
+  const [show,setShow] = useState(U0 && U0.show ? U0.show : "me");
+  const [emp,setEmp] = useState(U0 && U0.emp ? U0.emp : "");   // 298: one employee from the Show list ("" = everyone in it)
+  const [off,setOff] = useState(U0 && U0.off ? U0.off : {});
+  const dragRef = useRef(null); const [dropAt,setDropAt] = useState(null);
   const [data,setData] = useState(null);
   const [edit,setEdit] = useState(null);
   const [sheets,setSheets] = useState(false);
   const [tick,setTick] = useState(0);
-  useEffect(()=>{ calCtx(user, true).then(c=>{ setCtx(c); if(c.headDepts.length && !c.isSA) setShow("dept:"+c.headDepts[0]); }); },[user?.id]);
+  useEffect(()=>{ calCtx(user, true).then(c=>{ setCtx(c); if(c.headDepts.length && !c.isSA && !(U0 && U0.show)) setShow("dept:"+c.headDepts[0]); }); },[user?.id]);
+  useEffect(()=>{ calUiSet(user, { view, anchor, show, emp, off }); },[view, anchor, show, emp, JSON.stringify(off)]);
   useEffect(()=>{ try{ localStorage.setItem("calView",view); }catch(e){} },[view]);
   const range = (()=>{ if(view==="day") return [anchor,anchor];
     if(view==="week"){ const s = calAdd(anchor, -((calDow(anchor)+6)%7)); return [s, calAdd(s,6)]; }
@@ -70441,14 +70811,22 @@ function CalendarScreen({ user, company }){
   const qb = (on)=>({ ...btnSecondary, padding:"3px 10px", fontSize:12, borderRadius:14, ...(on?{ background:pal.p, borderColor:pal.p, color:"#fff", fontWeight:600 }:{}) });
   const empOpts = basePeople.slice().sort((a,b)=>a.localeCompare(b));
   const prim = { ...btnPrimary, background:pal.p, padding:"7px 14px", borderRadius:16 };
-  const openItem = (it)=>{ if(it.task) appOpenCard(it.task.id); else if(it.ev) setEdit({ ...it.ev }); };
+  const openItem = (it)=>{ if(it.task) appOpenCard(it.task.id, { label:"← Back to the calendar", tab:"calendar" }); else if(it.ev) setEdit({ ...it.ev }); };
+  // 302: drag a task card (or an event) to another day — the due date (event date / time) moves
+  const canDrag = (it)=> !!ctx && ((it.task && (it.kind==="task"||it.kind==="over") && !(it.task.proc_plan_id && it.task.parent_id) && ctx.canEditFor(it.who))
+    || (it.ev && it.kind!=="holiday" && (ctx.canEditFor(it.ev.owner) || it.ev.created_by_emp===ctx.me)));
+  const dragProps = (it)=> canDrag(it) ? { draggable:true, onDragStart:e=>{ dragRef.current = it; try{ e.dataTransfer.setData("text/plain", it.key); e.dataTransfer.effectAllowed = "move"; }catch(x){} }, onDragEnd:()=>{ dragRef.current = null; setDropAt(null); } } : {};
+  const dropProps = (date, minOf)=>({ onDragOver:e=>{ if(!dragRef.current) return; e.preventDefault(); const k = date+(minOf?"|t":""); if(dropAt!==k) setDropAt(k); },
+    onDragLeave:()=>{}, onDrop:async e=>{ e.preventDefault(); const it = dragRef.current; dragRef.current = null; setDropAt(null); if(!it) return;
+      const min = minOf ? minOf(e) : null; await calMoveItem(it, date, min, user, ctx); setTick(x=>x+1); } });
+  const dropHi = (date, t)=> dropAt===date+(t?"|t":"") ? { outline:"2px dashed "+pal.p, outlineOffset:-2, background:pal.pl } : {};
   const newAt = (date, min)=>{ const s = min!=null ? String(Math.floor(min/60)).padStart(2,"0")+":"+String(min%60).padStart(2,"0") : "10:00";
     const e = min!=null ? String(Math.floor((min+60)/60)).padStart(2,"0")+":"+String(min%60).padStart(2,"0") : "11:00";
     setEdit({ id:null, owner: people.length===1 ? people[0] : ctx.me, title:"", kind:"event", _date:date, _from:s, _to:e, all_day:false, guests:[], contract_number:"", repeat:"none", note:"" }); };
   const showOpts = [["me","Me — "+ctx.me], ...ctx.headDepts.map(d=>["dept:"+d, "Department: "+d]), ...(ctx.isSA || ctx.headDepts.length>1 ? [["all", ctx.isSA ? "All departments" : "All my departments"]] : [])];
   const groups = {}; people.forEach(n=>{ const e = ctx.empOf(n); const d = (e&&e.department)||"(no department)"; (groups[d]=groups[d]||[]).push(n); });
-  const chip = (it, compact)=> h("div",{key:it.key, title:(it.who!=="*"?it.who+" · ":"")+it.title+(it.badge?" ("+it.badge+")":""), onClick:e=>{ e.stopPropagation(); openItem(it); },
-    style:{ background:calItemColor(it,ctx), color:"#fff", borderRadius:4, padding:"1px 6px", fontSize:11, margin:"1px 0", cursor:(it.task||it.ev)?"pointer":"default", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", textDecoration: it.kind==="done" ? "line-through" : "none" }},
+  const chip = (it, compact)=> h("div",{key:it.key, ...dragProps(it), title:(it.who!=="*"?it.who+" · ":"")+it.title+(it.badge?" ("+it.badge+")":"")+(canDrag(it)?" — drag to another day to move it":""), onClick:e=>{ e.stopPropagation(); openItem(it); },
+    style:{ background:calItemColor(it,ctx), color:"#fff", borderRadius:4, padding:"1px 6px", fontSize:11, margin:"1px 0", cursor:canDrag(it)?"grab":(it.task||it.ev)?"pointer":"default", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", textDecoration: it.kind==="done" ? "line-through" : "none" }},
     (it.kind==="done"?"✓ ":it.kind==="over"?"↻ ":it.kind==="moved"?"→ ":"")+(people.length>1 && it.who!=="*" ? String(it.who).split(" ")[0]+": " : "")+(compact && it.start!=null && !it.allDay ? calHM(new Date(2000,0,1,0,it.start))+" " : "")+it.title+(it.badge && it.badge.startsWith("added by") ? " ✎" : ""));
   // ---- week / day grid ----
   const H0 = 7, H1 = 21, HP = 40;
@@ -70459,16 +70837,16 @@ function CalendarScreen({ user, company }){
       new Date(d+"T12:00:00").toLocaleDateString("en-GB",{weekday:"short"}).toUpperCase(),
       h("div",{style:{fontSize:19,color: d===today?"#fff":colors.text, background: d===today?pal.p:"transparent", borderRadius:"50%", width:32, height:32, lineHeight:"32px", margin:"1px auto 0"}}, Number(d.slice(8))))),
     h("div",{style:{fontSize:10,color:colors.muted,textAlign:"right",padding:"4px 6px",borderBottom:"1px solid "+colors.border}},"all day"),
-    days.map(d=> h("div",{key:"a"+d, onDoubleClick:()=>newAt(d,null), style:{borderLeft:"1px solid "+colors.border,borderBottom:"1px solid "+colors.border,padding:2,minHeight:26,background: calDow(d)===0?"#faf9f5":"#fff"}},
+    days.map(d=> h("div",{key:"a"+d, ...dropProps(d), onDoubleClick:()=>newAt(d,null), style:{borderLeft:"1px solid "+colors.border,borderBottom:"1px solid "+colors.border,padding:2,minHeight:26,background: calDow(d)===0?"#faf9f5":"#fff", ...dropHi(d)}},
       items.filter(it=>it.date===d && (it.allDay || it.start==null)).sort((a,b)=>(a.kind==="holiday"?-1:0)-(b.kind==="holiday"?-1:0)).map(it=>chip(it)))),
     h("div",null, Array.from({length:H1-H0},(_,i)=> h("div",{key:i,style:{height:HP,fontSize:10,color:colors.muted,textAlign:"right",paddingRight:6,transform:"translateY(-6px)"}}, i===0?"":((H0+i)>12?(H0+i-12):(H0+i))+((H0+i)>=12?" PM":" AM")))),
     days.map(d=>{ const ti = items.filter(it=>it.date===d && !it.allDay && it.start!=null).sort((a,b)=>a.start-b.start);
       const lanes = []; ti.forEach(it=>{ const en = it.end!=null && it.end>it.start ? it.end : it.start+60; let l = lanes.findIndex(x=>x<=it.start); if(l<0){ l = lanes.length; lanes.push(en); } else lanes[l] = en; it._lane = l; it._en = en; });
       const nl = Math.max(1, lanes.length);
-      return h("div",{key:"c"+d, onDoubleClick:e=>{ const r = e.currentTarget.getBoundingClientRect(); const m = H0*60 + Math.floor((e.clientY-r.top)/HP*2)*30; newAt(d, m); },
-        style:{position:"relative",borderLeft:"1px solid "+colors.border,height:(H1-H0)*HP,backgroundImage:"repeating-linear-gradient(to bottom, #f0eee6 0, #f0eee6 1px, transparent 1px, transparent "+HP+"px)", background: calDow(d)===0?"#faf9f5":undefined}},
+      return h("div",{key:"c"+d, ...dropProps(d, (e)=>{ const r = e.currentTarget.getBoundingClientRect(); return H0*60 + Math.floor((e.clientY-r.top)/HP*2)*30; }), onDoubleClick:e=>{ const r = e.currentTarget.getBoundingClientRect(); const m = H0*60 + Math.floor((e.clientY-r.top)/HP*2)*30; newAt(d, m); },
+        style:{position:"relative",borderLeft:"1px solid "+colors.border,height:(H1-H0)*HP,...(dropAt===d+"|t"?{boxShadow:"inset 0 0 0 2px "+pal.p}:{}),backgroundImage:"repeating-linear-gradient(to bottom, #f0eee6 0, #f0eee6 1px, transparent 1px, transparent "+HP+"px)", background: calDow(d)===0?"#faf9f5":undefined}},
         d===today ? h("div",{style:{position:"absolute",left:0,right:0,top:Math.max(0,((new Date().getHours()*60+new Date().getMinutes())-H0*60)/60*HP),borderTop:"2px solid "+pal.p,zIndex:2}}) : null,
-        ti.map(it=> h("div",{key:it.key, onClick:e=>{ e.stopPropagation(); openItem(it); }, title:it.who+" · "+it.title+(it.badge?" ("+it.badge+")":""),
+        ti.map(it=> h("div",{key:it.key, ...dragProps(it), onClick:e=>{ e.stopPropagation(); openItem(it); }, title:it.who+" · "+it.title+(it.badge?" ("+it.badge+")":"")+(canDrag(it)?" — drag to move":""),
           style:{position:"absolute", top:Math.max(0,(it.start-H0*60)/60*HP), height:Math.max(18,(it._en-it.start)/60*HP-2), left:(it._lane*100/nl)+"%", width:"calc("+(100/nl)+"% - 3px)",
             background:calItemColor(it,ctx), color:"#fff", borderRadius:5, padding:"2px 5px", fontSize:11, overflow:"hidden", cursor:"pointer", boxShadow:"0 1px 2px rgba(0,0,0,.2)", zIndex:1}},
           h("b",null, calHM(new Date(2000,0,1,0,it.start))+" "), (people.length>1?String(it.who).split(" ")[0]+" · ":"")+it.title,
@@ -70477,7 +70855,7 @@ function CalendarScreen({ user, company }){
     return h("div",{style:{display:"grid",gridTemplateColumns:"repeat(7,minmax(0,1fr))",minWidth:700}},
       ["MON","TUE","WED","THU","FRI","SAT","SUN"].map(x=>h("div",{key:x,style:{textAlign:"center",fontSize:11,color:colors.muted,padding:4,borderBottom:"1px solid "+colors.border}},x)),
       Array.from({length:42},(_,i)=>{ const d = calAdd(range[0],i); const its = items.filter(it=>it.date===d).sort((a,b)=>(a.kind==="holiday"?-1:0)-(b.kind==="holiday"?-1:0) || (a.start??-1)-(b.start??-1));
-        return h("div",{key:d, onDoubleClick:()=>newAt(d,null), style:{minHeight:96,borderRight:"1px solid "+colors.border,borderBottom:"1px solid "+colors.border,padding:3,background: new Date(d+"T12:00:00").getMonth()!==m ? "#faf9f5" : "#fff"}},
+        return h("div",{key:d, ...dropProps(d), onDoubleClick:()=>newAt(d,null), style:{minHeight:96,borderRight:"1px solid "+colors.border,borderBottom:"1px solid "+colors.border,padding:3,background: new Date(d+"T12:00:00").getMonth()!==m ? "#faf9f5" : "#fff", ...dropHi(d)}},
           h("div",{onClick:()=>{ setAnchor(d); setView("day"); },style:{fontSize:11.5,cursor:"pointer",textAlign:"center",marginBottom:2}},
             h("span",{style:{display:"inline-block",minWidth:22,borderRadius:11,padding:"1px 5px",background:d===today?pal.p:"transparent",color:d===today?"#fff":(new Date(d+"T12:00:00").getMonth()!==m?colors.mutedLight:colors.text)}}, Number(d.slice(8)))),
           its.slice(0,4).map(it=>chip(it,true)),
@@ -70511,7 +70889,7 @@ function CalendarScreen({ user, company }){
         h("div",{style:{marginTop:14,borderTop:"1px solid "+colors.border,paddingTop:8}},
           ["event","meeting","leave","task","over","moved","done","holiday"].map(k=> h("div",{key:k,style:{display:"flex",gap:6,alignItems:"center",fontSize:11.5,color:colors.muted,margin:"2px 0"}},
             h("i",{style:{width:10,height:10,borderRadius:2,display:"inline-block",background: CAL_KIND[k].c || pal.p}}), k==="event" ? "Event (person's colour)" : CAL_KIND[k].l))),
-        h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:10}},"Double-click a day or an hour to add an event. Click a task to open its card.")),
+        h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:10}},"Double-click a day or an hour to add an event. Click a task to open its card. Drag a task or an event to another day (or hour) to move it.")),
       h("div",{style:{flex:1,overflow:"auto",background:"#fff"}}, !data ? h("div",{style:{padding:20,color:colors.muted}},"Loading…") : (view==="month" ? monthGrid() : timeGrid()))),
     edit ? h(CalEventModal,{ user, ctx, pal, ev:edit, onClose:()=>setEdit(null), onSaved:()=>{ setEdit(null); setTick(x=>x+1); } }) : null,
     sheets ? h(CalTaskSheetsModal,{ user, ctx, pal, onClose:()=>setSheets(false),
