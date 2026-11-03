@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-11-02T17:00:00Z";
+  var APP_BUILD_VERSION = "2026-11-03T02:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -9160,7 +9160,11 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     const ref = gatewayRef.trim();
     if(!ref) return;
     setGatewayBusy(true);
-    const { data } = await sb.from("estimates").select("item_sl_no,customer_name").eq("reference_number",ref).order("item_sl_no");
+    let { data } = await sb.from("estimates").select("item_sl_no,customer_name").eq("reference_number",ref).order("item_sl_no");
+    if(!(data && data.length)){   // bala: same quote saved with another spelling (case, H, revision)? use that one
+      const found = await quoteInDb(ref);
+      if(found){ const r2 = await sb.from("estimates").select("item_sl_no,customer_name").eq("reference_number",found).order("item_sl_no"); data = r2.data; setGatewayRef(found);
+        alert("Quote "+found+" is already in the database"+(found.toUpperCase()!==ref.toUpperCase()?" (you typed "+ref+")":"")+". Pick an existing Sl No or add a new one — a new quote is not created."); } }
     setGatewayBusy(false);
     if(data && data.length>0){ setGatewaySiblings(data); setGatewayStep("existingChoice"); }
     else { setGatewaySiblings(null); setGatewayStep("newConfirm"); }
@@ -9430,8 +9434,8 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
   // Populate the Quote# combo box with every saved quote + its customer, so the
   // person can either pick an existing one or type a brand new Quote#.
   const loadQuoteOptions = async()=>{
-    const { data } = await sb.from("estimates").select("reference_number,description").order("reference_number");
-    if(!data) return;
+    const data = await fetchPaged(()=>sb.from("estimates").select("reference_number,description"));   // bala: all quotes, not the first 1000
+    if(!data) return; data.sort((a,b)=>String(a.reference_number).localeCompare(String(b.reference_number)));
     const seen = new Set(); const opts=[];
     data.forEach(r=>{ if(!seen.has(r.reference_number)){ seen.add(r.reference_number); opts.push(r); } });
     setQuoteOptions(opts);
@@ -9511,6 +9515,14 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     // twice for the same thing already confirmed would just be annoying.
     setSavingRef(true);
     const { data: siblingRows } = await sb.from("estimates").select("item_sl_no,company_id,quote_status").eq("reference_number",ref);
+    {   // bala: an offer that has gone to the customer is never overwritten here — a change is a new revision (Amend quote)
+      const st = siblingRows && siblingRows.length ? String((siblingRows.find(r=>r.quote_status)||{}).quote_status||"Draft") : "Draft";
+      if(siblingRows && siblingRows.some(r=>r.item_sl_no===slNo) && !/^draft$/i.test(st.trim()) && !qIsContractRef(ref)){   // Sale Order lines (6-digit contract numbers) keep their own rules
+        setSavingRef(false); setGatewayConfirmedNewSlNo(false);
+        fail("Quote# "+ref+" is at stage \""+st+"\" — it has gone to the customer, so Sl No "+slNo+" can't be overwritten from the Estimator.\n\nTo change it, open the quote and use Amend quote: it makes a new revision and keeps what the customer received.\n\nNothing was saved.");
+        return false;
+      }
+    }
     if(siblingRows && siblingRows.length>0 && !gatewayConfirmedNewSlNo){
       const usedSlNos = siblingRows.map(r=>r.item_sl_no);
       const isOverwrite = usedSlNos.includes(slNo);
@@ -9573,6 +9585,10 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
         await sb.from("estimates").update(existingPayload).eq("id",estimateId);
         davitStash = await davitStashBeforeResave(ref, slNo);   // 256: davit lines kept apart, put back below
         connStash = await connStashBeforeResave(ref, slNo);   // 257
+        try{   // bala: every overwrite is in the audit log, with the lines it replaced
+          const { data: oldLines } = await sb.from("estimate_lines").select("*").eq("reference_number",ref).eq("item_sl_no",slNo);
+          await logAudit("UPDATE","estimate_lines",ref+" / Sl No "+slNo,"Sl No "+slNo+" of "+ref+" overwritten from the Estimator ("+(oldLines||[]).length+" old lines replaced by "+effectiveCart.length+")",user?.username||"unknown",{ lines:oldLines||[] },{ lines:effectiveCart.map(l=>({ model:l.model, item:l.item, size:l.size, component:l.component, sales_price:l.sales_price })) });
+        }catch(e){ console.warn("overwrite audit", e); }
         await sb.from("estimate_lines").delete().eq("reference_number",ref).eq("item_sl_no",slNo);
       } else {
         const{data:created,error:err}=await sb.from("estimates").insert({reference_number:ref,item_sl_no:slNo,...headerPayload,order_qty:Number(orderQty),quote_status:resolvedQuoteStatus,company_id:resolvedCompanyId,created_by:user.username,datasheet_not_required:skipDatasheet===true,linked_allocation_id:(holdingNewSlNo&&holdingNewSlNo.linked_allocation_id)||null,linked_project_id:linkedProjectId||null,linked_enquiry_id:(holdingNewSlNo&&holdingNewSlNo.linked_enquiry_id)||null}).select().single();
@@ -9596,7 +9612,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
       // item, with the count held on order_qty. Every other cart keeps the
       // quantity exactly as it was. dp_order_qty is deliberately not in
       // this list — it is a carrier, not a column.
-      const rows=effectiveCart.filter(l=>!isDavitLine(l)).map((l,idx)=>({reference_number:ref,item_sl_no:slNo,sl_no:idx+1,estimate_id:estimateId,model:l.model,item:l.item,size:l.size,sub_assembly:l.sub_assembly,component:l.component,material_shape:l.material_shape||"",material_spec:l.material_spec,grade:l.grade,qty_required:(dpOnlyCart?1:l.qty_required),uom:l.uom,rate:l.rate,cost:l.cost,sf:l.sf,sales_price:l.sales_price,cutting_plan_layout_size:l.cutting_plan_layout_size||"",cutting_plan_qty:Number(l.cutting_plan_qty)||0,cutting_plan_uom:l.cutting_plan_uom||"",is_direct_price:l.is_direct_price===true,validation_status:l.validation_status||null,excel_file_name:l.excel_file_name||null,excel_file_path:l.excel_file_path||null,no_excel_code_used:l.no_excel_code_used||null,added_by:l.added_by||null,custom_item:l.custom_item||null,custom_model_recorded:l.custom_model_recorded||null,
+      const rows=effectiveCart.filter(l=>!isDavitLine(l)).map((l,idx)=>({reference_number:ref,item_sl_no:slNo,sl_no:idx+1,estimate_id:estimateId,model:l.model,item:l.item,size:l.size,sub_assembly:l.sub_assembly,component:l.component,material_shape:l.material_shape||"",material_spec:l.material_spec,grade:l.grade,qty_required:(dpOnlyCart?1:l.qty_required),uom:l.uom,rate:l.rate,cost:l.cost,sf:l.sf,sales_price:l.sales_price,cutting_plan_layout_size:l.cutting_plan_layout_size||"",cutting_plan_qty:Number(l.cutting_plan_qty)||0,cutting_plan_uom:l.cutting_plan_uom||"",is_direct_price:l.is_direct_price===true,validation_status:l.validation_status||null,excel_file_name:l.excel_file_name||null,excel_file_path:l.excel_file_path||null,no_excel_code_used:l.no_excel_code_used||null,added_by:l.added_by||user?.username||null,custom_item:l.custom_item||null,custom_model_recorded:l.custom_model_recorded||null,
         // Pricelist lines only — the keys are left off other lines so a
         // database without the price list columns keeps saving as before.
         ...(l.price_source ? {price_source:l.price_source, pricelist_model_code:l.pricelist_model_code||null, pricelist_ref:l.pricelist_ref||null, material_values:l.material_values||null, ...(l.pricelist_vendor?{pricelist_vendor:l.pricelist_vendor}:{})} : {})}));
@@ -15513,7 +15529,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       if(pool.length>0){ const slNo1 = pool.find(r=>r.item_sl_no===1) || pool[0]; openEstimate(slNo1); }
     }
   };
-  const handleRefSearchBlur = (e)=>{
+  const handleRefSearchBlur = async(e)=>{
     const val = refSearchDisplay.trim();
     if(!val){ setRefSearchDisplay(e.target.dataset.prevVal||""); return; }
     const hit = refOptionsList.find(o=>o.label===val || o.rn===val) || refOptionsList.find(o=>hFold(o.rn).toUpperCase()===hFold(val).toUpperCase());   // 184b
@@ -15523,12 +15539,22 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     // only prompt when it looks like a specific quote number was intended.
     const looksLikeRefAttempt = /^[A-Za-z0-9\-\/]+$/.test(val) && val.length>=3;
     if(!looksLikeRefAttempt){ setRefSearchDisplay(e.target.dataset.prevVal||""); return; }
-    if(confirm("Quote \""+val+"\" doesn't exist. Create it as a new quote?")){
+    // bala: never offer "create" for a quote that is in the database — look it up first (any case, with or without the H,
+    // any revision) and open it if it is there
+    const prevVal = e.target.dataset.prevVal||"";
+    const found = await quoteInDb(val);
+    if(found){
+      const rows = await fetchRefRows(found);
+      const target = rows.length ? found : null;
+      if(target){ setRefFilter(target); setSlNoFilter(""); setRefSearchDisplay(target); const slNo1 = rows.find(r=>r.item_sl_no===1) || rows[0]; openEstimate(slNo1);
+        alert("Quote "+target+" is in the database — it is opened for you.\n\nIt was not in the list on this screen. Nothing new was created."); return; }
+    }
+    if(confirm("Quote \""+val+"\" is not in the database (checked just now). Create it as a new quote?")){
       setRefSearchDisplay("");
       if(onNewSlNo) onNewSlNo(val, 1);
       else if(onGoToTab) onGoToTab("estimator");
     } else {
-      setRefSearchDisplay(e.target.dataset.prevVal||"");
+      setRefSearchDisplay(prevVal);
     }
   };
   const [showDatasheet,setShowDatasheet]=useState(false);
@@ -16156,7 +16182,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       const stripId = (r)=>{ const c={...r}; delete c.id; return c; };
       await clearLeftoversForRef(newRef);   // 152
       let newEstRows = [];
-      if(estRows?.length){ const { data: ne, error: neErr } = await sb.from("estimates").insert(estRows.map(r=>({...stripId(r), reference_number:newRef, quote_status:"Draft"}))).select(); if(neErr) throw neErr; newEstRows = ne||[]; }
+      if(estRows?.length){ const { data: ne, error: neErr } = await sb.from("estimates").insert(estRows.map(r=>({...stripId(r), reference_number:newRef, quote_status:"Draft", created_at:new Date().toISOString()}))).select(); if(neErr) throw neErr; newEstRows = ne||[]; }
       if(lineRows?.length){ const { error: lnErr } = await sb.from("estimate_lines").insert(remapEstimateIds(onlyLiveSl(lineRows, estRows), estRows, newEstRows).map(r=>({...stripId(r), reference_number:newRef}))); if(lnErr) throw lnErr; }
       if(termsRows?.length) await sb.from("quote_commercial_terms").insert(termsRows.map(r=>({...stripId(r), reference_number:newRef})));
       if(noteRows?.length) await sb.from("quote_notes").insert(noteRows.map(r=>({...stripId(r), reference_number:newRef})));
@@ -18714,7 +18740,11 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     fetchAll("material_spec","material_spec").then(rows=>setAllSpecs(Array.from(new Set(rows.map(r=>r.material_spec).filter(Boolean))).sort()));
   },[]);
 
-  const load=useCallback(async()=>{ setLoading(true); const{data}=await sb.from("estimates").select("*").order("created_at",{ascending:false}); setRefs(data||[]); setLoading(false); },[]);
+  // bala (2026-11-03T02:00:00Z): every quote, in pages — a plain read stops at the API's row limit, and quotes past it
+  // vanished from Find (FIN260008, 2 Nov 2026)
+  const load=useCallback(async()=>{ setLoading(true); let data = await fetchPaged(()=>sb.from("estimates").select("*")); data = (data||[]).sort((a,b)=>String(b.created_at||"").localeCompare(String(a.created_at||""))); setRefs(data); setLoading(false); },[]);
+  // a quote that is not in the list (yet) is read straight from the database and added, instead of being given up on
+  const fetchRefRows = async(ref)=>{ const { data } = await sb.from("estimates").select("*").eq("reference_number",ref); const rows = data||[]; if(rows.length) setRefs(prev=>{ const have = new Set(prev.map(r=>r.id)); return [...rows.filter(r=>!have.has(r.id)), ...prev]; }); return rows; };
   useEffect(()=>{load();},[load]);
 
   const [pendingOpenDatasheet,setPendingOpenDatasheet]=useState(false);
@@ -18738,6 +18768,10 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       setRetriedTargetKey(targetKey);
       load();
     } else {
+      const tgt = openTarget;   // bala: last try — read that quote directly
+      fetchRefRows(tgt.reference_number).then(rows=>{ const m = rows.find(r=>tgt.item_sl_no==null || r.item_sl_no===tgt.item_sl_no) || rows[0];
+        if(m){ setShowEntryGate(false); setRefFilter(m.reference_number); setSlNoFilter(""); openEstimate(m); if(tgt.openDatasheet) setPendingOpenDatasheet(true); }
+        else alert("Quote "+tgt.reference_number+" was not found in the database."); });
       if(onConsumedTarget) onConsumedTarget();
     }
   },[openTarget, loading, refs]);
@@ -24365,6 +24399,22 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
 }
 
 /* ---- AUDIT LOG HELPER ---- */
+// bala (2026-11-03T02:00:00Z): is this quote number in the database? Same number in any case, with or without the
+// H of the Hydronett prefix, or any revision of it. Returns the reference to open (the latest revision) or null.
+async function quoteInDb(typed){
+  const v = String(typed||"").trim(); if(!v) return null;
+  const esc = x=> x.replace(/[%_\\]/g, m=>"\\"+m);
+  const fam = qFamily(hFold(v)).replace(/\s+/g,"");
+  const tries = Array.from(new Set([v, hFold(v), qFamily(v), qFamily(hFold(v))].filter(Boolean)));
+  let rows = [];
+  for(const t of tries){ try{ const { data } = await sb.from("estimates").select("reference_number").ilike("reference_number", esc(t)+"%").limit(200); rows = rows.concat(data||[]); }catch(e){} }
+  // the H may be the other way round: typed FXDS…, saved FHXDS… — also try with the H put in after the first letter
+  if(!rows.length && /^F[A-Za-z]/i.test(v)){ try{ const withH = v.replace(/^([Ff])/,"$1H"); const { data } = await sb.from("estimates").select("reference_number").ilike("reference_number", esc(withH)+"%").limit(200); rows = rows.concat(data||[]); }catch(e){} }
+  const same = Array.from(new Set(rows.map(r=>r.reference_number))).filter(r=> qFamily(hFold(r)).replace(/\s+/g,"").toUpperCase()===fam.toUpperCase());
+  if(!same.length) return null;
+  const exact = same.find(r=>r.toUpperCase()===v.toUpperCase()); if(exact) return exact;
+  same.sort((a,b)=>qRevNum(b)-qRevNum(a)); return same[0];
+}
 async function logAudit(action, tableName, recordId, recordSummary, performedBy, oldData, newData) {
   try {
     await sb.from("audit_log").insert({
@@ -26077,7 +26127,7 @@ function SaleOrderContractPicker({ user, onOpenContract, startCreate, onConsumed
   const loadQuoteOptions = async()=>{
     setQuoteOptionsLoading(true);
     const [{data:estRows},{data:contractsAll}] = await Promise.all([
-      sb.from("estimates").select("reference_number,customer_name,quote_status,item_sl_no,currency").order("reference_number"),
+      fetchPaged(()=>sb.from("estimates").select("reference_number,customer_name,quote_status,item_sl_no,currency")).then(d=>({ data:(d||[]).sort((a,b)=>String(a.reference_number).localeCompare(String(b.reference_number))) })),   // bala
       pagedRead(()=>sb.from("sale_order_tbl").select("contract_number")),
     ]);
     const contractNumbers = new Set((contractsAll||[]).map(c=>c.contract_number));
@@ -35235,6 +35285,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"3 Nov 2026 (309, bala)", summary:"Built on 2026-11-03T02:00:00Z, on top of 2026-11-02T17:00:00Z. No SQL. BUILD \u201cbala\u201d \u2014 fixes for the FIN260008 incident (2 Nov). (1) Quotes screen reads EVERY quote in pages; before, it stopped at the database\u2019s 1,000-row limit and older quotes vanished from Find. Same for the Estimator\u2019s Quote# list and the Sale Order quote picker. Opening a quote from the Quotes Report or anywhere else reads that quote straight from the database if it is not in the list. (2) \u201cQuote \u2026 doesn\u2019t exist. Create it as a new quote?\u201d is only asked after the database has been checked \u2014 the same number in any case, with or without the H, or any revision. If the quote is there, it is opened (\u201cNothing new was created\u201d). The Estimator\u2019s + Add to estimate does the same. (3) The Estimator will NOT overwrite a Sl No of a quote that has left Draft (it has gone to the customer): it says to use Amend quote, which makes a new revision, and saves nothing. (4) Every overwrite of a Sl No (Draft quotes) is written to the audit log with the lines it replaced; lines saved from the Estimator carry who added them. (5) Amend quote: the new revision gets its own created date (it used to copy the old one\u2019s). Supabase Max rows can stay at 10000; the app no longer depends on it." },
   { date:"2 Nov 2026 (308)", summary:"Built on 2026-11-02T17:00:00Z, on top of 2026-11-02T15:00:00Z. No SQL. CUSTOMER INSIGHTS. (1) POINTS card replaces the rating card: grade and score, then one row per measure \u2014 the measure, a badge with the working in plain words (e.g. \u201c8 won of 26 quotes \u00b7 smoothed 29% \u00f7 target 40% = 73%\u201d, \u201cpays in 45 d vs 30 d terms \u2192 15 d late \u00b7 1 \u2212 15/45 = 67%\u201d) and the points out of the maximum \u2014 and a Total row. (2) NO FREE POINTS: a customer with no enquiry, quote or order in the period is NOT RATED (\u201c\u2014 not rated\u201d; any amount still pending is shown); conversion scores only when there are quotes; payments, overdue and terms score only for customers who ordered (half while nothing is invoiced / paid yet). Rating filter and dashboard get a Not rated line. (3) Empty funnel / quarter chart say so instead of zero bars. (4) The full-screen customer page FITS ONE SCREEN (windows 1000 \u00d7 640 and larger): the 8 figures in one row, Points beside Quarter / Funnel / Payments, and Quotations | Orders filling the rest, each scrolling inside its own box; smaller windows scroll as before." },
   { date:"2 Nov 2026 (307)", summary:"Built on 2026-11-02T15:00:00Z, on top of 2026-11-02T13:00:00Z. No SQL. CUSTOMER INSIGHTS: double-click a customer (or Enter) and it opens on a FULL-SCREEN page (the browser's own full screen where it allows, else the whole window). The bar at the top: \u2715 Close, \u2039 \u203a for the previous / next customer in the list (PgUp / PgDn too), the position (e.g. 4 of 34), the period, and Excel / PDF of that customer's figures. Close or Esc brings you back to Customer Insights exactly as you left it \u2014 same filters, sort and scroll \u2014 with the customer you were last on highlighted. Single-click still shows the customer in the panel under the list." },
   { date:"2 Nov 2026 (306)", summary:"Built on 2026-11-02T13:00:00Z, on top of 2026-11-02T10:00:00Z. SQL (both companies): structure_customer_name_alias_2026-11-02.sql \u2014 needed only to link quote names to customers. CUSTOMER INSIGHTS: (1) No more tabs \u2014 one panel under the list shows the selected customer and follows the selection (click a row, \u2191 \u2193, or a letter); a Customer | Dashboard switch chooses what the panel shows. (2) LATEST REVISION ONLY: all revisions of a quote (FS260043, -R01, -R02\u2026) are one quote. It counts once, in the period it was FIRST SENT; its value, stage and customer come from its LATEST revision \u2014 everywhere: list, totals, funnel, conversion, rating, quarter bars, dashboard. The quotations list shows Rev, First sent and Latest rev; tick \u201cshow earlier revisions\u201d to see the superseded ones in grey (not counted). Stage buttons All / Open / Won / Lost / Parked with counts. (3) A quote with a blank stage counts as sent when it has a value (it was being left out as a draft). (4) Customer names: Engg / Intl / Mfg / Technologies read the same as the full words, and a close name (one starts the other, or the same first two words) counts when only one customer fits. (5) Under the list, \u201cN quotes with a name not in the Customer Master \u2014 link them\u201d opens the list of those names; pick the customer each belongs to and Link \u2014 its quotes then count for that customer." },
