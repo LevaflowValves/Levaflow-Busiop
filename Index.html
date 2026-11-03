@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-11-03T07:00:00Z";
+  var APP_BUILD_VERSION = "2026-11-03T08:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -15439,7 +15439,7 @@ function BomMasterDialog({ kind, model, sub, add, chg, del, onApply, onClose, bu
         : kind==="quote" ? h("button",{"data-testid":"bom-ok",onClick:onClose,style:btnPrimary},"OK")
         : [h("button",{key:"n",onClick:onClose,style:btnSecondary},"Close"), h("button",{key:"y","data-testid":"bom-appr-approve",disabled:busy,onClick:()=>onApply({}),style:btnPrimary},busy?"Approving…":"Approve BOM")])));
 }
-function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, onGoToTab, onNewSlNo, mode, contractInfo, onContractInfoChanged, onOpenContract, cameFromQuotesReport, onBackToQuotesReport }) {
+function SavedEstimates({ autoFile, user, sessionCompany, openTarget, onConsumedTarget, onGoToTab, onNewSlNo, mode, contractInfo, onContractInfoChanged, onOpenContract, cameFromQuotesReport, onBackToQuotesReport }) {
   // mode: "quote" (default) | "contract". When "contract", this exact
   // same screen is a Sale Order — the underlying data lives in the same
   // estimates/estimate_lines/quote_commercial_terms/etc. tables, keyed
@@ -18412,6 +18412,10 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
 
   // Export panel always follows whichever quote is selected in the header — no separate picker.
   useEffect(()=>{ setQuoteExportRef(refFilter||""); },[refFilter]);
+  // 2026-11-03T08:00:00Z: run out of sight from the Quotes Report — make (and save) this quote's PDF once it is loaded
+  const autoRan = useRef(false);
+  useEffect(()=>{ if(!autoFile || autoRan.current || !quoteExportRef || quoteExportRef!==autoFile.ref) return; autoRan.current = true;
+    setTimeout(()=>generateQuotePdf("separate", false, false, "classic", !!autoFile.preview, autoFile), 300); },[quoteExportRef]);
   // Default the header selector to the most recently created quote once refs load, if nothing is picked yet.
   useEffect(()=>{
     if(!refFilter && refs.length){
@@ -20169,16 +20173,21 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       generateQuotePdf(testingMode, true, summaryMode, "classic", true);
     }catch(e){ console.error("Preview draft failed", e); alert("Could not start the draft preview: "+e.message); }
   };
-  const generateQuotePdf = async(testingMode="separate", watermark=false, summarised=false, template="classic", draftPreview=false)=>{
+  const generateQuotePdf = async(testingMode="separate", watermark=false, summarised=false, template="classic", draftPreview=false, auto=null)=>{
     if(!quoteExportRef) return;
+    // 2026-11-03T08:00:00Z: auto = run from the Quotes Report (no windows): nothing is asked or approved, an incomplete quote
+    // gives the DRAFT / PRICE NOT CHECKED preview (not saved), a complete one is saved; the result goes to auto.done(...)
+    const _al = window.alert, _cf = window.confirm, autoMsgs = []; let autoDone = false;
+    if(auto){ window.alert = (m)=>{ autoMsgs.push(String(m)); }; window.confirm = (m)=>{ autoMsgs.push(String(m)); return false; }; }
     setGeneratingQuotePdf(true);
     try {
       const readinessCheck = draftPreview ? { ready:true, missing:[] } : await checkQuoteReadiness(quoteExportRef);
+      if(auto && !readinessCheck.ready){ watermark = true; auto.missing = (readinessCheck.missing||[]).map(m=>(m.section ? m.section+": " : "")+((m.items||[]).join("; ") || m.label || m.type || "")); }
       // Admin/super admin bypass this gate entirely — same standing rule as
       // the missingHeaderFieldsForPdf gate above (isAdminOrAbove skips it
       // there too): their PDF is always the clean, final one, dirty quote
       // or not. Only a regular user sees this modal and has to choose.
-      if(!readinessCheck.ready && !isAdminOrAbove){
+      if(!auto && !readinessCheck.ready && !isAdminOrAbove){
         const outcome = await askDraftConfirm(readinessCheck.missing, readinessCheck.incompleteBomDetails);
         if(outcome==="cancel"){ setGeneratingQuotePdf(false); return; }
         if(outcome==="draft"){
@@ -21392,8 +21401,15 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       // with its Datasheets and Commercial Terms, so the Quotes Report shows exactly what was sent. Frozen once the quote
       // has left Draft: a later Generate does not replace it.
       const qpdfClean = !draftPreview && !watermark && !priceWatermark && mode!=="contract";
-      const qpdfFile = async(d)=>{ if(!qpdfClean) return; try{ await qpdfSaveSet(quoteExportRef, d, qpdfCt, ()=>buildDatasheetsDoc(quoteExportRef), user); }catch(e){ console.warn("quote PDF filing", e); } };
-      qpdfFile(doc);
+      const qpdfFile = async(d)=>{ if(!qpdfClean) return null; try{ return await qpdfSaveSet(quoteExportRef, d, qpdfCt, ()=>buildDatasheetsDoc(quoteExportRef), user); }catch(e){ console.warn("quote PDF filing", e); if(!auto) _al("The PDF is ready, but it could not be saved for the Quotes Report: "+(e.message||e)); throw e; } };
+      if(auto){   // from the Quotes Report: save (complete quote) or hand back the preview; no window
+        let saved = null, err = "";
+        if(qpdfClean){ try{ saved = await qpdfFile(doc); }catch(e){ err = e.message||String(e); } }
+        await logAudit("EXPORT","estimates",quoteExportRef,(qpdfClean?"Quote PDF made and saved from the Quotes Report for ":"Preview made from the Quotes Report for ")+quoteExportRef,user?.username||"unknown",null,null);
+        autoDone = true; auto.done({ ok:!err, saved, err, doc, clean:qpdfClean, priceCheck:priceWatermark, missing:auto.missing||[], msgs:autoMsgs });
+        return;
+      }
+      qpdfFile(doc).catch(()=>{});
       setPdfPreview({
         doc, filename:quoteExportRef.replace(/\s+/g,"_")+(draftPreview?"_DRAFT_PREVIEW":"")+"_Quote.pdf",
         onDownload: qpdfClean ? qpdfFile : null,
@@ -21405,7 +21421,10 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     } catch(e){
       console.error("Generate quote PDF failed", e);
       alert("Could not generate the PDF: "+e.message);
-    } finally { setGeneratingQuotePdf(false); }
+    } finally {
+      setGeneratingQuotePdf(false);
+      if(auto){ window.alert = _al; window.confirm = _cf; if(!autoDone){ autoDone = true; auto.done({ ok:false, err:autoMsgs.join("\n") || "The PDF could not be made.", msgs:autoMsgs }); } }
+    }
   };
 
   const exportQuoteDatasheetsExcel = async()=>{
@@ -35303,6 +35322,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"3 Nov 2026 (313)", summary:"Built on 2026-11-03T08:00:00Z, on top of 2026-11-03T07:00:00Z. No SQL. QUOTES REPORT PDFs MADE FROM THE REPORT. Clicking Quote / Datasheets / Commercial on a quote with no saved PDF now asks: \u201cNo PDF is saved for FXDS260099 (Offer Sent). Make it now and save it?\u201d \u2014 Make & save opens the quote out of sight, runs the quote screen\u2019s own Generate (so the PDF is identical), saves the Quote, Datasheets and Commercial PDFs and shows the one clicked. A Draft quote gets \u201cMake a DRAFT preview\u201d (shown, not saved). A quote that is not complete (missing items, price not checked) is shown as a DRAFT / PRICE NOT CHECKED preview, not saved, with what is missing; nothing is approved in the background. Super Admin: \u201cSave PDFs for all sent quotes\u201d makes and saves them one after another for every sent quote shown that has none, with progress and a list of the ones skipped and why. If saving fails, the reason is shown (no more silent failures)." },
   { date:"3 Nov 2026 (312)", summary:"Built on 2026-11-03T07:00:00Z, on top of 2026-11-03T05:00:00Z. No SQL. (1) PURCHASE OWNERS \u2014 Purchase \u203a Procurement, Document Control and Accounts \u203a Vouchers & Books \u203a Purchase Owners (Document Controller, Purchase, Accounts and Super Admins only). \u201cFind the owner\u201d: a drop-down of the listed contracts only (type the contract number or the customer \u2014 \u201c260112 \u00b7 Zeeco India\u201d), and it answers at once: the owner and since when, or No owner yet (with the Purchase Manager to assign, or waiting for the BOM summary). Buttons per owner with counts, No owner yet in red; list: contract, customer, PO date, value, BOM summary approved, purchase owner, owner since, planning (Planned / Partly planned / Overdue / Not planned), POs released; filters open / all / closed, planning, text; Excel and PDF. Assign / Reassign (Purchase Manager post and Super Admins) moves the procurement card \u2014 the same as Purchase Insights. The owner also shows on the Sale Order (under the status flag) and on each contract card of the Order Status board. (2) ACCOUNTS \u2014 ROUND-OFF IS THE USER\u2019S CHOICE: sales and purchase vouchers no longer round to the rupee by themselves. Round off: None (new vouchers), To the rupee (when clicked), or Type it (the round-off on the bill); more than \u20b9 0.99 is flagged in red. A voucher being changed keeps the round-off it was saved with. TDS stays rounded to the rupee." },
   { date:"3 Nov 2026 (311)", summary:"Built on 2026-11-03T05:00:00Z, on top of 2026-11-03T04:00:00Z. SQL (Flometriq first): data_purchase_card_owner_2026-11-03.sql. PURCHASE CARD = THE ONE OWNER. BOM summary approved -> one Procurement card on the Purchase Manager post, labelled To assign; 2 days to hand it to a Purchase Engineer (Assign in Purchase Insights or on the card), bell to Super Admin on day 3. The engineer owns every form on the card; 3 days from receiving it to fill the planned dates, bell to the Purchase Manager on day 4. Reassigning restarts the clock for unplanned forms only; a form added later gets its own 3 days. Per-form holder removed. Purchase Insights reads the cards: Waiting to be assigned + Planning by the buyer's own clock. The card's due date = the planning deadline until planned, then the earliest open step." },
   { date:"3 Nov 2026 (310)", summary:"Built on 2026-11-03T04:00:00Z, on top of 2026-11-03T02:00:00Z. SQL (both companies): structure_quote_pdf_2026-11-03.sql. FROZEN QUOTE PDFs IN THE QUOTES REPORT. Under each quote (latest revision) three links: \ud83d\udcc4 Quote \u00b7 Datasheets \u00b7 Commercial. Click one: the PDF opens full screen (\u2190 Back or Esc returns to the Report where you were; \u2039 \u203a or PgUp / PgDn for the previous / next quote; switch Quote | Datasheets | Commercial; Download). What it shows is the PDF FILED WITH THE QUOTE: when the clean quote PDF is generated (no DRAFT / PRICE NOT CHECKED watermark, not a preview) the app files it with its Datasheets and its Commercial Terms pages. While the quote is Draft a new Generate replaces them; once it has gone to the customer they are FROZEN \u2014 never rebuilt from today\u2019s rates or terms. A link is grey until its PDF is filed (generate the quote PDF once). If quick edits are made in the preview, Download files the edited copy." },
@@ -46776,19 +46796,54 @@ async function qpdfSaveSet(ref, quoteDoc, ctRange, buildDs, user){
   try{ await logAudit("EXPORT","quote_pdf_tbl",ref,"Quote PDF set filed for the Quotes Report ("+stage+")",by); }catch(e){}
   return true;
 }
+// 2026-11-03T08:00:00Z: makes a quote's PDF out of sight — the real quote screen, opened off-screen, runs its own Generate
+// (so the PDF is the same as from the quote screen). onDone({ ok, saved, err, doc, clean, priceCheck, missing }).
+function QpdfMaker({ user, refNo, preview, onDone }){
+  const done = useRef(false);
+  const finish = useCallback((r)=>{ if(done.current) return; done.current = true; onDone(r); },[onDone]);
+  useEffect(()=>{ const t = setTimeout(()=>finish({ ok:false, err:"The quote did not open within 90 seconds." }), 90000); return ()=>clearTimeout(t); },[]);
+  const auto = useMemo(()=>({ ref:refNo, preview:!!preview, done:finish }),[refNo, preview, finish]);
+  const target = useMemo(()=>({ reference_number:refNo, item_sl_no:null }),[refNo]);
+  return h("div",{"aria-hidden":true,style:{position:"fixed",left:-20000,top:0,width:1280,height:900,overflow:"hidden",visibility:"hidden",pointerEvents:"none"}},
+    h(SavedEstimates,{ autoFile:auto, user, sessionCompany:window.__sessionCompany||null, openTarget:target, onConsumedTarget:()=>{}, onGoToTab:()=>{}, onNewSlNo:()=>{} }));
+}
+// Super Admin: save the PDFs of every sent quote (latest revision) that has none — one after another, out of sight
+function QpdfBackfill({ user, list, onClose }){
+  const [i,setI] = useState(0); const [log,setLog] = useState([]); const [stop,setStop] = useState(false);
+  const cur = !stop && i<list.length ? list[i] : null;
+  const onDone = useCallback((r)=>{ const q = list[i];
+    setLog(l=>[...l, { ref:q.reference_number, ok: !!(r.clean && r.saved!==false && !r.err), why: r.err ? r.err : !r.clean ? (r.priceCheck ? "price not checked" : (r.missing&&r.missing.length ? "not complete: "+r.missing.slice(0,4).join(", ") : "not complete")) : r.saved===false ? "already frozen" : "" }]);
+    setI(n=>n+1); },[i, list]);
+  const okN = log.filter(x=>x.ok).length; const left = list.length - log.length;
+  return h(OsModal,{ title:"Save PDFs for all sent quotes", onClose:()=>{ setStop(true); onClose(); } },
+    h("div",{"data-testid":"qpdf-fill",style:{fontSize:13,marginBottom:8}}, cur ? "Making "+cur.reference_number+" … ("+(i+1)+" of "+list.length+")" : stop ? "Stopped." : "Done.",
+      " Saved ", h("b",null,okN), " · skipped ", h("b",null,log.length-okN), cur ? " · left "+left : ""),
+    h("div",{style:{maxHeight:300,overflowY:"auto",border:"1px solid "+colors.border,borderRadius:6}},
+      log.slice().reverse().map((x,n)=>h("div",{key:n,style:{padding:"3px 8px",fontSize:12.5,borderBottom:"1px solid #f1efe8",color:x.ok?colors.text:"#854f0b"}}, (x.ok?"✓ ":"– ")+x.ref+(x.why?" — "+x.why:"")))),
+    h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:10}}, cur ? h("button",{style:btnSecondary,onClick:()=>setStop(true)},"Stop after this one") : null, h("button",{style:btnPrimary,onClick:()=>{ setStop(true); onClose(); }}, cur ? "Close (stops)" : "Close")),
+    cur ? h(QpdfMaker,{ key:cur.reference_number+"#"+i, user, refNo:cur.reference_number, preview:false, onDone }) : null);
+}
 // full-screen PDF view: Quote | Datasheets | Commercial of the latest revision; Back / Esc returns
-function QpdfViewer({ list, start, kind0, saved, onClose, onOpenQuote }){
+function QpdfViewer({ list, start, kind0, saved, onClose, onOpenQuote, user, onSaved }){
   const [i,setI] = useState(start); const [kind,setKind] = useState(kind0); const [url,setUrl] = useState(null); const [err,setErr] = useState(""); const [busy,setBusy] = useState(false);
+  const [making,setMaking] = useState(null); const [made,setMade] = useState(null);   // 2026-11-03T08:00:00Z: make it here when nothing is saved
   const boxRef = useRef(null); const real = useRef(false);
   const r = list[i]; const row = r ? saved.find(x=>x.reference_number===r.reference_number && x.kind===kind) : null;
   const has = (ref,k)=> saved.some(x=>x.reference_number===ref && x.kind===k);
   useEffect(()=>{ let dead = false, u = null; setUrl(null); setErr("");
-    if(!row){ return; }
+    if(!row){ if(made && made.ref===(list[i]||{}).reference_number && made.doc){ try{ u = URL.createObjectURL(made.doc.output("blob")); setUrl(u); }catch(e){} } return ()=>{ if(u) URL.revokeObjectURL(u); }; }
     setBusy(true);
     sb.storage.from(QPDF_BUCKET).download(row.file_path).then(({ data, error })=>{ if(dead) return; setBusy(false);
       if(error || !data){ setErr("Could not load the saved PDF: "+((error&&error.message)||"not found")); return; }
       u = URL.createObjectURL(data.type==="application/pdf" ? data : new Blob([data],{type:"application/pdf"})); setUrl(u); });
-    return ()=>{ dead = true; if(u) URL.revokeObjectURL(u); }; },[i, kind, row && row.file_path, row && row.saved_at]);
+    return ()=>{ dead = true; if(u) URL.revokeObjectURL(u); }; },[i, kind, row && row.file_path, row && row.saved_at, made]);
+  const isDraftQ = (q)=> /^draft$/i.test(String((q && (q.status || q.quote_status)) || "Draft").trim());
+  const makeNow = ()=>{ const q = list[i]; setErr(""); setMade(null); setMaking({ ref:q.reference_number, preview:isDraftQ(q) }); };
+  const onMade = useCallback(async(r)=>{ const ref = making && making.ref; setMaking(null);
+    if(!r.ok && !r.doc){ setErr("Could not make the PDF of "+ref+": "+(r.err||"unknown reason")); return; }
+    if(r.err) setErr("The PDF was made but could not be saved: "+r.err);
+    if(r.clean && r.saved!==false && !r.err){ if(onSaved) await onSaved(); setMade(null); }
+    else setMade({ ref, doc:r.doc, clean:r.clean, priceCheck:r.priceCheck, missing:r.missing||[], frozen: r.saved===false }); },[making, onSaved]);
   const close = useCallback(()=>{ try{ if(document.fullscreenElement) document.exitFullscreen(); }catch(e){} onClose(); },[onClose]);
   const step = d=>{ let j = i+d; while(j>=0 && j<list.length && !QPDF_KINDS.some(([k])=>has(list[j].reference_number,k))) j += d; if(j<0 || j>=list.length) return; setI(j); if(!has(list[j].reference_number, kind)) setKind(QPDF_KINDS.find(([k])=>has(list[j].reference_number,k))[0]); };
   useEffect(()=>{ const el = boxRef.current; try{ const p = el && el.requestFullscreen && el.requestFullscreen(); if(p && p.then) p.then(()=>{ real.current = true; }).catch(()=>{}); }catch(e){}
@@ -46813,11 +46868,23 @@ function QpdfViewer({ list, start, kind0, saved, onClose, onOpenQuote }){
       url ? h("iframe",{title:"PDF",src:url,"data-testid":"qpdf-frame",style:{flex:1,border:0,background:"#55574f"}})
         : h("div",{style:{margin:"auto",color:"#fff",fontSize:14,textAlign:"center",maxWidth:520,lineHeight:1.6,padding:20}},
             busy ? "Loading the saved PDF…" : err ? err
-            : h(React.Fragment,null, "No "+(QPDF_KINDS.find(x=>x[0]===kind)||["",""])[1]+" PDF is filed for "+r.reference_number+" yet.", h("br"), "It is filed automatically the next time the quote PDF is generated (and frozen once the quote has gone to the customer).", h("br"),
-                onOpenQuote ? h("button",{style:{...btnSmall,marginTop:12},onClick:()=>{ close(); onOpenQuote(r.reference_number,1); }},"Open the quote") : null))));
+            : making ? h("div",{"data-testid":"qpdf-making"}, "Making the PDF of "+making.ref+"…", h("br"), h("span",{style:{fontSize:12.5,opacity:.8}},"The quote is opened out of sight and generated exactly as from the quote screen. A few seconds."))
+            : h("div",{"data-testid":"qpdf-ask",style:{background:"#fff",color:colors.text,borderRadius:10,padding:"18px 20px",textAlign:"left"}},
+                h("div",{style:{fontWeight:700,fontSize:15,marginBottom:6}}, "No PDF is saved for "+r.reference_number+(r.status?" ("+r.status+")":"")),
+                isDraftQ(r) ? h("div",{style:{fontSize:13}},"It is a Draft — nothing has gone to the customer. Make a DRAFT preview to look at it (not saved).")
+                  : h("div",{style:{fontSize:13}},"Make it now and save it? The Quote, Datasheets and Commercial PDFs are made exactly as from the quote screen and become the frozen copy for this quote."),
+                h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}},
+                  onOpenQuote ? h("button",{style:btnSecondary,onClick:()=>{ close(); onOpenQuote(r.reference_number,1); }},"Open the quote") : null,
+                  h("button",{style:btnPrimary,"data-testid":"qpdf-make",onClick:makeNow}, isDraftQ(r) ? "Make a DRAFT preview" : "Make & save"))))),
+    made && made.ref===r.reference_number && !row ? h("div",{"data-testid":"qpdf-made-note",style:{background:"#fff4d6",color:"#854f0b",padding:"6px 14px",fontSize:12.5}},
+      made.frozen ? "Shown, not saved: a copy for this quote is already frozen." : made.priceCheck ? "Shown, not saved: a price on this quote is not checked yet (PRICE NOT CHECKED). Approve it in the quote screen, then make it again."
+        : made.missing && made.missing.length ? "Shown, not saved: the quote is not complete — "+made.missing.slice(0,6).join(", ")+". Finish it in the quote screen, then make it again."
+        : "Draft preview — not saved.") : null,
+    making ? h(QpdfMaker,{ key:making.ref, user, refNo:making.ref, preview:making.preview, onDone:onMade }) : null);
 }
 function QuotesReportScreen({ user, onOpenQuote, initialFilters, onOpenContract }){
   const [qpdfSaved,setQpdfSaved] = useState([]); const [qpdfOpen,setQpdfOpen] = useState(null);   // 2026-11-03T04:00:00Z
+  const [qpdfFill,setQpdfFill] = useState(null);   // 2026-11-03T08:00:00Z: Super Admin — save PDFs for all sent quotes
   const qpdfLoad = useCallback(()=>{ qpdfRows(null).then(setQpdfSaved); },[]);
   useEffect(()=>{ qpdfLoad(); },[qpdfLoad]);
   const [rcOnly,setRcOnly] = useState(false); const [rcSet,setRcSet] = useState(null);   // 2026-10-28: open rate contracts (Multiple POs, not closed)
@@ -47613,7 +47680,8 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters, onOpenContract 
           [["offers","Offers"],["orders","Orders"]].map(([k,l])=>h("button",{key:k,onClick:()=>pickMode(k),style:{border:0,padding:"7px 18px",fontSize:14,fontWeight:700,cursor:"pointer",background:qrMode===k?"#0f6e56":"#fff",color:qrMode===k?"#fff":"#0f6e56"}},l))))),
     h(OrdersReceivedList,{ onOpenContract, user })));
   return h("div",{ref:reportRef,style:{background:"#fff",overflow:isFull?"auto":undefined,height:isFull?"100vh":undefined}},
-  qpdfOpen ? h(QpdfViewer,{ list:qpdfOpen.list, start:qpdfOpen.start, kind0:qpdfOpen.kind, saved:qpdfSaved, onOpenQuote, onClose:()=>{ setQpdfOpen(null); qpdfLoad(); } }) : null,
+  qpdfOpen ? h(QpdfViewer,{ list:qpdfOpen.list, start:qpdfOpen.start, kind0:qpdfOpen.kind, saved:qpdfSaved, onOpenQuote, user, onSaved:async()=>{ setQpdfSaved(await qpdfRows(null)); }, onClose:()=>{ setQpdfOpen(null); qpdfLoad(); } }) : null,
+  qpdfFill ? h(QpdfBackfill,{ user, list:qpdfFill, onClose:()=>{ setQpdfFill(null); qpdfLoad(); } }) : null,
   h("div",{style:{padding:"20px 24px",fontSize:14}},
     !isFull && h("div",{style:{background:"#fff",border:"1px solid #cfe3dd",borderLeft:"4px solid #0f7a5c",borderRadius:6,padding:"12px 16px",marginBottom:14}},
       h("div",{style:{display:"flex",gap:14,alignItems:"center",flexWrap:"wrap"}},
@@ -47695,6 +47763,12 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters, onOpenContract 
     // What is actually in force, with Refresh and how old the list is.
     h("div",{style:{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:10}},
       h("span",{style:{fontSize:13,fontWeight:700}},filtered.length+" offer"+(filtered.length===1?"":"s")),
+      user && user.role==="super_admin" ? h("button",{"data-testid":"qpdf-fill-btn",style:{...btnSmall,fontSize:11.5},title:"Make and save the Quote / Datasheets / Commercial PDFs of every sent quote shown (latest revision) that has none yet",
+        onClick:()=>{ const have = new Set(qpdfSaved.filter(x=>x.kind==="quote").map(x=>x.reference_number));
+          const list = displayRows.filter(z=>!z.__grp && !z.is_legacy && !/^draft$/i.test(String(z.status||"Draft").trim()) && !have.has(z.reference_number));
+          if(!list.length){ alert("Every sent quote shown already has its PDFs saved."); return; }
+          if(!confirm("Make and save the PDFs of "+list.length+" sent quote"+(list.length===1?"":"s")+" shown here (latest revision, none saved yet)?\n\nThey are made one after another, exactly as from the quote screen. Quotes that are not complete are skipped and listed. Keep this window open until it finishes.")) return;
+          setQpdfFill(list); }},"Save PDFs for all sent quotes") : null,
       h("span",{style:{display:"inline-flex",border:"1px solid "+colors.border,borderRadius:6,overflow:"hidden"},title:"A quote and its revisions (-Rev-1, -Rev-2\u2026) are one quote: the latest revision is shown and counted"},   // 141
         [["latest","Latest revision only"],["all","All revisions"]].map(([v,l])=>h("button",{key:v,onClick:()=>setRevMode(v),style:{border:0,padding:"4px 10px",fontSize:11.5,cursor:"pointer",background:revMode===v?"#1c1f1a":"#fff",color:revMode===v?"#fff":colors.text,fontWeight:revMode===v?700:400}},l))),
       valueRangeOn && (()=>{
@@ -47755,7 +47829,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters, onOpenContract 
               : h("a",{href:"#",onClick:e=>{e.preventDefault(); onOpenQuote(r.reference_number,1);},style:{color:"#0c447c",textDecoration:"underline",cursor:"pointer"}},r.reference_number),
             (!r.is_legacy && !r.__old) ? h("div",{"data-testid":"qpdf-chips",style:{display:"flex",gap:4,flexWrap:"wrap",marginTop:4}}, QPDF_KINDS.map(([k,l])=>{ const ok = qpdfSaved.some(x=>x.reference_number===r.reference_number && x.kind===k);
               return h("button",{key:k,"data-qpdf":k,onClick:()=>{ const list = displayRows.filter(z=>!z.__grp && !z.is_legacy); const st = list.findIndex(z=>z.reference_number===r.reference_number); setQpdfOpen({ list, start:Math.max(0,st), kind:k }); },
-                title: ok ? "See the "+l+" PDF (full screen)" : "No "+l+" PDF filed yet — it is filed when the quote PDF is generated",
+                title: ok ? "See the "+l+" PDF (full screen)" : "No "+l+" PDF saved yet — click to make it here",
                 style:{border:"1px solid "+(ok?"#c8d6ea":colors.border),background:ok?"#eef1f6":"transparent",color:ok?"#2f4f7a":colors.mutedLight,borderRadius:10,padding:"0 7px",fontSize:10.5,fontWeight:500,cursor:"pointer",whiteSpace:"nowrap"}}, (k==="quote"?"📄 ":"")+l); })) : null,
             (!r.__old && revMode!=="all" && r.__older && r.__older.length) ? h("div",null,h("span",{onClick:()=>setOpenFam(o=>({...o,[r.__fam]:!o[r.__fam]})),title:"Show the earlier revisions of this quote",
               style:{display:"inline-block",marginTop:3,fontSize:10.5,fontWeight:700,borderRadius:8,padding:"1px 7px",background:"#e6f1fb",color:"#2a6db0",cursor:"pointer",whiteSpace:"nowrap"}},
@@ -57390,6 +57464,7 @@ function App() {
   // blank landing screen, rather than each hardcoding one company's logo
   // regardless of who's actually using the app.
   const [sessionCompany,setSessionCompany] = useState(null);
+  useEffect(()=>{ window.__sessionCompany = sessionCompany; },[sessionCompany]);   // 2026-11-03T08:00:00Z: the out-of-sight quote screen (Quotes Report PDFs)
   useEffect(()=>{
     const companyId = user?.role==="super_admin" ? sessionCompanyId : (user?.company_id||null);
     if(!companyId){ setSessionCompany(null); return; }
