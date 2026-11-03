@@ -52,7 +52,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-11-03T02:00:00Z";
+  var APP_BUILD_VERSION = "2026-11-03T04:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -20449,6 +20449,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       const loadCachedPdf = (path,bucket)=>{ const k=bucket+"|"+path; if(!storedPdfCache.has(k)) storedPdfCache.set(k, loadStoredPdf(path,bucket)); return storedPdfCache.get(k); };
       const enclLoaded = await Promise.all(offerEnclosures.map(e=> e.filePath ? loadCachedPdf(e.filePath,"quote-documents") : Promise.resolve(null)));
       let mergeProblemsReported = false;
+      let qpdfCt = null;   // 2026-11-03T04:00:00Z: Commercial Terms page range of the last build (for the frozen Commercial PDF)
       const buildDoc = async (overrides={})=>{
       const effCustomerName = overrides.customerName!==undefined ? overrides.customerName : customerName;
       const effDelivery = overrides.delivery!==undefined ? overrides.delivery : (terms.delivery_term||"—");
@@ -20854,6 +20855,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
         didDrawPage:()=>letterhead("ANNEXURE - I  COMMERCIAL TERMS")
       });
       const termsEndPage = doc.internal.getNumberOfPages();
+      qpdfCt = { s:termsStartPage, e:termsEndPage };
       const afterTermsY = doc.lastAutoTable.finalY;
 
       // ---- Notes — fits entirely below Commercial Terms on the same
@@ -21382,8 +21384,15 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       }; // end buildDoc
 
       const doc = await buildDoc({});
+      // 2026-11-03T04:00:00Z: the clean quote PDF (no DRAFT / PRICE NOT CHECKED, not a preview) is filed with the quote,
+      // with its Datasheets and Commercial Terms, so the Quotes Report shows exactly what was sent. Frozen once the quote
+      // has left Draft: a later Generate does not replace it.
+      const qpdfClean = !draftPreview && !watermark && !priceWatermark && mode!=="contract";
+      const qpdfFile = async(d)=>{ if(!qpdfClean) return; try{ await qpdfSaveSet(quoteExportRef, d, qpdfCt, ()=>buildDatasheetsDoc(quoteExportRef), user); }catch(e){ console.warn("quote PDF filing", e); } };
+      qpdfFile(doc);
       setPdfPreview({
         doc, filename:quoteExportRef.replace(/\s+/g,"_")+(draftPreview?"_DRAFT_PREVIEW":"")+"_Quote.pdf",
+        onDownload: qpdfClean ? qpdfFile : null,
         buildDoc,
         quickEditDefaults: mode==="contract" ? { customerName, delivery: terms.delivery_term||"—" } : { customerName, delivery: terms.delivery_term||"—", validity: terms.validity||"—" }
       });
@@ -21439,11 +21448,9 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
     } finally { setExportingQuote(""); }
   };
 
-  const exportQuoteDatasheetsPDF = async()=>{
-    if(!quoteExportRef) return;
-    setExportingQuote("ds-pdf");
-    try {
-      const {estimatesRows, linesRows, datasheetsRows} = await fetchQuoteBundle(quoteExportRef);
+  // 2026-11-03T04:00:00Z: the Datasheets PDF as a document (used by Export and by the frozen copy filed with the quote)
+  const buildDatasheetsDoc = async(dsRef)=>{
+      const {estimatesRows, linesRows, datasheetsRows} = await fetchQuoteBundle(dsRef);
       const customer = (estimatesRows[0]&&estimatesRows[0].customer_name)||"";
       const quoteNo = estimatesRows[0]&&estimatesRows[0].reference_number;
       const list = await buildQuoteDatasheetsBySlNo(estimatesRows, linesRows, datasheetsRows);
@@ -21455,7 +21462,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       let letterheadPage = 0;
       const ensureLetterhead = ()=>{
         const p = doc.internal.getNumberOfPages();
-        if(p !== letterheadPage){ drawQuoteLetterhead(doc,W,"DATA SHEET",quoteExportRef,customer); letterheadPage = p; }
+        if(p !== letterheadPage){ drawQuoteLetterhead(doc,W,"DATA SHEET",dsRef,customer); letterheadPage = p; }
       };
       list.forEach((inst,idx)=>{
         if(inst.renderOwnPdfPage!==false){
@@ -21486,6 +21493,13 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       if(list.length===0){ ensureLetterhead(); doc.setFontSize(10); doc.text("No datasheet masters found for any item in this quote.",12,40); }
       numberQuotePages(doc,W);
       const finalDoc = await mergeAttachedPdfPages(doc, pdfMergeInsertions, "direct-price-excels");
+      return finalDoc;
+  };
+  const exportQuoteDatasheetsPDF = async()=>{
+    if(!quoteExportRef) return;
+    setExportingQuote("ds-pdf");
+    try {
+      const finalDoc = await buildDatasheetsDoc(quoteExportRef);
       setPdfPreview({doc:finalDoc, filename:quoteExportRef.replace(/\s+/g,"_")+"_Datasheets.pdf"});
     } catch(e){
       console.error("Export Datasheets PDF failed", e);
@@ -23670,7 +23684,7 @@ function SavedEstimates({ user, sessionCompany, openTarget, onConsumedTarget, on
       )
     ),
     authGate && h(AuthCodeGate,{ requiredType:authGate.requiredType, user, onClose:()=>setAuthGate(null), onAuthorized:authGate.action }),
-    pdfPreview && h(PdfPreviewModal,{ doc:pdfPreview.doc, filename:pdfPreview.filename, buildDoc:pdfPreview.buildDoc, quickEditDefaults:pdfPreview.quickEditDefaults, onClose:()=>setPdfPreview(null) }),
+    pdfPreview && h(PdfPreviewModal,{ doc:pdfPreview.doc, filename:pdfPreview.filename, buildDoc:pdfPreview.buildDoc, quickEditDefaults:pdfPreview.quickEditDefaults, onDownload:pdfPreview.onDownload, onClose:()=>setPdfPreview(null) }),
     showDeleteQuoteModal && h("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.55)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}},
       h("div",{style:{background:"#fff",borderRadius:8,padding:"20px 24px",width:380,maxWidth:"100%"}},
         h("div",{style:{fontWeight:700,fontSize:14,marginBottom:8}},"Delete "+revisionLabelOf(refFilter)+" of "+refFilter.replace(/-Rev-\d+$/,"")+"?"),
@@ -25633,7 +25647,7 @@ async function purgeQuoteDocumentsIfLeavingDraft(referenceNumber, performedBy){
 // built jsPDF doc as a blob in an iframe, with Download/Cancel. Other PDFs
 // in the app (reports, User Manual, audit exports) skip this and save
 // directly, per current scope.
-function PdfPreviewModal({ doc:initialDoc, filename, onClose, buildDoc, quickEditDefaults }){
+function PdfPreviewModal({ doc:initialDoc, filename, onClose, buildDoc, quickEditDefaults, onDownload }){
   const [doc,setDoc] = useState(initialDoc);
   const [blobUrl,setBlobUrl] = useState(null);
   const [rendering,setRendering] = useState(false);
@@ -25671,7 +25685,7 @@ function PdfPreviewModal({ doc:initialDoc, filename, onClose, buildDoc, quickEdi
         h("div",{style:{fontWeight:700,fontSize:14}},"Preview — "+filename+(rendering?" (updating…)":"")),
         h("div",{style:{display:"flex",gap:8}},
           h("button",{onClick:onClose,style:btnSecondary},"Cancel"),
-          h("button",{onClick:()=>{ doc.save(filename); onClose(); },style:btnPrimary},"Download")
+          h("button",{onClick:()=>{ doc.save(filename); if(onDownload) onDownload(doc); onClose(); },style:btnPrimary},"Download")
         )
       ),
       h("div",{style:{flex:1,display:"flex",gap:14,minHeight:0}},
@@ -35285,6 +35299,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"3 Nov 2026 (310)", summary:"Built on 2026-11-03T04:00:00Z, on top of 2026-11-03T02:00:00Z. SQL (both companies): structure_quote_pdf_2026-11-03.sql. FROZEN QUOTE PDFs IN THE QUOTES REPORT. Under each quote (latest revision) three links: \ud83d\udcc4 Quote \u00b7 Datasheets \u00b7 Commercial. Click one: the PDF opens full screen (\u2190 Back or Esc returns to the Report where you were; \u2039 \u203a or PgUp / PgDn for the previous / next quote; switch Quote | Datasheets | Commercial; Download). What it shows is the PDF FILED WITH THE QUOTE: when the clean quote PDF is generated (no DRAFT / PRICE NOT CHECKED watermark, not a preview) the app files it with its Datasheets and its Commercial Terms pages. While the quote is Draft a new Generate replaces them; once it has gone to the customer they are FROZEN \u2014 never rebuilt from today\u2019s rates or terms. A link is grey until its PDF is filed (generate the quote PDF once). If quick edits are made in the preview, Download files the edited copy." },
   { date:"3 Nov 2026 (309, bala)", summary:"Built on 2026-11-03T02:00:00Z, on top of 2026-11-02T17:00:00Z. No SQL. BUILD \u201cbala\u201d \u2014 fixes for the FIN260008 incident (2 Nov). (1) Quotes screen reads EVERY quote in pages; before, it stopped at the database\u2019s 1,000-row limit and older quotes vanished from Find. Same for the Estimator\u2019s Quote# list and the Sale Order quote picker. Opening a quote from the Quotes Report or anywhere else reads that quote straight from the database if it is not in the list. (2) \u201cQuote \u2026 doesn\u2019t exist. Create it as a new quote?\u201d is only asked after the database has been checked \u2014 the same number in any case, with or without the H, or any revision. If the quote is there, it is opened (\u201cNothing new was created\u201d). The Estimator\u2019s + Add to estimate does the same. (3) The Estimator will NOT overwrite a Sl No of a quote that has left Draft (it has gone to the customer): it says to use Amend quote, which makes a new revision, and saves nothing. (4) Every overwrite of a Sl No (Draft quotes) is written to the audit log with the lines it replaced; lines saved from the Estimator carry who added them. (5) Amend quote: the new revision gets its own created date (it used to copy the old one\u2019s). Supabase Max rows can stay at 10000; the app no longer depends on it." },
   { date:"2 Nov 2026 (308)", summary:"Built on 2026-11-02T17:00:00Z, on top of 2026-11-02T15:00:00Z. No SQL. CUSTOMER INSIGHTS. (1) POINTS card replaces the rating card: grade and score, then one row per measure \u2014 the measure, a badge with the working in plain words (e.g. \u201c8 won of 26 quotes \u00b7 smoothed 29% \u00f7 target 40% = 73%\u201d, \u201cpays in 45 d vs 30 d terms \u2192 15 d late \u00b7 1 \u2212 15/45 = 67%\u201d) and the points out of the maximum \u2014 and a Total row. (2) NO FREE POINTS: a customer with no enquiry, quote or order in the period is NOT RATED (\u201c\u2014 not rated\u201d; any amount still pending is shown); conversion scores only when there are quotes; payments, overdue and terms score only for customers who ordered (half while nothing is invoiced / paid yet). Rating filter and dashboard get a Not rated line. (3) Empty funnel / quarter chart say so instead of zero bars. (4) The full-screen customer page FITS ONE SCREEN (windows 1000 \u00d7 640 and larger): the 8 figures in one row, Points beside Quarter / Funnel / Payments, and Quotations | Orders filling the rest, each scrolling inside its own box; smaller windows scroll as before." },
   { date:"2 Nov 2026 (307)", summary:"Built on 2026-11-02T15:00:00Z, on top of 2026-11-02T13:00:00Z. No SQL. CUSTOMER INSIGHTS: double-click a customer (or Enter) and it opens on a FULL-SCREEN page (the browser's own full screen where it allows, else the whole window). The bar at the top: \u2715 Close, \u2039 \u203a for the previous / next customer in the list (PgUp / PgDn too), the position (e.g. 4 of 34), the period, and Excel / PDF of that customer's figures. Close or Esc brings you back to Customer Insights exactly as you left it \u2014 same filters, sort and scroll \u2014 with the customer you were last on highlighted. Single-click still shows the customer in the panel under the list." },
@@ -46478,7 +46493,93 @@ function OrdersReceivedList({ onOpenContract, user }){
     shown.length>25 ? h("div",{style:{display:"flex",gap:8,alignItems:"center",justifyContent:"flex-end",marginTop:8,fontSize:12}},
       h("button",{style:btnSmall,disabled:page===0,onClick:()=>setPage(p=>p-1)},"Previous"), "Page "+(page+1)+" of "+pages, h("button",{style:btnSmall,disabled:page>=pages-1,onClick:()=>setPage(p=>p+1)},"Next")) : null);
 }
+// ===== 2026-11-03T04:00:00Z: FROZEN QUOTE PDFs =====
+// The clean quote PDF, its Datasheets and its Commercial Terms are filed with the quote (bucket quote-documents,
+// issued/<quote#>/quote|ds|ct.pdf, one row each in quote_pdf_tbl) when the quote PDF is generated. While the quote is
+// Draft a new Generate replaces them; once it has left Draft they are frozen (never rebuilt from today's rates or terms).
+// The Quotes Report shows them under each quote (latest revision). Needs structure_quote_pdf_2026-11-03.sql.
+const QPDF_SQL = "structure_quote_pdf_2026-11-03.sql", QPDF_BUCKET = "quote-documents";
+const QPDF_KINDS = [["quote","Quote"],["ds","Datasheets"],["ct","Commercial"]];
+const qpdfPath = (ref, kind)=> "issued/"+String(ref).replace(/[^A-Za-z0-9._-]+/g,"_")+"/"+kind+".pdf";
+let QPDF_OK = null;
+async function qpdfRows(refs){
+  try{ let q = sb.from("quote_pdf_tbl").select("*"); if(refs && refs.length) q = q.in("reference_number", refs);
+    const { data, error } = await q; if(error){ QPDF_OK = false; return []; } QPDF_OK = true; return data||[]; }catch(e){ QPDF_OK = false; return []; }
+}
+async function qpdfSaveOne(ref, kind, docLike, stage, by, pages){
+  const blob = docLike.output("blob"); const path = qpdfPath(ref, kind);
+  const up = await sb.storage.from(QPDF_BUCKET).upload(path, blob, { upsert:true, contentType:"application/pdf" });
+  if(up && up.error) throw up.error;
+  const row = { reference_number:ref, kind, file_path:path, stage:stage||"", saved_by:by||"", saved_at:new Date().toISOString(), pages: pages!=null ? pages : (docLike.internal && docLike.internal.getNumberOfPages) ? docLike.internal.getNumberOfPages() : null };
+  const { error } = await sb.from("quote_pdf_tbl").upsert(row, { onConflict:"reference_number,kind" }); if(error) throw error;
+}
+async function qpdfCommercial(docLike, range){
+  if(!range || !window.PDFLib) return null;
+  const { PDFDocument } = window.PDFLib;
+  const src = await PDFDocument.load(docLike.output("arraybuffer")); const out = await PDFDocument.create();
+  const idx = []; for(let p=range.s; p<=range.e && p<=src.getPageCount(); p++) idx.push(p-1);
+  if(!idx.length) return null;
+  (await out.copyPages(src, idx)).forEach(pg=>out.addPage(pg));
+  const w = wrapAsJsPdfLike(await out.save()); w.__pages = idx.length; return w;
+}
+// files the set; returns false when it was left alone (frozen) or the SQL is not run
+async function qpdfSaveSet(ref, quoteDoc, ctRange, buildDs, user){
+  const by = (user && user.username) || "";
+  const { data: est } = await sb.from("estimates").select("quote_status,datasheet_not_required").eq("reference_number",ref);
+  const stage = String(((est||[]).find(r=>r.quote_status)||{}).quote_status || "Draft");
+  const have = await qpdfRows([ref]); if(QPDF_OK===false){ console.warn("Run "+QPDF_SQL+" to keep sent quote PDFs"); return false; }
+  if(have.length && !/^draft$/i.test(stage.trim())) return false;   // frozen: it has gone to the customer
+  await qpdfSaveOne(ref, "quote", quoteDoc, stage, by);
+  try{ const ct = await qpdfCommercial(quoteDoc, ctRange); if(ct) await qpdfSaveOne(ref, "ct", ct, stage, by, ct.__pages); }catch(e){ console.warn("commercial PDF", e); }
+  try{ const allNoDs = (est||[]).length && (est||[]).every(r=>r.datasheet_not_required===true);
+    if(!allNoDs && buildDs){ const ds = await buildDs(); if(ds) await qpdfSaveOne(ref, "ds", ds, stage, by); } }catch(e){ console.warn("datasheets PDF", e); }
+  try{ await logAudit("EXPORT","quote_pdf_tbl",ref,"Quote PDF set filed for the Quotes Report ("+stage+")",by); }catch(e){}
+  return true;
+}
+// full-screen PDF view: Quote | Datasheets | Commercial of the latest revision; Back / Esc returns
+function QpdfViewer({ list, start, kind0, saved, onClose, onOpenQuote }){
+  const [i,setI] = useState(start); const [kind,setKind] = useState(kind0); const [url,setUrl] = useState(null); const [err,setErr] = useState(""); const [busy,setBusy] = useState(false);
+  const boxRef = useRef(null); const real = useRef(false);
+  const r = list[i]; const row = r ? saved.find(x=>x.reference_number===r.reference_number && x.kind===kind) : null;
+  const has = (ref,k)=> saved.some(x=>x.reference_number===ref && x.kind===k);
+  useEffect(()=>{ let dead = false, u = null; setUrl(null); setErr("");
+    if(!row){ return; }
+    setBusy(true);
+    sb.storage.from(QPDF_BUCKET).download(row.file_path).then(({ data, error })=>{ if(dead) return; setBusy(false);
+      if(error || !data){ setErr("Could not load the saved PDF: "+((error&&error.message)||"not found")); return; }
+      u = URL.createObjectURL(data.type==="application/pdf" ? data : new Blob([data],{type:"application/pdf"})); setUrl(u); });
+    return ()=>{ dead = true; if(u) URL.revokeObjectURL(u); }; },[i, kind, row && row.file_path, row && row.saved_at]);
+  const close = useCallback(()=>{ try{ if(document.fullscreenElement) document.exitFullscreen(); }catch(e){} onClose(); },[onClose]);
+  const step = d=>{ let j = i+d; while(j>=0 && j<list.length && !QPDF_KINDS.some(([k])=>has(list[j].reference_number,k))) j += d; if(j<0 || j>=list.length) return; setI(j); if(!has(list[j].reference_number, kind)) setKind(QPDF_KINDS.find(([k])=>has(list[j].reference_number,k))[0]); };
+  useEffect(()=>{ const el = boxRef.current; try{ const p = el && el.requestFullscreen && el.requestFullscreen(); if(p && p.then) p.then(()=>{ real.current = true; }).catch(()=>{}); }catch(e){}
+    const key = e=>{ if(e.key==="Escape"){ e.preventDefault(); close(); } else if(e.key==="PageDown"){ e.preventDefault(); step(1); } else if(e.key==="PageUp"){ e.preventDefault(); step(-1); } };
+    const fs = ()=>{ if(!document.fullscreenElement && real.current){ real.current = false; onClose(); } };
+    window.addEventListener("keydown", key); document.addEventListener("fullscreenchange", fs); const ov = document.body.style.overflow; document.body.style.overflow = "hidden";
+    return ()=>{ window.removeEventListener("keydown", key); document.removeEventListener("fullscreenchange", fs); document.body.style.overflow = ov; }; },[i, kind]);
+  if(!r) return null;
+  const draft = /^draft$/i.test(String(r.status || r.quote_status || (row && row.stage) || "Draft").trim());   // the quote's stage today
+  const fname = String(r.reference_number).replace(/\s+/g,"_")+"_"+(QPDF_KINDS.find(x=>x[0]===kind)||["",""])[1]+".pdf";
+  return h("div",{ref:boxRef,role:"dialog","aria-modal":true,"aria-label":"Quote PDF","data-testid":"qpdf-view",style:{position:"fixed",inset:0,zIndex:1300,background:"#55574f",display:"flex",flexDirection:"column"}},
+    h("div",{style:{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",padding:"8px 14px",background:"#fff",borderBottom:"1px solid "+colors.border}},
+      h("button",{style:btnSmall,onClick:close,autoFocus:true,"data-testid":"qpdf-back"},"← Back"),
+      h("button",{style:btnSmall,"aria-label":"Previous quote",onClick:()=>step(-1)},"‹"), h("button",{style:btnSmall,"aria-label":"Next quote",onClick:()=>step(1)},"›"),
+      h("b",{style:{fontSize:14}}, r.reference_number), h("span",{style:{color:colors.muted,fontSize:12.5}}, (r.customer_name||"")+" · "+(i+1)+" of "+list.length),
+      h("span",{style:{flex:1}}),
+      h("span",{style:{display:"inline-flex"}}, QPDF_KINDS.map(([k,l],n)=>{ const on = k===kind, ok = has(r.reference_number,k);
+        return h("button",{key:k,disabled:!ok,"data-qpdf-tab":k,onClick:()=>setKind(k),title:ok?"":"Not filed for this quote",style:{...btnSmall,borderRadius:n===0?"6px 0 0 6px":n===2?"0 6px 6px 0":0,marginLeft:n?-1:0,background:on?"#0f6e56":"#fff",color:on?"#fff":colors.text,borderColor:on?"#0f6e56":colors.border,opacity:ok?1:0.45}},l); })),
+      h("span",{style:{color:colors.muted,fontSize:12}}, row ? ("Latest revision · "+(draft?"Draft — last generated ":"frozen copy as sent · saved ")+fmtDMY(String(row.saved_at).slice(0,10))+" "+String(row.saved_at).slice(11,16)+(row.saved_by?" by "+row.saved_by:"")) : ""),
+      url ? h("a",{href:url,download:fname,style:{...btnSmall,textDecoration:"none",color:"#0f6e56",borderColor:"#0f6e56",fontWeight:600}},"⬇ Download") : null),
+    h("div",{style:{flex:1,minHeight:0,display:"flex"}},
+      url ? h("iframe",{title:"PDF",src:url,"data-testid":"qpdf-frame",style:{flex:1,border:0,background:"#55574f"}})
+        : h("div",{style:{margin:"auto",color:"#fff",fontSize:14,textAlign:"center",maxWidth:520,lineHeight:1.6,padding:20}},
+            busy ? "Loading the saved PDF…" : err ? err
+            : h(React.Fragment,null, "No "+(QPDF_KINDS.find(x=>x[0]===kind)||["",""])[1]+" PDF is filed for "+r.reference_number+" yet.", h("br"), "It is filed automatically the next time the quote PDF is generated (and frozen once the quote has gone to the customer).", h("br"),
+                onOpenQuote ? h("button",{style:{...btnSmall,marginTop:12},onClick:()=>{ close(); onOpenQuote(r.reference_number,1); }},"Open the quote") : null))));
+}
 function QuotesReportScreen({ user, onOpenQuote, initialFilters, onOpenContract }){
+  const [qpdfSaved,setQpdfSaved] = useState([]); const [qpdfOpen,setQpdfOpen] = useState(null);   // 2026-11-03T04:00:00Z
+  const qpdfLoad = useCallback(()=>{ qpdfRows(null).then(setQpdfSaved); },[]);
+  useEffect(()=>{ qpdfLoad(); },[qpdfLoad]);
   const [rcOnly,setRcOnly] = useState(false); const [rcSet,setRcSet] = useState(null);   // 2026-10-28: open rate contracts (Multiple POs, not closed)
   useEffect(()=>{ if(!rcOnly) return; let dead = false; qmpOpenRateContracts().then(s=>{ if(!dead) setRcSet(s||new Set()); }); return ()=>{ dead = true; }; },[rcOnly]);
   const [qrMode,setQrMode] = useState(()=>{ try{ return localStorage.getItem("qrep_mode")||"offers"; }catch(e){ return "offers"; } });   // 197
@@ -47272,6 +47373,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters, onOpenContract 
           [["offers","Offers"],["orders","Orders"]].map(([k,l])=>h("button",{key:k,onClick:()=>pickMode(k),style:{border:0,padding:"7px 18px",fontSize:14,fontWeight:700,cursor:"pointer",background:qrMode===k?"#0f6e56":"#fff",color:qrMode===k?"#fff":"#0f6e56"}},l))))),
     h(OrdersReceivedList,{ onOpenContract, user })));
   return h("div",{ref:reportRef,style:{background:"#fff",overflow:isFull?"auto":undefined,height:isFull?"100vh":undefined}},
+  qpdfOpen ? h(QpdfViewer,{ list:qpdfOpen.list, start:qpdfOpen.start, kind0:qpdfOpen.kind, saved:qpdfSaved, onOpenQuote, onClose:()=>{ setQpdfOpen(null); qpdfLoad(); } }) : null,
   h("div",{style:{padding:"20px 24px",fontSize:14}},
     !isFull && h("div",{style:{background:"#fff",border:"1px solid #cfe3dd",borderLeft:"4px solid #0f7a5c",borderRadius:6,padding:"12px 16px",marginBottom:14}},
       h("div",{style:{display:"flex",gap:14,alignItems:"center",flexWrap:"wrap"}},
@@ -47411,6 +47513,10 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters, onOpenContract 
             r.is_legacy
               ? h(React.Fragment,null, r.reference_number, h("span",{style:{marginLeft:6,fontSize:9.5,padding:"1px 6px",borderRadius:8,background:"#f0eee6",color:colors.mutedLight}},"Legacy"))
               : h("a",{href:"#",onClick:e=>{e.preventDefault(); onOpenQuote(r.reference_number,1);},style:{color:"#0c447c",textDecoration:"underline",cursor:"pointer"}},r.reference_number),
+            (!r.is_legacy && !r.__old) ? h("div",{"data-testid":"qpdf-chips",style:{display:"flex",gap:4,flexWrap:"wrap",marginTop:4}}, QPDF_KINDS.map(([k,l])=>{ const ok = qpdfSaved.some(x=>x.reference_number===r.reference_number && x.kind===k);
+              return h("button",{key:k,"data-qpdf":k,onClick:()=>{ const list = displayRows.filter(z=>!z.__grp && !z.is_legacy); const st = list.findIndex(z=>z.reference_number===r.reference_number); setQpdfOpen({ list, start:Math.max(0,st), kind:k }); },
+                title: ok ? "See the "+l+" PDF (full screen)" : "No "+l+" PDF filed yet — it is filed when the quote PDF is generated",
+                style:{border:"1px solid "+(ok?"#c8d6ea":colors.border),background:ok?"#eef1f6":"transparent",color:ok?"#2f4f7a":colors.mutedLight,borderRadius:10,padding:"0 7px",fontSize:10.5,fontWeight:500,cursor:"pointer",whiteSpace:"nowrap"}}, (k==="quote"?"📄 ":"")+l); })) : null,
             (!r.__old && revMode!=="all" && r.__older && r.__older.length) ? h("div",null,h("span",{onClick:()=>setOpenFam(o=>({...o,[r.__fam]:!o[r.__fam]})),title:"Show the earlier revisions of this quote",
               style:{display:"inline-block",marginTop:3,fontSize:10.5,fontWeight:700,borderRadius:8,padding:"1px 7px",background:"#e6f1fb",color:"#2a6db0",cursor:"pointer",whiteSpace:"nowrap"}},
               (r.__rev?"Rev-"+r.__rev+" \u00b7 ":"")+r.__older.length+" earlier "+(openFam[r.__fam]?"\u25be":"\u25b8"))) : null,
