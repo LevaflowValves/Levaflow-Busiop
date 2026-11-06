@@ -1,47 +1,45 @@
-BUILD 2026-10-23T03:15:00Z
-On top of: 2026-10-23T02:45:00Z
-SQL needed: no structure SQL. Two data files, Flometriq only:
-            ramesh_drift_card_2026-10-23.sql   — Ramesh's pinned checklist card
-            trello_drift_5_history.sql         — earlier revisions from Trello (saved to your Downloads)
+BUILD 2026-11-06T06:30:00Z  (on top of 2026-11-06T06:00:00Z — the "build calender" build)
+Serial numbers: DC tick boxes, QC Register check, data fix
 
-WHAT CHANGED — PINNED CHECKLIST CARDS
-1. A task card with the label "Pinned":
-     - red background and a 📌 PINNED chip;
-     - top of every list on the board, whatever the sort order (above Urgent);
-     - when it is saved with every box ticked (sub-items included), the app completes it and it
-       leaves the board — "Every box ticked: pinned card completed" in its log. Until then it stays.
-   Ticks are kept when he presses Save on the card (as for any card).
+SQL — in this order, BEFORE deploying:
+  1. structure_serial_fix_2026-11-06.sql        -> BOTH companies. Check: 2 columns + 2 triggers listed.
+  2. data_serial_fix_FLOMETRIQ_2026-11-06.sql   -> Flometriq only. It prints what it did (send me the result).
+Then deploy Index.html + version.txt to both companies. Header must show 2026-11-06T06:30:00Z.
 
-2. Start-up progress report for the VP Projects post (Suresh Subramaniam)
-   When he starts the app and any pinned card is open, a ⚑ Progress report opens first:
-   each pinned card, whose it is, due date, x of y boxes with a bar, and each checklist group with
-   its own count. "Open task boards" / "Close". Once per app start; the bell also gets a ⚑ flag with
-   the counts once a day. It stops by itself when no pinned card is open.
+1. DC — serials with tick boxes (Stores › Despatch › DC)
+   - Each line shows its own Sl No's free serials as tick boxes in a box that scrolls after 4 rows.
+   - Shift-click ticks a run. "Tick the first N" fills the next free ones. "Clear" empties the line.
+   - What is ticked shows as ranges ("29641 to 29644").
+   - Ticked fewer / more than Send now: the line turns yellow, the ticks are kept, and
+     "Make Send now = n" sets the quantity (not above the balance). The DC can't go until they match.
+   - Changing Send now keeps the ticks already made (the first N are ticked by themselves only on an empty line).
+   - A line short of serials: "Ask QC". If the same item's other Sl No has spare serials, the line says so
+     ("29638 to 29640 spare on Sl No 1 (same item)") and QC's card carries it. Stores can't tick them.
 
-3. Ramesh's card (ramesh_drift_card_2026-10-23.sql)
-   "Trello drift clean-up — Document Control" on the Document Controller post holder's board,
-   due 28 Oct 2026, 111 boxes in 9 groups:
-     1 Document numbers (-TR- placeholders) — one box per contract (35)
-     2 The 4 links missing on Trello
-     3 Statuses (the two Code A labels mapped by judgement, then the rest)
-     4 Veolia 260095 — 19 statuses; archive duplicates of GAD 668 / ITP 669 / DS 666 / PV Elite 670
-     5 Duplicates to archive (260061, 260150, 260155, 260128)
-     6 id 624 document number
-     7 The 14 contracts that had only the PO — check against each VDRL
-     8 The 31 contracts with no documents in the app — Contract Register with the Sales Coordinator
-     9 The 9 app contracts with no open Trello list
-   Info-only documents (40) need no confirmation — not on the card.
+2. QC › Serial Number Register › Register check (button next to + New entry, for QC people)
+   - "Same serial in two places" at the top, then one card per contract whose serials don't match:
+     Sl No with none / more than ordered / fewer, serials without a Sl No, serials in two places.
+   - Tick serials (nameplates checked) → "Move ticked to Sl No …" or "Remove from <contract>".
+     Remove = kept unused with the reason (never deleted). Serials already on a DC can't be changed.
+   - Any QC person needs a one-time code from Thangavignesh (QC Head) or a Super Admin
+     (Deepak or Bala Boopathy): "Ask …" sends the bell; they press "Give … a code" on the same card
+     (one use, that contract, 24 h). The QC Head and the Super Admins move / remove without a code.
+   - Every change goes into the serial's history (who, when, why, code from whom) and the audit log.
+     A contract drops off the list when its serials match. An open "Give serials" card for it closes.
 
-REVISION HISTORY (trello_drift_5_history.sql)
-   278 earlier revisions on 54 documents, from the Trello revision checklists: Rev, In/Out, date,
-   OneDrive link; status Out = Third Party Action Pending, In = Code 1 / 2 / 3 where Trello noted it,
-   otherwise Our Action Pending - Resubmission. Trello's wording is kept in each row's reason.
-   An earlier revision never gets a higher Rev or a later time than the current one, so no card moves.
-   The last line checks it: latest_changed_should_be_0 = 0. Safe to re-run.
-   Run order: trello_drift_5_history.sql, then ramesh_drift_card_2026-10-23.sql — then send the brief.
+3. Guard: the register refuses a serial number that is already in it (New entry, Excel load or by hand).
 
-Tested: pinned helpers and auto-close on a stub; card SQL with labels as jsonb and as text[];
-history SQL on a copy of the table layout (higher-numbered old revisions pulled under the current one).
+4. Data fix (Flometriq) — nothing deleted; wrong copies are kept unused with the reason; serials on a DC untouched:
+   - Copies loaded twice on the same contract and Sl No (24730–24733).
+   - 260107: 29013–29018 off (they belong to 260018).
+   - Stock (UL) copies of serials that went on a contract — the contract keeps the serial (29019–29033).
+   - Re-split in Sl No order (lines are the same item): 260094, 260114, 260097, 260056, 260021, 260020, 260011.
+     A contract is skipped if any of its serials is already on a DC, or the serials don't equal the qty.
+   After this, 260094's DC can go (Sl No 1: 29135–29137, Sl No 2: 29138–29140).
 
-Manual (English and Tamil): new article "Pinned checklist cards and the VP Projects progress report".
-Files to deploy: Index.html, version.txt. This ReadMe and the SQL files are not deployed.
+5. What QC corrects by hand — see the note "Serial_Register_Corrections_QC" (PDF).
+
+Tested headless on both companies: tick boxes, first-N, shift-click run, prompt + Make Send now, ticks kept
+on qty change, spare hint, Register check card, refusal without a code, ask → QC Head gives code → move with
+code, history, contract drops off, clash listed, remove = kept unused, DC Sl No 2 then picks its serials.
+SQL: tested twice on local Postgres (second run changes nothing). Earlier tests: same results as before.
