@@ -55,7 +55,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-11-08T06:28:00Z";
+  var APP_BUILD_VERSION = "2026-11-08T11:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -3050,7 +3050,7 @@ const CODE_FREE_TYPES = ["stale_close","task_reopen","pdf_unblock","acc_export",
 // 2026-11-06T09:30 (approval build): every code is named by its kind — never just "code"
 const CODE_NAMES = { edit:"Edit code", delete:"Delete code", direct_price:"Direct Price code", price_check:"Price-check code", pdf_unblock:"PDF unblock code",
   stale_close:"Stale close code", task_reopen:"Task reopen code", acc_export:"Accounts Export code", acc_rollback:"Accounts Roll-back code", rollback:"Accounts Roll-back code",
-  grn_no_bill:"GRN no-bill code", qc_skip:"Bill-first code", qcsr_fix:"Serial-correction code", doc_add:"Add-document code", open_entry_ext:"Open-entry extension code", deletion:"Deletion code", irn_cancel:"E-invoice cancel code", ewb_cancel:"E-way bill cancel code" };
+  grn_no_bill:"GRN no-bill code", qc_skip:"Bill-first code", qcsr_fix:"Serial-correction code", doc_add:"Add-document code", open_entry_ext:"Open-entry extension code", deletion:"Deletion code", irn_cancel:"E-invoice cancel code", ewb_cancel:"E-way bill cancel code", clock_pause:"Clock pause code" };
 const codeName = (t)=> CODE_NAMES[t] || (t ? String(t).replace(/_/g," ")+" code" : "code");
 const aCode = (t)=>{ const n = codeName(t); return (/^[AEIOU]/i.test(n) ? "an " : "a ")+n; };
 // the one-time PINs (Admin generates one per action)
@@ -15108,7 +15108,7 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
   const otherMissing = [
     !quoteHeaderRow?.po_number && "P.O. Number",
     !quoteHeaderRow?.po_date && "P.O. Date",
-    !contractInfo.shipping_address && "Shipping Address",
+    !contractInfo.shipping_address && !contractInfo.ship_tba && "Shipping Address",   // 2026-11-08: "Customer will advise at despatch" passes
     !contractInfo.drawings_required && "Drawings",
     !contractInfo.qap_conditions && "QAP Conditions",
     !contractInfo.inspection_by && "Inspection By",
@@ -15361,7 +15361,14 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
         df("signatory_name","Signatory Name"),
         df("signatory_designation","Signatory Designation"),
       ),
-      otherMissing.includes("Shipping Address") && h("textarea",{value:draft.shipping_address,onChange:e=>setDraft(d=>({...d,shipping_address:e.target.value})),placeholder:"Shipping Address",rows:2,style:{...inputStyle,padding:"5px 8px",fontSize:11.5,width:"100%",marginBottom:8}}),
+      otherMissing.includes("Shipping Address") && h("textarea",{value:draft.shipping_address,onChange:e=>setDraft(d=>({...d,shipping_address:e.target.value})),placeholder:"Shipping Address",rows:2,style:{...inputStyle,padding:"5px 8px",fontSize:11.5,width:"100%",marginBottom:4}}),
+      otherMissing.includes("Shipping Address") && h("label",{style:{display:"flex",gap:6,alignItems:"center",fontSize:11.5,marginBottom:8}},   // 2026-11-08
+        h("input",{type:"checkbox","data-testid":"oa-ship-tba",onChange:async e=>{ if(!e.target.checked) return;
+          const { error } = await sb.from("sale_order_tbl").update({ ship_tba:true }).eq("id",contractInfo.id);
+          if(error){ alert("Not saved: "+error.message+(/ship_tba/.test(error.message)?"\n\nRun structure_despatch_clearance_2026-11-08.sql first.":"")); e.target.checked = false; return; }
+          try{ await logAudit("UPDATE","sale_order_tbl",contractInfo.contract_number,"Shipping address: customer will advise at despatch",user?.username||"unknown",null,null); }catch(x){}
+          if(onChanged) onChanged(); }}),
+        h("span",null,h("b",null,"Customer will advise at despatch"),h("span",{style:{color:colors.muted}}," — approve without it; the OA prints \u201cto be advised\u201d and the Document Controller and Accounts chase it near despatch."))),
       otherMissing.length>0 && h("div",{style:{display:"flex",gap:8,alignItems:"center",marginBottom: billingMissing?8:0}},
         h("button",{onClick:saveAllFields,disabled:savingAll,style:{...btnSmall,fontSize:10.5,opacity:savingAll?0.6:1}},savingAll?"Saving…":"Save all details"),
         allJustSaved && h("span",{style:{fontSize:11,color:"#1c8c56",fontWeight:600}},"✓ Saved")
@@ -21232,7 +21239,7 @@ function SavedEstimates({ autoFile, user, sessionCompany, openTarget, onConsumed
         ["Inspection By", contractInfo?.inspection_by||"—"],
         ["Late Delivery", contractInfo?.late_delivery||"—"],
         ["Billing Address", contractInfo?.billing_address||"—"],
-        ["Shipping Address", contractInfo?.shipping_address||"Kindly provide the shipping details as soon as possible to avoid delays at the time of despatch"],
+        ["Shipping Address", contractInfo?.shipping_address||(contractInfo?.ship_tba ? "To be advised by you before despatch." : "Kindly provide the shipping details as soon as possible to avoid delays at the time of despatch")],
       ].filter(row=>row[1]) : [];
       doc.autoTable({
         startY:topY(38),
@@ -26372,6 +26379,7 @@ function SaleOrderHeaderModal({ contractRow, onCancel, onSaved }){
       ),
       fld("billing_address","Billing Address (defaults from Customer)","textarea"),
       fld("shipping_address","Shipping Address","textarea"),
+      ("ship_tba" in (contractRow||{})) ? h("label",{style:{display:"flex",gap:6,alignItems:"center",fontSize:12,margin:"-4px 0 10px"}},h("input",{type:"checkbox",checked:!!f.ship_tba,onChange:e=>setF(x=>({...x,ship_tba:e.target.checked}))}),"Customer will advise at despatch") : null,   // 2026-11-08
       // Signatory (24 Aug) — this Order Acceptance's own, separate from the
       // Quote's, deliberately starts blank rather than pre-filled.
       h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 12px"}},
@@ -35729,6 +35737,8 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"8 Nov 2026 (344)", summary:"Built on 2026-11-08T09:36:00Z. NEEDS SQL: structure_invoice_completion_2026-11-08.sql (BOTH companies). INVOICE COMPLETION: a 'Complete the invoice' pop-up opens on the first open of a draft and again at Ready for IRN while anything is red — freight, insurance, LR / docket no and date (or No LR), mode, transporter GSTIN / ID or vehicle, e-way distance (goods over Rs 50,000), exchange rate and ports for exports; mode, transporter and delivery term come from the Despatch Clearance. Invoice date, delivery, transport and insurance terms change with a reason (separate override history). Bill to, buyer GSTIN, place of supply, ship to, PO no / date, P&F, payment and taxes terms change only by an OA amendment: Change shows what to do, then Refresh from OA. Prices, qty, HSN and GST rate locked. Edit (anyone working on it) until the IRN; frozen at IRN entry. The e-way bill goes in with the IRN (Ask the Factory Manager sends him IRN, value, PIN, distance, transporter, vehicle); the automatic gateway sends the e-way bill details with the IRN; the invoice is Issued only when IRN, Ack and e-way bill are in. Clocks: Ready for IRN 3 days, IRN in 1 day to Mark as sent, then stale (PDFs blocked, escalated); Pause the clock 1 day with a Clock pause code (Finance Director / Super Admin need none). Code messages say where the giver finds the button. Transporter booking copy (same number, value and tax, freight to be advised, no IRN, red band) with who it went to. Order Status board: own lot columns 12A Invoice · ready for IRN and 12B IRN in · to send — moving opens the invoice; the card moves by itself; a stale card turns red with the owner. Stage report, Order Progress Report and Pending Actions read the same stages." },
+  { date:"8 Nov 2026 (343)", summary:"Built on 2026-11-08T06:28:00Z. NEEDS SQL: structure_despatch_clearance_2026-11-08.sql (BOTH companies). SHIP-TO LATER: the Order Acceptance can be approved with \u201cCustomer will advise at despatch\u201d (tick under the missing Shipping Address, or in the OA header); the OA PDF prints \u201cTo be advised by you before despatch.\u201d CHASE: once the contract\u2019s documents are down to the Final Hold ones (or a lot is ready, when there are no hold documents) the Document Controller and Accounts posts get a Pending Action; Order Acceptance \u203a Despatch details shows the chase box \u2014 Make letter No. n (PDF request letter, signed by the Document Controller) and Mark sent; reminder after 5 days, final reminder after 10 (the Sales Head is told). ENTERING IT: Despatch details now also take PIN, consignee GSTIN and where it came from; the Document Controller may enter them too. The ship-to is written into the Order Acceptance without a revision (logged with who, when and the source). A DC can be made without it; Accounts is asked for it before approving the DC. DESPATCH CLEARANCE (on every approved DC, by Accounts): goods (ordered, this DC, sent earlier, balance, serials), ship-to, complete despatch details (mode, transporter, freight, insurance, delivery terms, despatch by, ports and destination for export, packages, gross weight from the packing), Accounts checks (advance, payment before despatch, tax invoice, QC release, LUT), Final Hold documents to go with the goods, special instructions, instructions to the shipper (pre-filled, editable), Cleared or Hold with reason. Saved as DCL/yy-yy/nnnn and printed for Accounts to sign; the Production Manager is told and marks it received. No e-way bill on it. Pending Actions: Accounts \u2014 issue the clearance for an approved DC; Production Manager \u2014 mark it received." },
   { date:"8 Nov 2026 (342)", summary:"Built on 2026-11-08T06:06:00Z. NEEDS SQL: structure_order_progress_2026-11-08.sql (BOTH companies). ORDER PROGRESS REPORT (Reports \u203a Order Status): for review only \u2014 nothing is sent from it. Open to Super Admins, admins and the department-head posts. Single contract or All contracts (All open / Late or at risk / Delivery within 30 days), filter by head. PROGRESS BY WEIGHTED STATISTICS: four parts \u2014 Engineering & documents 10, Procurement 40, Manufacturing 35, Inspection & despatch 15 (weights in Rules); inside each part every step, Full Hold document (submitted 30%, Code 1/2 100%), material form (PO released 40%, inspection 70\u201385%, at our factory 100%) and lot (by quantity) counts by its share. All contracts: each contract\u2019s % weighted by its order value. Straight-line plan from the OA date to the delivery date; status On track / At risk / Behind plan / N d late. RECOMMENDATIONS BY HEAD from 13 starter rules (documents with the client or with us, OA not sent, W/O, BOM summary, PO and material late against the Gantt, no lot after production started, lot with QC, behind plan, delivery passed, customer told more than the app shows, delivery date told differs); each names the post and its holders and an act-by date. RULES button: switch rules on/off, change limit, head, colour, days and wording, add, remove, reset; Super Admin and the VP Projects post save them. REPORT TO CUSTOMER: asks for the format \u2014 the customer\u2019s (load the PDF of a report already sent; its headings are read and kept for that customer) or ours (also when no PDF is loaded); makes a Word draft to check and send yourself; Areas of concern lists facts only, never NIL while a line is red. RECORD AS SENT: date, reference, % told, delivery date told (also for reports sent outside the app); the history shows on the contract and two rules compare with it. Excel of the All contracts view." },
   { date:"8 Nov 2026 (341)", summary:"Built on 2026-11-08T04:47:00Z. NEEDS SQL: data_oa_rename_2026-11-08.sql (BOTH companies, after deploying). ORDER ACCEPTANCE: Sale Order is now called Order Acceptance (short form OA) everywhere you read it — menus, ribbons, buttons, screen titles, messages, notices, task cards, reports and their PDFs/Excel, the User Manual (English and Tamil), FAQ and Training. The client PDF already reads ORDER ACCEPTANCE. Short labels: SO pending / SO overdue / No SO / \u2197 SO now say OA. The data SQL renames the task type and task card titles that said Sale Order, and the source shown on document requirements. Tables, fields, contract numbers and the Version History are unchanged. The breadcrumb of an open contract now reads Order Acceptance (it showed sale_order). LEVAFLOW BILL PREFIX: the Levaflow site never falls back to FFI — the Bill number prefix box starts empty until Levaflow\u2019s own prefix is saved, and Accounts cannot number a DC until it is set (no number is used)." },
   { date:"8 Nov 2026 (340)", summary:"Built on 2026-11-08T03:00:00Z. NEEDS SQL: structure_gst_gateway_2026-11-08.sql (BOTH companies). E-INVOICE AND E-WAY BILL — TWO GATEWAYS. MANUAL (as before, now checked): the Ack No must be 15 digits and not the IRN; the Ack date needs a time and cannot be before the invoice date; a manual e-way bill no must be 12 digits. Correct Ack No / date on an issued invoice (Edit code; the Finance Director needs none) also corrects the sales voucher. AUTOMATIC (through the Clear gateway, server function gst-gateway): Generate e-invoice (preview of what is sent, then issue from the reply), Cancel e-invoice within 24 hours (E-invoice cancel code), E-way bill from the IRN, Part B (vehicle) update, Cancel e-way bill (E-way bill cancel code). Every call is logged on the invoice. SWITCH: Despatch Settings > E-invoice gateway — Off / Sandbox / Live, Super Admin only; Sandbox gives the Super Admin a test button that never saves to the invoice. While Live, entering by hand needs a reason and an Edit code (Finance Director: reason only) and the Super Admins are told. RIGHTS BY POST: Accounts — e-invoice; Factory Manager — e-way bill; Finance Director — everything, no code; Super Admin — everything. Codes come from the Finance Director or a Super Admin." },
@@ -68816,9 +68826,17 @@ async function despSaveDetails(cn, after, user, note){
     ship_same_as_oa:!!after.ship_same_as_oa, mode_of_shipment:after.mode_of_shipment||null,
     handoff_needed: after.handoff_needed===true ? true : after.handoff_needed===false ? false : null,
     handoff_contact: after.handoff_needed ? (after.handoff_contact||null) : null, handoff_address: after.handoff_needed ? (after.handoff_address||null) : null,
-    handoff_phone: after.handoff_needed ? (after.handoff_phone||null) : null, updated_by:user?.username||"unknown", updated_at:new Date().toISOString() };
-  const { error } = await sb.from("contract_despatch_tbl").upsert(row,{ onConflict:"contract_number" });
+    handoff_phone: after.handoff_needed ? (after.handoff_phone||null) : null, updated_by:user?.username||"unknown", updated_at:new Date().toISOString(),
+    ship_pin:after.ship_pin||null, ship_gstin:after.ship_gstin||null, ship_source:after.ship_source||null };   // 2026-11-08
+  let { error } = await sb.from("contract_despatch_tbl").upsert(row,{ onConflict:"contract_number" });
+  if(error && /ship_pin|ship_gstin|ship_source/.test(error.message||"")){ delete row.ship_pin; delete row.ship_gstin; delete row.ship_source; ({ error } = await sb.from("contract_despatch_tbl").upsert(row,{ onConflict:"contract_number" })); }
   if(error) throw error;
+  // 2026-11-08: the ship-to goes into the Order Acceptance when it had none ("to be advised") — not a revision, the OA stays as sent
+  try{ const { data: so0 } = await sb.from("sale_order_tbl").select("id,shipping_address,ship_tba").eq("contract_number",cn).maybeSingle();
+    if(so0 && (!String(so0.shipping_address||"").trim() || so0.ship_tba)){
+      const txt = shipComposed(row); const up = { shipping_address:txt, ship_tba:false, ship_added_by:user?.username||"", ship_added_at:new Date().toISOString(), ship_source:row.ship_source||null };
+      let r = await sb.from("sale_order_tbl").update(up).eq("id",so0.id); if(r.error) r = await sb.from("sale_order_tbl").update({ shipping_address:txt }).eq("id",so0.id);
+      if(!r.error) await logAudit("UPDATE","sale_order_tbl",cn,"Shipping address added to the Order Acceptance (no revision)"+(row.ship_source?" — source: "+row.ship_source:""),user?.username||"unknown",{ shipping_address:so0.shipping_address||null },{ shipping_address:txt }); } }catch(e){ console.error("Ship-to into OA", e); }
   await sb.from("contract_despatch_hist_tbl").insert({ contract_number:cn, changed_by:user?.username||"unknown", before_data:before||null, after_data:row, note:note||null });
   await logAudit(before?"UPDATE":"CREATE","contract_despatch_tbl",cn,"Despatch details: ship to "+(row.ship_address||"—").slice(0,60)+(row.mode_of_shipment?" · "+row.mode_of_shipment:"")+(row.handoff_needed===true?" · handoff "+(row.handoff_contact||""):row.handoff_needed===false?" · no handoff":""),user?.username||"unknown",before||null,row);
   try{ await despSyncCard(cn); }catch(e){ console.error("Despatch card sync", e); }
@@ -68881,7 +68899,8 @@ function DespatchDetailsDialog({ C, user, onSaved, onCancel, reason }){
     ship_same_as_oa: dd.ship_address ? !!dd.ship_same_as_oa : !!C.oaShip,
     ship_contact: dd.ship_contact||"", ship_address: dd.ship_address || C.oaShip || "", ship_phone: dd.ship_phone||"",
     mode_of_shipment: dd.mode_of_shipment||"", handoff_needed: dd.handoff_needed===true ? true : dd.handoff_needed===false ? false : null,
-    handoff_contact: dd.handoff_contact||"", handoff_address: dd.handoff_address||"", handoff_phone: dd.handoff_phone||"" }));
+    handoff_contact: dd.handoff_contact||"", handoff_address: dd.handoff_address||"", handoff_phone: dd.handoff_phone||"",
+    ship_pin: dd.ship_pin||"", ship_gstin: dd.ship_gstin||"", ship_source: dd.ship_source||"" }));
   const [err,setErr] = useState(""); const [busy,setBusy] = useState(false);
   const set = (k,v)=> setF(x=>({...x,[k]:v}));
   const lab = (t)=> h("div",{style:{fontSize:11.5,color:colors.muted,margin:"8px 0 3px"}},t);
@@ -68910,6 +68929,11 @@ function DespatchDetailsDialog({ C, user, onSaved, onCancel, reason }){
     lab("Ship to — contact name"), h("input",{value:f.ship_contact,onChange:e=>set("ship_contact",e.target.value),style:inputStyle,placeholder:"Mr. R. Menon (Logistics)"}),
     lab("Ship to — company and address"), h("textarea",{rows:3,value:f.ship_address,disabled:!!(f.ship_same_as_oa&&C.oaShip),onChange:e=>set("ship_address",e.target.value),style:{...inputStyle,opacity:(f.ship_same_as_oa&&C.oaShip)?0.7:1}}),
     lab("Phone / email"), h("input",{value:f.ship_phone,onChange:e=>set("ship_phone",e.target.value),style:inputStyle}),
+    h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 10px"}},   // 2026-11-08
+      h("div",null,lab("PIN / postal code"),h("input",{"data-testid":"dd-pin",value:f.ship_pin,onChange:e=>set("ship_pin",e.target.value),style:inputStyle})),
+      h("div",null,lab("Consignee GSTIN (if different)"),h("input",{value:f.ship_gstin,onChange:e=>set("ship_gstin",e.target.value.toUpperCase()),style:inputStyle}))),
+    lab("Where it came from"), h("input",{"data-testid":"dd-source",value:f.ship_source,list:"dd-src-list",placeholder:"Customer email dd/mm/yyyy",onChange:e=>set("ship_source",e.target.value),style:inputStyle}),
+    h("datalist",{id:"dd-src-list"},["Customer email","Customer letter","Phone, confirmed by email","Purchase order"].map(x=>h("option",{key:x,value:x}))),
     C.isExport ? h("div",null, lab("Mode of shipment"), h("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}}, DESP_MODES.map(m=>h("button",{key:m,onClick:()=>set("mode_of_shipment",m),style:{...btnSmall,fontSize:12.5,padding:"5px 12px",background:f.mode_of_shipment===m?colors.dark:"#fff",color:f.mode_of_shipment===m?"#fff":colors.text}},m)))) : null,
     errEl,
     h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}},
@@ -68937,8 +68961,9 @@ function DespatchDetailsPanel({ contractInfo, user }){
   const [missing,setMissing] = useState(false); const [canEdit,setCanEdit] = useState(false);
   const load = useCallback(async()=>{ if(!cn) return; try{ const c = await despContract(cn); setC(c); setMissing(false); }catch(e){ setMissing(true); } },[cn]);
   useEffect(()=>{ load(); },[load]);
-  useEffect(()=>{ (async()=>{ const me = await despMe(user); const P = await despPeople(); setCanEdit(despCan("acc",user,me,P) || despCan("stores",user,me,P)); })(); },[user && user.username]);
+  useEffect(()=>{ (async()=>{ const me = await despMe(user); const P = await despPeople(); setCanEdit(despCan("acc",user,me,P) || despCan("stores",user,me,P) || postHolders("doc_controller").includes(me)); })(); },[user && user.username]);
   if(!cn || missing || !C) return null;
+  const shipLater = !!(C.so && C.so.ship_tba) && !(C.despatch && String(C.despatch.ship_address||"").trim());   // 2026-11-08
   const dd = C.despatch;
   const ok = despDetailsComplete(dd, C.isExport);
   const line = (k,v)=> h("div",{style:{display:"flex",gap:8,fontSize:12.5,padding:"2px 0"}},h("span",{style:{color:colors.muted,minWidth:130}},k),h("span",{style:{whiteSpace:"pre-wrap"}},v||"—"));
@@ -68949,12 +68974,289 @@ function DespatchDetailsPanel({ contractInfo, user }){
       h("span",{style:{fontSize:11.5,color:colors.muted}}, (C.isExport?"Export":"Domestic")+" · "+C.dcCount+" DC"+(C.dcCount===1?"":"s")+" · balance "+C.lines.reduce((n,l)=>n+l.balance,0)+" of "+C.lines.reduce((n,l)=>n+l.ordered,0)+" items"),
       h("span",{onClick:()=>setOpen(o=>!o),style:{fontSize:11.5,color:"#0f7a5c",fontWeight:700,cursor:"pointer"}}, open?"▾ Hide":"▸ Show"),
       canEdit ? h("button",{onClick:()=>setEdit(true),style:{...btnSmall,marginLeft:"auto"}}, dd ? "Change" : "Enter details") : null),
+    shipLater ? h(ShipChaseBox,{C, user, canAct:canEdit, onChanged:load}) : null,
     open ? h("div",{style:{marginTop:6}},
       line("Ship to", [dd&&dd.ship_contact, dd&&dd.ship_address, dd&&dd.ship_phone].filter(Boolean).join("\n")),
       C.isExport ? line("Mode of shipment", dd&&dd.mode_of_shipment) : null,
       C.isExport ? line("Notifying party", !dd || dd.handoff_needed===null || dd.handoff_needed===undefined ? "not asked yet" : dd.handoff_needed===false ? "not needed" : [dd.handoff_contact, dd.handoff_address, dd.handoff_phone].filter(Boolean).join("\n")) : null,
       dd ? h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:4}},"Last changed by "+(dd.updated_by||"")+" · "+fmtDMYTime(dd.updated_at)) : null) : null,
     edit ? h(DespatchDetailsDialog,{C, user, reason:"Changed on the Order Acceptance", onCancel:()=>setEdit(false), onSaved:()=>{ setEdit(false); load(); }}) : null);
+}
+// ---------------------------------------------------------------- 2026-11-08: SHIP-TO LATER, CHASE LETTERS, DESPATCH CLEARANCE
+// The OA may go out with "Customer will advise at despatch" (sale_order_tbl.ship_tba). Once the contract's documents are down to
+// the Final Hold ones (Full Hold and Inspection Hold cleared) — or a lot is ready, for contracts with no hold documents — the
+// Document Controller and Accounts posts are asked to chase it: request letter No. 1, reminder after 5 days, final reminder after
+// 10 (the Sales Head is told). Accounts enters the ship-to (Despatch details); it is written into the OA without a revision.
+// Accounts then issues the Despatch Clearance for each approved DC (despatch_clearance_tbl): goods, ship-to, complete despatch
+// details, Accounts checks, Final Hold documents with the goods, special instructions and instructions to the shipper; printed,
+// signed by Accounts and handed to Production, who mark it received.
+const SHIP_CHASE_DAYS = [0, 5, 10];   // letter 1 at once, 2 after 5 days, 3 (final) after 10 days from letter 1
+const shipComposed = (dd)=> [dd && dd.ship_contact, dd && dd.ship_address, dd && dd.ship_pin ? "PIN "+dd.ship_pin : "", dd && dd.ship_phone, dd && dd.ship_gstin ? "GSTIN "+dd.ship_gstin : ""].filter(x=>String(x||"").trim()).join("\n");
+// contracts whose ship-to is awaited and due for chasing
+async function shipChaseDue(){
+  let sos = []; try{ const r = await sb.from("sale_order_tbl").select("contract_number,customer_name,ship_tba,shipping_address,status,basis_number").eq("ship_tba",true); if(r.error) return []; sos = (r.data||[]).filter(s=>!String(s.shipping_address||"").trim() && !/cancel|closed/i.test(s.status||"")); }catch(e){ return []; }
+  if(!sos.length) return [];
+  const cns = sos.map(s=>String(s.contract_number));
+  let dds = [], lets = [], lots = [];
+  try{ dds = (await sb.from("contract_despatch_tbl").select("contract_number,ship_address").in("contract_number",cns)).data||[]; }catch(e){}
+  try{ const r = await sb.from("ship_chase_tbl").select("*").in("contract_number",cns).order("letter_no"); lets = r.error ? [] : (r.data||[]); }catch(e){}
+  try{ lots = (await sb.from("so_lot_tbl").select("contract_number,status,ready_at").in("contract_number",cns)).data||[]; }catch(e){}
+  let hold = {}; try{ hold = await ctHoldLoad() || {}; }catch(e){}
+  const have = new Set(dds.filter(d=>String(d.ship_address||"").trim()).map(d=>String(d.contract_number)));
+  return sos.filter(s=>!have.has(String(s.contract_number))).map(s=>{ const cn = String(s.contract_number); const g = hold[cn];
+    const docsOk = !!(g && g.holdDocs>0 && (g.level==="Final Hold" || g.level===""));
+    const lotReady = lots.some(l=>String(l.contract_number)===cn && l.status!=="Returned" && l.ready_at);
+    const L = lets.filter(x=>String(x.contract_number)===cn);
+    return { cn, so:s, start: docsOk ? "Final Hold documents stage reached" : lotReady ? "a lot is ready" : null, letters:L };
+  }).filter(x=>x.start);
+}
+function shipNextLetter(x, today){
+  const L = x.letters||[]; const n = L.length;
+  if(n>=SHIP_CHASE_DAYS.length) return { no:null, overdue:true, since:L[n-1].sent_on };
+  if(n===0) return { no:1, due:today };
+  const first = String(L[0].sent_on||"").slice(0,10); const due = addDaysISO(first, SHIP_CHASE_DAYS[n]);
+  return { no:n+1, due, ready: due<=today };
+}
+async function shipLetterPdf(C, no, user){
+  await loadPostPeople();
+  const dcName = postHolders("doc_controller")[0] || "";
+  const title = no===1 ? "REQUEST FOR SHIPPING DETAILS" : no===2 ? "REMINDER — SHIPPING DETAILS" : "FINAL REMINDER — SHIPPING DETAILS";
+  const { doc, W, co } = await despPdfStart("portrait", title, null, null);
+  const today = toISODate(new Date()); const reply = addDaysISO(today, no===3 ? 3 : 5);
+  let y = 42; doc.setFontSize(9.5); doc.setTextColor(28,31,26); doc.setFont(undefined,"normal");
+  doc.text("Ref: SA/"+C.cn+"/0"+no, 10, y); doc.text("Date: "+fmtDMY(today), W-10, y, {align:"right"}); y += 8;
+  const addr = String(C.buyerAddr||"").replace(new RegExp("^\\s*"+String(C.customer||"").replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\s*,?\\s*","i"),"");
+  const toL = ["To", C.customer||"", ...doc.splitTextToSize(addr, 120), "Kind attn: Procurement / Expediting"].filter(Boolean); doc.text(toL, 10, y); y += toL.length*4.6 + 4;
+  doc.setFont(undefined,"bold"); doc.text("Sub: Shipping and consignee details for despatch"+(no>1?" — "+(no===2?"reminder":"final reminder"):""), 10, y); y += 5;
+  doc.setFont(undefined,"normal"); doc.text("Ref: Your PO No. "+(C.po_number||"—")+(C.po_date?" dated "+fmtDMY(C.po_date):"")+"  ·  Our Order Acceptance No. "+C.cn, 10, y); y += 9;
+  const para = (t)=>{ const ls = doc.splitTextToSize(t, W-20); doc.text(ls, 10, y); y += ls.length*4.6 + 3; };
+  para("Dear Sir,");
+  para(no===1 ? "The items against the above order are nearing completion. To plan the despatch and raise the invoice and e-way bill without delay, please send us:"
+    : "We have not yet received the shipping details requested on "+fmtDMY(String((C._first||"")).slice(0,10)||today)+". The goods are nearing despatch; please send us:");
+  const asks = ["Consignee name and full delivery address with PIN / postal code","Contact person at site and phone number","Consignee GSTIN, if different from the billing party","Delivery instructions: unloading hours, gate pass or site permit, if any"];
+  if(C.isExport) asks.push("Consignee, notify party, port of discharge and mode of shipment");
+  asks.forEach((a,i)=>{ const ls = doc.splitTextToSize((i+1)+".  "+a, W-26); doc.text(ls, 14, y); y += ls.length*4.6 + 1; }); y += 3;
+  para("We request your reply by "+fmtDMY(reply)+". If the delivery address is the same as your billing address, a one-line confirmation is enough."+(no===3?" Despatch will be held until we hear from you.":""));
+  para("Thanking you,"); y += 2;
+  doc.text("For "+pdfFooterCompanyName(co), 10, y); y += 16; doc.text(dcName||"", 10, y); y += 4.6; doc.text("Document Controller", 10, y);
+  despPdfFooter(doc, co, "Shipping details request "+C.cn);
+  doc.save("Shipping_details_request_"+C.cn+"_No"+no+".pdf");
+}
+// the chase box on the OA's Despatch details panel
+function ShipChaseBox({ C, user, canAct, onChanged }){
+  const [x,setX] = useState(null); const [busy,setBusy] = useState(false); const [missing,setMissing] = useState(false);
+  const today = toISODate(new Date());
+  const load = useCallback(async()=>{ try{ const r = await sb.from("ship_chase_tbl").select("*").eq("contract_number",C.cn).order("letter_no"); if(r.error){ setMissing(true); return; } setX({ letters:r.data||[] }); }catch(e){ setMissing(true); } },[C.cn]);
+  useEffect(()=>{ load(); },[load]);
+  if(missing) return h("div",{style:{fontSize:11.5,color:"#854f0b",marginTop:6}},"Run structure_despatch_clearance_2026-11-08.sql to keep the chase letters.");
+  if(!x) return null;
+  const nx = shipNextLetter({ letters:x.letters }, today);
+  const make = async()=>{ setBusy(true); try{ await shipLetterPdf({ ...C, _first: x.letters[0] && x.letters[0].sent_on }, nx.no, user); }catch(e){ alert("Letter not made: "+(e.message||e)); } setBusy(false); };
+  const mark = async()=>{ setBusy(true);
+    const { error } = await sb.from("ship_chase_tbl").insert({ contract_number:C.cn, letter_no:nx.no, sent_on:today, sent_by:user?.username||"" });
+    setBusy(false); if(error){ alert("Not saved: "+error.message); return; }
+    try{ await logAudit("CREATE","ship_chase_tbl",C.cn,"Shipping details request letter No. "+nx.no+" sent",user?.username||""); }catch(e){}
+    if(nx.no===3){ try{ await loadPostPeople(); const sh = postHolders("sales_head");
+      await notifyPeople(sh, "Ship-to still awaited — contract "+C.cn+": the final reminder went to "+C.customer+" today. Please follow up with the customer.", "despatch"); }catch(e){} }
+    load(); onChanged && onChanged(); };
+  return h("div",{"data-testid":"ship-chase",style:{marginTop:6,padding:"6px 8px",background:"#fff8e6",border:"1px solid #f0dca8",borderRadius:6,fontSize:12}},
+    h("div",{style:{fontWeight:700}},"Ship-to: to be advised by the customer"),
+    x.letters.length ? h("div",{style:{color:colors.muted}},"Letters sent: "+x.letters.map(l=>"No. "+l.letter_no+" on "+fmtDMY(l.sent_on)+(l.sent_by?" ("+l.sent_by+")":"")).join(" · ")) : h("div",{style:{color:colors.muted}},"No letter sent yet."),
+    nx.no ? h("div",{style:{display:"flex",gap:6,alignItems:"center",marginTop:4,flexWrap:"wrap"}},
+      h("span",null,(nx.no===1?"Request letter":nx.no===2?"Reminder":"Final reminder")+(nx.due>today?" — due "+fmtDMY(nx.due):"")),
+      canAct ? h("button",{"data-testid":"ship-letter",disabled:busy,onClick:make,style:{...btnSmall,fontSize:11}},"Make letter No. "+nx.no+" (PDF)") : null,
+      canAct ? h("button",{"data-testid":"ship-mark",disabled:busy,onClick:mark,style:{...btnSmall,fontSize:11}},"Mark No. "+nx.no+" sent today") : null)
+      : h("div",{style:{color:"#a3312a",marginTop:4}},"All three letters sent — follow up by phone; the Sales Head has been told."),
+    h("div",{style:{color:colors.muted,marginTop:4}},"When the customer replies, Accounts enters it under Despatch details — it goes into this Order Acceptance without a revision."));
+}
+async function shipPendingItems(){
+  const out = []; const today = toISODate(new Date());
+  let due = []; try{ due = await shipChaseDue(); }catch(e){ return out; }
+  if(!due.length) return out;
+  await loadPostPeople(); const dcs = postHolders("doc_controller"), acc = postHolders("accounts"), sh = postHolders("sales_head");
+  due.forEach(x=>{ const nx = shipNextLetter(x, today); const tag = "contract "+x.cn+(x.so.customer_name?" ("+x.so.customer_name+")":"");
+    let what = null, dw = null;
+    if(nx.no===1){ what = "Ship-to awaited — "+tag+": "+x.start+". Send the request letter No. 1 (Order Acceptance › Despatch details)"; }
+    else if(nx.no && nx.ready){ what = "Ship-to awaited — "+tag+": send "+(nx.no===2?"the reminder":"the final reminder")+" (letter No. "+nx.no+")"; dw = insDays(nx.due, today); }
+    else if(!nx.no){ what = "Ship-to still awaited — "+tag+": three letters sent; follow up by phone"; dw = insDays(nx.since, today); }
+    if(!what) return;
+    const people = Array.from(new Set(dcs.concat(acc).concat(!nx.no ? sh : [])));
+    (people.length ? people : [""]).forEach(p=>out.push({ what, entity_key:x.cn, detail_key:"shipchase|"+x.cn+"|"+(nx.no||"x"), owed_by_person:p, owed_by_role: dcs.includes(p) ? "doc_controller" : acc.includes(p) ? "accounts" : "sales_head", days_waiting:dw||null, urgency: (dw||0)>=2 ? "overdue" : "due", source:"ship_chase", client_side:true }));
+  });
+  return out;
+}
+// ---- Despatch Clearance ------------------------------------------------------------------------------
+const DCL_MODES = ["Road","Sea","Air","Courier","Rail","Hand delivery"];
+const DCL_CHECKS = [ ["adv","Advance"], ["pay","Payment due before despatch"], ["inv","Tax invoice"], ["qc","QC release"], ["lut","LUT / export papers"] ];
+function dclShipperTemplate(C, D){
+  const tags = Array.from(new Set((D.lines||[]).map(l=>l.customer_tag).filter(Boolean))).join(", ");
+  const dd = C.despatch || {};
+  return [
+    "1. Mark every package with: PO "+(C.po_number||"—")+" · our contract "+C.cn+(tags?" · tag nos "+tags:"")+" · package no. x of "+((D.boxes||[]).length||"n")+".",
+    "2. Hand over with the goods: DC, packing slip, tax invoice copy"+(C.isExport?", and the export documents":"")+", and the documents listed in section 4 — in a waterproof cover fixed to package 1.",
+    "3. Handle with care: keep flange faces covered and the items upright; do not stack other loads on the packages.",
+    "4. Deliver to: "+(dd.ship_contact||"the consignee")+(dd.ship_phone?" ("+dd.ship_phone+")":"")+" — call before arrival.",
+    "5. Take the consignee's signature and seal on the DC copy (POD); send it, with the LR / AWB / BL copy, to Accounts on the day of delivery.",
+    "6. Send a photo of the loaded vehicle (number plate visible) to Accounts before it leaves." ].join("\n");
+}
+async function dclFinalHoldDocs(cn){
+  try{ const [{ data: ds }, { data: cats }] = await Promise.all([ sb.from("universal_documents_tbl").select("id,doc_name,doc_number,category,hold_level,is_archived,entity_type,entity_id").eq("entity_type","contract").eq("entity_id",cn), sb.from("doc_category_tbl").select("*") ]);
+    let hold = {}; try{ hold = await ctHoldLoad() || {}; }catch(e){}
+    const open = new Set((((hold[cn]||{}).open||{})["Final Hold"]||[]).map(o=>o.name));
+    return (ds||[]).filter(d=>!d.is_archived && docHoldOf(d, cats||[])==="Final Hold").map(d=>{ const nm = d.doc_name||d.category||d.doc_number||"Document"; return { name:nm, ready:!open.has(nm), go:true }; });
+  }catch(e){ return []; }
+}
+async function dclNextNo(){
+  const fy = despFy(); let n = 0;
+  try{ const { data } = await sb.from("despatch_clearance_tbl").select("dcl_no").eq("fy",fy); n = (data||[]).map(r=>parseInt(String(r.dcl_no||"").split("/").pop(),10)||0).reduce((a,b)=>Math.max(a,b),0); }catch(e){}
+  return { fy, no:"DCL/"+fy+"/"+String(n+1).padStart(4,"0") };
+}
+async function dclPdf(row){
+  const d = row.data || {};
+  const { doc, W, co } = await despPdfStart("portrait", "DESPATCH CLEARANCE", "Accounts to Production · "+row.dcl_no+" · "+fmtDMYTime(row.made_at), row.verdict==="hold" ? "HOLD" : null);
+  let y = 39;
+  const kv = (rows)=>{ doc.autoTable({ ...DESP_TBL, startY:y, body:rows, columnStyles:{0:{fontStyle:"bold",cellWidth:34},1:{cellWidth:(W-20)/2-34},2:{fontStyle:"bold",cellWidth:30}} }); y = doc.lastAutoTable.finalY + 2; };
+  const sec = (t)=>{ if(y > doc.internal.pageSize.getHeight()-30){ doc.addPage(); y = 16; } doc.setFontSize(8.5); doc.setFont(undefined,"bold"); doc.setTextColor(29,58,51); doc.text(t, 10, y+3); doc.setFont(undefined,"normal"); doc.setTextColor(28,31,26); y += 5; };
+  kv([["Contract / OA", row.contract_number+(d.oa_rev!=null?" · Rev "+d.oa_rev:""), "Customer", d.customer||""],
+      ["Customer PO", d.po||"—", "DC / Bill no", d.dc_no||"—"],
+      ["Lot", d.lot||"—", "Invoice", d.invoice||"to follow (same number as the DC)"]]);
+  sec("1 · Goods cleared");
+  doc.autoTable({ ...DESP_TBL, startY:y, head:[["OA Sl","Item / description","Ordered","This DC","Sent earlier","Balance","Serial nos"]], body:(d.lines||[]).map(l=>[String(l.sl), [l.item,l.desc].filter(Boolean).join(" — "), String(l.ordered), String(l.qty), String(l.earlier), String(l.balance), l.serials||"—"]),
+    columnStyles:{0:{cellWidth:12},2:{cellWidth:16,halign:"right"},3:{cellWidth:16,halign:"right"},4:{cellWidth:18,halign:"right"},5:{cellWidth:16,halign:"right"},6:{cellWidth:40}} }); y = doc.lastAutoTable.finalY + 2;
+  sec("2 · Ship to");
+  doc.autoTable({ ...DESP_TBL, startY:y, body:[[{content:"Consignee & address",styles:{fontStyle:"bold"}}, d.ship||"—"], ...(d.notify?[[{content:"Notifying party",styles:{fontStyle:"bold"}}, d.notify]]:[]), [{content:"Source",styles:{fontStyle:"bold"}}, d.ship_source||"—"]], columnStyles:{0:{cellWidth:40}} }); y = doc.lastAutoTable.finalY + 2;
+  sec("3 · Despatch details");
+  const dp = d.desp || {};
+  kv([["Mode", dp.mode||"—", "Transporter / forwarder", dp.transporter||"—"], ["Freight", dp.freight||"—", "Insurance", dp.insurance||"—"], ["Delivery terms", dp.terms||"—", "Despatch by", dp.by?fmtDMY(dp.by):"—"],
+      ...(d.export?[["Port of loading", dp.pol||"—", "Port of discharge", dp.pod||"—"],["Final destination", dp.dest||"—", "", ""]]:[]), ["Packages", dp.pkgs||"—", "Gross weight", dp.gross||"—"]]);
+  sec("4 · Accounts checks");
+  doc.autoTable({ ...DESP_TBL, startY:y, head:[["Check","Status","Note"]], body:(d.checks||[]).map(c=>[c.label, c.st==="ok"?"Done":c.st==="na"?"Not applicable":"PENDING", c.note||""]), columnStyles:{0:{cellWidth:50},1:{cellWidth:30}} }); y = doc.lastAutoTable.finalY + 2;
+  sec("5 · Documents to go with the goods");
+  doc.autoTable({ ...DESP_TBL, startY:y, head:[["Document","Status","With goods"]], body:(d.docs||[]).map(x=>[x.name, x.ready?"Ready":"NOT READY", x.go?"Yes":"No"]), columnStyles:{1:{cellWidth:28},2:{cellWidth:24}} }); y = doc.lastAutoTable.finalY + 2;
+  if(row.special_instructions){ sec("6 · Special instructions"); doc.autoTable({ ...DESP_TBL, startY:y, body:[[row.special_instructions]] }); y = doc.lastAutoTable.finalY + 2; }
+  sec((row.special_instructions?"7":"6")+" · Instructions to the shipper");
+  doc.autoTable({ ...DESP_TBL, startY:y, body:[[row.shipper_instructions||"—"]] }); y = doc.lastAutoTable.finalY + 4;
+  if(y > doc.internal.pageSize.getHeight()-42){ doc.addPage(); y = 16; }
+  doc.setFontSize(10); doc.setFont(undefined,"bold"); doc.text(row.verdict==="hold" ? "ON HOLD — "+(row.hold_reason||"") : "CLEARED FOR DESPATCH", 10, y+2); doc.setFont(undefined,"normal"); y += 6;
+  const cw = (W-20)/3; doc.setDrawColor(28,31,26); doc.rect(10,y,W-20,26); [1,2].forEach(i=>doc.line(10+cw*i,y,10+cw*i,y+26));
+  doc.setFontSize(7.5); doc.setTextColor(60,60,60);
+  doc.text("Prepared & signed by · Accounts", 12, y+4); doc.text((row.made_by_name||row.made_by||"")+" · sign / date", 12, y+24);
+  doc.text("Received by · Production Manager", 10+cw+2, y+4); doc.text(row.received_at ? (row.received_by||"")+" · "+fmtDMYTime(row.received_at) : "sign / date / time", 10+cw+2, y+24);
+  doc.text("Gate pass · Stores", 10+cw*2+2, y+4); doc.text("GP no. ______ · sign / date", 10+cw*2+2, y+24);
+  despPdfFooter(doc, co, "Despatch Clearance "+row.dcl_no);
+  doc.save("Despatch_Clearance_"+String(row.dcl_no).replace(/\//g,"-")+".pdf");
+}
+function DclPanel({ dc, D, C, user, me, P, onAskDetails }){
+  const [row,setRow] = useState(undefined); const [form,setForm] = useState(null); const [busy,setBusy] = useState(false); const [msg,setMsg] = useState(""); const [missing,setMissing] = useState(false);
+  const canAcc = despCan("acc", user, me, P), canPm = despCan("pm", user, me, P);
+  const load = useCallback(async()=>{ try{ const r = await sb.from("despatch_clearance_tbl").select("*").eq("dc_id",dc.id).neq("status","Cancelled").order("id",{ascending:false}).limit(1); if(r.error){ setMissing(true); setRow(null); return; } setRow((r.data||[])[0]||null); }catch(e){ setMissing(true); setRow(null); } },[dc.id]);
+  useEffect(()=>{ load(); },[load]);
+  if(row===undefined) return null;
+  const startForm = async()=>{ setMsg(""); setBusy(true);
+    const c = await despContract(C.cn); const dd = c.despatch || {};
+    let inv = null; try{ const { data } = await sb.from("invoice_tbl").select("invoice_no,status,irn").eq("dc_id",dc.id).limit(1); inv = (data||[])[0]||null; }catch(e){}
+    const S = await despSettings(); const docs = await dclFinalHoldDocs(C.cn);
+    const ser = (lid)=> despSerialRanges((D.serials||[]).filter(s=>s.dc_line_id===lid).map(s=>s.serial));
+    const gross = (D.boxes||[]).reduce((a,b)=>a+(Number(b.packing_wt)||0)+(b.contents||[]).reduce((s2,c)=>s2+(Number(c.qty)||0)*(Number(c.wt_per_item!=null?c.wt_per_item:c.wt)||0),0),0);
+    setForm({
+      lines:(D.lines||[]).map(l=>{ const b = c.lines.find(x=>x.item_sl_no===l.item_sl_no)||{}; const q = Number(l.qty)||0; const earlier = Math.max(0,(b.ordered||0)-(b.balance||0)-q);
+        return { sl:l.item_sl_no, item:l.item||b.item||"", desc:l.description||b.description||"", ordered:b.ordered||0, qty:q, earlier, balance:b.balance||0, serials: l.no_serial ? "no serial" : ser(l.id) }; }),
+      ship: shipComposed(dd), notify: c.isExport && dd.handoff_needed ? [dd.handoff_contact, dd.handoff_address, dd.handoff_phone].filter(Boolean).join("\n") : "", ship_source: dd.ship_source||"",
+      desp:{ mode: dd.mode_of_shipment || (c.isExport ? "Sea" : "Road"), transporter:"", freight:"Paid by us", insurance:"By customer", terms:"", by:toISODate(new Date()), pol:"", pod:"", dest:"", pkgs: (D.boxes||[]).length ? String((D.boxes||[]).length) : "", gross: gross ? gross.toFixed(1)+" kg" : "" },
+      checks: DCL_CHECKS.filter(([k])=>k!=="lut" || c.isExport).map(([k,l])=>({ k, label:l, st: k==="inv" ? (inv && inv.status==="Issued" ? "ok" : "pend") : k==="qc" ? (dc.qc_at ? "ok" : "pend") : k==="lut" ? (S.lut_no ? "ok" : "pend") : "pend",
+        note: k==="inv" ? (inv ? inv.invoice_no+" · "+(inv.status||"") : "same number as the DC: "+(dc.bill_no||"")) : k==="qc" ? (dc.qc_at ? "QC cleared "+fmtDMY(dc.qc_at) : qcSkipOn(dc) ? "QC skipped (gateway 2) — release to follow" : "") : k==="lut" ? (S.lut_no||"") : "" })),
+      docs, special:"", shipper: dclShipperTemplate(c, D), verdict:"cleared", hold:"", export:c.isExport, invoice: inv ? inv.invoice_no : "",
+      po:[c.po_number, c.po_date?fmtDMY(c.po_date):""].filter(Boolean).join(" · "), customer:c.customer, oa_rev: c.so ? (Number(c.so.amd_no)||0) : null, shipOk: despDetailsComplete(dd, c.isExport) });
+    setBusy(false); };
+  const save = async()=>{ const f = form;
+    if(!f.shipOk){ setMsg("Enter the ship-to first (Despatch details) — it goes into the Order Acceptance without a revision."); return; }
+    if(f.verdict==="hold" && !String(f.hold).trim()){ setMsg("Say why it is on hold."); return; }
+    const pend = f.checks.filter(c=>c.st==="pend"); if(f.verdict==="cleared" && pend.length && !window.confirm("Still pending: "+pend.map(c=>c.label).join(", ")+".\n\nClear for despatch anyway?")) return;
+    setBusy(true); const { fy, no } = await dclNextNo();
+    const row = { dcl_no:no, fy, dc_id:dc.id, contract_number:C.cn, lot_id:dc.lot_id||null, made_by:user?.username||"", made_by_name:me||"", made_at:new Date().toISOString(), verdict:f.verdict, hold_reason:f.verdict==="hold"?f.hold:null,
+      special_instructions:f.special||null, shipper_instructions:f.shipper||null, status:"Issued",
+      data:{ customer:f.customer, po:f.po, dc_no:despNo(dc), lot: dc.lot_id ? "Lot "+((D.lot&&D.lot.lot_no)||dc.lot_id) : "", invoice:f.invoice, oa_rev:f.oa_rev, lines:f.lines, ship:f.ship, notify:f.notify, ship_source:f.ship_source, desp:f.desp, checks:f.checks, docs:f.docs, export:f.export } };
+    const { data, error } = await sb.from("despatch_clearance_tbl").insert(row).select().single();
+    setBusy(false); if(error){ setMsg("Not saved: "+error.message+(/relation|does not exist|schema cache/i.test(error.message)?" — run structure_despatch_clearance_2026-11-08.sql first.":"")); return; }
+    try{ await logAudit("CREATE","despatch_clearance_tbl",no,"Despatch Clearance "+no+" for DC "+despNo(dc)+" — "+(f.verdict==="hold"?"ON HOLD: "+f.hold:"cleared"),user?.username||""); }catch(e){}
+    try{ await notifyPeople(P.pm||[], "Despatch Clearance "+no+" — "+(f.verdict==="hold"?"ON HOLD ("+f.hold+")":"cleared")+" · DC "+despNo(dc)+" · contract "+C.cn+". Collect the signed copy from Accounts and mark it received.", "despatch"); }catch(e){}
+    setForm(null); setRow(data); try{ await dclPdf(data); }catch(e){} };
+  const receive = async()=>{ setBusy(true); const { error } = await sb.from("despatch_clearance_tbl").update({ received_by:me||user?.username||"", received_at:new Date().toISOString() }).eq("id",row.id); setBusy(false);
+    if(error){ alert(error.message); return; } try{ await logAudit("UPDATE","despatch_clearance_tbl",row.dcl_no,"Despatch Clearance received by Production",user?.username||""); }catch(e){} load(); };
+  const box = { marginTop:12, border:"1px solid "+colors.border, borderRadius:8, padding:"10px 12px", background:"#fbfaf6" };
+  if(missing) return h("div",{style:box},h("b",null,"Despatch Clearance"),h("div",{style:{fontSize:12,color:"#854f0b"}},"Run structure_despatch_clearance_2026-11-08.sql to use it."));
+  if(row && !form) return h("div",{"data-testid":"dcl-panel",style:box},
+    h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}, h("b",null,"Despatch Clearance "+row.dcl_no),
+      h("span",{style:{fontSize:11,fontWeight:700,borderRadius:9,padding:"1px 8px",background:row.verdict==="hold"?"#fdecea":"#e4f3ed",color:row.verdict==="hold"?"#a3312a":"#0f6b4f"}}, row.verdict==="hold"?"On hold":"Cleared"),
+      h("span",{style:{fontSize:11.5,color:colors.muted}},"by "+(row.made_by_name||row.made_by)+" · "+fmtDMYTime(row.made_at)), h("span",{style:{flex:1}}),
+      h("button",{onClick:()=>dclPdf(row),style:btnSmall},"PDF"),
+      !row.received_at && canPm ? h("button",{"data-testid":"dcl-receive",disabled:busy,onClick:receive,style:btnPrimary},"Mark received (Production)") : null),
+    row.verdict==="hold" ? h("div",{style:{fontSize:12,color:"#a3312a",marginTop:4}},"Hold: "+(row.hold_reason||"")) : null,
+    h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:4}}, row.received_at ? "Received by "+row.received_by+" · "+fmtDMYTime(row.received_at) : "Not yet received by Production."),
+    canAcc && row.verdict==="hold" ? h("button",{onClick:startForm,style:{...btnSmall,marginTop:6}},"Issue a new clearance") : null);
+  if(!form) return h("div",{"data-testid":"dcl-panel",style:box},
+    h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}, h("b",null,"Despatch Clearance"), h("span",{style:{fontSize:11.5,color:colors.muted}},"Accounts fills and signs it, and hands it to Production."), h("span",{style:{flex:1}}),
+      canAcc ? h("button",{"data-testid":"dcl-start",disabled:busy,onClick:startForm,style:btnPrimary},busy?"Reading…":"Make Despatch Clearance") : h("span",{style:{fontSize:11.5,color:colors.mutedLight}},"Waiting for Accounts.")));
+  const f = form; const set = (k,v)=>setForm(x=>({...x,[k]:v})); const setD = (k,v)=>setForm(x=>({...x,desp:{...x.desp,[k]:v}}));
+  const lab = (t)=> h("div",{style:{fontSize:11,color:colors.muted,margin:"6px 0 2px",fontWeight:600}},t);
+  const inp = { ...inputStyle, padding:"5px 8px", fontSize:12.5 };
+  const sec = (t)=> h("div",{style:{fontSize:11.5,fontWeight:700,letterSpacing:".05em",textTransform:"uppercase",color:colors.dark,margin:"12px 0 4px"}},t);
+  const cell = { padding:"4px 6px", borderBottom:"1px solid #eee", fontSize:12, verticalAlign:"top" };
+  return h("div",{"data-testid":"dcl-form",style:box},
+    h("b",null,"Despatch Clearance — DC "+despNo(dc)),
+    sec("1 · Goods cleared"),
+    h("div",{style:{overflowX:"auto"}},h("table",{style:{width:"100%",borderCollapse:"collapse",minWidth:620}},
+      h("thead",null,h("tr",null,["OA Sl","Item","Ordered","This DC","Sent earlier","Balance","Serial nos"].map(t=>h("th",{key:t,style:{...cell,textAlign:"left",fontSize:11,color:colors.muted}},t)))),
+      h("tbody",null,f.lines.map((l,i)=>h("tr",{key:i},h("td",{style:cell},l.sl),h("td",{style:cell},[l.item,l.desc].filter(Boolean).join(" — ")),h("td",{style:cell},l.ordered),h("td",{style:{...cell,fontWeight:700}},l.qty),h("td",{style:cell},l.earlier),h("td",{style:cell},l.balance),h("td",{style:{...cell,fontFamily:"monospace",fontSize:11}},l.serials||"—")))))),
+    sec("2 · Ship to"),
+    f.shipOk ? h("div",{style:{fontSize:12.5,whiteSpace:"pre-wrap"}},f.ship+(f.notify?"\n\nNotifying party:\n"+f.notify:"")+(f.ship_source?"\n\nSource: "+f.ship_source:""))
+      : h("div",{style:{fontSize:12.5,color:"#a3312a"}},"Ship-to not given yet. ", h("button",{"data-testid":"dcl-enter-ship",onClick:()=>{ onAskDetails && onAskDetails(async()=>{ await startForm(); }); },style:{...btnSmall,fontSize:11.5}},"Enter the ship-to")),
+    sec("3 · Despatch details"),
+    h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:"0 10px"}},
+      h("div",null,lab("Mode"),h("select",{value:f.desp.mode,onChange:e=>setD("mode",e.target.value),style:inp},DCL_MODES.map(m=>h("option",{key:m},m)))),
+      h("div",null,lab("Transporter / forwarder"),h("input",{"data-testid":"dcl-transporter",value:f.desp.transporter,onChange:e=>setD("transporter",e.target.value),style:inp})),
+      h("div",null,lab("Freight"),h("select",{value:f.desp.freight,onChange:e=>setD("freight",e.target.value),style:inp},["Paid by us","To pay (customer)","Customer's own transporter","Included in price"].map(m=>h("option",{key:m},m)))),
+      h("div",null,lab("Insurance"),h("select",{value:f.desp.insurance,onChange:e=>setD("insurance",e.target.value),style:inp},["By customer","By us","Not required"].map(m=>h("option",{key:m},m)))),
+      h("div",null,lab("Delivery terms"),h("input",{value:f.desp.terms,placeholder:f.export?"FOB Chennai / CIF …":"Ex-works / FOR site …",onChange:e=>setD("terms",e.target.value),style:inp})),
+      h("div",null,lab("Despatch by"),h("input",{type:"date",value:f.desp.by,onChange:e=>setD("by",e.target.value),style:inp})),
+      f.export ? h("div",null,lab("Port of loading"),h("input",{value:f.desp.pol,onChange:e=>setD("pol",e.target.value),style:inp})) : null,
+      f.export ? h("div",null,lab("Port of discharge"),h("input",{value:f.desp.pod,onChange:e=>setD("pod",e.target.value),style:inp})) : null,
+      f.export ? h("div",null,lab("Final destination"),h("input",{value:f.desp.dest,onChange:e=>setD("dest",e.target.value),style:inp})) : null,
+      h("div",null,lab("Packages"),h("input",{value:f.desp.pkgs,onChange:e=>setD("pkgs",e.target.value),style:inp})),
+      h("div",null,lab("Gross weight"),h("input",{value:f.desp.gross,onChange:e=>setD("gross",e.target.value),style:inp}))),
+    sec("4 · Accounts checks"),
+    f.checks.map((c,i)=>h("div",{key:c.k,style:{display:"grid",gridTemplateColumns:"190px 150px 1fr",gap:8,alignItems:"center",marginBottom:4}},
+      h("span",{style:{fontSize:12.5}},c.label),
+      h("select",{"data-testid":"dcl-chk-"+c.k,value:c.st,onChange:e=>{ const v = e.target.value; setForm(x=>({...x,checks:x.checks.map((y,j)=>j===i?{...y,st:v}:y)})); },style:{...inp,color:c.st==="pend"?"#a3312a":colors.text}},[["ok","Done"],["na","Not applicable"],["pend","Pending"]].map(([k,t])=>h("option",{key:k,value:k},t))),
+      h("input",{value:c.note,placeholder:"amount, reference, date",onChange:e=>{ const v = e.target.value; setForm(x=>({...x,checks:x.checks.map((y,j)=>j===i?{...y,note:v}:y)})); },style:inp}))),
+    sec("5 · Documents to go with the goods (Final Hold)"),
+    f.docs.length ? f.docs.map((d,i)=>h("label",{key:i,style:{display:"flex",gap:8,alignItems:"center",fontSize:12.5,padding:"2px 0"}},
+      h("input",{type:"checkbox",checked:d.go,onChange:e=>{ const v = e.target.checked; setForm(x=>({...x,docs:x.docs.map((y,j)=>j===i?{...y,go:v}:y)})); }}), d.name,
+      h("span",{style:{fontSize:11,fontWeight:700,color:d.ready?"#0f6b4f":"#a3312a"}}, d.ready?"ready":"not ready"))) : h("div",{style:{fontSize:12,color:colors.mutedLight}},"No Final Hold documents on this contract."),
+    sec("6 · Special instructions"),
+    h("textarea",{"data-testid":"dcl-special",rows:2,value:f.special,placeholder:"Anything particular to this despatch (customer's site rules, part shipment, items to hold back …)",onChange:e=>set("special",e.target.value),style:inp}),
+    sec("7 · Instructions to the shipper"),
+    h("textarea",{"data-testid":"dcl-shipper",rows:7,value:f.shipper,onChange:e=>set("shipper",e.target.value),style:{...inp,fontSize:12}}),
+    sec("Decision"),
+    h("div",{style:{display:"flex",gap:14,alignItems:"center",flexWrap:"wrap",fontSize:13}},
+      h("label",null,h("input",{type:"radio",checked:f.verdict==="cleared",onChange:()=>set("verdict","cleared")})," Cleared for despatch"),
+      h("label",null,h("input",{type:"radio","data-testid":"dcl-hold",checked:f.verdict==="hold",onChange:()=>set("verdict","hold")})," Hold"),
+      f.verdict==="hold" ? h("input",{"data-testid":"dcl-hold-why",value:f.hold,placeholder:"why",onChange:e=>set("hold",e.target.value),style:{...inp,width:280}}) : null),
+    msg ? h("div",{style:{color:colors.danger,fontSize:12,marginTop:6}},msg) : null,
+    h("div",{style:{display:"flex",gap:8,marginTop:10}}, h("button",{"data-testid":"dcl-save",disabled:busy,onClick:save,style:btnPrimary},busy?"Saving…":"Save and print"), h("button",{onClick:()=>setForm(null),style:btnSecondary},"Cancel")));
+}
+async function dclPendingItems(P){
+  const out = []; const days = (ts)=> ts ? Math.max(0, Math.floor((Date.now()-new Date(ts).getTime())/86400000)) : 0;
+  let dcs = [], rows = [];
+  try{ const r = await sb.from("despatch_clearance_tbl").select("id,dc_id,dcl_no,verdict,received_at,made_at,contract_number,status"); if(r.error) return out; rows = (r.data||[]).filter(x=>x.status!=="Cancelled"); }catch(e){ return out; }
+  try{ dcs = (await sb.from("dc_tbl").select("id,bill_no,draft_no,contract_number,customer_name,status,acc_at,is_test,gate_pass_id").eq("status","Approved")).data||[]; }catch(e){}
+  const by = new Map(rows.map(x=>[x.dc_id,x]));
+  const to = (people, base)=>{ (people.length ? people : [""]).forEach(p=>out.push({ ...base, owed_by_person:p, client_side:true })); };
+  dcs.filter(d=>!d.is_test && !d.gate_pass_id && !by.has(d.id)).forEach(d=>{ const dw = days(d.acc_at);
+    to(P.acc||[], { what:"DC "+despNo(d)+" · contract "+d.contract_number+(d.customer_name?" ("+d.customer_name+")":"")+" — issue the Despatch Clearance to Production", entity_key:despNo(d), detail_key:"dcl|"+d.id, owed_by_role:"accounts", days_waiting:dw||null, urgency: dw>=1 ? "overdue" : "due", source:"despatch_clearance" }); });
+  rows.filter(x=>x.verdict==="cleared" && !x.received_at).forEach(x=>{ const dw = days(x.made_at);
+    to(P.pm||[], { what:"Despatch Clearance "+x.dcl_no+" · contract "+x.contract_number+" — collect the signed copy from Accounts and mark it received", entity_key:x.dcl_no, detail_key:"dclrcv|"+x.id, owed_by_role:"production_manager", days_waiting:dw||null, urgency: dw>=1 ? "overdue" : "due", source:"despatch_clearance" }); });
+  return out;
 }
 // ---- small promise dialogs (outside React state, like the price-validation code) ---------------------
 function despAsk(title, text, buttons){
@@ -69846,6 +70148,7 @@ function DcEditor({ user, me, P, S, dcId, contract, lot, onClose, onChanged }){
   const [boxes,setBoxes] = useState([]);
   const [hdr,setHdr] = useState({ remarks:"", readiness_skipped:false });
   const [askDetails,setAskDetails] = useState(false);
+  const dclAfter = useRef(null);   // 2026-11-08: run after the ship-to is entered from the Despatch Clearance
   const [busy,setBusy] = useState(false); const [msg,setMsg] = useState("");
   const [back,setBack] = useState(null);   // send-back reason dialog: {to}
   const [hist,setHist] = useState([]);
@@ -69875,7 +70178,7 @@ function DcEditor({ user, me, P, S, dcId, contract, lot, onClose, onChanged }){
       setRows(c.lines.map(l=>({ ...l, key:"sl"+l.item_sl_no, line_id:null, qty: lq.has(Number(l.item_sl_no)) ? String(Math.min(lq.get(Number(l.item_sl_no)), l.balance)) : "", no_serial:false, uom:"NOS", serials: lq.has(Number(l.item_sl_no)) ? qcsrPick(rg, l.item_sl_no, Math.min(lq.get(Number(l.item_sl_no)), l.balance), []) : [], start:"" })));
       if(lr) setHdr(x=>({ ...x, readiness_skipped:true }));
       setBoxes([]);
-      if(!despDetailsComplete(c.despatch, c.isExport)) setAskDetails(true);
+      if(!despDetailsComplete(c.despatch, c.isExport) && !(c.so && c.so.ship_tba)) setAskDetails(true);   // 2026-11-08: "to be advised" — asked at Accounts
     }
   },[dcId, contract]);
   useEffect(()=>{ load(); },[load]);
@@ -69916,7 +70219,7 @@ function DcEditor({ user, me, P, S, dcId, contract, lot, onClose, onChanged }){
       shipRows.forEach(r=>{ const b = boxQty(r.item_sl_no); if(b!==Number(r.qty)) p.push("Sl No "+r.item_sl_no+": "+b+" packed in boxes, but "+r.qty+" being sent."); });
       boxes.forEach(b=>b.contents.forEach(c=>{ if(!rows.find(r=>r.item_sl_no===c.sl && Number(r.qty)>0)) p.push("Box "+b.box_no+" holds Sl No "+c.sl+", which is not being sent."); }));
       if(!hdr.readiness_skipped && !lotRow) p.push("Tick the readiness line: Stores confirms these items are ready (the production gateway is not built yet).");
-      if(!despDetailsComplete(C.despatch, C.isExport)) p.push("Despatch details (ship-to"+(C.isExport?", mode, notifying party":"")+") are missing — enter them first.");
+      if(!despDetailsComplete(C.despatch, C.isExport) && !(C.so && C.so.ship_tba)) p.push("Despatch details (ship-to"+(C.isExport?", mode, notifying party":"")+") are missing — enter them first.");
     }
     return p;
   };
@@ -70030,6 +70333,7 @@ function DcEditor({ user, me, P, S, dcId, contract, lot, onClose, onChanged }){
     const c = await despContract(C.cn, dc.id);
     const over = D.lines.filter(l=>{ const b = c.lines.find(x=>x.item_sl_no===l.item_sl_no); return !b || Number(l.qty) > b.balance; });
     if(over.length){ setMsg("Other DCs have used up the balance since this one was made: Sl No "+over.map(l=>l.item_sl_no).join(", ")+". Send it back to Stores."); return; }
+    if(!despDetailsComplete(c.despatch, c.isExport)){ setC(c); setMsg("Enter the ship-to from the customer first (it goes into the Order Acceptance — not a revision). Then approve."); setAskDetails(true); return; }   // 2026-11-08
     const S2 = await despSettings(); if(S2._missing){ setMsg("Run the despatch SQL first."); return; }
     let isTest = false;
     if(!S2.test_phase_done){
@@ -70254,11 +70558,12 @@ function DcEditor({ user, me, P, S, dcId, contract, lot, onClose, onChanged }){
           h("div",{style:{display:"flex",gap:8}},
             h("button",{"data-testid":"dc-qcskip-go",onClick:goSkip,disabled:busy,style:{...btnPrimary,background:"#c9302c",borderColor:"#c9302c"}},"Straight to billing"),
             h("button",{onClick:()=>setSkip(x=>({...x,open:false})),style:btnSecondary},"Cancel"))))) : null,
+    (dc.id && !dc.is_test && (st==="Approved" || st==="Despatched")) ? h(DclPanel,{dc, D:{ ...D, lot:lotRow||null }, C, user, me, P, onAskDetails:(fn)=>{ dclAfter.current = fn; setAskDetails(true); }}) : null,   // 2026-11-08
     hist.length ? h("div",{style:{marginTop:14}},h("div",{style:{fontSize:12,fontWeight:700,color:colors.muted}},"History"),
       hist.map(x=>h("div",{key:x.id,style:{fontSize:11.5,color:colors.muted,padding:"2px 0"}},fmtDMYTime(x.at)+" · "+(x.by_user||"")+" · "+x.action+(x.note?" — "+x.note:"")))) : null,
     askDetails ? h(DespatchDetailsDialog,{C, user, reason: dc.id ? "Changed on DC "+despNo(dc) : "Asked on the first DC of the contract",
       onCancel:()=>{ setAskDetails(false); if(!dc.id && !despDetailsComplete(C.despatch, C.isExport)) onClose && onClose(); },
-      onSaved:async()=>{ setAskDetails(false); const c = await despContract(C.cn, dc.id); setC(c); }}) : null,
+      onSaved:async()=>{ setAskDetails(false); const c = await despContract(C.cn, dc.id); setC(c); const fn = dclAfter.current; dclAfter.current = null; if(fn) fn(); }}) : null,
     back ? h(ReasonDialog,{title:back.label, subtitle:"DC "+despNo(dc)+" · contract "+C.cn, placeholder:back.to==="Cancelled"?"Why is it cancelled?":"What needs fixing?", okLabel:back.to==="Cancelled"?"Cancel the DC":"Send back",
       okStyle: back.to==="Cancelled" ? {background:colors.danger} : null, onCancel:()=>setBack(null),
       onOk:async(why)=>{ const b = back; setBack(null); if(b.to==="Cancelled") await cancelDc(why); else { const wasAcc = st==="With Accounts"; const ok = await step("Draft",{ returned_by:who(), returned_at:now(), returned_note:why },lotRow?"Sent back to the Production Manager":"Sent back to Stores", why); if(ok && wasAcc) await lotAfterAcc(false, why); } }}) : null);
@@ -70288,7 +70593,7 @@ const OS_MODES = [["transport","Transporter / courier (LR / AWB)"],["own","Own v
 const osModeLabel = (m)=> (OS_MODES.find(x=>x[0]===m)||[null,""])[1];
 // Old placements (before 31 Oct) were numbered on the 6-column board; board_v = 2 rows use the 7 columns above.
 const OS_OLD2NEW = { 1:1, 2:3, 3:4, 4:5, 5:6, 6:7 };
-const OSN = (n)=> Number(n)+8;   // Label: eight columns before production   // 2026-11-01T06:00:00Z: six columns before production come first; lot columns show as 7-13
+const OSN = (n)=> Number(n)===8 ? "12A" : Number(n)===9 ? "12B" : Number(n)+8;   // 344: the invoice columns sit after 12 · With Accounts   // Label: eight columns before production   // 2026-11-01T06:00:00Z: six columns before production come first; lot columns show as 7-13
 const osPlaceCol = (p)=> !p ? 1 : Number(p.board_v)===2 ? Number(p.col) : (OS_OLD2NEW[Number(p.col)]||Number(p.col));
 const osDmy = (d)=> d ? fmtDMY(String(d).slice(0,10)) : "";
 const osIso = ()=> new Date().toISOString();
@@ -70301,6 +70606,7 @@ function osLotCol(l, dc){
   if(l.paid_at) return 7;
   if(l.shipped_at) return 6;
   if(dc && dc.status==="Approved" && qcSkipPending(dc)) return 4;   // 2026-11-05: billed before QC — the goods wait for the QC documents
+  { const ic = osInvCol(dc); if(ic) return ic; }   // 344: 12A invoice ready for IRN · 12B IRN in, to send (moves by itself)
   if(dc && (dc.status==="Approved" || dc.status==="Despatched")) return 5;
   if(dc && dc.status==="With Accounts") return 4;
   if(!osDcLive(dc) || !l.stores_done_at) return 2;    // stores_done_* = "DC and packing slip done" (made by the Production Manager since 31 Oct)
@@ -70310,7 +70616,8 @@ function osLotCol(l, dc){
 // the time the lot came into its column (for "days here" and the ageing on the dashboard)
 function osLotSince(l, dc){
   const c = osLotCol(l, dc);
-  if(c===7) return l.paid_at; if(c===6) return l.shipped_at; if(c===5) return (dc && dc.acc_at) || l.clear_req_at || l.qc_at;
+  if(c===7) return l.paid_at; if(c===6) return l.shipped_at; if(c===5) return (dc && dc._inv && dc._inv.sent_at) || (dc && dc.acc_at) || l.clear_req_at || l.qc_at;
+  if(c===8) return (dc && dc._inv && dc._inv.ready_at) || (dc && dc.acc_at); if(c===9) return (dc && dc._inv && (dc._inv.ack_date || dc._inv.issued_at)) || (dc && dc.acc_at);   // 344
   if(c===4) return (dc && dc.pm_acc_at) || l.clear_req_at || l.qc_at || l.stores_done_at;
   if(c===3) return l.stores_done_at; return l.back_at || l.ready_at;
 }
@@ -70322,6 +70629,7 @@ function osLotNext(l, dc){
   if(c===4) return dc && dc.status==="With Accounts" ? "acc" : (dc && dc.status==="Approved" && qcSkipPending(dc)) ? "qc" : "pm";
   if(c===5) return "stores";
   if(c===6) return "acc";
+  if(c===8 || c===9) return "acc";   // 344
   return "";
 }
 function osLotWhere(l, dc){
@@ -70335,6 +70643,10 @@ function osLotWhere(l, dc){
   if(c===3) return "QC: check and issue the clearance letter";
   if(c===4 && qcSkipPending(dc)) return dc.status==="Approved" ? "Billed "+(dc.bill_no||"")+" — despatch held: QC documents pending" : "With Accounts for the bill — QC skipped by code, documents pending";
   if(c===4) return dc && dc.status==="With Accounts" ? "With Accounts for despatch clearance" : "Production Manager: send to Accounts";
+  if(c===8 || c===9){ const k = osInvClock(dc) || {}; const iv = dc._inv;   // 344
+    const clock = k.stale ? " · ⛔ STALE — "+(k.owner||postPersonShort("accounts")) : k.lim && k.since ? " · day "+(k.days+1)+" of "+k.lim : "";
+    if(c===8) return (!iv ? "Accounts: make the invoice of DC "+(dc.bill_no||"") : iv.status==="Draft" ? "Accounts: invoice "+iv.invoice_no+" draft — complete it, Ready for IRN" : "Accounts: IRN, Ack and e-way bill — "+iv.invoice_no)+clock;
+    return (iv.status==="Ready for IRN" ? "IRN in — e-way bill from the Factory Manager · "+iv.invoice_no : "Accounts: send "+iv.invoice_no+" and Mark as sent")+clock; }
   if(c===5) return "Stores: gate pass, despatch, hand over"+(dc && dc.bill_no ? " · "+dc.bill_no : "");
   if(c===6) return "Payment due "+(l.due_date?osDmy(l.due_date):"—")+(l._paidPart ? " · Part paid Rs "+accInr(l._paidPart)+" of "+accInr(l._due) : "");
   if(c===7) return "Paid "+osDmy(l.paid_at)+(l.paid_auto?" (from the books)":"");
@@ -70383,7 +70695,7 @@ async function osLoadAll(){
   const r2 = await sb.from("os_place_tbl").select("*"); out.place = r2.data||[];
   const r3 = await sb.from("os_settings_tbl").select("*").eq("id",1).maybeSingle(); out.settings = r3.data||null;
   const dcIds = Array.from(new Set(out.lots.map(l=>l.dc_id).filter(Boolean)));
-  if(dcIds.length){ const { data } = await sb.from("dc_tbl").select("id,status,bill_no,draft_no,dc_date,gate_pass_id,returned_note,returned_by,returned_at,contract_number,is_test,acc_at,acc_by,pm_acc_at").in("id",dcIds); out.dcs = data||[]; }
+  if(dcIds.length){ const { data } = await sb.from("dc_tbl").select("*").in("id",dcIds); out.dcs = data||[]; }   // 344: all columns (QC-skip and invoice placing read them)
   const gpIds = Array.from(new Set(out.dcs.map(d=>d.gate_pass_id).filter(Boolean)));
   if(gpIds.length){ try{ const { data } = await sb.from("gate_pass_tbl").select("id,gp_no,status,exit_at,scan_link").in("id",gpIds); out.gps = data||[]; }catch(e){} }
   try{ const r = await sb.from("so_lot_tbl").select("despatch_mode,back_note").limit(1); if(r.error) out.needSql2 = true; }catch(e){ out.needSql2 = true; }   // 2026-10-31T06:00:00Z
@@ -70394,7 +70706,8 @@ async function osLoadAll(){
       if(r.error) r = await sb.from("estimates").select("reference_number,item_sl_no,order_qty").in("reference_number",open.slice(i,i+150));
       out.ests = out.ests.concat(r.data||[]); }catch(e){}
   }
-  if(dcIds.length){ try{ const { data } = await sb.from("invoice_tbl").select("id,invoice_no,invoice_date,dc_id,grand_total,status").in("dc_id",dcIds); out.invs = data||[]; }catch(e){} }
+  if(dcIds.length){ let iv = null; try{ iv = await osInvLoad(out.dcs); }catch(e){}   // 344: the invoice of each DC places the lot on 12A / 12B
+    if(iv) out.invs = iv; else { try{ const { data } = await sb.from("invoice_tbl").select("id,invoice_no,invoice_date,dc_id,grand_total,status").in("dc_id",dcIds); out.invs = data||[]; }catch(e){} } }
   return out;
 }
 // Paid in the books? Sales voucher posted from the lot's invoice, receipts allocated against it.
@@ -70582,7 +70895,7 @@ function OsLotPanel({ lotId, user, me, P, so, onClose, onChanged, sessionCompany
   const load = async()=>{
     const { data: l } = await sb.from("so_lot_tbl").select("*").eq("id",lotId).maybeSingle(); if(!l){ setMsg("This lot was not found."); return; }
     setL(l); setQcDocs((l.qc_docs&&l.qc_docs.length) ? l.qc_docs : OS_QC_DOCS.slice(0,5).map(x=>({ label:x, link:"" }))); setQcNote(l.qc_note||""); setShipDocs(l.despatch_docs||[]);
-    let d = null; if(l.dc_id){ const { data } = await sb.from("dc_tbl").select("*").eq("id",l.dc_id).maybeSingle(); d = data||null; } setDc(d);
+    let d = null; if(l.dc_id){ const { data } = await sb.from("dc_tbl").select("*").eq("id",l.dc_id).maybeSingle(); d = data||null; } if(d){ try{ await osInvLoad([d]); }catch(e){} } setDc(d);   // 344
     let iv = null; if(d){ const { data } = await sb.from("invoice_tbl").select("id,invoice_no,invoice_date,grand_total,status,currency").eq("dc_id",d.id).maybeSingle(); iv = data||null; } setInv(iv);
     let g = null; if(d && d.gate_pass_id){ try{ const { data } = await sb.from("gate_pass_tbl").select("*").eq("id",d.gate_pass_id).maybeSingle(); g = data||null; }catch(e){} } setGp(g);
     let t = null; try{ const { data } = await sb.from("quote_commercial_terms").select("*").eq("reference_number",l.contract_number).limit(1); t = (data||[])[0]||null; }catch(e){} setTerms(t);
@@ -70739,11 +71052,12 @@ function OsLotPanel({ lotId, user, me, P, so, onClose, onChanged, sessionCompany
       if(from===2 && to===3){ if(osDcLive(dc) && dc.status==="Draft") { openDc(dc.id); flash('[data-testid="dc-lot-done"]', "Send this lot to QC", ["Check the lines, serials and boxes.","Press Done – send to QC."]); } else makeDc(); }
       else if(from===3 && to===4) flash('[data-testid="os-qc-issue"]', "QC clearance", ["Link the QC documents.","Press Issue QC clearance."]);
       else if(from===3 && to===2) qcBack();
-      else if(from===4 && to===5){ if(dc && dc.status==="With Accounts") giveClear(); else flash('[data-testid="os-req-clear"]', "Send to Accounts", []); }
+      else if(from===4 && (to===5 || to===8)){ if(dc && dc.status==="With Accounts") giveClear(); else flash('[data-testid="os-req-clear"]', "Send to Accounts", []); }
+      else if((from===8 || from===9) && dc){ onClose && onClose(); invOpenFromBoard(dc, from===9 ? "send" : "irn"); }   // 344: the invoice step does the work; the card moves by itself
       else if(from===4 && to<4){ if(dc && dc.status==="With Accounts") hold(); }
       else if(from===5 && to===6) flash('[data-testid="os-shipped"]', "Despatched — hand over to Accounts", ["Gate pass Exited, with its signed scan linked.","LR / AWB, or the signed DC acknowledgement for own vehicle / hand delivery.","Press Despatched – hand over to Accounts."]);
       else if(from===6 && to===7) paid();
-      else appToast("A lot moves one step at a time: "+(OS_COLS[from-1]||{}).label+" → "+(OS_COLS[from]||{}).label+".");
+      else appToast("A lot moves one step at a time: "+osColOf(from).label+" → "+osColOf(osNextCol(from)).label+".");
     }, 250);
   },[loaded, intent]);
   if(!L) return h(OsModal,{ title:"Lot", onClose }, h("div",{style:{color:colors.muted}}, msg||"Reading…"));
@@ -70761,7 +71075,7 @@ function OsLotPanel({ lotId, user, me, P, so, onClose, onChanged, sessionCompany
   const gpLine = h("div",{key:"gp",style:{fontSize:12.5,background:gpOk?"#e4f3ed":"#fff4d6",borderRadius:6,padding:"7px 10px",marginBottom:8}},
     h("b",null,"Gate pass: "), !gp ? "not made yet — Stores → Gate Passes, tick DC "+osDcNo(dc)+"." : gp.gp_no+" · "+(gp.status==="Open"?"waiting to leave":gp.status)+(gp.exit_at?" "+fmtDMYTime(gp.exit_at):"")+" · signed copy: ", gp ? (gp.scan_link ? h("a",{href:gp.scan_link,target:"_blank",rel:"noopener noreferrer"},"open") : h("b",{style:{color:"#a3312a"}},"missing")) : null,
     h("button",{onClick:goGatePass,"data-testid":"os-goto-gp",style:{...btnSmall,marginLeft:8,fontSize:11.5}},"Open Gate Passes →"));
-  return h(OsModal,{ title:osLotName(L)+(so && so.customer_name ? " — "+so.customer_name : ""), sub:(returned ? "Returned to production" : "Column "+col+" · "+(OS_COLS[col-1]||{}).label+" · "+osLotWhere(L, dc))+(next ? " · next: "+osWhoText(next) : ""), onClose, width:900 },
+  return h(OsModal,{ title:osLotName(L)+(so && so.customer_name ? " — "+so.customer_name : ""), sub:(returned ? "Returned to production" : "Column "+OSN(col)+" · "+osColOf(col).label+" · "+osLotWhere(L, dc))+(next ? " · next: "+osWhoText(next) : ""), onClose, width:900 },
     needSql2 ? h("div",{style:{background:"#fdecea",color:"#a3312a",borderRadius:6,padding:"6px 10px",fontSize:12.5,marginBottom:8}},"Run "+OS_SQL2+" (both companies) — QC send-back, despatch mode and the signed acknowledgement need it.") : null,
     h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}},
       h("button",{onClick:()=>{ onClose(); osGotoSo(L.contract_number, L.id); },"data-testid":"os-open-so",style:btnSmall},"Open the Order Acceptance →"),
@@ -70800,6 +71114,10 @@ function OsLotPanel({ lotId, user, me, P, so, onClose, onChanged, sessionCompany
             ? [h(React.Fragment,{key:"a"},btn("os-give-clear",qcSkipPending(dc)?"Make the bill (despatch held for QC)":"Give despatch clearance",giveClear,true,!can("acc"))), h(React.Fragment,{key:"h"},btn("os-hold","Hold",hold,false,!can("acc")))]
             : dc && dc.status==="Approved" && qcSkipPending(dc) ? h("div",{style:{fontSize:12.5,color:"#a3312a"}},"Billed "+(dc.bill_no||"")+". No gate pass, no despatch until QC issues the documents.")
             : btn("os-req-clear","Send to Accounts",reqClear,true,!can("pm")))])
+    : (col===8 || col===9) ? box((col===8 ? "Invoice — ready for IRN" : "IRN in — to send")+" · "+osWhoText("acc"),[   // 344
+        h("div",{key:"t",style:{fontSize:12.5,marginBottom:6}}, osLotWhere(L, dc)),
+        h("div",{key:"n",style:{fontSize:11.5,color:colors.muted,marginBottom:6}}, col===8 ? "Accounts completes the invoice, makes it Ready for IRN and enters the IRN, Ack and e-way bill ("+STALE_DAYS+" days, then stale). The card moves to 12B by itself when the IRN is in." : "Accounts sends the e-invoice and presses Mark as sent (1 day from the IRN, then stale). The card moves to Clearance given by itself."),
+        h("div",{key:"b"}, btn("os-open-inv", col===8 ? (dc && dc._inv ? "Open invoice "+dc._inv.invoice_no : "Make the invoice") : "Open invoice "+((dc && dc._inv && dc._inv.invoice_no)||""), ()=>{ onClose && onClose(); invOpenFromBoard(dc, col===9?"send":"irn"); }, true, !can("acc")))])
     : col===5 ? box("Despatch — "+osWhoText("stores"),[
         gpLine,
         h("div",{key:"f",style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:8}},
@@ -70914,7 +71232,7 @@ function OsDashboard({ rows, lots, dcBy, invBy }){
       tile(over.length, "Payment overdue", over.length?"#a3312a":null, sum(over) ? "Rs "+accInr(sum(over),0) : null)),
     h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(340px,1fr))",gap:12}},
       panel("Cards per column, by days in the column", h("div",null,
-        OS_COLS.filter(c=>c.n<7).map(c=>{ const xs = live.filter(r=>r.col===c.n); const b = [0,0,0,0]; xs.forEach(r=>b[osAgeBucket(r.days)]++);
+        OS_ORDER.filter(n=>n!==7).map(osColOf).map(c=>{ const xs = live.filter(r=>r.col===c.n); const b = [0,0,0,0]; xs.forEach(r=>b[osAgeBucket(r.days)]++);
           return h("div",{key:c.n,style:{display:"grid",gridTemplateColumns:"minmax(110px,190px) 1fr auto",gap:8,alignItems:"center",marginBottom:6,fontSize:12}},
             h("span",null,OSN(c.n)+" · "+c.label),
             h("div",{style:{display:"flex",height:14,background:"#f1efe6",borderRadius:4,overflow:"hidden",width:Math.max(xs.length?4:0,Math.round(100*xs.length/maxCol))+"%"}}, b.map((n,i)=> n ? h("div",{key:i,title:OS_AGE_LABELS[i]+": "+n,style:{flex:n,background:OS_AGE_TONES[i]}}) : null)),
@@ -70925,7 +71243,7 @@ function OsDashboard({ rows, lots, dcBy, invBy }){
       panel("Longest waiting", oldest.length ? h("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:12}},
         h("tbody",null, oldest.map((r,i)=>h("tr",{key:i},
           h("td",{style:{padding:"3px 4px",borderBottom:"1px solid "+colors.border,fontWeight:600}},r.name),
-          h("td",{style:{padding:"3px 4px",borderBottom:"1px solid "+colors.border,color:colors.muted}},(OS_COLS[r.col-1]||{}).label),
+          h("td",{style:{padding:"3px 4px",borderBottom:"1px solid "+colors.border,color:colors.muted}},osColOf(r.col).label),
           h("td",{style:{padding:"3px 4px",borderBottom:"1px solid "+colors.border}},r.whoName||""),
           h("td",{style:{padding:"3px 4px",borderBottom:"1px solid "+colors.border,textAlign:"right",fontWeight:700,color:OS_AGE_TONES[osAgeBucket(r.days)]}},r.days+" d"))))) : h("div",{style:{fontSize:12,color:colors.mutedLight}},"Nothing waiting."))));
 }
@@ -71035,8 +71353,8 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
   const [badges,setBadges] = useState(ospBadgesShown()); const [ownN,setOwnN] = useState({}); const [paSend,setPaSend] = useState(null);   // Label
   useEffect(()=>{ (async()=>{ try{ await loadPostPeople(); const sup = await superAdminNames(); const n = {};
     OSP_COLS.forEach(c=>{ n[c.k] = [...(c.posts||[]).map(k=>postHolders(k).join(", ")), ...(c.sa?[sup.join(", ")]:[])].filter(Boolean).join(" · "); });
-    const lotPost = { prod:"production_manager", dc:"production_manager", qc:"qc", acc:"accounts", clear:"stores", ship:"accounts", paid:"accounts" };
-    OS_COLS.forEach(c=>{ n["c"+c.n] = postHolders(lotPost[c.key]||"").join(", "); }); setOwnN(n); }catch(e){} })(); },[]);
+    const lotPost = { prod:"production_manager", dc:"production_manager", qc:"qc", acc:"accounts", irn:"accounts", send:"accounts", clear:"stores", ship:"accounts", paid:"accounts" };
+    [...OS_COLS, ...OS_INV_COLS].forEach(c=>{ n["c"+c.n] = postHolders(lotPost[c.key]||"").join(", "); }); setOwnN(n); }catch(e){} })(); },[]);
   const setBadgesP = (v)=>{ setBadges(v); try{ localStorage.setItem("os_badges", v?"1":"0"); }catch(e){} };
   // 2026-11-01T13:00:00Z: full screen — the board fills the window, each list scrolls on its own under its frozen heading;
   // outside full screen the board scrolls in its own box with the headings frozen at the top
@@ -71095,7 +71413,7 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
   const strict = (k)=> { const L = OS_WHO_LABEL[k]; return !!L && (P[k==="stores"?"stores":k]||[]).includes(me); };   // holds the post (not just admin)
   const whoName = (k)=> k ? postPersonShort(OS_WHO_LABEL[k]) : "";
   // the cards, per column
-  const cols = OS_COLS.map(()=>[]);
+  const cols = [...OS_COLS, ...OS_INV_COLS].map(()=>[]);   // 344: index n-1 (8, 9 = the invoice columns)
   const pre = OSP_COLS.map(()=>[]);   // 2026-11-01T06:00:00Z: the six stages before production
   const preMine = (k)=>{ const c = OSP_COLS.find(z=>z.k===k); if(!c) return false; if(c.sa) return isSA; if(k==="bom") return (myKeys||[]).includes("technical_head"); return (c.posts||[]).some(p=>(myKeys||[]).includes(p)); };
   D.sos.forEach(s=>{
@@ -71175,9 +71493,9 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
     }
     if(d.kind==="lot"){
       if(!myKind(d.nextK)){ appToast("It is "+(whoName(d.nextK)||"someone else")+"'s move on this lot."); return; }
-      const back = to<d.from; const okBack = (d.from===3 && to===2) || (d.from===4 && to<4);
+      const back = osRank(to)<osRank(d.from); const okBack = (d.from===3 && to===2) || (d.from===4 && to<4);   // 344: by board order
       if(back && !okBack){ appToast("This lot cannot be dragged back from here."); return; }
-      if(!back && to!==d.from+1){ appToast("One step at a time: drop it on “"+(OS_COLS[d.from]||{}).label+"”."); return; }
+      if(!back && to!==osNextCol(d.from) && !(d.from===4 && to===5)){ appToast("One step at a time: drop it on “"+osColOf(osNextCol(d.from)).label+"”."); return; }
       openLot(d.id, to);
     }
   };
@@ -71243,11 +71561,12 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
     const l = x.l; const age = osDays(x.since);
     const overdue = l.shipped_at && !l.paid_at && l.due_date && new Date(l.due_date) < new Date();
     const mineNow = myKind(x.nextK); const nd = (l.qc_docs||[]).length+(l.despatch_docs||[]).length;
-    return h("div",{key:"l"+l.id,"data-testid":"os-lot",...(mineNow?dragProps({ kind:"lot", id:l.id, from:osLotCol(l,x.dc), nextK:x.nextK }):{}),onClick:()=>openLot(l.id),style:{background:"#fff",border:"1px solid "+(mineNow?"#0f7a5c":colors.border),borderLeft:"4px solid "+(mineNow?"#0f7a5c":colors.border),borderRadius:8,padding:"8px 10px",marginBottom:8,cursor:mineNow?"grab":"pointer"}},
+    const ick = osInvClock(x.dc); const stl = !!(ick && ick.stale);   // 344: a stale invoice card turns red
+    return h("div",{key:"l"+l.id,"data-testid":"os-lot",...(stl?{"data-stale":"1"}:{}),...(mineNow?dragProps({ kind:"lot", id:l.id, from:osLotCol(l,x.dc), nextK:x.nextK }):{}),onClick:()=>openLot(l.id),style:{background:stl?"#fdecea":"#fff",border:"1px solid "+(stl?"#c0392b":mineNow?"#0f7a5c":colors.border),borderLeft:"4px solid "+(stl?"#c0392b":mineNow?"#0f7a5c":colors.border),borderRadius:8,padding:"8px 10px",marginBottom:8,cursor:mineNow?"grab":"pointer"}},
       h("div",{style:{display:"flex",alignItems:"flex-start",gap:4}}, h("div",{style:{flex:1}},head(osLotName(l))),
         h("button",{title:"Documents (QC and shipping)","data-testid":"os-card-docs",onClick:e=>{ e.stopPropagation(); setDocsFor(l.id); },style:{border:"1px solid "+colors.border,background:"#fff",borderRadius:5,fontSize:11,padding:"0 5px",cursor:"pointer"}},"📎"+(nd?" "+nd:""))),
       h("div",{style:{fontSize:11.5,color:colors.muted}},(x.s.customer_name||"")+(x.s.basis_number?" · PO "+x.s.basis_number:"")),
-      h("div",{style:{fontSize:11.5,marginTop:3,color:overdue?"#a3312a":colors.text}}, osLotWhere(l, x.dc)),
+      h("div",{style:{fontSize:11.5,marginTop:3,color:(overdue||stl)?"#a3312a":colors.text,fontWeight:stl?700:400}}, osLotWhere(l, x.dc)),
       qcSkipOn(x.dc) ? h("div",{style:{marginTop:2}}, ospBadge(qcSkipPending(x.dc) ? "QC skipped — QC documents pending" : "QC documents in ✓ (after billing)", qcSkipPending(x.dc) ? "rd" : "ok", "qs")) : null,
       h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:3}}, (l.lines||[]).length+" Sl No"+((l.lines||[]).length===1?"":"s")+" · "+(l.lines||[]).reduce((n,z)=>n+Number(z.qty||0),0)+" Nos"+(x.nextK?" · next: "+whoName(x.nextK):"")+(age?" · "+age+" d here":"")),
       mineNow ? h("div",{style:{fontSize:10.5,fontWeight:700,color:"#0f7a5c",marginTop:3}},"⚑ your move"+(strict(x.nextK)?"":" (as admin)")+" — drag it to the next column or open it") : null);
@@ -71367,7 +71686,7 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
         // 2026-11-05: Super Admin places a lot at Despatched / Payment received (a legacy lot; 11–13 need a DC, so they stay with the lot's own steps)
         if(isSA){ if(from<6) out.push({ lotPlace:6, label:"⇢ place this lot at "+OSN(6)+" · "+OS_COLS[5].label+" (reason)" }); if(from<7) out.push({ lotPlace:7, label:"⇢ place this lot at "+OSN(7)+" · "+OS_COLS[6].label+" (reason)" }); }
         if(!myKind(x.nextK)) return out;
-        if(OS_COLS[from]) out.push({ col:from+1, label:"→ "+OSN(from+1)+" · "+OS_COLS[from].label+" ("+(r.lot||"this lot")+")" });
+        { const nx = osNextCol(from); if(nx) out.push({ col:nx, label:"→ "+OSN(nx)+" · "+osColOf(nx).label+" ("+(r.lot||"this lot")+")" }); }   // 344
         if(from===3) out.push({ col:2, label:"← back to "+OSN(2)+" · "+OS_COLS[1].label+" ("+(r.lot||"this lot")+")" });
         if(from===4) [1,2,3].forEach(n=>out.push({ col:n, label:"← back to "+OSN(n)+" · "+OS_COLS[n-1].label+" ("+(r.lot||"this lot")+")" }));
         return out; }
@@ -71439,7 +71758,7 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
   const myLots = rows.filter(r=>r.x.kind==="lot" && strict(r.x.nextK));
   // table + exports
   const TCOLS = [
-    { label:"Column", get:r=>r.colLabel || (OSN(r.col)+" · "+(OS_COLS[r.col-1]||{}).label) }, { label:"Contract", get:r=>r.cn }, { label:"Lot", get:r=>r.lot||"" },
+    { label:"Column", get:r=>r.colLabel || (OSN(r.col)+" · "+osColOf(r.col).label) }, { label:"Contract", get:r=>r.cn }, { label:"Lot", get:r=>r.lot||"" },
     { label:"Client", get:r=>r.client }, { label:"Client PO", get:r=>r.po }, { label:"Sl Nos", get:r=>r.sls }, { label:"Nos", get:r=>r.nos },
     { label:"Where it is", get:r=>r.where }, { label:"Next: who", get:r=>r.whoName }, { label:"Days here", get:r=>r.days },
     { label:"DC", get:r=>r.dc+(r.dcStatus?" ("+r.dcStatus+")":"") }, { label:"Gate pass", get:r=>r.gp }, { label:"How", get:r=>r.mode },
@@ -71473,7 +71792,7 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
     D.needSql2 ? h("div",{style:{background:"#fdecea",color:"#a3312a",borderRadius:6,padding:"6px 10px",fontSize:12.5,marginBottom:8}},"Run "+OS_SQL2+" on this company (structure, both companies). Until then QC send-back, the despatch mode / signed acknowledgement and moving placed contracts will not save.") : null,
     myLots.length ? h("div",{"data-testid":"os-mine-flag",style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",background:"#fff4d6",border:"1px solid #e0b84a",borderRadius:8,padding:"7px 12px",marginBottom:10,fontSize:12.5}},
       h("b",null,"⚑ "+myLots.length+" lot"+(myLots.length===1?"":"s")+" waiting on you"),
-      myLots.slice(0,8).map(r=>h("button",{key:r.x.l.id,onClick:()=>openLot(r.x.l.id),style:{...btnSmall,fontSize:11.5,background:"#fff"}},r.name+" · "+(OS_COLS[r.col-1]||{}).label+(r.days?" · "+r.days+" d":""))),
+      myLots.slice(0,8).map(r=>h("button",{key:r.x.l.id,onClick:()=>openLot(r.x.l.id),style:{...btnSmall,fontSize:11.5,background:"#fff"}},r.name+" · "+osColOf(r.col).label+(r.days?" · "+r.days+" d":""))),
       myLots.length>8 ? h("span",{style:{color:colors.muted}},"+"+(myLots.length-8)+" more") : null,
       !mine ? h("button",{onClick:()=>setMine(true),style:{...btnSmall,fontSize:11.5,marginLeft:"auto"}},"Show only mine") : null) : null,
     view==="oa" ? h(OaScorecard,null) :   // 2026-11-04T04:00:00Z
@@ -71495,14 +71814,14 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
           h("div",{style:{fontSize:11}},ospPostText(c.posts, c.sa)),
           ownN[c.k] ? h("div",{"data-testid":"osp-own-"+c.k,style:{fontSize:10.5,opacity:.85}},ownN[c.k]) : null),
         h("div",{style:osBodyFs}, pre[i].length ? pre[i].map(x=>preCard(x, c.k)) : h("div",{style:{fontSize:12,color:colors.mutedLight,padding:"4px 6px"}},"Nothing here.")))) : null,
-      OS_COLS.map((c,i)=>h("div",{key:c.n,"data-testid":"os-col-"+c.n,
+      OS_ORDER.map(n=>{ const c = osColOf(n), i = n-1; return h("div",{key:c.n,"data-testid":"os-col-"+c.n,
           onDragOver:e=>{ if(!drag) return; e.preventDefault(); if(over!==c.n) setOver(c.n); }, onDragLeave:()=>{ if(over===c.n) setOver(0); }, onDrop:e=>{ e.preventDefault(); dropOn(c.n); },
           style:{minWidth:178,flex:"1 1 0",background:over===c.n?"#e3efe9":"#f4f2ea",outline:over===c.n?"2px dashed #0f7a5c":"none",borderRadius:10,padding:8,minHeight:120,...osColFs}},
         h("div",{"data-testid":"os-head",style:{background:c.tone[0],color:c.tone[1],borderRadius:8,padding:"7px 10px",marginBottom:8,...osHeadFix}},
           h("div",{style:{fontWeight:700,fontSize:13}},OSN(c.n)+" · "+c.label+"  ("+cols[i].length+")"),
           h("div",{style:{fontSize:11}},c.sub),
           ownN["c"+c.n] ? h("div",{style:{fontSize:10.5,opacity:.85}},ownN["c"+c.n]) : null),
-        h("div",{style:osBodyFs}, cols[i].length ? cols[i].map(card) : h("div",{style:{fontSize:12,color:colors.mutedLight,padding:"4px 6px"}},"Nothing here."))))),
+        h("div",{style:osBodyFs}, cols[i].length ? cols[i].map(card) : h("div",{style:{fontSize:12,color:colors.mutedLight,padding:"4px 6px"}},"Nothing here."))); })),
     paSend ? h(OspPaSendModal,{ cn:paSend.cn, client:paSend.client, user, onClose:()=>setPaSend(null), onDone:()=>{ setPaSend(null); load(); } }) : null,
     ready ? h(OsItemsReady,{ cn:ready, so:soBy.get(String(ready)), user, me, P, onClose:()=>setReady(null), onDone:(lot)=>{ setReady(null); load(); if(lot && confirm(osLotName(lot)+" is made.\n\nMake its DC and packing slip now?")) setDcOpen({ new:lot.contract_number, lot:lot.id }); } }) : null,
     lotOpen ? (()=>{ const lt = D.lots.find(z=>z.id===Number(lotOpen)); return h(OsLotPanel,{ key:lotOpen+"|"+(lotIntent||""), lotId:Number(lotOpen), intent:lotIntent, needSql2:D.needSql2, user, me, P, so: lt ? soBy.get(String(lt.contract_number)) : null, sessionCompany, onOpenDc:(x)=>setDcOpen(x), onClose:()=>{ setLotOpen(null); setLotIntent(null); }, onChanged:load }); })() : null,
@@ -72874,7 +73193,7 @@ async function ospPlace(cn, from, to, user, why, quiet){
 }
 // 2026-11-05: Super Admin places a whole contract in a column after production (same as Place old contracts);
 // column 7 (Payment received) closes the contract. quiet = no message (the caller sends one combined message).
-const OS_COL_POST = { prod:"production_manager", dc:"production_manager", qc:"qc", acc:"accounts", clear:"stores", ship:"accounts", paid:"accounts" };
+const OS_COL_POST = { prod:"production_manager", dc:"production_manager", qc:"qc", acc:"accounts", irn:"accounts", send:"accounts", clear:"stores", ship:"accounts", paid:"accounts" };
 async function osPlaceAtCol(cn, fromLabel, col, user, why, so){
   const by = user?.username||""; let me = ""; try{ me = await despMe(user); }catch(e){} const who = me||by; const now = new Date().toISOString();
   const { error } = await sb.from("os_place_tbl").upsert([{ contract_number:String(cn), col:Number(col), board_v:2, note:why, placed_by:who, placed_at:now }], { onConflict:"contract_number" });
@@ -73022,14 +73341,15 @@ async function ctfBoard(force){
 }
 const CTF_LOT = { 1:{k:"prod",label:"Production in progress",posts:["production_manager"]}, 2:{k:"dc",label:"Ready – DC & packing slip",posts:["production_manager"]},
   3:{k:"qc",label:"With QC",posts:["qc"]}, 4:{k:"acc",label:"With Accounts",posts:["accounts"]}, 5:{k:"clear",label:"Clearance given – gate pass & despatch",posts:["stores"]},
-  6:{k:"ship",label:"Despatched – payment awaited",posts:["accounts"]}, 7:{k:"paid",label:"Payment received",posts:[]} };
+  6:{k:"ship",label:"Despatched – payment awaited",posts:["accounts"]}, 7:{k:"paid",label:"Payment received",posts:[]},
+  8:{k:"irn",label:"Invoice · ready for IRN",posts:["accounts"]}, 9:{k:"send",label:"IRN in · to send",posts:["accounts"]} };   // 344
 const CTF_TRACK = [
   ["so","Order Acceptance made"], ["doc","Full Hold documents approved (Code 2 / Code 1)"], ["ph","Client's production hold lifted"], ["wo","Work order released"],
   ["bom","BOM summary approved"], ["pr","PR released"], ["pa","Purchase approved"], ["pur","All material in"], ["prod","Production"],
-  ["dc","DC & packing slip"], ["qc","QC clearance"], ["acc","Accounts despatch clearance"], ["clear","Gate pass & despatch"], ["ship","Payment received"] ];
+  ["dc","DC & packing slip"], ["qc","QC clearance"], ["acc","Accounts despatch clearance"], ["irn","Invoice: IRN, Ack & e-way bill"], ["send","Invoice sent"], ["clear","Gate pass & despatch"], ["ship","Payment received"] ];
 const CTF_POSTS = { so:["doc_controller","technical_head"], doc:["doc_controller","vp_projects"], ph:["doc_controller","vp_projects"], wo:["technical_head","doc_controller","vp_projects"],
   bom:["technical_head"], pr:["stores","purchase_manager"], pa:[], pur:["purchase_manager","purchase_engineer"], prod:["production_manager"], dc:["production_manager"], qc:["qc"],
-  acc:["accounts"], clear:["stores"], ship:["accounts"] };
+  acc:["accounts"], irn:["accounts"], send:["accounts"], clear:["stores"], ship:["accounts"] };
 const ctfNames = (posts)=> Array.from(new Set((posts||[]).flatMap(k=>postHolders(k)).filter(Boolean)));
 const ctfWho = (names, posts)=> names.length ? names.join(", ") : (posts||[]).map(k=>postLabel(k)).join(" · ");
 function ctfChaseLevel(days){ return days>=21 ? "Final reminder" : days>=14 ? "Second reminder" : "First reminder"; }
@@ -73051,8 +73371,8 @@ async function ctfInfo(cn, force){
   // lots (from production on)
   let lots = [], dcs = []; let lotCol = 0, lotBehind = null;
   if(x.stage==="prod"){ try{ const r = await sb.from("so_lot_tbl").select("*").eq("contract_number",cn).order("id"); lots = (r.data||[]).filter(l=>l.status!=="Returned"); }catch(e){}
-    const ids = lots.map(l=>l.dc_id).filter(Boolean); if(ids.length){ try{ const r = await sb.from("dc_tbl").select("id,status,acc_at,pm_acc_at").in("id",ids); dcs = r.data||[]; }catch(e){} }
-    lots.forEach(l=>{ const c = osLotCol(l, dcs.find(d=>d.id===l.dc_id)); if(c && (!lotCol || c<lotCol)){ lotCol = c; lotBehind = l; } }); }
+    const ids = lots.map(l=>l.dc_id).filter(Boolean); if(ids.length){ try{ const r = await sb.from("dc_tbl").select("*").in("id",ids); dcs = r.data||[]; }catch(e){} try{ await osInvLoad(dcs); }catch(e){} }   // 344
+    lots.forEach(l=>{ const c = osLotCol(l, dcs.find(d=>d.id===l.dc_id)); if(c && (!lotCol || osRank(c)<osRank(lotCol))){ lotCol = c; lotBehind = l; } }); }
   // payment milestones
   let ms = []; try{ const r = await sb.from("pay_milestone_tbl").select("*").eq("contract_number",cn).order("sl"); if(!r.error) ms = r.data||[]; }catch(e){}
   // special states
@@ -73064,7 +73384,7 @@ async function ctfInfo(cn, force){
   if(info.kind==="step"){
     if(cur==="prod" && lotCol){ const L = CTF_LOT[lotCol]; cur = L.k;
       if(lotCol===7){ info.label = "All lots paid"; info.tone = ["#d7efe3","#0b5a40"]; }
-      else { const c = OS_COLS.find(z=>z.n===lotCol); info.label = "Production · "+L.label; info.tone = c ? c.tone : info.tone; }
+      else { const c = osColOf(lotCol); info.label = "Production · "+L.label; info.tone = c.tone || info.tone; }
       info.since = osLotSince(lotBehind, dcs.find(d=>d.id===lotBehind.dc_id)); info.waitPosts = L.posts; }
     else { const c = OSP_COLS.find(z=>z.k===cur); const n = OSP_COLS.findIndex(z=>z.k===cur);
       if(c){ info.label = c.label; info.tone = c.tone; info.stepNo = n+1; info.waitPosts = c.posts||[]; if(c.sa) info.waiting = sas.slice(); }
@@ -73094,7 +73414,7 @@ async function ctfInfo(cn, force){
     else if(cur==="pur") info.holding.push(x.forms.length ? x.facN+" of "+x.forms.length+" materials in ("+x.pct+"%)" : "Material in pending");
     else if(cur==="prod") info.holding.push(lots.length ? lots.length+" lot"+(lots.length===1?"":"s") : "Items being made; no lot ready yet");
     else if(lotCol && lotCol<7){ const by = {}; lots.forEach(l=>{ const c = osLotCol(l, dcs.find(d=>d.id===l.dc_id)); by[c] = (by[c]||0)+1; });
-      info.holding.push(Object.keys(by).sort().map(c=>by[c]+" lot"+(by[c]>1?"s":"")+" "+CTF_LOT[c].label.toLowerCase()).join(" · ")); }
+      info.holding.push(Object.keys(by).sort((a,b)=>osRank(a)-osRank(b)).map(c=>by[c]+" lot"+(by[c]>1?"s":"")+" "+CTF_LOT[c].label.toLowerCase()).join(" · ")); }
   }
   // steps
   const order = CTF_TRACK.map(t=>t[0]); const ci = cur==='paid' ? order.length : order.indexOf(cur);
@@ -73613,6 +73933,7 @@ async function oprLoad(){
   let lots = []; try{ const r = await sb.from("so_lot_tbl").select("*").limit(5000); lots = (r.data||[]).filter(l=>l.status!=="Returned"); }catch(e){}
   let dcs = []; const ids = lots.map(l=>l.dc_id).filter(Boolean);
   for(let i=0;i<ids.length;i+=150){ try{ const r = await sb.from("dc_tbl").select("*").in("id",ids.slice(i,i+150)); dcs = dcs.concat(r.data||[]); }catch(e){} }
+  try{ await osInvLoad(dcs); }catch(e){}   // 344: lots on 12A / 12B
   let est = []; for(let i=0;i<cns.length;i+=150){ try{ const r = await sb.from("estimates").select("reference_number,item_sl_no,order_qty").in("reference_number",cns.slice(i,i+150)); est = est.concat(r.data||[]); }catch(e){} }
   const qrefs = Array.from(new Set(cns.map(cn=>(M.so.get(cn)||{}).quote_reference_number).filter(Boolean)));
   let vals = []; for(let i=0;i<qrefs.length;i+=150){ try{ const r = await sb.from("quote_value_snapshot_tbl").select("reference_number,total_value").in("reference_number",qrefs.slice(i,i+150)); vals = vals.concat(r.data||[]); }catch(e){} }
@@ -73653,9 +73974,9 @@ function oprCalc(D, cn, cfg, today){
   const started = !!(st.prod_started_at || lotRows.length || M.placed.has(cn));
   const readyShare = Math.min(1, lotRows.filter(r=>r.col>=2).reduce((a,r)=>a+share(r),0));
   const mfg = started ? 40 + 60*readyShare : 0;
-  const INS = { 3:25, 4:60, 5:80, 6:100, 7:100 };
+  const INS = { 3:25, 4:60, 8:80, 9:80, 5:80, 6:100, 7:100 };
   const ins = Math.min(100, lotRows.reduce((a,r)=>a+share(r)*(INS[r.col]||0),0));
-  const shipShare = Math.min(1, lotRows.filter(r=>r.col>=6).reduce((a,r)=>a+share(r),0));
+  const shipShare = Math.min(1, lotRows.filter(r=>r.col===6 || r.col===7).reduce((a,r)=>a+share(r),0));   // 344: 8 / 9 are before despatch
   const parts = OPR_PARTS.map(p=>{ const done = p.k==="eng" ? eSteps.reduce((a,s)=>a+s[1]*s[2]/100,0) : p.k==="pur" ? pSteps.reduce((a,s)=>a+s[1]*s[2]/100,0) : p.k==="mfg" ? mfg : ins;
     const w = (Number(W[p.k])||0)/wSum*100; return { ...p, w:oprR1(w), done:oprR1(done), adds:oprR1(w*done/100) }; });
   const total = oprR1(parts.reduce((a,p)=>a+p.adds,0));
@@ -75638,6 +75959,8 @@ async function despPendingItems(){
     if(g.status==="Open" && days(g.created_at)>=2) to(P.stores, { what:"Gate pass "+g.gp_no+" ("+(g.vehicle_no||"")+") — has the truck left? Record the exit", entity_key:g.gp_no, detail_key:"gp-exit", owed_by_role:"stores", days_waiting:days(g.created_at), urgency:"overdue", source:"despatch_gp" });
     if(g.status==="Exited" && !g.scan_link) to(P.stores, { what:"Gate pass "+g.gp_no+" — paste the link to the signed, scanned security copy", entity_key:g.gp_no, detail_key:"gp-scan", owed_by_role:"stores", days_waiting:days(g.exit_at)||null, urgency: days(g.exit_at)>=2 ? "overdue" : "due", source:"despatch_gp" });
   });
+  try{ (await shipPendingItems()).forEach(x=>out.push(x)); }catch(e){ console.error("Ship-to chase items", e); }   // 2026-11-08
+  try{ (await dclPendingItems(P)).forEach(x=>out.push(x)); }catch(e){ console.error("Despatch clearance items", e); }
   // 10 Oct 2026 (166): invoices + LUT register
   try{ (await invPendingItems(P)).forEach(x=>out.push(x)); }catch(e){ console.error("Invoice pending items", e); }
   try{ (await piPendingItems(P)).forEach(x=>out.push(x)); }catch(e){ console.error("Proforma pending items", e); }
@@ -75884,6 +76207,7 @@ async function invPdf(inv, lines){
   const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight();
   const qrImg = inv.signed_qr ? await invQrDataUrl(inv.signed_qr) : null;
   const PI = !!inv._pi;
+  const BK = !!inv._booking;   // 344: transporter booking copy — same number, value and tax, freight to be advised, no IRN
   const DI = !!inv._direct, DIok = DI && !!inv._approved;   // 247: direct invoice — no header until the quantities are approved, DRAFT always   // 185k: a Proforma Invoice prints with the same layout — one copy, no IRN, no DC / e-way / shipping bill
   const copies = inv._copies ? inv._copies : DI ? [""] : PI ? [inv.status==="Issued" ? "Original" : ""] : inv.is_export ? ["Original for Buyer","Duplicate","Triplicate for Supplier"] : ["Original for Recipient","Duplicate for Transporter","Triplicate for Supplier"];
   const T = { ...DESP_TBL, bodyStyles:{ ...DESP_TBL.bodyStyles, fontSize:7.6 } };
@@ -75904,13 +76228,19 @@ async function invPdf(inv, lines){
     }   // 247
     doc.setDrawColor(200,197,185); doc.setLineWidth(0.4); doc.line(10, 25, W-10, 25);
     doc.setFontSize(13); doc.setFont(undefined,"bold"); doc.setTextColor(28,31,26);
-    doc.text(PI ? "PROFORMA INVOICE" : (DI && !DIok) ? "TAX INVOICE (DRAFT — NOT FOR ISSUE)" : "TAX INVOICE", W/2, 30.8, {align:"center"});
+    doc.text(BK ? "INVOICE — TRANSPORTER BOOKING COPY" : PI ? "PROFORMA INVOICE" : (DI && !DIok) ? "TAX INVOICE (DRAFT — NOT FOR ISSUE)" : "TAX INVOICE", W/2, 30.8, {align:"center"});
     doc.setFontSize(7.5); doc.setFont(undefined,"normal"); doc.setTextColor(90,90,90); doc.text(copy, W/2, 34.6, {align:"center"});
-    if(DI || inv.status!=="Issued"){ try{ doc.setGState(new doc.GState({opacity:0.12})); }catch(e){} doc.setFontSize(54); doc.setTextColor(180,40,40);
+    if(BK){ try{ doc.setGState(new doc.GState({opacity:0.12})); }catch(e){} doc.setFontSize(30); doc.setTextColor(180,40,40);
+      doc.text("FOR TRANSPORTER BOOKING ONLY", W/2, H/2-8, {align:"center", angle:30}); doc.text("NOT VALID FOR TRANSIT · NOT A TAX INVOICE", W/2+6, H/2+6, {align:"center", angle:30});
+      try{ doc.setGState(new doc.GState({opacity:1})); }catch(e){} doc.setTextColor(28,31,26); }
+    else if(DI || inv.status!=="Issued"){ try{ doc.setGState(new doc.GState({opacity:0.12})); }catch(e){} doc.setFontSize(54); doc.setTextColor(180,40,40);
       doc.text(DI ? (inv.status==="Cancelled" ? "CANCELLED" : "DRAFT") : inv.status==="Cancelled" ? "CANCELLED" : inv.status==="Superseded" ? "SUPERSEDED" : PI ? "DRAFT" : "DRAFT — NO IRN YET", W/2, H/2, {align:"center", angle:30}); try{ doc.setGState(new doc.GState({opacity:1})); }catch(e){} doc.setTextColor(28,31,26); }
     let y = 37;
+    if(BK){ doc.setFillColor(192,57,43); doc.rect(10,y,W-20,6.5,"F"); doc.setFontSize(8.2); doc.setFont(undefined,"bold"); doc.setTextColor(255,255,255);
+      doc.text("FOR TRANSPORTER BOOKING ONLY — NOT VALID FOR TRANSIT — NOT A TAX INVOICE (the tax invoice with IRN and e-way bill follows)", W/2, y+4.4, {align:"center"});
+      doc.setFont(undefined,"normal"); doc.setTextColor(28,31,26); y += 8; }
     // IRN block + QR (not on a proforma)
-    if(!PI && !DI){
+    if(!PI && !DI && !BK){
     const irnTxt = [["IRN", inv.irn||"— (enter after uploading to the IRP)"],["Ack No / Date", (inv.ack_no||"—")+(inv.ack_date?" / "+fmtDMYTime(inv.ack_date):"")]];
     doc.autoTable({ ...T, startY:y, body:irnTxt, margin:{ left:10, right: qrImg ? 40 : 10 }, columnStyles:{0:{fontStyle:"bold",cellWidth:26}} });
     if(qrImg){ try{ doc.addImage(qrImg,"PNG",W-38,y-1,28,28); }catch(e){} }
@@ -75941,8 +76271,9 @@ async function invPdf(inv, lines){
       ["Invoice No", inv.invoice_no, "Bank Name", inv.snap_bank_name||"—"], ["Invoice Date", fmtDMY(inv.invoice_date), "Account No", inv.snap_bank_account||"—"],
       ["Contract No", inv.contract_number||"", "Account Name", inv.snap_bank_acc_name||"—"], ["PO No / Date", [inv.po_no, inv.po_date?fmtDMY(inv.po_date):""].filter(Boolean).join(" / ")||"—", "IFSC Code", inv.snap_bank_ifsc||"—"],
       ["OA Date", inv.oa_date?fmtDMY(inv.oa_date):"—", "Branch", inv.snap_bank_branch||"—"], ["Place of Supply", (inv.pos_state||"—")+(inv.pos_code?" ("+inv.pos_code+")":""), "Reverse Charge", inv.reverse_charge?"Yes":"No"],
-      ["DC No", inv._legacy ? "—" : DI ? "at despatch" : inv.invoice_no+" (same number)", "E-way Bill No / Date", [inv.eway_no, inv.eway_date?fmtDMY(inv.eway_date):""].filter(Boolean).join(" / ")||"—"],
-      ["Site Contact", inv.site_contact||"—", "Vehicle No", inv.vehicle_no||"—"] ];
+      ["DC No", inv._legacy ? "—" : DI ? "at despatch" : inv.invoice_no+" (same number)", "E-way Bill No / Date", BK ? "after booking" : [inv.eway_no, inv.eway_date?fmtDMY(inv.eway_date):""].filter(Boolean).join(" / ")||"—"],
+      ["Site Contact", inv.site_contact||"—", "Vehicle No", BK ? (inv.vehicle_no||"to be advised") : inv.vehicle_no||"—"],
+      ...(!BK && (inv.lr_no || inv.transporter_name) ? [["Transporter", inv.transporter_name||"—", "LR No / Date", inv.lr_no ? inv.lr_no+(inv.lr_date?" / "+fmtDMY(String(inv.lr_date).slice(0,10)):"") : "—"]] : []) ];
     doc.autoTable({ ...T, startY:y, body:L, columnStyles:{0:{fontStyle:"bold",cellWidth:28},1:{cellWidth:(W-20)/2-28},2:{fontStyle:"bold",cellWidth:30}} });
     y = doc.lastAutoTable.finalY + 1.5;
     const sym = isInr ? "Rs" : cur;
@@ -75956,11 +76287,18 @@ async function invPdf(inv, lines){
       columnStyles: mixedPdf ? {0:{cellWidth:10},1:{cellWidth:26},3:{cellWidth:18},4:{cellWidth:12,halign:"right"},5:{cellWidth:15},6:{cellWidth:23,halign:"right"},7:{cellWidth:25,halign:"right"}}
                              : {0:{cellWidth:10},1:{cellWidth:28},3:{cellWidth:18},4:{cellWidth:16},5:{cellWidth:24,halign:"right"},6:{cellWidth:26,halign:"right"}} });
     y = doc.lastAutoTable.finalY + 1.5;
+    if(BK){   // 344: what the transporter books: packages, sizes, gross weight, marks
+      const bx = inv._boxes||[];
+      const pk = bx.length ? bx.map(b=>[String(b.box_no||""), b.packing_mode||"Package", [b.length_mm,b.width_mm,b.height_mm].every(v=>v!=null&&v!=="") ? b.length_mm+" × "+b.width_mm+" × "+b.height_mm+" mm" : "—",
+        (()=>{ const w = (Number(b.packing_wt)||0)+(b.contents||[]).reduce((a,c)=>a+(Number(c.qty)||0)*(Number(c.wt_per_item!=null?c.wt_per_item:c.wt)||0),0); return w ? w.toFixed(1)+" kg" : "—"; })()]) : [["—","Packing slip not made","—","—"]];
+      doc.autoTable({ ...T, startY:y, head:[["Pkg","Packing","Size (L × W × H)","Gross weight"]], body:[...pk, [{content:"Total: "+bx.length+" package"+(bx.length===1?"":"s")+(inv._gross?" · "+Number(inv._gross).toFixed(1)+" kg gross":"")+" · Marks: "+(inv._marks||""),colSpan:4,styles:{fontStyle:"bold"}}]] });
+      y = doc.lastAutoTable.finalY + 1.5; }
     if(y > H-75){ doc.addPage(); y = 15; }
     const terms = [["Payment Term", inv.payment_term],["Delivery Term", inv.delivery_term],["Transportation", inv.transport_term],["Packing", inv.packing_term],["Insurance", inv.insurance_term],["Taxes", inv.tax_term]].filter(t=>t[1]);
     const tot = [];
     if(Number(inv.pf_amount)) tot.push(["Packing & Forwarding", invMoney(inv.pf_amount,cur)]);
-    if(Number(inv.freight_amount)) tot.push(["Freight (recovered)", invMoney(inv.freight_amount,cur)]);
+    if(BK) tot.push(["Freight", "to be advised"]);
+    else if(Number(inv.freight_amount)) tot.push(["Freight (recovered)", invMoney(inv.freight_amount,cur)]);
     if(Number(inv.insurance_amount)) tot.push(["Insurance (recovered)", invMoney(inv.insurance_amount,cur)]);
     if(!inv.is_export) tot.push(["Taxable Value", invMoney(inv.taxable_total,cur)]);
     (inv.tax_lines||[]).forEach(t=>tot.push([ (mixedPdf && t.base!=null) ? {content:"OUTPUT "+t.label+" "+t.rate+"% on "+invMoney(t.base,cur)} : "OUTPUT "+t.label+" "+t.rate+"%", invMoney(t.amount,cur)]));
@@ -76007,8 +76345,294 @@ async function invPdf(inv, lines){
       try{ doc.setGState(new doc.GState({opacity:0.13})); }catch(e){} doc.setFontSize(110); doc.setFont(undefined,"bold"); doc.setTextColor(180,40,40);
       doc.text(inv.status==="Cancelled" ? "CANCELLED" : "DRAFT", W/2, H/2+12, {align:"center", angle:30}); try{ doc.setGState(new doc.GState({opacity:1})); }catch(e){} doc.setFont(undefined,"normal"); doc.setTextColor(28,31,26); } }
   if(DI && !DIok){ const pages = doc.internal.getNumberOfPages(); for(let pg=1; pg<=pages; pg++){ doc.setPage(pg); doc.setFontSize(7.5); doc.setTextColor(140,140,140); doc.text("Direct invoice "+inv.invoice_no+" · not approved · page "+pg+" of "+pages, W/2, H-6, {align:"center"}); } }
-  else despPdfFooter(doc, co, (DI?"Direct Invoice ":PI?"Proforma Invoice ":"Tax Invoice ")+inv.invoice_no);   // 231: no "Export"
-  pdfShow(doc, ((DI?"Direct_Invoice_":PI?"Proforma_":"Invoice_")+inv.invoice_no+"_"+(inv.contract_number||"")).replace(/[^A-Za-z0-9_-]+/g,"_")+".pdf");
+  else despPdfFooter(doc, co, (BK?"Booking copy (not a tax invoice) ":DI?"Direct Invoice ":PI?"Proforma Invoice ":"Tax Invoice ")+inv.invoice_no);   // 231: no "Export"
+  pdfShow(doc, ((BK?"Booking_copy_":DI?"Direct_Invoice_":PI?"Proforma_":"Invoice_")+inv.invoice_no+"_"+(inv.contract_number||"")).replace(/[^A-Za-z0-9_-]+/g,"_")+".pdf");
+}
+// ===== 2026-11-08 (344) Invoice completion: the "Complete the invoice" pop-up, OA-amendment-only fields, override history,
+// e-way bill with the IRN, the two clocks (3 days Ready for IRN, 1 day IRN in -> sent), Clock pause code, transporter booking copy =====
+const INV_EWB_LIMIT = 50000;
+const INV_SQL = "structure_invoice_completion_2026-11-08.sql";
+// only through an amendment of the Order Acceptance
+const INV_OA_AMEND = [["bill_to","Bill to"],["buyer_gstin","Buyer GSTIN"],["pos_state","Place of supply"],["ship_to","Ship to"],["po_no","PO no"],["po_date","PO date"],["pf_amount","P&F amount"],["payment_term","Payment term"],["tax_term","Taxes term"]];
+// from the Order Acceptance, can be changed on the invoice with a reason (kept in the override history)
+const INV_OA_OVR = [["invoice_date","Invoice date","date"],["delivery_term","Delivery term"],["transport_term","Transport term"],["insurance_term","Insurance term"]];
+const INV_MODES = [["Road","Road"],["Rail","Rail"],["Air","Air"],["Sea","Sea / ship"],["Courier","Courier"],["Own vehicle","Own vehicle"],["By hand","By hand / customer collects"]];
+const invModeCode = (m)=>{ const s = String(m||"").toLowerCase(); return /rail/.test(s) ? "2" : /air/.test(s) ? "3" : /sea|ship/.test(s) ? "4" : "1"; };
+function invIsGoods(lines){ return !(lines||[]).length || (lines||[]).some(l=>String(l.supply_kind||"Goods")!=="Service"); }
+function invValueInr(inv){ const g = Number(inv.grand_total)||0; if(String(inv.currency||"INR").toUpperCase()==="INR") return g; return Number(inv.grand_total_inr) || r2(g*(Number(inv.fx_rate)||0)); }
+function invEwbNeeded(inv, lines){ return invIsGoods(lines) && invValueInr(inv) >= INV_EWB_LIMIT; }
+function invHasEwb(inv){ return GST_EWB_RE.test(String(inv.eway_no||"").replace(/\s+/g,"")); }
+function invIsBlank(v){ return v===null || v===undefined || String(v).trim()===""; }
+// what is still red on the pop-up
+function invCompleteProblems(inv, lines){
+  const p = [];
+  if(invIsBlank(inv.freight_amount)) p.push("Freight amount (0 if none).");
+  if(invIsBlank(inv.insurance_amount)) p.push("Insurance amount (0 if none).");
+  if(!inv.lr_none && (invIsBlank(inv.lr_no) || !inv.lr_date)) p.push("LR / docket no and date from the transporter (or tick No LR).");
+  if(invIsBlank(inv.mode_of_shipment)) p.push("Mode of transport.");
+  if(invEwbNeeded(inv, lines)){
+    const d = Number(inv.ewb_distance); if(!(d>=1 && d<=4000)) p.push("E-way distance in km (1–4000) — over ₹50,000, an e-way bill is needed.");
+    if(invIsBlank(inv.vehicle_no) && invIsBlank(inv.transporter_gstin)) p.push("Transporter GSTIN / ID, or the vehicle no (the vehicle can come later).");
+  }
+  if(!invIsBlank(inv.transporter_gstin) && !/^[0-9A-Z]{15}$/.test(String(inv.transporter_gstin).trim().toUpperCase())) p.push("Transporter GSTIN / ID is 15 characters.");
+  if(inv.is_export){
+    if(!(Number(inv.fx_rate)>0)) p.push("Exchange rate (the customs notified rate for the invoice date).");
+    if(invIsBlank(inv.port_loading)) p.push("Port of loading.");
+    if(invIsBlank(inv.port_discharge)) p.push("Port of discharge.");
+  }
+  if(!inv.completed_at) p.push("Press Save on Complete the invoice once the details are checked.");
+  return p;
+}
+// every code message says who gives it and where they find the button
+function invCodeWhere(kind, inv, names){
+  return "Ask "+(names||"the Finance Director or a Super Admin")+" for "+aCode(kind)+". They make it on this invoice: open invoice "+inv.invoice_no+" (Accounts › Billing › Tax Invoices) › 'Make a code' row › "+codeName(kind)+".";
+}
+// the OA-amendment message (no code; the change comes through the Order Acceptance)
+function invAmendText(label, inv){
+  return "“"+label+"” comes from the Order Acceptance and changes only through an OA amendment:\n\n"+
+    "1. Open Order Acceptance "+inv.contract_number+" › Amend Order Acceptance.\n"+
+    "2. Attach the customer's PO amendment (or their letter / email asking for the change).\n"+
+    "3. Change “"+label+"” in the amendment.\n"+
+    "4. Get the amendment approved.\n"+
+    "5. Come back to invoice "+inv.invoice_no+" and press “Refresh from OA”.\n\n"+
+    (inv.irn ? "This invoice already has an IRN, so it cannot simply be refreshed:\n"+
+      "• Within 24 hours of the Ack: cancel the e-invoice (needs an E-invoice cancel code from the Finance Director or a Super Admin — they make it on this invoice › 'Make a code' row › E-invoice cancel code) and make the invoice again.\n"+
+      "• After 24 hours: raise a credit note against it and make a new invoice."
+    : "If the IRN goes in before the amendment: within 24 hours cancel the e-invoice (E-invoice cancel code from the Finance Director or a Super Admin) and re-issue; after 24 hours, a credit note and a new invoice.");
+}
+// the override history (separate from the invoice history)
+async function invOverride(inv, field, label, from, to, reason, by){
+  const row = { invoice_id:inv.id, invoice_no:inv.invoice_no, field, label, from_value: from==null?null:String(from), to_value: to==null?null:String(to), reason, by_user:by||"" };
+  const { error } = await sb.from("invoice_override_tbl").insert(row);
+  if(error) return /relation|does not exist|schema cache/i.test(error.message||"") ? "Run "+INV_SQL+" first." : error.message;
+  await invHist(inv.id, inv.dc_id, "Changed from the OA: "+label, by, (from||"—")+" → "+(to||"—")+" — "+reason);
+  return null;
+}
+// the latest Despatch Clearance of the DC (what Accounts told Production)
+async function invDclFor(dcId){
+  try{ const { data } = await sb.from("despatch_clearance_tbl").select("*").eq("dc_id",dcId).neq("status","Cancelled").order("id",{ascending:false}).limit(1); return (data||[])[0]||null; }catch(e){ return null; }
+}
+// what the Order Acceptance says now, for the amendment-only fields (Refresh from OA)
+async function invOaNow(inv){
+  const x = await despLoadDc(inv.dc_id); const dc = x.dc; if(!dc) throw new Error("The DC of this invoice was not found.");
+  const C = await despContract(inv.contract_number, dc.id);
+  const { data: terms } = await sb.from("quote_commercial_terms").select("*").eq("reference_number",inv.contract_number).maybeSingle();
+  const buyerCode = invStateCodeFromGstin(C.buyerGstin) || invStateCodeFromName(C.company && (C.company.billing_state||C.company.state));
+  const dd = C.despatch||{};
+  const ship = [dd.ship_contact||dc.ship_contact, dd.ship_address||dc.ship_address||C.oaShip, dd.ship_phone||dc.ship_phone].filter(Boolean).join("\n")||null;
+  const out = { bill_to:[C.customer, C.buyerAddr].filter(Boolean).join("\n"), buyer_gstin:C.buyerGstin||null,
+    pos_state: inv.is_export ? GST_STATES["96"] : (GST_STATES[buyerCode]||null), pos_code: inv.is_export ? "96" : (buyerCode||null), ship_to:ship,
+    po_no:C.po_number||null, po_date:C.po_date ? toISODate(C.po_date) : null, payment_term:(terms&&terms.payment_term)||null,
+    tax_term: inv.is_export ? "Nil — export under LUT" : ((terms&&terms.tax)||((C.so&&C.so.gst_structure_name)||null)) };
+  if(!inv.is_export) out.buyer_state = GST_STATES[buyerCode]||(C.company&&(C.company.billing_state||C.company.state))||inv.buyer_state||null;
+  // P&F: a percentage of this invoice's basic, or this invoice's share of the lumpsum (other invoices only)
+  if(terms && terms.packing_forwarding_basis==="Percentage") out.pf_amount = r2((Number(inv.basic_total)||0)*(Number(terms.packing_forwarding_value)||0)/100);
+  else if(terms && terms.packing_forwarding_basis==="Flat" && Number(terms.packing_forwarding_value)){
+    const lump = Number(terms.packing_forwarding_value)||0;
+    const { data: prev } = await sb.from("invoice_tbl").select("id,pf_amount,status").eq("contract_number",inv.contract_number);
+    const used = (prev||[]).filter(p=>p.status!=="Cancelled" && p.id!==inv.id).reduce((n,p)=>n+(Number(p.pf_amount)||0),0);
+    out.pf_amount = r2(Math.min(Math.max(0, lump-used), Number(inv.pf_amount)||Math.max(0, lump-used)));
+  } else out.pf_amount = Number(inv.pf_amount)||0;
+  return out;
+}
+// ---- the two clocks ----
+// Ready for IRN -> 3 days (invoice_irn step); IRN in -> 1 day to Mark as sent (the invoice "sent" step, its clock set 2 days back)
+async function invStepIrnOpen(inv, user){
+  await loadPostPeople(true).catch(()=>{});
+  const owner = await billEmpOfUser(user?.username) || postHolders("accounts")[0] || null;
+  return stepOpen({ module:"accounts", doc_type:"invoice_irn", doc_ref:inv.invoice_no, step:"irn", owner, manager_post:"accounts", link_tab:"tax_invoices", escalate:BILL_ESCALATE,
+    title:"Get the IRN for tax invoice "+inv.invoice_no+" — "+(inv.contract_number||"")+" "+(inv.customer_name||""), cardText:"IRN, Ack and e-way bill into the invoice (Ready for IRN since "+fmtDMY(toISODate(new Date()))+")",
+    cardNote:"Made by the app when the invoice went Ready for IRN. "+STALE_DAYS+" days, then stale (PDFs blocked) and escalated.", labels:["IRN"] }, user?.username||"App");
+}
+async function invStepSendOpen(inv, user){
+  await loadPostPeople(true).catch(()=>{});
+  const owner = await billEmpOfUser(user?.username) || postHolders("accounts")[0] || null;
+  const row = await stepOpen({ module:"accounts", doc_type:"invoice", doc_ref:inv.invoice_no, step:"sent", owner, manager_post:"accounts", link_tab:"tax_invoices", escalate:BILL_ESCALATE,
+    title:"Send tax invoice "+inv.invoice_no+" — "+(inv.contract_number||"")+" "+(inv.customer_name||""), cardText:"Send the e-invoice PDF and mark it as sent (with the OneDrive link) — 1 day from the IRN", labels:["Send"] }, user?.username||"App");
+  if(row && row.id){   // one day: the clock starts (STALE_DAYS - 1) days back
+    const from = new Date(Date.now()-(STALE_DAYS-1)*864e5).toISOString(), due = purAddDays(pgToday(), 1);
+    try{ await sb.from("pending_step_tbl").update({ clock_from:from }).eq("id",row.id); }catch(e){}
+    for(const tid of [row.task_id, ...(row.extra_task_ids||[])].filter(Boolean)){ try{ await sb.from("task_tbl").update({ due_date:due }).eq("id",tid); await taskLog(tid, "App", "IRN entered: send by "+fmtDMY(due)+" (1 day), then stale"); }catch(e){} }
+  }
+  return row;
+}
+async function invStepsOf(inv){
+  try{ const { data } = await sb.from("pending_step_tbl").select("*").in("doc_type",["invoice_irn","invoice"]).eq("doc_ref",inv.invoice_no).is("done_at",null).is("closed_at",null); return data||[]; }catch(e){ return []; }
+}
+// pause a clock for a day
+async function invClockPause(step, inv, user, why, by){
+  const base = new Date(step.clock_from || step.opened_at).getTime();
+  const from = new Date(Math.max(base, Date.now()-STALE_DAYS*864e5) + 864e5).toISOString();
+  const { error } = await sb.from("pending_step_tbl").update({ clock_from:from, stale_at:null, manager_told_at:null }).eq("id",step.id);
+  if(error) return error.message;
+  for(const tid of [step.task_id, ...(step.extra_task_ids||[])].filter(Boolean)){ try{ const { data: t } = await sb.from("task_tbl").select("due_date").eq("id",tid).maybeSingle();
+    const due = purAddDays((t && t.due_date) ? String(t.due_date).slice(0,10) : pgToday(), 1); await sb.from("task_tbl").update({ due_date:due }).eq("id",tid); await taskLog(tid, user?.username||"App", "Clock paused 1 day — "+why+by); }catch(e){} }
+  const what = step.doc_type==="invoice_irn" ? "Ready-for-IRN clock" : "Send clock";
+  await invHist(inv.id, inv.dc_id, "Clock paused 1 day", user?.username, what+" — "+why+by);
+  await logAudit("UPDATE","pending_step_tbl",inv.invoice_no,what+" paused 1 day — "+why+by,user?.username||"unknown",null,null);
+  try{ await notifySuperAdmins("⏸ Invoice "+inv.invoice_no+": "+what+" paused 1 day — "+why+by+".", null, "gst"); }catch(e){}
+  try{ STALE_ME.at = 0; }catch(e){}
+  return null;
+}
+// ---- the transporter booking copy (before the LR): same number, value and tax, freight to be advised, no IRN ----
+async function invBookingPdf(inv, lines){
+  const x = await despLoadDc(inv.dc_id).catch(()=>({ boxes:[] }));
+  const boxes = x.boxes||[];
+  const gross = boxes.reduce((a,b)=>a+(Number(b.packing_wt)||0)+(b.contents||[]).reduce((s2,c)=>s2+(Number(c.qty)||0)*(Number(c.wt_per_item!=null?c.wt_per_item:c.wt)||0),0),0);
+  const marks = "PO "+(inv.po_no||"—")+" · contract "+(inv.contract_number||"")+" · invoice "+inv.invoice_no;
+  return invPdf({ ...inv, _booking:true, _copies:["Transporter booking copy"], _boxes:boxes, _gross:gross, _marks:marks }, lines);
+}
+// ---- Order Status board: two lot columns of their own between "With Accounts" and "Clearance given" ----
+const OS_INV_COLS = [
+  { n:8, key:"irn",  label:"Invoice · ready for IRN", sub:"Accounts: IRN, Ack, e-way bill (3 days)", tone:["#fdf0dc","#8a5a0b"], days:3 },
+  { n:9, key:"send", label:"IRN in · to send",        sub:"Accounts: mark as sent (1 day)",         tone:["#e8eefb","#2c4f9e"], days:1 },
+];
+const OS_ORDER = [1,2,3,4,8,9,5,6,7];
+const osColOf = (n)=> OS_COLS.find(c=>c.n===Number(n)) || OS_INV_COLS.find(c=>c.n===Number(n)) || {};
+const osRank = (n)=> { const i = OS_ORDER.indexOf(Number(n)); return i<0 ? 99 : i; };
+const osNextCol = (n)=> OS_ORDER[osRank(n)+1] || 0;
+// attach the invoice of each DC (the board reads it to place the lot)
+function osInvAttach(dcs, invs){
+  const by = new Map(); (invs||[]).forEach(i=>{ if(i.status==="Cancelled") return; const o = by.get(i.dc_id); if(!o || Number(i.id)>Number(o.id)) by.set(i.dc_id, i); });
+  (dcs||[]).forEach(d=>{ d._invRead = true; d._inv = by.get(d.id)||null; });
+  return dcs;
+}
+// 8 = invoice to make / draft / ready (no IRN), 9 = IRN in, not sent; null = not on these columns
+function osInvCol(dc){
+  if(!dc || !dc._invRead || dc.status!=="Approved" || dc.is_test) return null;
+  const iv = dc._inv;
+  if(!iv) return dc.gate_pass_id ? null : 8;
+  if(iv.sent_at) return null;
+  if(iv.irn) return 9;
+  return 8;
+}
+// the Factory Manager makes the e-way bill: everything he needs in one bell
+async function invAskFm(inv, lines, irn, user, me){
+  await loadPostPeople(true).catch(()=>{});
+  const fm = postHolders("factory_manager");
+  if(!fm.length) return { err:"Nobody holds the Factory Manager post (Admin › Posts)." };
+  const pin = (String(inv.ship_to||inv.bill_to||"").match(/\b\d{6}\b/)||[""])[0];
+  const msg = "🚚 E-way bill please — invoice "+inv.invoice_no+" ("+(inv.customer_name||"")+"): IRN "+(irn||inv.irn||"(coming)")+
+    " · value ₹"+invMoney(invValueInr(inv),"INR")+" · ship-to PIN "+(pin||"—")+" · distance "+(inv.ewb_distance?inv.ewb_distance+" km":"—")+
+    " · transporter "+([inv.transporter_name, inv.transporter_gstin].filter(Boolean).join(" ")||"—")+" · vehicle "+(inv.vehicle_no||"to follow")+
+    (inv.lr_no?" · LR "+inv.lr_no+(inv.lr_date?" dt "+fmtDMY(String(inv.lr_date).slice(0,10)):""):"")+". Send the 12-digit e-way bill number to "+(me||user?.username||"Accounts")+".";
+  await notifyPeople(fm, msg, "gst");
+  await invHist(inv.id, inv.dc_id, "E-way bill asked from the Factory Manager", user?.username, fm.join(", "));
+  return { names:fm };
+}
+// ---- the pop-up ----
+function InvCompleteDialog({ inv, lines, user, me, dcl, canEdit, onClose, onSaved, onAmend, onRefresh, startMsg }){
+  const ewbNeed = invEwbNeeded(inv, lines);
+  const D = (dcl && dcl.data && dcl.data.desp) || {};
+  const blank0 = (v)=> inv.completed_at ? (v==null?"":String(v)) : (Number(v) ? String(v) : "");
+  const [f,setF] = useState(()=>({
+    freight_amount: blank0(inv.freight_amount), insurance_amount: blank0(inv.insurance_amount), ewb_distance: inv.ewb_distance==null ? "" : String(inv.ewb_distance),
+    lr_no: inv.lr_no||"", lr_date: inv.lr_date ? String(inv.lr_date).slice(0,10) : "", lr_none: !!inv.lr_none, remarks: inv.remarks||"",
+    transporter_gstin: inv.transporter_gstin||"", transporter_name: inv.transporter_name || D.transporter || "", vehicle_no: inv.vehicle_no||"",
+    mode_of_shipment: inv.mode_of_shipment || D.mode || "", fx_rate: inv.fx_rate==null ? "" : String(inv.fx_rate),
+    port_loading: inv.port_loading || D.pol || "", port_discharge: inv.port_discharge || D.pod || "", final_destination: inv.final_destination || D.dest || "",
+    invoice_date: inv.invoice_date ? String(inv.invoice_date).slice(0,10) : "", delivery_term: inv.delivery_term||"", transport_term: inv.transport_term||"", insurance_term: inv.insurance_term||"" }));
+  const [why,setWhy] = useState({}); const [busy,setBusy] = useState(false); const [msg,setMsg] = useState(startMsg||"");
+  const set = (k,v)=> setF(x=>({ ...x, [k]:v }));
+  const orig = { invoice_date: inv.invoice_date ? String(inv.invoice_date).slice(0,10) : "", delivery_term: inv.delivery_term||"", transport_term: inv.transport_term||"", insurance_term: inv.insurance_term||"" };
+  const changed = INV_OA_OVR.filter(([k])=> String(f[k]||"").trim() !== String(orig[k]||"").trim());
+  const merged = { ...inv, ...f, freight_amount: f.freight_amount, insurance_amount: f.insurance_amount, completed_at:"x" };
+  const probs = invCompleteProblems(merged, lines);
+  const miss = (cond)=> cond ? { border:"1.5px solid #c0392b", background:"#fff6f5" } : {};
+  const lab = { display:"flex", flexDirection:"column", gap:3, fontSize:11.5, color:colors.muted };
+  const inp = (k, label, o)=> h("label",{key:k,style:{ ...lab, flex:"1 1 "+((o&&o.w)||170)+"px" }}, h("span",null,label, o&&o.req ? h("b",{style:{color:"#c0392b"}}," *") : null),
+    o && o.options ? h("select",{"data-testid":"ic-"+k,value:f[k]||"",disabled:!canEdit,onChange:e=>set(k,e.target.value),style:{ ...inputStyle, padding:"6px 8px", ...miss(o.bad) }}, [["","— choose —"], ...o.options].map(([v,t])=>h("option",{key:v,value:v},t)))
+    : h("input",{"data-testid":"ic-"+k,type:(o&&o.type)||"text",value:f[k]||"",disabled:!canEdit || (o&&o.off),placeholder:(o&&o.ph)||"",onChange:e=>set(k, o&&o.upper ? e.target.value.toUpperCase() : e.target.value),style:{ ...inputStyle, padding:"6px 8px", ...miss(o && o.bad) }}));
+  const sec = (n, title, sub, ...kids)=> h("div",{key:"s"+n,style:{ border:"1px solid "+colors.border, borderRadius:8, padding:"8px 10px", marginTop:8 }},
+    h("div",{style:{ fontSize:12.5, fontWeight:700 }}, n+" · "+title), sub ? h("div",{style:{ fontSize:11, color:colors.muted, margin:"1px 0 6px" }}, sub) : null, ...kids);
+  const row = (...k)=> h("div",{style:{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:6 }}, ...k);
+  const save = async()=>{
+    setMsg("");
+    for(const [k,l] of changed){ if(String(why[k]||"").trim().length<3){ setMsg("Say why “"+l+"” is changed from the Order Acceptance (kept in the override history)."); return; } }
+    if(changed.some(([k])=>k==="invoice_date") && !f.invoice_date){ setMsg("Enter the invoice date."); return; }
+    const num = (v)=> invIsBlank(v) ? null : r2(Number(String(v).replace(/[^\d.]/g,""))||0);
+    const patch = { freight_amount:num(f.freight_amount), insurance_amount:num(f.insurance_amount), ewb_distance: invIsBlank(f.ewb_distance) ? null : Math.round(Number(f.ewb_distance)||0),
+      lr_no: String(f.lr_no||"").trim()||null, lr_date: f.lr_date||null, lr_none: !!f.lr_none, remarks: String(f.remarks||"").trim()||null,
+      transporter_gstin: String(f.transporter_gstin||"").trim().toUpperCase()||null, transporter_name: String(f.transporter_name||"").trim()||null,
+      vehicle_no: String(f.vehicle_no||"").replace(/\s+/g,"").toUpperCase()||null, mode_of_shipment: f.mode_of_shipment||null,
+      completed_by: me||user?.username||"", completed_at: new Date().toISOString() };
+    if(inv.is_export){ patch.fx_rate = Number(f.fx_rate)||null; patch.port_loading = f.port_loading||null; patch.port_discharge = f.port_discharge||null; patch.final_destination = f.final_destination||null; }
+    changed.forEach(([k])=>{ patch[k] = String(f[k]||"").trim()||null; });
+    // the totals follow freight / insurance
+    const lines2 = (lines||[]).map(l=>({ ...l, unit_price:Number(l.unit_price), amount:r2((Number(l.unit_price)||0)*(Number(l.qty)||0)) }));
+    const G = await invGstContext(inv.contract_number).catch(()=>({ snap:[] }));
+    const c = invCompute({ ...inv, ...patch, freight_amount:patch.freight_amount||0, insurance_amount:patch.insurance_amount||0 }, lines2, G.snap||[], inv.gst_kind || G.kind || null); delete c.mixed_rates; delete c.gst_kind;
+    setBusy(true);
+    const { error } = await sb.from("invoice_tbl").update({ ...patch, ...c }).eq("id",inv.id).eq("status","Draft");
+    if(error){ setBusy(false); setMsg(/ewb_distance|lr_no|lr_none|lr_date|transporter_|completed_/.test(error.message||"") ? "Run "+INV_SQL+" first (both companies)." : "Could not save: "+error.message); return; }
+    for(const [k,l] of changed){ const e = await invOverride(inv, k, l, orig[k], f[k], String(why[k]).trim(), user?.username); if(e){ setBusy(false); setMsg(e); return; } }
+    await invHist(inv.id, inv.dc_id, "Invoice completed", user?.username, ["freight "+(patch.freight_amount||0), "insurance "+(patch.insurance_amount||0), patch.lr_none?"no LR":(patch.lr_no?"LR "+patch.lr_no:null), patch.ewb_distance?patch.ewb_distance+" km":null, patch.vehicle_no, patch.transporter_gstin].filter(Boolean).join(" · "));
+    setBusy(false); onSaved && onSaved(probs);
+  };
+  const dclTxt = dcl ? "From Despatch Clearance "+dcl.dcl_no+(D.mode?" · mode "+D.mode:"")+(D.transporter?" · transporter "+D.transporter:"")+(D.terms?" · delivery "+D.terms:"") : "No Despatch Clearance for this DC yet — enter the details.";
+  const oaLine = (k, label)=> h("div",{key:k,style:{ display:"flex", gap:8, alignItems:"flex-start", fontSize:12, padding:"3px 0", borderTop:"1px solid #f0eee6" }},
+    h("span",{style:{ width:130, color:colors.muted, flex:"0 0 130px" }}, label),
+    h("span",{style:{ flex:1, whiteSpace:"pre-wrap" }}, k==="pos_state" ? ((inv.pos_state||"—")+(inv.pos_code?" ("+inv.pos_code+")":"")) : k==="pf_amount" ? invMoney(inv.pf_amount, String(inv.currency||"INR").toUpperCase()) : k==="po_date" ? (inv.po_date?fmtDMY(String(inv.po_date).slice(0,10)):"—") : (inv[k]||"—")),
+    h("button",{"data-testid":"ic-amend-"+k,onClick:()=>onAmend && onAmend(label),style:{ ...btnSmall, fontSize:11 }},"Change"));
+  return h("div",{"data-testid":"inv-complete",onClick:e=>{ if(e.target===e.currentTarget) onClose(); },style:{ position:"fixed", inset:0, background:"rgba(0,0,0,.45)", zIndex:2600, display:"flex", alignItems:"flex-start", justifyContent:"center", padding:"30px 16px", overflowY:"auto" }},
+    h("div",{style:{ background:"#fff", borderRadius:10, width:880, maxWidth:"100%", padding:"14px 16px" }},
+      h("div",{style:{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}, h("b",{style:{ fontSize:15 }},"Complete the invoice — "+inv.invoice_no),
+        h("span",{style:{ fontSize:11.5, fontWeight:700, borderRadius:10, padding:"2px 9px", background: probs.length ? "#fdecea" : "#dff3ea", color: probs.length ? "#a3312a" : "#0f5b45" }}, probs.length ? probs.length+" to fill" : "Complete")),
+      h("div",{style:{ fontSize:11.5, color:colors.muted, marginTop:2 }}, "What the Order Acceptance does not give. Red must be filled before Ready for IRN. You can change everything here until the IRN goes in; then the invoice is frozen."),
+      sec(1, "Must enter", ewbNeed ? "Goods over ₹50,000 — the e-way bill needs the distance and the transporter (or the vehicle)." : "No e-way bill needed (services, or under ₹50,000).",
+        row(inp("freight_amount","Freight amount ("+String(inv.currency||"INR").toUpperCase()+")",{ req:true, w:150, bad:invIsBlank(f.freight_amount), ph:"0 if none" }),
+            inp("insurance_amount","Insurance amount ("+String(inv.currency||"INR").toUpperCase()+")",{ req:true, w:150, bad:invIsBlank(f.insurance_amount), ph:"0 if none" }),
+            ewbNeed ? inp("ewb_distance","E-way distance (km)",{ req:true, type:"number", w:120, bad:!(Number(f.ewb_distance)>=1 && Number(f.ewb_distance)<=4000) }) : null),
+        row(inp("lr_no","LR / docket / BL / AWB no",{ req:!f.lr_none, w:170, off:f.lr_none, bad:!f.lr_none && invIsBlank(f.lr_no) }), inp("lr_date","LR date",{ req:!f.lr_none, type:"date", w:140, off:f.lr_none, bad:!f.lr_none && !f.lr_date }),
+            h("label",{style:{ display:"flex", alignItems:"center", gap:5, fontSize:11.5, color:colors.muted, flex:"1 1 200px" }}, h("input",{type:"checkbox","data-testid":"ic-lr_none",checked:!!f.lr_none,disabled:!canEdit,onChange:e=>set("lr_none",e.target.checked)}), "No LR (own vehicle / by hand / customer collects)")),
+        row(inp("transporter_gstin","Transporter GSTIN / ID",{ req:ewbNeed && invIsBlank(f.vehicle_no), w:170, upper:true, bad:(ewbNeed && invIsBlank(f.vehicle_no) && invIsBlank(f.transporter_gstin)) || (!invIsBlank(f.transporter_gstin) && !/^[0-9A-Z]{15}$/.test(String(f.transporter_gstin).trim())) }),
+            inp("vehicle_no","Vehicle no (or later)",{ w:140, upper:true }), inp("remarks","Note on the invoice (optional)",{ w:300 })),
+        inv.is_export ? row(inp("fx_rate","Exchange rate ₹ per "+String(inv.currency||"").toUpperCase()+" (customs notified rate)",{ req:true, type:"number", w:220, bad:!(Number(f.fx_rate)>0) })) : null),
+      sec(2, "From the Despatch Clearance — check", dclTxt,
+        row(inp("mode_of_shipment","Mode",{ req:true, options:INV_MODES, w:170, bad:invIsBlank(f.mode_of_shipment) }), inp("transporter_name","Transporter / forwarder name",{ w:220 })),
+        inv.is_export ? row(inp("port_loading","Port of loading",{ req:true, w:170, bad:invIsBlank(f.port_loading) }), inp("port_discharge","Port of discharge",{ req:true, w:170, bad:invIsBlank(f.port_discharge) }), inp("final_destination","Final destination",{ w:170 })) : null,
+        D.terms && String(D.terms).trim()!==String(f.delivery_term||"").trim() ? h("div",{style:{ fontSize:11.5, color:"#854f0b" }}, "The clearance says delivery: “"+D.terms+"”. ", canEdit ? h("button",{"data-testid":"ic-use-dcl",onClick:()=>{ set("delivery_term", D.terms); setWhy(w=>({ ...w, delivery_term:"As per Despatch Clearance "+dcl.dcl_no })); },style:{ ...btnSmall, fontSize:11 }},"Use it") : null) : null),
+      sec(3, "From the Order Acceptance — change with a reason", "Kept in the override history (who, when, from, to, why). No code needed.",
+        ...INV_OA_OVR.map(([k,l,t])=>{ const ch = String(f[k]||"").trim() !== String(orig[k]||"").trim();
+          return row(inp(k, l, { type:t||"text", w:t?150:320 }), ch ? h("label",{style:{ ...lab, flex:"1 1 260px" }}, h("span",null,"Why changed ",h("b",{style:{color:"#c0392b"}},"*")),
+            h("input",{"data-testid":"ic-why-"+k,value:why[k]||"",onChange:e=>{ const v = e.target.value; setWhy(w=>({ ...w, [k]:v })); },placeholder:"e.g. customer asked for door delivery",style:{ ...inputStyle, padding:"6px 8px", ...miss(String(why[k]||"").trim().length<3) }})) : null); })),
+      sec(4, "Order Acceptance amendment only", "These change only through an approved OA amendment, then Refresh from OA.",
+        ...INV_OA_AMEND.map(([k,l])=>oaLine(k,l)),
+        canEdit ? h("div",{style:{ marginTop:6 }}, h("button",{"data-testid":"ic-refresh",onClick:()=>onRefresh && onRefresh(),style:btnSmall},"Refresh from OA")) : null),
+      sec(5, "Locked", null, h("div",{style:{ fontSize:12, color:colors.muted }}, "Prices, quantities, HSN and GST rate (from the contract and the DC) · our GSTIN, bank and LUT (from Settings).")),
+      sec(6, "Comes at issue", null, h("div",{style:{ fontSize:12, color:colors.muted }}, "IRN, Ack No / date and the signed QR"+(ewbNeed ? ", and the e-way bill (from the Factory Manager, or automatically with the IRN)" : "")+". The invoice is Issued only when all of them are in.")),
+      probs.length ? h("div",{"data-testid":"ic-probs",style:{ whiteSpace:"pre-wrap", fontSize:12, marginTop:8, padding:"6px 9px", borderRadius:6, background:"#fdecea", color:"#a3312a" }}, "Still to fill:\n• "+probs.filter(x=>!/Press Save/.test(x)).join("\n• ")) : null,
+      msg ? h("div",{"data-testid":"ic-msg",style:{ whiteSpace:"pre-wrap", fontSize:12, marginTop:8, padding:"6px 9px", borderRadius:6, background:"#fff4d6", color:"#854f0b" }}, msg) : null,
+      h("div",{style:{ display:"flex", gap:8, justifyContent:"flex-end", marginTop:12, flexWrap:"wrap" }},
+        h("button",{onClick:onClose,style:btnSecondary},"Close"),
+        canEdit ? h("button",{"data-testid":"ic-save",onClick:save,disabled:busy,style:btnPrimary},busy?"Saving…":"Save") : null)));
+}
+// read the invoices (and their open clocks) of these DCs and attach them; null = could not read (the board then works as before)
+async function osInvLoad(dcs){
+  const ids = (dcs||[]).map(d=>d.id).filter(Boolean); if(!ids.length) return [];
+  let invs = [];
+  for(let i=0;i<ids.length;i+=150){ const r = await sb.from("invoice_tbl").select("id,invoice_no,invoice_date,dc_id,grand_total,status,irn,ack_date,ready_at,issued_at,sent_at").in("dc_id",ids.slice(i,i+150)); if(r.error) return null; invs = invs.concat(r.data||[]); }
+  try{ const nos = invs.map(i=>i.invoice_no).filter(Boolean);
+    for(let i=0;i<nos.length;i+=150){ const r = await sb.from("pending_step_tbl").select("*").in("doc_type",["invoice_irn","invoice"]).in("doc_ref",nos.slice(i,i+150)).is("done_at",null).is("closed_at",null);
+      (r.data||[]).forEach(s=>{ const iv = invs.find(x=>x.invoice_no===s.doc_ref); if(iv) (iv._steps = iv._steps||[]).push(s); }); } }catch(e){}
+  osInvAttach(dcs, invs); return invs;
+}
+// the clock of a lot on 12A / 12B
+function osInvClock(dc){
+  const c = osInvCol(dc); if(!c) return null; const iv = dc._inv;
+  if(!iv) return { c, days:osDays(dc.acc_at), lim:null, stale:false, owner:null };
+  const st = (iv._steps||[]).find(s=> c===8 ? s.doc_type==="invoice_irn" : s.doc_type==="invoice");
+  const since = c===8 ? iv.ready_at : (iv.ack_date||iv.issued_at);
+  const lim = c===8 ? STALE_DAYS : 1, days = since ? osDays(since) : 0;
+  const stale = st ? stepIsStale(st) : (!!since && days>=lim && (c===9 || iv.status==="Ready for IRN"));
+  return { c, days, lim, stale, since, owner:(st && st.owner)||null, iv };
+}
+// open the invoice of a lot from the board (the step that does the work)
+let INV_OPEN_TARGET = null;   // { id } or { dcId } — the Tax Invoices screen opens it when it mounts / hears flo-inv-open
+function invOpenFromBoard(dc, intent){
+  INV_OPEN_TARGET = dc && dc._inv ? { id:dc._inv.id, intent } : { dcId:dc && dc.id, intent };
+  appOpenTab("tax_invoices");
+  setTimeout(()=>{ try{ window.dispatchEvent(new CustomEvent("flo-inv-open")); }catch(e){} }, 300);
 }
 // ---- the invoice editor ----------------------------------------------------------------------------
 // ===== 2026-11-08 IRP build: e-invoice and e-way bill — two gateways =====
@@ -76071,7 +76695,7 @@ async function gstMakeCode(kind, inv, user, me, note){
 async function gstAskCode(kind, inv, user, me, why){
   const names = await gstApprovers();
   await invHist(inv.id, inv.dc_id, "Asked for "+codeName(kind), user?.username, me||user?.username);
-  await notifyPeople(names, "🔑 "+(me||user?.username)+" asks for "+aCode(kind)+" for invoice "+inv.invoice_no+(why?" — "+why:"")+". Open the invoice (Accounts › Billing › Tax Invoices) and press Make a code.", "gst_code");
+  await notifyPeople(names, "🔑 "+(me||user?.username)+" asks for "+aCode(kind)+" for invoice "+inv.invoice_no+(why?" — "+why:"")+". Make it here: open invoice "+inv.invoice_no+" (Accounts › Billing › Tax Invoices) › 'Make a code' row › "+codeName(kind)+".", "gst_code");
   return names;
 }
 async function gstTakeCode(kind, code, inv, user){
@@ -76208,6 +76832,7 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
   const [gst,setGst] = useState(null); const [gstKind,setGstKind] = useState(null); const [busy,setBusy] = useState(false); const [msg,setMsg] = useState(""); const [hist,setHist] = useState([]);
   const [irnDlg,setIrnDlg] = useState(null); const [cancelDlg,setCancelDlg] = useState(false);
   const [gc,setGc] = useState(null); const [gstDlg,setGstDlg] = useState(null); const [gstLog,setGstLog] = useState([]); const [co,setCo] = useState(null);   // 2026-11-08 IRP build
+  const [cmp,setCmp] = useState(null); const [dcl,setDcl] = useState(null); const [ovr,setOvr] = useState([]); const [steps,setSteps] = useState([]); const autoCmp = useRef(false);   // 344
   const load = useCallback(async()=>{
     const [{ data: i }, { data: ls }] = await Promise.all([ sb.from("invoice_tbl").select("*").eq("id",invoiceId).maybeSingle(), sb.from("invoice_line_tbl").select("*").eq("invoice_id",invoiceId).order("sort_order") ]);
     if(!i){ setMsg("Invoice not found."); return; }
@@ -76215,13 +76840,18 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
     setGst(G.snap||[]); setGstKind(i.gst_kind || G.kind || null);
     setInv(i); setLines((ls||[]).map(l=>({ ...l, hsn: l.hsn || (i.status==="Draft" ? HSN_DEFAULT||null : null), unit_price:String(l.unit_price), _orig:Number(l.unit_price) }))); setOrig(JSON.stringify(i));
     const { data: hs } = await sb.from("dc_history_tbl").select("*").eq("invoice_id",invoiceId).order("at"); setHist(hs||[]);
+    invDclFor(i.dc_id).then(setDcl); invStepsOf(i).then(setSteps);   // 344
+    try{ const r = await sb.from("invoice_override_tbl").select("*").eq("invoice_id",invoiceId).order("at"); setOvr(r.error ? [] : (r.data||[])); }catch(e){ setOvr([]); }
     gstCfg(true).then(async c=>{ let n = []; try{ n = await gstApprovers(); }catch(e){} setGc({ ...c, _names:n }); });
     try{ const { data: gl } = await sb.from("gst_api_log_tbl").select("*").eq("ref",i.invoice_no).order("at",{ascending:false}).limit(15); setGstLog(gl||[]); }catch(e){}
   },[invoiceId]);
   useEffect(()=>{ load(); },[load]);
+  // 344: the pop-up opens by itself the first time a draft is opened
+  useEffect(()=>{ if(inv && inv.status==="Draft" && !inv.irn && !inv.completed_at && !autoCmp.current){ autoCmp.current = true; setCmp({}); } },[inv && inv.id, inv && inv.status]);
   if(!inv) return h("div",{style:{padding:20,color:colors.muted}}, msg || "Reading the invoice…");
   const canAcc = despCan("acc",user,me,P);
-  const editable = inv.status==="Draft" && canAcc;
+  const editable = inv.status==="Draft" && canAcc && !inv.irn;   // 344: frozen once the IRN is in
+  const ewbNeed = invEwbNeeded(inv, lines);
   const cur = String(inv.currency||"INR").toUpperCase();
   const calcLines = lines.map(l=>({ ...l, amount:r2((Number(l.unit_price)||0)*(Number(l.qty)||0)) }));
   const calc = invCompute(inv, calcLines, gst, gstKind);
@@ -76269,17 +76899,20 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
   const toReady = async()=>{
     if(!(await save(true))) return;
     const p = problems(); if(p.length){ setMsg(p.join("\n")); return; }
+    { const cp = invCompleteProblems(inv, lines); if(cp.length){ setCmp({ msg:"Ready for IRN needs these first:\n• "+cp.join("\n• ") }); return; } }   // 344
     if(!inv.is_export && !inv.buyer_gstin){ const a = await despAsk("No GSTIN for the buyer","This invoice will be treated as a supply to an unregistered buyer (B2C).", [{key:"no",label:"Go back"},{key:"yes",label:"Continue",primary:true}]); if(a!=="yes") return; }
     if(posWarn){ const a = await despAsk("Check the tax", posWarn+"\n\nFix the contract's GST structure, or continue if you are sure.", [{key:"no",label:"Go back"},{key:"yes",label:"Continue anyway",primary:true}]); if(a!=="yes") return; }
     setBusy(true);
     const { error } = await sb.from("invoice_tbl").update({ status:"Ready for IRN", ready_by:user?.username||"unknown", ready_at:new Date().toISOString() }).eq("id",inv.id).eq("status","Draft");
     setBusy(false); if(error){ setMsg("Could not move it: "+error.message); return; }
     await invHist(inv.id, inv.dc_id, "Ready for IRN", user?.username, posWarn?("Tax warning accepted: "+posWarn):null);
+    try{ await invStepIrnOpen(inv, user); }catch(e){ console.warn("IRN clock", e); }   // 344: 3 days, then stale
     await logAudit("UPDATE","invoice_tbl",inv.invoice_no,"Ready for IRN · "+cur+" "+invMoney(calc.grand_total,cur),user?.username||"unknown",null,null);
     onChanged && onChanged(); load();
   };
-  const backToDraft = async()=>{ setBusy(true); await sb.from("invoice_tbl").update({ status:"Draft", ready_by:null, ready_at:null }).eq("id",inv.id).eq("status","Ready for IRN"); setBusy(false);
-    await invHist(inv.id, inv.dc_id, "Back to Draft", user?.username, null); onChanged && onChanged(); load(); };
+  const backToDraft = async()=>{ if(inv.irn){ alert("The IRN is in — the invoice is frozen."); return; }   // 344: Edit until the IRN; the 3-day clock keeps running
+    setBusy(true); await sb.from("invoice_tbl").update({ status:"Draft" }).eq("id",inv.id).eq("status","Ready for IRN").is("irn",null); setBusy(false);
+    await invHist(inv.id, inv.dc_id, "Edit — back to draft", user?.username, "the Ready-for-IRN clock keeps running"); onChanged && onChanged(); load(); };
   const saveTransport = async()=>{
     { const ew = String(inv.eway_no||"").replace(/\s+/g,""); if(ew && !GST_EWB_RE.test(ew)){ setMsg("The e-way bill number is 12 digits."); return; } }   // 2026-11-08
     setBusy(true);
@@ -76319,6 +76952,12 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
   const sendEinv = async()=>{
     const d = gstDlg; const B = gstBuildEinv(inv, lines.map(l=>({ ...l, unit_price:Number(l.unit_price) })), gst, gstKind, d.ov);
     if(B.problems.length){ setGstDlg({ ...d, msg:B.problems.join("\n") }); return; }
+    if(ewbNeed && !inv.is_export && !d.test && Number(inv.ewb_distance)>0){   // 344: the e-way bill with the IRN (Part A only when there is no vehicle)
+      const veh = String(inv.vehicle_no||"").replace(/\s+/g,"").toUpperCase(), tid = String(inv.transporter_gstin||"").trim().toUpperCase();
+      B.body.EwbDtls = { Distance:Math.round(Number(inv.ewb_distance)),
+        ...(tid ? { TransId:tid } : {}), ...(inv.transporter_name ? { TransName:String(inv.transporter_name).slice(0,100) } : {}),
+        ...(veh ? { TransMode:invModeCode(inv.mode_of_shipment), VehNo:veh, VehType:"R" } : {}),
+        ...(veh && inv.lr_no && !inv.lr_none ? { TransDocNo:String(inv.lr_no).slice(0,15), ...(inv.lr_date ? { TransDocDt:gstDmy(inv.lr_date) } : {}) } : {}) }; }
     setBusy(true); setGstDlg({ ...d, msg:"Sending to the IRP…" });
     const r = await gstCall("irn_generate", { test:!!d.test, invoice_id:inv.id, ref:inv.invoice_no, einv:B.body }, user);
     setBusy(false); gLogAdd();
@@ -76333,7 +76972,7 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
     if(!gLive) return { via:"manual" };
     const why = String(f.reason||"").trim(); if(why.length<3){ alert("The automatic gateway is Live. Say why you are entering it by hand (e.g. Clear down, portal generated it)."); return null; }
     if(gFree) return { via:"manual — "+why };
-    const t = await gstTakeCode("edit", f.code, inv, user); if(t.err){ alert(t.err+"\n\nAsk "+gNames+" for an Edit code."); return null; }
+    const t = await gstTakeCode("edit", f.code, inv, user); if(t.err){ alert(t.err+"\n\n"+invCodeWhere("edit", inv, gNames)); return null; }
     return { via:"manual — "+why+" (Edit code from "+t.by+")" };
   };
   const issueSave = async(f, auto)=>{
@@ -76342,19 +76981,82 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
     if(!auto){ const p = gstAckProblem(irn, f.ack_no, f.ack_date, inv); if(p){ alert(p); return false; } }
     const { data: dup } = await sb.from("invoice_tbl").select("invoice_no").eq("irn",irn).neq("id",inv.id);
     if(dup && dup.length){ alert("This IRN is already on invoice "+dup[0].invoice_no+"."); return false; }
+    // 344: the e-way bill goes in with the IRN (over ₹50,000, goods); without it the IRN is kept and the invoice waits for it
+    let ew = f.eway && f.eway.eway_no ? f.eway : null;
+    if(!ew && !auto && String(f.eway_no||"").trim()){ const no = String(f.eway_no).replace(/\s+/g,""); if(!GST_EWB_RE.test(no)){ alert("The e-way bill number is 12 digits."); return false; }
+      if(!f.eway_date){ alert("Enter the e-way bill date."); return false; } ew = { eway_no:no, eway_date:f.eway_date }; }
+    const waitEwb = ewbNeed && !ew;
     let via = f.via || "manual";
     if(!auto){ const g = await manualGate(f); if(!g) return false; via = g.via; }
     setBusy(true);
     const now = new Date().toISOString();
-    const patch = { status:"Issued", irn, ack_no:String(f.ack_no).trim(), ack_date:new Date(f.ack_date).toISOString(), signed_qr:String(f.signed_qr||"").trim()||null, issued_by:user?.username||"unknown", issued_at:now, einv_via:via, ...(f.eway||{}) };
+    const base = { irn, ack_no:String(f.ack_no).trim(), ack_date:new Date(f.ack_date).toISOString(), signed_qr:String(f.signed_qr||"").trim()||null, einv_via:via, irn_by:user?.username||"unknown", irn_at:now };
+    const patch = waitEwb ? base : { ...base, status:"Issued", issued_by:user?.username||"unknown", issued_at:now, ...(ew||{}) };
     let { error } = await sb.from("invoice_tbl").update(patch).eq("id",inv.id).eq("status","Ready for IRN");
-    if(error && /einv_via|eway_valid_till|eway_at/.test(error.message||"")){ const p2 = { ...patch }; delete p2.einv_via; delete p2.eway_valid_till; delete p2.eway_at; ({ error } = await sb.from("invoice_tbl").update(p2).eq("id",inv.id).eq("status","Ready for IRN")); }
+    if(error && /einv_via|eway_valid_till|eway_at|irn_by|irn_at/.test(error.message||"")){ const p2 = { ...patch }; delete p2.einv_via; delete p2.eway_valid_till; delete p2.eway_at; delete p2.irn_by; delete p2.irn_at; ({ error } = await sb.from("invoice_tbl").update(p2).eq("id",inv.id).eq("status","Ready for IRN")); }
     if(error){ setBusy(false); alert("Could not save: "+error.message); return false; }
-    try{ await sb.from("posting_queue_tbl").insert({ doc_type: inv.is_export ? "Export invoice" : "Tax invoice", doc_id:inv.id, doc_no:inv.invoice_no, doc_date:inv.invoice_date, party:inv.customer_name, amount:inv.grand_total, currency:cur, amount_inr:inv.grand_total_inr, status:"To post" }); }catch(e){ console.error("posting queue", e); }
-    await invHist(inv.id, inv.dc_id, "Issued — IRN "+(auto?"from the IRP (automatic)":"entered"), user?.username, "Ack "+String(f.ack_no).trim()+" · "+via+(f.eway&&f.eway.eway_no?" · e-way bill "+f.eway.eway_no:""));
-    await logAudit("UPDATE","invoice_tbl",inv.invoice_no,"Issued · IRN "+irn.slice(0,12)+"… · Ack "+String(f.ack_no).trim()+" · "+via+" · "+cur+" "+invMoney(inv.grand_total,cur),user?.username||"unknown",null,null);
+    try{ await stepDone("invoice_irn", inv.invoice_no, "irn", user?.username, "IRN in"); }catch(e){}
+    try{ await invStepSendOpen(inv, user); }catch(e){ console.warn("Send clock", e); }   // 1 day to Mark as sent
+    if(!waitEwb) await invPostQueue();
+    await invHist(inv.id, inv.dc_id, waitEwb ? "IRN entered — e-way bill to follow ("+(auto?"automatic":"by hand")+")" : "Issued — IRN "+(auto?"from the IRP (automatic)":"entered"), user?.username, "Ack "+String(f.ack_no).trim()+" · "+via+(ew?" · e-way bill "+ew.eway_no:"")+(waitEwb?" · frozen; issued when the e-way bill is in":""));
+    await logAudit("UPDATE","invoice_tbl",inv.invoice_no,(waitEwb?"IRN in (e-way bill to follow)":"Issued")+" · IRN "+irn.slice(0,12)+"… · Ack "+String(f.ack_no).trim()+" · "+via+" · "+cur+" "+invMoney(inv.grand_total,cur),user?.username||"unknown",null,null);
     if(gLive && !auto){ try{ await notifySuperAdmins("✍️ Invoice "+inv.invoice_no+": IRN entered by hand while the automatic gateway is Live — "+via+" — by "+(me||user?.username)+".", null, "gst"); }catch(e){} }
     setBusy(false); setIrnDlg(null); onChanged && onChanged(); load(); return true;
+  };
+  const invPostQueue = async()=>{ try{ await sb.from("posting_queue_tbl").insert({ doc_type: inv.is_export ? "Export invoice" : "Tax invoice", doc_id:inv.id, doc_no:inv.invoice_no, doc_date:inv.invoice_date, party:inv.customer_name, amount:inv.grand_total, currency:cur, amount_inr:inv.grand_total_inr, status:"To post" }); }catch(e){ console.error("posting queue", e); } };
+  // 344: the IRN is in and the e-way bill now comes — the invoice is issued
+  const issueWithEwb = async(ewPatch, how)=>{
+    let { error } = await sb.from("invoice_tbl").update({ status:"Issued", issued_by:user?.username||"unknown", issued_at:new Date().toISOString(), ...ewPatch }).eq("id",inv.id).eq("status","Ready for IRN").not("irn","is",null);
+    if(error && /eway_valid_till|eway_at/.test(error.message||"")){ const p2 = { status:"Issued", issued_by:user?.username||"unknown", issued_at:new Date().toISOString(), eway_no:ewPatch.eway_no, eway_date:ewPatch.eway_date, vehicle_no:ewPatch.vehicle_no||inv.vehicle_no||null }; ({ error } = await sb.from("invoice_tbl").update(p2).eq("id",inv.id).eq("status","Ready for IRN")); }
+    if(error){ alert("Could not issue: "+error.message); return false; }
+    await invPostQueue();
+    await invHist(inv.id, inv.dc_id, "Issued — e-way bill "+ewPatch.eway_no+" in", user?.username, how);
+    await logAudit("UPDATE","invoice_tbl",inv.invoice_no,"Issued · e-way bill "+ewPatch.eway_no+" · "+how,user?.username||"unknown",null,null);
+    return true;
+  };
+  const saveEwbIssue = async(d)=>{
+    const no = String(d.eway_no||"").replace(/\s+/g,""); if(!GST_EWB_RE.test(no)){ alert("The e-way bill number is 12 digits."); return; }
+    if(!d.eway_date){ alert("Enter the e-way bill date."); return; }
+    setBusy(true); const ok = await issueWithEwb({ eway_no:no, eway_date:d.eway_date, vehicle_no:String(d.veh||"").replace(/\s+/g,"").toUpperCase()||inv.vehicle_no||null }, "entered by "+(me||user?.username)+(d.from?" — from "+d.from:""));
+    setBusy(false); if(ok){ setGstDlg(null); onChanged && onChanged(); load(); }
+  };
+  const askFm = async(irnTyped)=>{ const r = await invAskFm(inv, lines, irnTyped, user, me); if(r.err){ alert(r.err); return; } alert("Sent to the Factory Manager ("+r.names.join(", ")+"): IRN, value, ship-to PIN, distance, transporter and vehicle. His e-way bill number comes to you; enter it here."); load(); };
+  // 344: Refresh from OA (after an approved amendment)
+  const refreshOa = async()=>{
+    if(!editable){ alert(inv.irn ? "The IRN is in — the invoice is frozen. "+invAmendText("the field", inv).split("\n\n").slice(-1)[0] : "Press Edit first (the invoice must be a draft)."); return; }
+    let now; try{ now = await invOaNow(inv); }catch(e){ alert("Could not read the Order Acceptance: "+(e.message||e)); return; }
+    const lab = Object.fromEntries([...INV_OA_AMEND, ["pos_code","State code"], ["buyer_state","Buyer state"]]);
+    const norm = (k,v)=> k==="pf_amount" ? String(r2(Number(v)||0)) : k==="po_date" ? String(v||"").slice(0,10) : String(v==null?"":v).trim();
+    const ch = Object.keys(now).filter(k=> norm(k, now[k]) !== norm(k, inv[k]));
+    if(!ch.length){ alert("The invoice already matches the Order Acceptance."); return; }
+    const a = await despAsk("Refresh from the Order Acceptance", ch.map(k=>(lab[k]||k)+": "+(norm(k,inv[k])||"—")+"  →  "+(norm(k,now[k])||"—")).join("\n"), [{key:"no",label:"Cancel"},{key:"yes",label:"Take these",primary:true}]);
+    if(a!=="yes") return;
+    const patch = Object.fromEntries(ch.map(k=>[k, now[k]]));
+    const c = invCompute({ ...inv, ...patch }, calcLines, gst, gstKind); delete c.mixed_rates; delete c.gst_kind;
+    setBusy(true); const { error } = await sb.from("invoice_tbl").update({ ...patch, ...c }).eq("id",inv.id).eq("status","Draft"); setBusy(false);
+    if(error){ alert("Could not save: "+error.message); return; }
+    await invHist(inv.id, inv.dc_id, "Refreshed from the OA", user?.username, ch.map(k=>(lab[k]||k)+": "+(norm(k,inv[k])||"—")+" → "+(norm(k,now[k])||"—")).join(" · "));
+    await logAudit("UPDATE","invoice_tbl",inv.invoice_no,"Refreshed from the Order Acceptance: "+ch.join(", "),user?.username||"unknown",null,null);
+    setCmp(null); onChanged && onChanged(); load();
+  };
+  const amend = async(label)=>{ const a = await despAsk("Change “"+label+"” — OA amendment", invAmendText(label, inv), [{key:"no",label:"Close"}, ...(editable?[{key:"r",label:"Refresh from OA",primary:true}]:[])]); if(a==="r") refreshOa(); };
+  // 344: the transporter booking copy (before the LR) — who it went to is kept
+  const bookingCopy = async(d)=>{
+    const to = String(d.to||"").trim(); if(to.length<2){ alert("Who is it going to (transporter / shipping line / airline)?"); return; }
+    try{ billAllowPdf([inv.invoice_no]); await invBookingPdf({ ...inv, ...(editable?calc:{}) }, editable?calcLines:lines.map(l=>({...l,unit_price:Number(l.unit_price)}))); }catch(e){ alert("PDF: "+e.message); return; }
+    try{ await sb.from("invoice_tbl").update({ booking_to:to, booking_by:user?.username||"", booking_at:new Date().toISOString() }).eq("id",inv.id); }catch(e){}
+    await invHist(inv.id, inv.dc_id, "Booking copy sent", user?.username, "to "+to+(d.via?" by "+d.via:"")+" — before the LR; not valid for transit");
+    setGstDlg(null); load();
+  };
+  // 344: pause a clock for a day (Clock pause code unless Finance Director / Super Admin)
+  const pauseClock = async(d)=>{
+    const st = steps.find(x=>String(x.id)===String(d.step)) || steps[0]; if(!st){ alert("No clock is running on this invoice."); return; }
+    const why = String(d.reason||"").trim(); if(why.length<3){ alert("Say why the clock is paused."); return; }
+    let by = "";
+    if(!gFree){ const t = await gstTakeCode("clock_pause", d.code, inv, user); if(t.err){ alert(t.err+"\n\n"+invCodeWhere("clock_pause", inv, gNames)); return; } by = " (Clock pause code from "+t.by+")"; }
+    setBusy(true); const e = await invClockPause(st, inv, user, why, by); setBusy(false);
+    if(e){ alert("Could not pause: "+e); return; }
+    setGstDlg(null); try{ stepLoadMine(user, true); }catch(x){} load();
   };
   const issue = (f)=> issueSave(f, false);
   // correct the Ack No / date of an issued invoice (and its sales voucher)
@@ -76362,7 +77064,7 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
     const p = gstAckProblem(inv.irn, d.ack_no, d.ack_date, inv); if(p){ alert(p); return; }
     const why = String(d.reason||"").trim(); if(why.length<3){ alert("Say why the Ack No / date is being corrected."); return; }
     let by = "";
-    if(!gFree){ const t = await gstTakeCode("edit", d.code, inv, user); if(t.err){ alert(t.err+"\n\nAsk "+gNames+" for an Edit code."); return; } by = " (Edit code from "+t.by+")"; }
+    if(!gFree){ const t = await gstTakeCode("edit", d.code, inv, user); if(t.err){ alert(t.err+"\n\n"+invCodeWhere("edit", inv, gNames)); return; } by = " (Edit code from "+t.by+")"; }
     setBusy(true);
     const old = { ack_no:inv.ack_no, ack_date:inv.ack_date };
     const nv = { ack_no:String(d.ack_no).trim(), ack_date:new Date(d.ack_date).toISOString() };
@@ -76379,7 +77081,7 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
   const cancelAuto = async(d)=>{
     const why = String(d.remark||"").trim(); if(why.length<3){ alert("Write the cancellation remark (it goes to the IRP)."); return; }
     let by = "";
-    if(!gFree){ const t = await gstTakeCode("irn_cancel", d.code, inv, user); if(t.err){ alert(t.err+"\n\nAsk "+gNames+" for an E-invoice cancel code."); return; } by = " (E-invoice cancel code from "+t.by+")"; }
+    if(!gFree){ const t = await gstTakeCode("irn_cancel", d.code, inv, user); if(t.err){ alert(t.err+"\n\n"+invCodeWhere("irn_cancel", inv, gNames)); return; } by = " (E-invoice cancel code from "+t.by+")"; }
     setBusy(true); const r = await gstCall("irn_cancel", { invoice_id:inv.id, ref:inv.invoice_no, irn:inv.irn, reason:d.rsn||"2", remark:why.slice(0,100) }, user); setBusy(false); gLogAdd();
     if(!r.ok){ alert("The IRP did not cancel it:\n\n"+gErrText(r)); return; }
     const rs = { "1":"Duplicate", "2":"Data entry mistake", "3":"Order cancelled", "4":"Others" }[d.rsn||"2"];
@@ -76399,6 +77101,7 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
     let { error } = await sb.from("invoice_tbl").update(patch).eq("id",inv.id);
     if(error && /eway_valid_till|eway_at/.test(error.message||"")){ const p2 = { ...patch }; delete p2.eway_valid_till; delete p2.eway_at; ({ error } = await sb.from("invoice_tbl").update(p2).eq("id",inv.id)); }
     if(error){ alert("E-way bill "+r.ewb_no+" was generated but could not be saved here: "+error.message+"\n\nWrite it down and enter it by hand."); return; }
+    if(inv.status==="Ready for IRN") await issueWithEwb({ eway_no:patch.eway_no, eway_date:patch.eway_date }, "e-way bill generated through Clear");   // 344
     await invHist(inv.id, inv.dc_id, "E-way bill generated (automatic)", user?.username, "EWB "+r.ewb_no+(r.ewb_valid?" · valid till "+r.ewb_valid:"")+(patch.vehicle_no?" · vehicle "+patch.vehicle_no:""));
     await logAudit("UPDATE","invoice_tbl",inv.invoice_no,"E-way bill "+r.ewb_no+" generated through Clear",user?.username||"unknown",null,null);
     setGstDlg({ kind:"result", test:false, r, ewb:true }); onChanged && onChanged(); load();
@@ -76416,7 +77119,7 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
   const ewbCancel = async(d)=>{
     const why = String(d.remark||"").trim(); if(why.length<3){ alert("Write the cancellation remark."); return; }
     let by = "";
-    if(!gFree){ const t = await gstTakeCode("ewb_cancel", d.code, inv, user); if(t.err){ alert(t.err+"\n\nAsk "+gNames+" for an E-way bill cancel code."); return; } by = " (E-way bill cancel code from "+t.by+")"; }
+    if(!gFree){ const t = await gstTakeCode("ewb_cancel", d.code, inv, user); if(t.err){ alert(t.err+"\n\n"+invCodeWhere("ewb_cancel", inv, gNames)); return; } by = " (E-way bill cancel code from "+t.by+")"; }
     setBusy(true); const r = await gstCall("ewb_cancel", { invoice_id:inv.id, ref:inv.invoice_no, ewb_no:String(inv.eway_no), reason:d.rsn||"DATA_ENTRY_MISTAKE", remark:why.slice(0,50) }, user); setBusy(false); gLogAdd();
     if(!r.ok){ alert("The portal did not cancel the e-way bill:\n\n"+gErrText(r)); return; }
     const old = inv.eway_no;
@@ -76429,7 +77132,7 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
   };
   // an approver makes a code for this invoice (it also goes to whoever asked)
   const makeCode = async(kind)=>{ try{ const c = await gstMakeCode(kind, inv, user, me); setGstDlg({ kind:"code", code:c, ck:kind }); }catch(e){ alert(e.message); } };
-  const askCode = async(kind)=>{ const names = await gstAskCode(kind, inv, user, me); alert("Asked "+gstWho(names)+" for "+aCode(kind)+". It comes to your bell."); };
+  const askCode = async(kind)=>{ const names = await gstAskCode(kind, inv, user, me); alert("Asked "+gstWho(names)+" for "+aCode(kind)+". It comes to your bell.\n\nThey make it on this invoice: open invoice "+inv.invoice_no+" (Accounts › Billing › Tax Invoices) › 'Make a code' row › "+codeName(kind)+"."); };
   // ---- the dialogs ----
   const gModal = (w, kids, close)=> h("div",{onClick:e=>{ if(e.target===e.currentTarget) close(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:2600,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"40px 16px",overflowY:"auto"}},
     h("div",{style:{background:"#fff",borderRadius:10,width:w,maxWidth:"100%",padding:"14px 16px"}},...kids));
@@ -76439,6 +77142,7 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
   const codeRow = (d, kind)=> gFree ? h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:6}},"No code needed — you are "+(gSA?"a Super Admin":"the Finance Director")+". The action is logged and Super Admins are told.")
     : h("div",{style:{background:"#fff4d6",border:"1px solid #f0d9a8",borderRadius:8,padding:"7px 10px",marginTop:8,fontSize:12}},
         h("b",null,"This needs "+aCode(kind)+" from "+gNames+"."),
+        h("div",{"data-testid":"g-code-where",style:{fontSize:11,color:"#854f0b",marginTop:2}},"They make it on this invoice: open invoice "+inv.invoice_no+" (Accounts › Billing › Tax Invoices) › 'Make a code' row › "+codeName(kind)+"."),
         h("div",{style:{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginTop:5}},
           h("button",{"data-testid":"g-ask",onClick:()=>askCode(kind),style:{...btnSmall,background:"#2a6db0",color:"#fff",borderColor:"#2a6db0"}},"Ask for "+aCode(kind)),
           h("input",{"data-testid":"g-code",value:d.code||"",onChange:e=>{ const v = e.target.value; setGstDlg(x=>({...x,code:v})); },placeholder:codeName(kind),style:{...inputStyle,width:150,padding:"5px 8px",letterSpacing:".12em"}})));
@@ -76507,6 +77211,22 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
       h("div",{key:"f",style:{display:"flex",gap:8,flexWrap:"wrap"}}, gIn(d,"eway_no","E-way bill no (12 digits)",{mono:true,w:180}), gIn(d,"eway_date","Date",{type:"date",w:150}), gIn(d,"veh","Vehicle no",{w:140})),
       h("div",{key:"r",style:{marginTop:6}}, gIn(d,"reason","Why by hand",{ph:"e.g. generated on the portal, Clear down"})),
       codeRow(d,"edit"), btnRow("Save", ()=>saveEwbManual(d)) ], ()=>setGstDlg(null));
+    if(d.kind==="ewbissue") return gModal(560, [ h("b",{key:"t",style:{fontSize:15}},"E-way bill — issue "+inv.invoice_no),   // 344
+      h("div",{key:"s",style:{fontSize:11.5,color:colors.muted,margin:"2px 0 8px"}},"The IRN is in ("+String(inv.irn||"").slice(0,12)+"…). Enter the e-way bill the Factory Manager made; the invoice is then issued."),
+      h("div",{key:"f",style:{display:"flex",gap:8,flexWrap:"wrap"}}, gIn(d,"eway_no","E-way bill no (12 digits)",{mono:true,w:180}), gIn(d,"eway_date","Date",{type:"date",w:150}), gIn(d,"veh","Vehicle no",{w:140})),
+      h("div",{key:"r",style:{marginTop:6}}, gIn(d,"from","Got it from (optional)",{ph:"e.g. Babu, WhatsApp 10:40"})),
+      btnRow("Save and issue", ()=>saveEwbIssue(d), h("button",{key:"fm","data-testid":"g-askfm2",style:btnSecondary,onClick:()=>askFm(inv.irn)},"Ask the Factory Manager")) ], ()=>setGstDlg(null));
+    if(d.kind==="booking") return gModal(520, [ h("b",{key:"t",style:{fontSize:15}},"Booking copy for the transporter — "+inv.invoice_no),
+      h("div",{key:"s",style:{fontSize:11.5,color:colors.muted,margin:"2px 0 8px"}},"Before the LR: the transporter / shipping line / airline books with it. Same invoice number, value and tax; freight “to be advised”; no IRN; red band “for transporter booking only — not valid for transit, not a tax invoice”. Who it went to is kept in the history."),
+      h("div",{key:"f",style:{display:"flex",gap:8,flexWrap:"wrap"}}, gIn(d,"to","Sent to",{w:240,ph:"e.g. VRL Logistics, Maersk, Blue Dart"}), gIn(d,"via","How",{options:[["Email","Email"],["WhatsApp","WhatsApp"],["By hand","By hand"]],w:130})),
+      inv.booking_to ? h("div",{key:"p",style:{fontSize:11.5,color:colors.muted,marginTop:6}},"Last sent to "+inv.booking_to+" on "+fmtDMYTime(inv.booking_at)+".") : null,
+      btnRow("Make the booking copy (PDF)", ()=>bookingCopy(d)) ], ()=>setGstDlg(null));
+    if(d.kind==="pause"){ const st = steps.find(x=>String(x.id)===String(d.step)) || steps[0];
+      return gModal(540, [ h("b",{key:"t",style:{fontSize:15}},"Pause the clock 1 day — "+inv.invoice_no),
+        h("div",{key:"s",style:{fontSize:11.5,color:colors.muted,margin:"2px 0 8px"}},"The clock gets one more day (the card is not stale until then). Kept in the history; Super Admins are told."),
+        steps.length>1 ? gIn(d,"step","Which clock",{options:steps.map(x=>[String(x.id), x.doc_type==="invoice_irn"?"Ready for IRN (3 days)":"Mark as sent (1 day)"]),w:240}) : h("div",{key:"c",style:{fontSize:12}},st ? (st.doc_type==="invoice_irn"?"Ready for IRN clock (3 days)":"Mark-as-sent clock (1 day)")+" · "+stepAgeDays(st)+" day(s) on it" : "No clock running."),
+        h("div",{key:"r",style:{marginTop:6}}, gIn(d,"reason","Why",{ph:"e.g. transporter's LR expected tomorrow"})),
+        codeRow(d,"clock_pause"), btnRow("Pause 1 day", ()=>pauseClock(d)) ], ()=>setGstDlg(null)); }
     if(d.kind==="code") return gModal(440, [ h("b",{key:"t",style:{fontSize:15}},codeName(d.ck)+" made"), h("div",{key:"c","data-testid":"g-made-code",style:{fontSize:26,fontWeight:700,letterSpacing:".2em",margin:"10px 0"}},d.code),
       h("div",{key:"s",style:{fontSize:11.5,color:colors.muted}},"One use, this invoice only, 24 hours. If someone asked for it, it has gone to their bell too."), btnRow(null,null) ], ()=>setGstDlg(null));
     return null;
@@ -76517,27 +77237,43 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
     if(!d.eway_date){ alert("Enter the e-way bill date."); return; }
     const g = await manualGate(d); if(!g) return;
     setBusy(true);
-    const { error } = await sb.from("invoice_tbl").update({ eway_no:no, eway_date:d.eway_date, vehicle_no:String(d.veh||"").replace(/\s+/g,"").toUpperCase()||inv.vehicle_no||null }).eq("id",inv.id);
-    setBusy(false); if(error){ alert("Could not save: "+error.message); return; }
+    if(inv.status==="Ready for IRN"){ const ok = await issueWithEwb({ eway_no:no, eway_date:d.eway_date, vehicle_no:String(d.veh||"").replace(/\s+/g,"").toUpperCase()||inv.vehicle_no||null }, "by hand — "+g.via); setBusy(false); if(!ok) return; }   // 344
+    else { const { error } = await sb.from("invoice_tbl").update({ eway_no:no, eway_date:d.eway_date, vehicle_no:String(d.veh||"").replace(/\s+/g,"").toUpperCase()||inv.vehicle_no||null }).eq("id",inv.id);
+    setBusy(false); if(error){ alert("Could not save: "+error.message); return; } }
     await invHist(inv.id, inv.dc_id, "E-way bill entered by hand", user?.username, "EWB "+no+" · "+g.via);
     try{ await notifySuperAdmins("✍️ Invoice "+inv.invoice_no+": e-way bill "+no+" entered by hand while the automatic gateway is Live — "+g.via+" — by "+(me||user?.username)+".", null, "gst"); }catch(e){}
     setGstDlg(null); onChanged && onChanged(); load();
   };
   // ---- view ----
-  const fld = (label, k, opt)=> h("label",{style:{display:"flex",flexDirection:"column",gap:3,fontSize:11.5,color:colors.muted,flex:"1 1 "+((opt&&opt.w)||200)+"px"}}, label,
-    (opt&&opt.area) ? h("textarea",{rows:opt.rows||3,value:inv[k]||"",disabled:!(opt&&opt.always?canAcc:editable),onChange:e=>set(k,e.target.value),style:inputStyle})
-    : h("input",{type:(opt&&opt.type)||"text",value:inv[k]==null?"":(opt&&opt.type==="date"?String(inv[k]).slice(0,10):inv[k]),disabled:!(opt&&opt.always?((opt.ewb?canW&&!gLive:canAcc)&&inv.status!=="Cancelled"):editable),onChange:e=>set(k,e.target.value),style:inputStyle}));
+  // 344: OA-amendment-only fields, pop-up fields and OA fields changed with a reason are not typed here
+  const FK_OA = new Set(["bill_to","buyer_gstin","buyer_state","pos_state","pos_code","ship_to","po_no","po_date","oa_date","pf_amount","payment_term","tax_term","packing_term","currency"]);
+  const FK_CMP = new Set(["invoice_date","delivery_term","transport_term","insurance_term","freight_amount","insurance_amount","remarks","mode_of_shipment","fx_rate","port_loading","port_discharge","final_destination"]);
+  const fkLab = (k,label)=> (INV_OA_AMEND.find(x=>x[0]===k)||[k,label])[1];
+  const fld = (label, k, opt)=>{ const fz = !(opt&&opt.always) && (FK_OA.has(k) || FK_CMP.has(k));
+    const chg = fz && inv.status!=="Cancelled" && !(opt&&opt.always) ? h("button",{"data-testid":"f-chg-"+k,onClick:e=>{ e.preventDefault(); if(FK_OA.has(k)) amend(fkLab(k,label)); else if(editable) setCmp({}); else amend(label); },style:{border:"none",background:"none",color:"#2a6db0",cursor:"pointer",fontSize:11,padding:"0 0 0 6px"}},"Change") : null;
+    return h("label",{style:{display:"flex",flexDirection:"column",gap:3,fontSize:11.5,color:colors.muted,flex:"1 1 "+((opt&&opt.w)||200)+"px"}}, h("span",null,label,chg),
+    (opt&&opt.area) ? h("textarea",{rows:opt.rows||3,value:inv[k]||"",disabled:fz || !(opt&&opt.always?canAcc:editable),onChange:e=>set(k,e.target.value),style:inputStyle})
+    : h("input",{type:(opt&&opt.type)||"text",value:inv[k]==null?"":(opt&&opt.type==="date"?String(inv[k]).slice(0,10):inv[k]),disabled:fz || !(opt&&opt.always?((opt.ewb?canW&&!gLive:canAcc)&&inv.status!=="Cancelled"):editable),onChange:e=>set(k,e.target.value),style:inputStyle})); };
   const card = (title, ...kids)=> h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"8px 12px",marginBottom:10}}, h("b",{style:{fontSize:13}},title), h("div",{style:{marginTop:6}},...kids));
   const row = (...kids)=> h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",marginBottom:6}},...kids);
   const th = (t,w,al)=> h("th",{style:{textAlign:al||"left",padding:"5px 7px",fontSize:11,color:colors.muted,borderBottom:"2px solid "+colors.dark,width:w}},t);
   const td = (c,al)=> h("td",{style:{padding:"5px 7px",borderBottom:"1px solid "+colors.border,fontSize:12.5,textAlign:al||"left",verticalAlign:"top"}},c);
   const acts = [];
-  if(editable){ acts.push(h("button",{key:"s",onClick:()=>save(false),disabled:busy,style:btnSecondary},busy?"Saving…":"Save draft"));
+  const cmpLeft = inv.status==="Draft" ? invCompleteProblems(inv, lines).length : 0;
+  if(editable){ acts.push(h("button",{key:"cm","data-testid":"inv-complete-btn",onClick:()=>setCmp({}),style:cmpLeft?{...btnPrimary,background:"#c0392b",borderColor:"#c0392b"}:btnSecondary},"Complete the invoice"+(cmpLeft?" ("+cmpLeft+" to fill)":" ✓")));   // 344
+    acts.push(h("button",{key:"rf","data-testid":"inv-refresh-oa",onClick:refreshOa,disabled:busy,style:btnSecondary},"Refresh from OA"));
+    acts.push(h("button",{key:"s",onClick:()=>save(false),disabled:busy,style:btnSecondary},busy?"Saving…":"Save draft"));
     acts.push(h("button",{key:"r",onClick:toReady,disabled:busy,style:btnPrimary},"Ready for IRN"));
     acts.push(h("button",{key:"d",onClick:discard,style:btnDanger},"Discard draft")); }
-  if(inv.status==="Ready for IRN" && (canAcc || canE)){ acts.push(h("button",{key:"b",onClick:backToDraft,disabled:busy,style:btnSecondary},"Back to draft"));
+  if(inv.status==="Ready for IRN" && !inv.irn && (canAcc || canE)){ acts.push(h("button",{key:"b","data-testid":"inv-edit",onClick:backToDraft,disabled:busy,style:btnSecondary},"Edit"));   // 344: Edit until the IRN
     if(gLive) acts.push(h("button",{key:"ga","data-testid":"g-gen",onClick:()=>openPreview(false),style:btnPrimary},"Generate e-invoice \u25b8"));   // 2026-11-08: automatic gateway
-    acts.push(h("button",{key:"i","data-testid":"g-manual",onClick:()=>setIrnDlg({ irn:"", ack_no:"", ack_date:"", signed_qr:"", reason:"", code:"" }),style:gLive?btnSecondary:btnPrimary},gLive?"Enter IRN by hand":"Enter IRN and issue")); }
+    acts.push(h("button",{key:"i","data-testid":"g-manual",onClick:()=>setIrnDlg({ irn:"", ack_no:"", ack_date:"", signed_qr:"", reason:"", code:"", eway_no:"", eway_date:"" }),style:gLive?btnSecondary:btnPrimary},gLive?"Enter IRN by hand":(ewbNeed?"Enter IRN, Ack and e-way bill":"Enter IRN and issue"))); }
+  if(inv.status==="Ready for IRN" && inv.irn && (canAcc || canE || canW)){   // 344: IRN in, waiting for the e-way bill
+    acts.push(h("button",{key:"ei","data-testid":"inv-ewb-issue",onClick:()=>setGstDlg({ kind:"ewbissue", eway_no:"", eway_date:toISODate(new Date()), veh:inv.vehicle_no||"", from:"" }),style:btnPrimary},"Enter e-way bill and issue"));
+    acts.push(h("button",{key:"fm","data-testid":"inv-ask-fm",onClick:()=>askFm(inv.irn),style:btnSecondary},"Ask the Factory Manager"));
+    if(gLive && canW && !inv.is_export) acts.push(h("button",{key:"ew2","data-testid":"g-ewb",onClick:()=>setGstDlg({ kind:"ewb", mode:invModeCode(inv.mode_of_shipment), vtype:"R", distance:inv.ewb_distance?String(inv.ewb_distance):"", veh:inv.vehicle_no||"", trans_id:inv.transporter_gstin||"", trans_name:inv.transporter_name||"", doc_no:inv.lr_no||"", doc_dt:inv.lr_date?String(inv.lr_date).slice(0,10):"" }),style:btnSecondary},"Generate e-way bill \u25b8")); }
+  if(["Draft","Ready for IRN"].includes(inv.status) && !inv.irn && (canAcc || canE)) acts.push(h("button",{key:"bk","data-testid":"inv-booking",onClick:()=>setGstDlg({ kind:"booking", to:inv.transporter_name||"", via:"Email" }),style:btnSecondary},"Booking copy for transporter"));
+  if(steps.length && inv.status!=="Cancelled") acts.push(h("button",{key:"pz","data-testid":"inv-pause",onClick:()=>setGstDlg({ kind:"pause", step:String(steps[0].id), reason:"", code:"" }),style:btnSecondary},"Pause the clock 1 day"));
   if(gMode==="sandbox" && gSA && ["Draft","Ready for IRN","Issued"].includes(inv.status)) acts.push(h("button",{key:"gt","data-testid":"g-test",onClick:()=>openPreview(true),style:btnSecondary},"Test e-invoice on the sandbox"));
   if(inv.status==="Issued" && canW && !gLive) acts.push(h("button",{key:"t",onClick:saveTransport,disabled:busy,style:btnSecondary},"Save transport details"));
   if(inv.status==="Issued" && canE){
@@ -76556,11 +77292,13 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
       h("button",{onClick:()=>onClose&&onClose(),style:btnSmall},"← All invoices"),
       h("h2",{style:{fontSize:18,margin:0}},(inv.is_export?"Export invoice ":"Tax invoice ")+inv.invoice_no), invPill(inv.status),
       h("span",{style:{fontSize:13,color:colors.muted}},"Contract "+inv.contract_number+" · "+(inv.customer_name||"")+" · DC "+inv.invoice_no)),
-    h("div",{style:{fontSize:11.5,color:colors.muted,margin:"4px 0 8px"}}, inv.status==="Draft" ? "Draft: check prices, charges and fields, then Ready for IRN. Upload to the IRP outside the app and enter the IRN back here." :
+    inv.status==="Ready for IRN" && inv.irn ? h("div",{"data-testid":"inv-wait-ewb",style:{background:"#fdf0dc",color:"#8a5a0b",borderRadius:6,padding:"6px 10px",fontSize:12.5,marginBottom:8}},"IRN in — frozen. Waiting for the e-way bill (Factory Manager makes it). The invoice is issued once it is entered.") : null,
+    steps.length ? h("div",{"data-testid":"inv-clock",style:{fontSize:11.5,margin:"0 0 6px",color:steps.some(stepIsStale)?"#a3312a":"#854f0b"}}, steps.map(st=>(st.doc_type==="invoice_irn"?"Ready-for-IRN clock: ":"Mark-as-sent clock: ")+(stepIsStale(st)?"STALE — PDFs of "+(st.owner||"the owner")+" are blocked":(st.doc_type==="invoice_irn"?STALE_DAYS:1)+" day"+(st.doc_type==="invoice_irn"?"s":"")+" from "+fmtDMYTime(st.doc_type==="invoice_irn"?(inv.ready_at||st.opened_at):(inv.irn_at||inv.issued_at||st.opened_at)))).join(" · ")) : null,
+    h("div",{style:{fontSize:11.5,color:colors.muted,margin:"4px 0 8px"}}, inv.status==="Draft" ? "Draft: Complete the invoice (freight, insurance, LR, transporter"+(ewbNeed?", e-way distance":"")+"), check, then Ready for IRN. Fields from the Order Acceptance change only by an OA amendment (press Change). Editable until the IRN goes in." :
       inv.status==="Ready for IRN" ? (gLive ? "Press Generate e-invoice: the app registers it on the IRP through Clear and issues it. Enter IRN by hand only with a reason. Values are locked; Back to draft to change them." : "Upload this invoice to the IRP, then Enter IRN and issue. Values are locked; Back to draft to change them.") :
       inv.status==="Issued" ? "Issued "+fmtDMYTime(inv.issued_at)+" by "+(inv.issued_by||"")+" — locked. Corrections only by a credit note. E-way bill and shipping bill details can still be added." : "Cancelled: "+(inv.cancel_reason||"")),
     posWarn && inv.status!=="Issued" ? h("div",{style:{background:"#fff4d6",color:"#854f0b",borderRadius:6,padding:"6px 10px",fontSize:12.5,marginBottom:8}},"⚠ "+posWarn) : null,
-    gFree && ["Ready for IRN","Issued"].includes(inv.status) ? h("div",{style:{fontSize:12,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",margin:"0 0 8px",color:colors.muted}},"Make a code for this invoice:", ...["edit","irn_cancel","ewb_cancel"].map(k=>h("button",{key:k,"data-testid":"g-make-"+k,onClick:()=>makeCode(k),style:btnSmall},codeName(k)))) : null,   // 2026-11-08
+    gFree && ["Draft","Ready for IRN","Issued"].includes(inv.status) ? h("div",{"data-testid":"g-make-row",style:{fontSize:12,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",margin:"0 0 8px",color:colors.muted}},"Make a code for this invoice:", ...["edit","irn_cancel","ewb_cancel","clock_pause"].map(k=>h("button",{key:k,"data-testid":"g-make-"+k,onClick:()=>makeCode(k),style:btnSmall},codeName(k)))) : null,   // 2026-11-08
     gMode!=="off" ? h("div",{style:{fontSize:11.5,color:gLive?"#0f6e56":"#854f0b",margin:"0 0 6px"}},"E-invoice / e-way bill gateway: "+(gLive?"Live (automatic through Clear)":"Sandbox (tests only)")) : null,
     card("Invoice",
       row(fld("Invoice date","invoice_date",{type:"date",w:150}), fld("PO No","po_no",{w:160}), fld("PO date","po_date",{type:"date",w:150}), !inv.is_export ? fld("OA date","oa_date",{type:"date",w:150}) : null, !inv.is_export ? fld("Site contact","site_contact") : null),
@@ -76574,8 +77312,8 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
       h("div",{style:{overflowX:"auto"}}, h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:760}},
         h("thead",null,h("tr",null,th("Sl No",50),th("Item / description"),th("HSN",80),th("Qty",60,"right"),th("Unit price ("+cur+")",140,"right"),th("Amount ("+cur+")",120,"right"),th("Price from",110))),
         h("tbody",null, calcLines.map(l=>h("tr",{key:l.id}, td(l.item_sl_no), td(h("div",null,h("b",null,l.item||""),h("div",{style:{fontSize:11.5,color:colors.muted}},l.description||""))),
-          td(editable ? hsnCell(l.hsn, v=>setLines(lines.map(x=>x.id===l.id?{...x,hsn:v}:x))) : (l.hsn||h("span",{style:{color:"#a3312a",fontWeight:700}},"missing"))), td(l.qty,"right"),
-          td(editable ? h("input",{value:l.unit_price,onChange:e=>{ const v = e.target.value.replace(/[^\d.]/g,""); const nl = lines.map(x=>x.id===l.id?{...x,unit_price:v}:x); setLines(nl);
+          td((l.hsn||h("span",{style:{color:"#a3312a",fontWeight:700}},"missing"))), td(l.qty,"right"),   // 344: HSN and price locked
+          td(false ? h("input",{value:l.unit_price,onChange:e=>{ const v = e.target.value.replace(/[^\d.]/g,""); const nl = lines.map(x=>x.id===l.id?{...x,unit_price:v}:x); setLines(nl);
               // a percentage P&F follows the basic
               const pm = String(inv.packing_term||"").match(/^\s*([\d.]+)\s*%\s*$/); if(pm) set("pf_amount", r2(nl.reduce((n,x)=>n+r2((Number(x.unit_price)||0)*(Number(x.qty)||0)),0)*Number(pm[1])/100)); },style:{...inputStyle,padding:"4px 6px",fontSize:12.5,textAlign:"right",width:120}}) : invMoney(l.unit_price,cur),"right"),
           td(invMoney(l.amount,cur),"right"),
@@ -76596,7 +77334,9 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
     card("Transport and e-invoice",
       row(!inv.is_export ? fld("E-way bill no","eway_no",{always:true,ewb:true,w:160}) : null, !inv.is_export ? fld("E-way bill date","eway_date",{type:"date",always:true,ewb:true,w:150}) : null, fld("Vehicle no","vehicle_no",{always:true,w:150}),
         inv.is_export ? fld("Shipping bill no","shipping_bill_no",{always:true,w:160}) : null, inv.is_export ? fld("Shipping bill date","shipping_bill_date",{type:"date",always:true,w:150}) : null),
-      !inv.is_export && inv.grand_total_inr>50000 && !inv.eway_no ? h("div",{style:{fontSize:11.5,color:"#854f0b"}},"Over ₹50,000 — an e-way bill is needed before the goods move.") : null,
+      inv.is_export && ewbNeed ? row(fld("E-way bill no (to the port)","eway_no",{always:true,ewb:true,w:160}), fld("E-way bill date","eway_date",{type:"date",always:true,ewb:true,w:150})) : null,
+      h("div",{"data-testid":"inv-transport",style:{fontSize:12,color:colors.text,margin:"2px 0 4px"}}, "Mode: "+(inv.mode_of_shipment||"—")+" · transporter: "+([inv.transporter_name, inv.transporter_gstin].filter(Boolean).join(" ")||"—")+" · LR: "+(inv.lr_none?"none (own vehicle / by hand)":inv.lr_no?inv.lr_no+(inv.lr_date?" dt "+fmtDMY(String(inv.lr_date).slice(0,10)):""):"—")+(ewbNeed?" · e-way distance: "+(inv.ewb_distance?inv.ewb_distance+" km":"—"):"")+(inv.booking_to?" · booking copy to "+inv.booking_to+" "+fmtDMY(String(inv.booking_at||"").slice(0,10)):"")),
+      ewbNeed && !inv.eway_no ? h("div",{style:{fontSize:11.5,color:"#854f0b"}},"Goods over ₹50,000 — the e-way bill goes in with the IRN; the invoice is issued only when it is in.") : null,
       inv.irn ? h("div",{style:{fontSize:12,marginTop:4}},h("b",null,"IRN "),h("span",{style:{fontFamily:"monospace",fontSize:11.5}},inv.irn)," · Ack ",inv.ack_no," · ",fmtDMYTime(inv.ack_date), inv.signed_qr?" · signed QR on file":" · no signed QR (the PDF prints without the QR)") : null),
     msg ? h("div",{style:{whiteSpace:"pre-wrap",color:/Saved/.test(msg)?"#0f6b4f":colors.danger,fontSize:12.5,margin:"6px 0",background:/Saved/.test(msg)?"#e4f3ed":"#fdecea",borderRadius:6,padding:"6px 10px"}},msg) : null,
     h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",marginTop:6}}, acts),
@@ -76612,10 +77352,20 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
         gLive && !gFree ? h("div",{style:{background:"#fff4d6",border:"1px solid #f0d9a8",borderRadius:8,padding:"7px 10px",marginBottom:6,fontSize:12}}, h("b",null,"This needs an Edit code from "+gNames+"."),
           h("div",{style:{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginTop:5}}, h("button",{onClick:()=>askCode("edit"),style:{...btnSmall,background:"#2a6db0",color:"#fff",borderColor:"#2a6db0"}},"Ask for an Edit code"),
             h("input",{"data-testid":"irn-code",value:irnDlg.code||"",onChange:e=>{ const v = e.target.value; setIrnDlg(d=>({...d,code:v})); },placeholder:"Edit code",style:{...inputStyle,width:140,padding:"5px 8px"}}))) : null,
+        ewbNeed ? h("div",{"data-testid":"irn-ewb",style:{background:"#f4f7fb",border:"1px solid #d6e2f0",borderRadius:8,padding:"7px 10px",marginBottom:6,fontSize:12}},   // 344
+          h("b",null,"E-way bill (goods over ₹50,000)"), h("div",{style:{fontSize:11,color:colors.muted,margin:"2px 0 5px"}},"From the Factory Manager. Leave it blank if it is not made yet: the IRN is kept, the invoice is frozen and issued once the e-way bill is entered."),
+          h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",alignItems:"flex-end"}},
+            h("input",{"data-testid":"irn-eway",value:irnDlg.eway_no||"",onChange:e=>{ const v = e.target.value; setIrnDlg(d=>({...d,eway_no:v})); },placeholder:"12-digit e-way bill no",style:{...inputStyle,width:180,fontFamily:"monospace"}}),
+            h("input",{"data-testid":"irn-eway-date",type:"date",value:irnDlg.eway_date||"",onChange:e=>{ const v = e.target.value; setIrnDlg(d=>({...d,eway_date:v})); },style:{...inputStyle,width:150}}),
+            h("button",{"data-testid":"irn-ask-fm",onClick:()=>{ if(!GST_IRN_RE.test(String(irnDlg.irn||"").trim().toLowerCase())){ alert("Enter the IRN first — the Factory Manager needs it for the e-way bill."); return; } askFm(String(irnDlg.irn).trim().toLowerCase()); },style:{...btnSmall,background:"#2a6db0",color:"#fff",borderColor:"#2a6db0"}},"Ask the Factory Manager"))) : null,
         h("label",{style:{display:"flex",flexDirection:"column",gap:3,fontSize:11.5,color:colors.muted}},"Signed QR code text (optional — prints as the QR)",h("textarea",{rows:3,value:irnDlg.signed_qr,onChange:e=>{ const v = e.target.value; setIrnDlg(d=>({...d,signed_qr:v})); },style:{...inputStyle,fontFamily:"monospace",fontSize:11}})),
-        h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}, h("button",{onClick:()=>setIrnDlg(null),style:btnSecondary},"Cancel"), h("button",{onClick:()=>issue(irnDlg),disabled:busy,style:btnPrimary},busy?"Saving…":"Issue the invoice")))) : null,
+        h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}, h("button",{onClick:()=>setIrnDlg(null),style:btnSecondary},"Cancel"), h("button",{"data-testid":"irn-save",onClick:()=>issue(irnDlg),disabled:busy,style:btnPrimary},busy?"Saving…":(ewbNeed && !String(irnDlg.eway_no||"").trim() ? "Save the IRN (e-way bill to follow)" : "Issue the invoice"))))) : null,
     cancelDlg ? h(ReasonDialog,{title:"Record IRN cancellation — "+inv.invoice_no, subtitle:"Cancel the IRN on the IRP first (allowed within 24 hours of issue). This invoice and its number stay as Cancelled; the goods need a new DC.", placeholder:"Why was the IRN cancelled?", okLabel:"Record cancellation", okStyle:{background:colors.danger}, onCancel:()=>setCancelDlg(false), onOk:cancelIssued}) : null,
     gstDialog(),   // 2026-11-08 IRP build
+    cmp ? h(InvCompleteDialog,{ key:"cmp"+inv.id, inv, lines, user, me, dcl, canEdit:editable, startMsg:cmp.msg||"", onClose:()=>setCmp(null), onAmend:amend, onRefresh:refreshOa,
+      onSaved:async()=>{ setCmp(null); await load(); onChanged && onChanged(); } }) : null,   // 344
+    ovr.length ? h("div",{"data-testid":"inv-ovr",style:{marginTop:14}},h("div",{style:{fontSize:12,fontWeight:700,color:colors.muted}},"Changed from the Order Acceptance (override history)"),
+      ovr.map(x=>h("div",{key:x.id,style:{fontSize:11.5,color:colors.muted,padding:"2px 0"}},fmtDMYTime(x.at)+" · "+(x.by_user||"")+" · "+(x.label||x.field)+": "+(x.from_value||"—")+" → "+(x.to_value||"—")+" — "+(x.reason||"")))) : null,
     gstLog.length && canW ? h("div",{"data-testid":"g-log",style:{marginTop:14}},h("div",{style:{fontSize:12,fontWeight:700,color:colors.muted}},"E-invoice / e-way bill gateway log"),
       gstLog.map(x=>h("div",{key:x.id,style:{fontSize:11.5,color:x.ok?colors.muted:"#a3312a",padding:"2px 0"}},fmtDMYTime(x.at)+" \u00b7 "+(x.username||"")+" \u00b7 "+x.action+(x.mode==="sandbox"?" (sandbox)":"")+" \u00b7 "+(x.ok?"OK":"refused")+(x.message?" \u2014 "+x.message:"")))) : null);
 }
@@ -77196,6 +77946,11 @@ function InvoicesScreen({ user }){
     setDcs((d||[]).filter(x=>!x.is_test && x.bill_no && !done.has(x.id))); setList(data||[]);
   },[user && user.username]);
   useEffect(()=>{ load(); },[load]);
+  // 344: the Order Status board opens the invoice of a lot (12A / 12B)
+  useEffect(()=>{ const go = async()=>{ const t = INV_OPEN_TARGET; if(!t) return; INV_OPEN_TARGET = null;
+      if(t.id){ setOpen(t.id); return; }
+      if(t.dcId){ try{ const { data: ex } = await sb.from("invoice_tbl").select("id").eq("dc_id",t.dcId).neq("status","Cancelled").limit(1); if(ex && ex.length){ setOpen(ex[0].id); return; } setOpen(await invMakeFromDc(t.dcId, user)); }catch(e){ alert("Could not make the invoice: "+(e.message||e)); } } };
+    go(); window.addEventListener("flo-inv-open", go); return ()=>window.removeEventListener("flo-inv-open", go); },[]);
   const [svc,setSvc] = useState(false);   // 212
   if(open) return h(InvoiceEditor,{ user, me, P, invoiceId:open, onChanged:load, onClose:()=>{ setOpen(null); load(); } });
   if(!list) return h("div",{style:{padding:20,color:colors.muted}},"Reading the invoices…");
@@ -84385,12 +85140,15 @@ async function invPendingItems(P){
   const out = [];
   const days = (ts)=> ts ? Math.max(0, Math.floor((Date.now()-new Date(ts).getTime())/86400000)) : 0;
   const to = (people, base)=>{ (people.length ? people : [""]).forEach(p=>out.push({ ...base, owed_by_person:p, client_side:true })); };
-  const { data: invs, error } = await sb.from("invoice_tbl").select("id,dc_id,invoice_no,contract_number,customer_name,status,is_export,grand_total_inr,eway_no,shipping_bill_no,created_at,ready_at,issued_at").neq("status","Cancelled");
+  let { data: invs, error } = await sb.from("invoice_tbl").select("id,dc_id,invoice_no,contract_number,customer_name,status,is_export,grand_total_inr,eway_no,shipping_bill_no,created_at,ready_at,issued_at,irn,irn_at,sent_at").neq("status","Cancelled");
+  if(error) ({ data: invs, error } = await sb.from("invoice_tbl").select("id,dc_id,invoice_no,contract_number,customer_name,status,is_export,grand_total_inr,eway_no,shipping_bill_no,created_at,ready_at,issued_at").neq("status","Cancelled"));   // 344: before the SQL
   if(error) return out;
   (invs||[]).forEach(i=>{
     const no = i.invoice_no+" · contract "+i.contract_number+(i.customer_name?" ("+i.customer_name+")":"");
     if(i.status==="Draft" && days(i.created_at)>=1) to(P.acc, { what:"Invoice "+no+" is a draft — check and make it Ready for IRN", entity_key:i.invoice_no, detail_key:"inv-draft", owed_by_role:"accounts", days_waiting:days(i.created_at), urgency:days(i.created_at)>=2?"overdue":"due", source:"invoice" });
-    if(i.status==="Ready for IRN" && days(i.ready_at)>=1) to(P.acc, { what:"Invoice "+no+" — upload to the IRP and enter the IRN", entity_key:i.invoice_no, detail_key:"inv-irn", owed_by_role:"accounts", days_waiting:days(i.ready_at), urgency:"overdue", source:"invoice" });
+    if(i.status==="Ready for IRN" && !i.irn) to(P.acc, { what:"Invoice "+no+" — Ready for IRN: IRN, Ack and e-way bill in ("+STALE_DAYS+" days, then stale)", entity_key:i.invoice_no, detail_key:"inv-irn", owed_by_role:"accounts", days_waiting:days(i.ready_at)||null, urgency:days(i.ready_at)>=STALE_DAYS-1?"overdue":"due", source:"invoice" });   // 344
+    if(i.status==="Ready for IRN" && i.irn) to(P.acc, { what:"Invoice "+no+" — IRN in, e-way bill missing: get it from the Factory Manager and enter it (the invoice is issued with it)", entity_key:i.invoice_no, detail_key:"inv-ewbwait", owed_by_role:"accounts", days_waiting:days(i.irn_at)||null, urgency:"overdue", source:"invoice" });
+    if(i.status==="Issued" && !i.sent_at && i.irn_at) to(P.acc, { what:"Invoice "+no+" — IRN in: send it and Mark as sent (1 day from the IRN)", entity_key:i.invoice_no, detail_key:"inv-send", owed_by_role:"accounts", days_waiting:days(i.irn_at)||null, urgency:days(i.irn_at)>=1?"overdue":"due", source:"invoice" });
     if(i.status==="Issued" && !i.is_export && Number(i.grand_total_inr)>50000 && !i.eway_no) to(P.acc, { what:"Invoice "+no+" — e-way bill number not entered (over ₹50,000)", entity_key:i.invoice_no, detail_key:"inv-eway", owed_by_role:"accounts", days_waiting:days(i.issued_at)||null, urgency:"due", source:"invoice" });
     if(i.status==="Issued" && i.is_export && !i.shipping_bill_no && days(i.issued_at)>=7) to(P.acc, { what:"Export invoice "+no+" — enter the shipping bill number and date", entity_key:i.invoice_no, detail_key:"inv-sb", owed_by_role:"accounts", days_waiting:days(i.issued_at), urgency:"due", source:"invoice" });
   });
