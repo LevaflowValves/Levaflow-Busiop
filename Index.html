@@ -60,7 +60,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-11-13T04:00:00Z";
+  var APP_BUILD_VERSION = "2026-11-13T06:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -493,6 +493,12 @@ function empNextCode(codes){
   return code;
 }
 function setUnsavedGuard(dirty, message, saveFn){
+  // 2026-11-13T06:00: a list of parts not saved (each with its own save), shown on the big badge; Save all saves them in turn
+  try{ const key = message || "__default";
+    if(dirty) SV.parts.set(key, { label: svGuardLabel(message), saveFn: saveFn||null });
+    else if(message) SV.parts.delete(key);
+    else { SV.parts.clear(); SV.dirty = null; }
+    svSyncGuard(); return; }catch(e){}
   window.__unsavedGuard = { dirty:!!dirty, message: message||"You have unsaved changes. Leave anyway?", saveFn: saveFn||null };
 }
 // ---- UNFINISHED QUOTE, kept on this computer (23 Sep) -----------------
@@ -633,6 +639,278 @@ const HSN_DEFAULT = IS_LEVAFLOW_SITE ? "" : "84212900";
 function canSeeValvePrice(user){ return !IS_LEVAFLOW_SITE || (user && (user.role==="admin" || user.role==="super_admin")); }
 if(APP_SETTINGS.appTitle){ try{ document.title = String(APP_SETTINGS.appTitle); }catch(e){} }
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+// ===================================================================================================================
+// 2026-11-13T06:00:00Z — SAVE FEEDBACK, APP-WIDE. Every save started by a click gets a message: green "Saved", or a red
+// box saying why it failed and what to do (the entry stays on screen). A big badge shows the state of the screen:
+// yellow Not saved · green Saved · red Save failed. Leaving with changes not saved asks "Quit without saving?".
+// A Delete button asks "Going to delete — are you sure?" (with a tick box) first. Failed saves are logged (save_fail_tbl).
+// ===================================================================================================================
+const SV_SQL = "structure_save_feedback_2026-11-13.sql";
+// writes the app makes by itself, never reported as a person's save
+const SV_QUIET = /^(notifications_tbl|audit_log|login_history|app_session[a-z_]*|save_fail_tbl|order_stale_tbl|stale_pass_tbl|tfy_[a-z_]*|user_tab_seen[a-z_]*|[a-z_]*_seen_tbl|[a-z_]*_read_tbl|activity_ping[a-z_]*)$/i;
+const SV = { act:null, dirty:null, parts:new Map(), state:"clean", at:0, msg:"", fail:null, fetches:0, delOk:0, bypass:null, tab:"" };
+window.__SV = SV;
+// plain-words reason and what to do, from a database error
+function svReason(err, table, op){
+  const m = String((err && (err.message||err.error_description||err.hint)) || err || "");
+  const d = String((err && err.details) || "");
+  const col = (x)=> String(x||"").replace(/_/g," ");
+  let r;
+  if(/Failed to fetch|NetworkError|network|timed? ?out|aborted|ECONN|load failed/i.test(m)) r = { why:"No connection to the server (the internet dropped or the server did not answer).", todo:"Your entry is still on the screen. Check the internet and press Save again." };
+  else if(/JWT|expired|not authenticated|invalid claim/i.test(m)) r = { why:"Your sign-in has run out.", todo:"Open a new tab, sign in there, then come back to this tab and press Save again." };
+  else if(/duplicate key|unique constraint|already exists/i.test(m)){ const k = d.match(/Key \(([^)]+)\)=\(([^)]*)\)/); r = { why: k ? "“"+k[2]+"” already exists ("+col(k[1])+")." : "This entry already exists.", todo:"Open the existing one, or change the number / name and save again." }; }
+  else if(/null value in column "([^"]+)"/i.test(m)){ const c = m.match(/null value in column "([^"]+)"/i)[1]; r = { why:col(c)+" is empty.", todo:"Fill "+col(c)+" and press Save again." }; }
+  else if(/invalid input syntax for type (\w+)[^"]*"([^"]*)"/i.test(m)){ const x = m.match(/invalid input syntax for type (\w+)[^"]*"([^"]*)"/i); r = { why:"“"+x[2]+"” is not a valid "+(/date|time/.test(x[1])?"date":/int|numeric|real|double/.test(x[1])?"number":x[1])+".", todo:"Correct it and press Save again." }; }
+  else if(/value too long/i.test(m)) r = { why:"One of the entries is too long for its box.", todo:"Shorten it and press Save again." };
+  else if(/foreign key/i.test(m)) r = op==="delete" ? { why:"It is still used somewhere else"+(d.match(/table "([^"]+)"/) ? " ("+col(d.match(/table "([^"]+)"/)[1])+")" : "")+".", todo:"Remove it from there first, then delete." } : { why:"It points to something that does not exist (any more).", todo:"Pick it again from the list and press Save again." };
+  else if(/check constraint/i.test(m)) r = { why:"One of the values is not allowed here.", todo:"Check the values and press Save again." };
+  else if(/does not exist|schema cache|Could not find the|relation .* not exist|undefined column/i.test(m)) r = { why:"The app needs a database update ("+((m.match(/'([a-z_]+)'|"([a-z_]+)"/i)||[])[1]||(m.match(/"([a-z_]+)"/i)||[])[1]||table)+").", todo:"Tell the admin to run the latest SQL file. Your entry is still on the screen." };
+  else if(/permission denied|row-level security|not allowed|forbidden|401|403/i.test(m)) r = { why:"You are not allowed to save this.", todo:"Ask the admin which post can do it." };
+  else r = { why:"The server refused it: "+m.slice(0,160), todo:"Press Save again. If it fails again, use Copy for Report an issue." };
+  r.raw = m+(d?" · "+d:""); return r;
+}
+function svLabel(btn){ if(!btn) return ""; const t = String(btn.getAttribute("aria-label") || btn.textContent || btn.title || "").replace(/\s+/g," ").trim(); return t.replace(/^[^A-Za-z0-9]+/,"").slice(0,60); }
+function svScreen(el){
+  try{ const m = el && el.closest && svModalOf(el); const scope = m || (el && el.closest && el.closest("[data-sv-screen]")) || document.body;
+    const hd = m ? (m.querySelector("h1,h2,h3,[data-title]") || m.querySelector("b,strong")) : (scope.querySelector("h1,h2,h3,[data-title]")); const t = hd ? hd.textContent : "";
+    return String(t||"").replace(/\s+/g," ").trim().slice(0,70); }catch(e){ return ""; }
+}
+// the pop-up an element sits in (a fixed full-screen overlay), else null
+function svModalOf(el){ let x = el; while(x && x!==document.body){ try{ const cs = getComputedStyle(x); if(cs.position==="fixed" && x.offsetWidth>=window.innerWidth*0.5/Math.max(1,UI_Z) && x.offsetHeight>=window.innerHeight*0.5/Math.max(1,UI_Z) && x.id!=="sv-badge") return x; }catch(e){} x = x.parentElement; } return null; }
+const SV_SAVEBTN = /^\W*(save|submit|post|update|create|record|approve|endorse|send|apply|confirm)\b/i;
+const SV_ACTBTN = /^\W*(save|submit|post|update|create|record|approve|endorse|send|apply|confirm|add|delete|remove|move|mark|release|assign|allot|import|upload|generate|book|issue|receive|accept|reject|return|hold|place|link|set|change|rename|clone|copy|done|complete|reopen|hand|yes|ok|replace|merge|start|finish|park|unpark|revise|request|raise|log|use|give|make|enter|pay|bill|keep|swap|tick|post)/i;
+const SV_DELBTN = /^\W*delete\b/i;
+const SV_CLOSEBTN = /^\W*(close|cancel|later|back|discard|×|✕|x)\W*$/i;
+// a form box that counts: inside a screen / pop-up that has a Save-type button; search and filter boxes never count
+function svCountsAsForm(el){
+  if(!el || el.closest("[data-nodirty],#sv-badge,#sv-dlg,.topbar-user,#app-sticky-header")) return null;
+  const tp = String(el.type||"").toLowerCase(); if(/^(search|button|submit|file|range|color)$/.test(tp)) return null;
+  const hint = [el.placeholder, el.getAttribute("aria-label"), el.name, el.id, el.title].join(" ");
+  if(/search|find|filter|look ?up|type to|jump|go to|month|from date|to date|show/i.test(hint)) return null;
+  const scope = svModalOf(el) || el.closest("[data-sv-screen]");
+  if(!scope) return null;
+  const btns = Array.from(scope.querySelectorAll("button")).filter(b=>SV_SAVEBTN.test(svLabel(b)));
+  return btns.length ? scope : null;
+}
+function svSetState(st, msg){ SV.state = st; SV.msg = msg||""; SV.at = Date.now(); svPaint(); }
+function svPartsList(){ const out = Array.from(SV.parts.values()).map(p=>p.label); if(SV.dirty) out.unshift(SV.dirty.label||"this screen"); return Array.from(new Set(out.filter(Boolean))); }
+function svIsDirty(){ return !!SV.dirty || SV.parts.size>0; }
+// keeps the old single guard (window.__unsavedGuard) in step: dirty if anything is not saved, and one Save-all function
+function svSyncGuard(){
+  const fns = Array.from(SV.parts.values()).filter(p=>p.saveFn);
+  const list = svPartsList();
+  window.__unsavedGuard = { dirty:svIsDirty(), message: list.length ? "Not saved: "+list.join(" · ")+". Quit without saving?" : "You have unsaved changes. Quit without saving?",
+    saveFn: fns.length ? async()=>{ for(const p of fns){ await p.saveFn(); } } : null };
+  if(svIsDirty() && SV.state!=="failed" && SV.state!=="saving") SV.state = "dirty";
+  if(!svIsDirty() && SV.state==="dirty") SV.state = "clean";
+  svPaint();
+}
+// the big badge
+function svPaint(){
+  let b = document.getElementById("sv-badge");
+  const show = SV.state!=="clean";
+  if(!show){ if(b) b.style.display = "none"; return; }
+  if(!b){ b = document.createElement("button"); b.id = "sv-badge"; b.type = "button"; b.setAttribute("data-testid","sv-badge"); b.setAttribute("aria-live","polite");
+    b.onclick = ()=>svBadgeClick(); document.body.appendChild(b); }
+  const C = { dirty:["#f2c230","#3d2e00","Not saved"], saving:["#fff3c4","#3d2e00","Saving…"], saved:["#1f8a4c","#fff","Saved ✓"], failed:["#c0392b","#fff","Save failed"], deleted:["#1f8a4c","#fff","Deleted ✓"] }[SV.state] || ["#eee","#333",""];
+  let top = 70; try{ const hd = document.getElementById("app-sticky-header"); if(hd){ const r = hd.getBoundingClientRect(); top = Math.max(6, r.bottom/UI_Z + 6); } }catch(e){}
+  const pr = parseFloat(document.body.style.paddingRight)||0;
+  b.style.cssText = "position:fixed;z-index:4100;right:"+(14+pr)+"px;top:"+top+"px;display:flex;align-items:center;gap:10px;min-width:220px;max-width:420px;border:2px solid rgba(0,0,0,.12);border-radius:12px;padding:9px 16px;cursor:pointer;text-align:left;box-shadow:0 6px 18px rgba(0,0,0,.18);font:800 17px 'Segoe UI',system-ui,sans-serif;background:"+C[0]+";color:"+C[1];
+  b.setAttribute("data-state", SV.state);
+  const t = SV.at ? new Date(SV.at) : null; const hm = t ? String(t.getHours()).padStart(2,"0")+":"+String(t.getMinutes()).padStart(2,"0") : "";
+  const sub = SV.state==="dirty" ? svPartsList().join(" · ") : SV.state==="saved"||SV.state==="deleted" ? (SV.msg||"") : SV.state==="failed" ? (SV.msg||"Click for the reason") : "Please wait";
+  b.innerHTML = ""; const dot = document.createElement("span"); dot.style.cssText = "width:15px;height:15px;border-radius:50%;background:currentColor;flex:none"; b.appendChild(dot);
+  const tx = document.createElement("span"); const m = document.createElement("span"); m.textContent = C[2]+(SV.state==="saved"||SV.state==="deleted" ? " "+hm : ""); const s = document.createElement("span");
+  s.style.cssText = "display:block;font-size:12px;font-weight:600;max-width:360px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"; s.textContent = sub; tx.append(m, s); b.appendChild(tx);
+  b.title = SV.state==="dirty" ? "Not saved: "+svPartsList().join(", ")+(Array.from(SV.parts.values()).some(p=>p.saveFn)?" — click to Save all":"") : SV.state==="failed" ? "Click for the reason and what to do" : "";
+}
+function svBadgeClick(){
+  if(SV.state==="failed" && SV.fail){ svFailBox(SV.fail); return; }
+  if(SV.state==="dirty"){ const fn = window.__unsavedGuard && window.__unsavedGuard.saveFn;
+    svDialog({ tone:"y", title:"Not saved yet", lines:svPartsList(), note: fn ? "Save all saves every part listed that has its own Save." : "Use the Save button on the screen.",
+      buttons:[{ t:"OK", v:"stay" }, ...(fn ? [{ t:"Save all", v:"save", pri:true }] : [])] }).then(async v=>{ if(v==="save"){ try{ await fn(); }catch(e){} } }); return; }
+  if(SV.state==="saved"||SV.state==="deleted") svSetState("clean");
+}
+// one dialog for quit / delete / not-saved (never the browser's own boxes)
+function svDialog({ tone, title, lines, note, check, buttons }){
+  return new Promise(res=>{
+    const old = document.getElementById("sv-dlg"); if(old) old.remove();
+    const ov = document.createElement("div"); ov.id = "sv-dlg"; ov.setAttribute("data-testid","sv-dlg");
+    ov.style.cssText = "position:fixed;inset:0;z-index:6000;background:rgba(20,22,18,.55);display:flex;align-items:flex-start;justify-content:center;padding:60px 14px";
+    const box = document.createElement("div"); box.setAttribute("role","dialog"); box.setAttribute("aria-modal","true");
+    box.style.cssText = "background:#fff;color:#1c1f1a;border-radius:14px;width:560px;max-width:100%;overflow:hidden;box-shadow:0 14px 44px rgba(0,0,0,.35);font:15px 'Segoe UI',system-ui,sans-serif";
+    const hd = document.createElement("div"); hd.style.cssText = "padding:15px 20px;font-size:19px;font-weight:800;"+(tone==="r" ? "background:#c0392b;color:#fff" : "background:#f2c230;color:#3d2e00");
+    hd.textContent = (tone==="r" ? "🗑  " : "⚠  ")+title; box.appendChild(hd);
+    const bd = document.createElement("div"); bd.style.cssText = "padding:14px 20px;display:flex;flex-direction:column;gap:8px";
+    (lines||[]).forEach(l=>{ const d = document.createElement("div"); d.textContent = (lines.length>1?"• ":"")+l; d.style.fontWeight = "600"; bd.appendChild(d); });
+    if(note){ const n = document.createElement("div"); n.style.cssText = "font-size:13.5px;color:#5d6157"; n.textContent = note; bd.appendChild(n); }
+    let cb = null; if(check){ const lb = document.createElement("label"); lb.style.cssText = "display:flex;gap:8px;align-items:flex-start;font-size:14.5px;cursor:pointer";
+      cb = document.createElement("input"); cb.type = "checkbox"; cb.setAttribute("data-testid","sv-dlg-check"); cb.style.cssText = "width:18px;height:18px;margin-top:2px"; lb.append(cb, document.createTextNode(check)); bd.appendChild(lb); }
+    box.appendChild(bd);
+    const ft = document.createElement("div"); ft.style.cssText = "padding:12px 20px 16px;border-top:1px solid #e2dfd3;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap";
+    const done = (v)=>{ ov.remove(); document.removeEventListener("keydown", esc, true); res(v); };
+    const esc = (e)=>{ if(e.key==="Escape"){ e.stopPropagation(); done(buttons[0].v); } };
+    buttons.forEach(bt=>{ const b = document.createElement("button"); b.type = "button"; b.textContent = bt.t; b.setAttribute("data-testid","sv-dlg-"+bt.v);
+      b.style.cssText = "font:inherit;font-size:14.5px;border-radius:8px;padding:8px 16px;cursor:pointer;"+(bt.pri ? "background:#0f7a5c;color:#fff;border:1px solid #0f7a5c;font-weight:700" : bt.red ? "background:#c0392b;color:#fff;border:1px solid #c0392b;font-weight:700" : bt.warn ? "background:#fff;color:#c0392b;border:1px solid #efb7b0" : "background:#fff;color:#1c1f1a;border:1px solid #d6d2c4");
+      if(bt.needCheck && cb){ b.disabled = true; b.style.opacity = ".5"; cb.addEventListener("change", ()=>{ b.disabled = !cb.checked; b.style.opacity = cb.checked ? "1" : ".5"; }); }
+      b.onclick = ()=>done(bt.v); ft.appendChild(b); });
+    box.appendChild(ft); ov.appendChild(box); document.body.appendChild(ov); document.addEventListener("keydown", esc, true);
+    setTimeout(()=>{ try{ ft.querySelector("button").focus(); }catch(e){} }, 30);
+  });
+}
+// "Quit without saving?" — Stay / Quit without saving / Save all, then go. Resolves true when it is fine to leave.
+async function svAskLeave(where){
+  if(!svIsDirty()) return true;
+  const fn = window.__unsavedGuard && window.__unsavedGuard.saveFn;
+  const v = await svDialog({ tone:"y", title:"Quit without saving?", lines:svPartsList(), note:"These changes"+(where?" on "+where:"")+" are not saved. If you quit, they are lost.",
+    buttons:[{ t:"Stay here", v:"stay" }, { t:"Quit without saving", v:"quit", warn:true }, ...(fn ? [{ t:"Save all, then go", v:"save", pri:true }] : [])] });
+  if(v==="stay") return false;
+  SV.leaveOk = Date.now();
+  if(v==="save"){ try{ await fn(); }catch(e){ return false; } if(svIsDirty() && SV.state==="failed") return false; }
+  try{ await logAudit("UPDATE","unsaved",svPartsList().join(", ").slice(0,200),v==="quit"?"Quit without saving":"Saved all, then left",(window.__svUser||"unknown"),null,null); }catch(e){}
+  svClear(); return true;
+}
+function svClear(){ SV.dirty = null; SV.parts.clear(); window.__unsavedGuard = { dirty:false, message:"", saveFn:null }; if(SV.state==="dirty"||SV.state==="failed") SV.state = "clean"; SV.fail = null; svPaint(); }
+// the red box: what failed, why, what to do
+function svFailBox(f){
+  const old = document.getElementById("sv-fail"); if(old) old.remove();
+  const box = document.createElement("div"); box.id = "sv-fail"; box.setAttribute("role","alert"); box.setAttribute("data-testid","sv-fail");
+  const pr = parseFloat(document.body.style.paddingRight)||0;
+  box.style.cssText = "position:fixed;z-index:5500;right:"+(14+pr)+"px;bottom:20px;width:440px;max-width:calc(100vw / var(--uiz,1) - 28px);background:#fff;color:#1c1f1a;border:2px solid #c0392b;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.3);font:14.5px 'Segoe UI',system-ui,sans-serif;overflow:hidden";
+  const hd = document.createElement("div"); hd.style.cssText = "background:#c0392b;color:#fff;padding:10px 14px;font-weight:800;font-size:16px;display:flex;gap:8px;align-items:center";
+  const ht = document.createElement("span"); ht.style.flex = "1"; ht.textContent = "✗ "+(f.partial ? "Saved only in part — "+f.what+" not saved" : f.what+" — not saved"); hd.appendChild(ht);
+  const x = document.createElement("button"); x.type = "button"; x.textContent = "Close"; x.style.cssText = "background:none;border:1px solid #fff;color:#fff;border-radius:6px;font:inherit;font-size:13px;padding:2px 9px;cursor:pointer"; x.onclick = ()=>box.remove(); hd.appendChild(x);
+  box.appendChild(hd);
+  const bd = document.createElement("div"); bd.style.cssText = "padding:10px 14px;display:flex;flex-direction:column;gap:6px";
+  const w = document.createElement("div"); w.innerHTML = "<b>Why:</b> "; w.appendChild(document.createTextNode(f.why)); bd.appendChild(w);
+  const t = document.createElement("div"); t.innerHTML = "<b>What to do:</b> "; t.appendChild(document.createTextNode(f.todo)); bd.appendChild(t);
+  if(f.okCount){ const o = document.createElement("div"); o.style.cssText = "font-size:13px;color:#2c7a52"; o.textContent = "✓ "+f.okCount+" other part"+(f.okCount===1?"":"s")+" of this save went through."; bd.appendChild(o); }
+  const act = document.createElement("div"); act.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:2px";
+  const cp = document.createElement("button"); cp.type = "button"; cp.textContent = "Copy for Report an issue"; cp.style.cssText = "font:inherit;font-size:13px;border:1px solid #d6d2c4;background:#fff;border-radius:7px;padding:5px 10px;cursor:pointer";
+  cp.onclick = ()=>{ const txt = "Save failed: "+f.what+" · screen "+(f.screen||f.tab||"")+" · "+f.table+" "+f.op+" · "+f.raw+" · "+new Date().toLocaleString("en-GB"); try{ navigator.clipboard.writeText(txt).then(()=>{ cp.textContent = "Copied"; }, ()=>{ prompt("Copy this:", txt); }); }catch(e){ prompt("Copy this:", txt); } };
+  const det = document.createElement("span"); det.style.cssText = "font-size:11.5px;color:#888;cursor:help"; det.textContent = "technical detail"; det.title = f.table+" · "+f.op+" · "+f.raw;
+  act.append(cp, det); bd.appendChild(act); box.appendChild(bd); document.body.appendChild(box);
+}
+async function svLogFail(f){
+  try{ await SV_RAW.from("save_fail_tbl").insert({ at:new Date().toISOString(), username:window.__svUser||null, tab:f.tab||null, screen:f.screen||null, action:f.what||null, table_name:f.table||null, op:f.op||null, reason:f.why||null, raw:String(f.raw||"").slice(0,800) }); }catch(e){}
+}
+// ---- the watcher: every insert / update / upsert / delete through sb ----
+let SV_RAW = null;
+(function svWrap(){
+  if(typeof sb==="undefined" || !sb || sb.__svWrapped) return; sb.__svWrapped = true;
+  const raw = { from: sb.from.bind(sb) }; SV_RAW = { from: raw.from };
+  sb.from = function(table){
+    const q = raw.from(table);
+    ["insert","update","upsert","delete"].forEach(op=>{ const orig = q[op]; if(typeof orig!=="function") return;
+      q[op] = function(){ const b = orig.apply(this, arguments); try{ svWatch(b, table, op); }catch(e){} return b; }; });
+    return q;
+  };
+  try{ const F = window.fetch; if(F && !F.__sv){ const nf = function(){ if(SV.act) SV.fetches++; return F.apply(this, arguments); }; nf.__sv = true; window.fetch = nf; } }catch(e){}
+})();
+function svWatch(b, table, op){
+  if(!b || typeof b.then!=="function" || b.__svw) return; b.__svw = true;
+  const quiet = SV_QUIET.test(String(table||""));
+  const act = SV.act && Date.now()-SV.act.last < 8000 ? SV.act : null;
+  if(quiet || !act) return;
+  act.pending++; act.last = Date.now(); if(act.pending===1 && SV.state!=="failed" && SV_ACTBTN.test(act.label||"")) svSetState("saving");
+  const ot = b.then;
+  b.then = function(res, rej){
+    return ot.call(this, (r)=>{ try{ act.pending--; act.last = Date.now(); const err = r && r.error;
+        act.writes.push({ table, op, ok:!err, err, at:Date.now() }); svSettle(act); }catch(e){} return res ? res(r) : r; },
+      (e)=>{ try{ act.pending--; act.last = Date.now(); act.writes.push({ table, op, ok:false, err:e, at:Date.now() }); svSettle(act); }catch(x){} if(rej) return rej(e); throw e; });
+  };
+}
+function svSettle(act){ clearTimeout(act.tm); act.tm = setTimeout(()=>svFinish(act), 900); }
+function svFinish(act){
+  if(act.pending>0){ svSettle(act); return; }
+  if(act.done) return; act.done = true;
+  const W = act.writes; if(!W.length) return;
+  // a failure followed by a success on the same table (the screen tried again another way) is not a failure
+  const fails = W.filter((w,i)=>!w.ok && !W.slice(i+1).some(x=>x.ok && x.table===w.table));
+  const oks = W.filter(w=>w.ok);
+  const isDel = W.every(w=>w.op==="delete") || SV_DELBTN.test(act.label);
+  if(!fails.length && !SV_ACTBTN.test(act.label||"")){ return; }   // a click that is not a save (opening, picking) — no message
+  if(!fails.length){
+    if(act.form) { if(SV.dirty && SV.dirty.scope===act.form) SV.dirty = null; }
+    else if(SV.dirty && !SV.dirty.scope.isConnected) SV.dirty = null;
+    if(SV.dirty && act.btnScope && SV.dirty.scope===act.btnScope) SV.dirty = null;
+    SV.fail = null; const old = document.getElementById("sv-fail"); if(old) old.remove();
+    svSyncGuard();
+    if(!svIsDirty()) svSetState(isDel ? "deleted" : "saved", (act.label ? act.label : "")+(act.screen ? " — "+act.screen : ""));
+    else svSetState("dirty");
+    if(!act.toasted && !act.alerted) try{ appToast((isDel ? "✓ Deleted" : SV_SAVEBTN.test(act.label) && !/^\W*(approve|endorse|send|post|submit)/i.test(act.label) ? "✓ Saved" : "✓ Done — "+(act.label||"saved"))+(act.screen ? " · "+act.screen : "")); }catch(e){}
+    return;
+  }
+  // schema-missing side tables after a successful main save: keep it green, log it quietly
+  const hard = fails.filter(f=>!(oks.length && /does not exist|schema cache|Could not find the/i.test(String((f.err&&f.err.message)||f.err||""))));
+  const f0 = hard[0] || fails[0]; const R = svReason(f0.err, f0.table, f0.op);
+  const info = { what:(act.label||"Save")+(act.screen?" · "+act.screen:""), why:R.why, todo:R.todo, raw:R.raw, table:f0.table, op:f0.op, tab:window.__curTab||"", screen:act.screen, partial: oks.length>0 && hard.length>0, okCount: hard.length ? oks.length : 0 };
+  svLogFail(info);
+  if(!hard.length){ svSyncGuard(); if(!svIsDirty()) svSetState("saved", act.label||""); if(!act.toasted && !act.alerted) try{ appToast("✓ Saved"+(act.screen?" · "+act.screen:"")); }catch(e){} return; }
+  SV.fail = info; svSetState("failed", R.why); svFailBox(info);
+}
+// a click starts an "action"; the writes that follow belong to it
+document.addEventListener("click", (e)=>{
+  const btn = e.target && e.target.closest ? e.target.closest("button,[role=button],a.btn") : null; if(!btn || !e.isTrusted && !SV.bypass) return;
+  if(btn.closest("#sv-dlg,#sv-badge,#sv-fail")) return;
+  const label = svLabel(btn);
+  // Delete: "Going to delete — are you sure?" first
+  if(SV_DELBTN.test(label) && SV.bypass!==btn && !btn.closest("[data-nodelask]")){
+    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+    const row = btn.closest("tr,li,[data-row],[data-testid$='-row'],[data-testid$='-card']");
+    let what = row ? String(row.textContent||"").replace(/\s+/g," ").replace(/\b(Delete|Edit|Save|Cancel|Open)\b/g,"").trim().slice(0,110) : svScreen(btn);
+    if(!what) what = label;
+    svDialog({ tone:"r", title:"Going to delete — are you sure?", lines:[what], note:"Anything that belongs to it goes too. It cannot be brought back from the screen (admins can still see it in the audit log).",
+      check:"Yes, I want to delete this", buttons:[{ t:"No, keep it", v:"no" }, { t:"Delete", v:"yes", red:true, needCheck:true }] }).then(v=>{
+      if(v!=="yes") return; SV.delOk = Date.now(); SV.bypass = btn; try{ btn.click(); }finally{ SV.bypass = null; } });
+    return;
+  }
+  // Close / Cancel on a pop-up with changes not saved: "Quit without saving?"
+  if(SV_CLOSEBTN.test(label) && SV.dirty && SV.bypass!==btn){ const m = svModalOf(btn);
+    if(m && SV.dirty.scope && (m===SV.dirty.scope || m.contains(SV.dirty.scope))){
+      e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+      svAskLeave(SV.dirty.label).then(ok=>{ if(!ok) return; SV.bypass = btn; try{ btn.click(); }finally{ SV.bypass = null; } });
+      return; } }
+  const form = SV.dirty && SV.dirty.scope && SV.dirty.scope.contains(btn) ? SV.dirty.scope : null;
+  SV.act = { at:Date.now(), last:Date.now(), label, btn, form, btnScope: svModalOf(btn) || btn.closest("[data-sv-screen]") || null, screen: svScreen(btn), pending:0, writes:[], toasted:false, alerted:false, done:false };
+  SV.fetches = 0;
+  const act = SV.act;
+  // Save pressed with nothing typed and nothing sent: say so
+  if(SV_SAVEBTN.test(label) && /^\W*save\b/i.test(label) && !svIsDirty()){
+    setTimeout(()=>{ if(act.writes.length || act.pending || act.alerted || act.toasted || SV.fetches) return; try{ appToast("No changes — nothing to save"); }catch(er){} }, 2600); }
+}, true);
+// typing in a form marks it "Not saved"
+["input","change"].forEach(ev=>document.addEventListener(ev, (e)=>{
+  if(!e.isTrusted) return; const el = e.target; if(!el || !/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+  const tp = String(el.type||"").toLowerCase(); if(ev==="change" && !/checkbox|radio|select|date|time|number/.test(tp) && el.tagName!=="SELECT") return;
+  const scope = svCountsAsForm(el); if(!scope) return;
+  if(!SV.dirty || SV.dirty.scope!==scope) SV.dirty = { scope, label: svScreen(el) || "this screen", at:Date.now() };
+  svSyncGuard();
+}, true));
+// a pop-up that closes, or another screen opened, takes its "Not saved" with it
+setInterval(()=>{ try{
+  if(SV.dirty && !SV.dirty.scope.isConnected){ SV.dirty = null; svSyncGuard(); }
+  if((SV.state==="saved"||SV.state==="deleted") && Date.now()-SV.at>15000) svSetState("clean");
+  if(window.__curTab!==SV.tab){ SV.tab = window.__curTab;
+    if(SV.dirty && SV.dirty.scope.hasAttribute && SV.dirty.scope.hasAttribute("data-sv-screen")){ SV.dirty = null; svSyncGuard(); }
+    if(SV.state!=="failed" && !svIsDirty()) svSetState("clean"); }
+}catch(e){} }, 1000);
+// the screen's own messages: no second toast
+(function(){ const A = window.alert, C = window.confirm, P = window.prompt;
+  window.alert = function(m){ if(SV.act) SV.act.alerted = true; return A.apply(window, arguments); };
+  window.confirm = function(m){ if(SV.act) SV.act.alerted = true;
+    if(SV.delOk && Date.now()-SV.delOk<5000 && /delet|remov/i.test(String(m||""))){ SV.delOk = 0; return true; }   // already asked in our red box
+    if(SV.leaveOk && Date.now()-SV.leaveOk<5000 && /without saving|unsaved|not saved|leave anyway|discard|quit/i.test(String(m||""))){ SV.leaveOk = 0; return true; }   // already asked "Quit without saving?"
+    return C.apply(window, arguments); };
+  window.prompt = function(){ if(SV.act) SV.act.alerted = true; return P.apply(window, arguments); };
+})();
+window.addEventListener("resize", ()=>svPaint());
+
+// appToast from a screen: the save already has its message
+(function(){ try{ const T = appToast; appToast = function(m){ if(SV.act && Date.now()-SV.act.at<12000 && !SV.act.done) SV.act.toasted = true; return T.apply(this, arguments); }; }catch(e){} })();
+// the old one-place guard, now a list of parts (Save all saves each part that has its own save)
+function svGuardLabel(m){ return String(m||"").replace(/\s*(Leave|Quit) anyway\??/i,"").replace(/^You have (an |a )?/i,"").replace(/[.?]\s*$/,"").trim().slice(0,80) || "changes"; }
+
 // 252: Supabase switches row-level security ON for new tables made in the SQL editor; the app then can't write there.
 (function(){ try{ const a0 = window.alert && window.alert.bind(window); if(!a0 || window.__rlsAlert) return; window.__rlsAlert = true;
   window.alert = function(msg){ const t = String(msg==null?"":msg);
@@ -3508,6 +3786,7 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
         {key:"audit_log",label:"Audit Log"},
         ...(isSuperAdmin?[{key:"activity_report",label:"Activity & Risk Report"}]:[]),   // 224
         ...(isSuperAdmin?[{key:"delete_activity_report",label:"Delete Activity Report"}]:[]),
+        ...(isSuperAdmin?[{key:"save_fails",label:"Save Failures"}]:[]),   // 2026-11-13T06:00
       ]},
       { label:"Data", tabs:[
         {key:"data_backup",label:"Data Backup"},
@@ -3518,7 +3797,7 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
 
   const allTabsOf = g => g.tabs || g.subgroups.flatMap(sg=>sg.tabs);
   const groupIsActive = g => allTabsOf(g).some(t=>t.key===active);
-  const pick = key => { if(!confirmLeaveIfDirty()) return; setUnsavedGuard(false); onChange(key); setOpenGroup(null); };
+  const pick = async key => { if(!(await svAskLeave())) return; setUnsavedGuard(false); onChange(key); setOpenGroup(null); };   /* 2026-11-13T06:00: Quit without saving? */
 
   // Contract approval roles (24 Aug follow-up) — see isApprovalRole above.
   // Overrides the whole nav to just Order Acceptance, same narrow-scope
@@ -26823,7 +27102,7 @@ function SaleOrderContractPicker({ user, onOpenContract, startCreate, onConsumed
     fetchPaged(()=>sb.from("companies").select("id,company_name").order("id")).then(data=>setCustomerOptions((data||[]).map(c=>c.company_name).filter(Boolean).sort((a,b)=>a.localeCompare(b))));   // 140: every customer, not the first 1,000
   },[]);
 
-  const contractLabel = (c)=> c.contract_number+" — "+(c.customer_name||"—");
+  const contractLabel = (c)=> c.contract_number+" — "+(String(c.quote_reference_number||"").trim()||ctQOr(c.contract_number))+" — "+(c.customer_name||"—");
   const trimmedSearch = search.trim();
   const exactMatch = contracts.find(c=>contractLabel(c)===search);
   const showNoMatchPrompt = trimmedSearch && !exactMatch && !showAdd;
@@ -36012,6 +36291,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"13 Nov 2026", summary:"Built on 2026-11-13T06:00:00Z, on top of 2026-11-13T04:00:00Z. SQL: structure_save_feedback_2026-11-13.sql (both companies). SAVE FEEDBACK, APP-WIDE: every save started by a click now ends in a message — green ✓ Saved, or a red box with why it failed and what to do (the entry stays on screen; Copy for Report an issue). A big badge beside the screen: yellow Not saved (names the parts), green Saved with the time, red Save failed. Leaving with changes not saved (menu, Refresh, Close on a pop-up, Sign out) asks Quit without saving? — Stay / Quit without saving / Save all, then go. Every Delete asks Going to delete — are you sure? with a tick box first. Save with nothing changed says so. Failed saves are logged: Admin › Logs › Save Failures. CRM-PURCHASE: contracts read Contract – Quote No – Client (or – No Quote –) in every contract box, card and board card, and a quote number finds its contract; Quote Register: ☎ Contact under the customer name (address on the quote, the contact with phone / WhatsApp / email, other contacts); Purchase BOM: + Add a line (not in the Production BOM, reason required, marked ADDED, kept on Refresh), 📄 PDF (preview) and ⬇ Excel (Lines · Vendor rates · History); the Shipping details request, Despatch Clearance, Attendance and posted daily-report PDFs now open in the preview first." },
   { date:"13 Nov 2026", summary:"Built on 2026-11-13T04:00:00Z, on top of 2026-11-13T02:00:00Z. SQL: structure_text_size_2026-11-13.sql (both companies). TEXT SIZE: everything in the app is now 120% bigger by default (text, boxes, buttons and tables together, so screens keep their layout). A new “A A 120%” button in the top bar lets each person pick 100% (as before), 110%, 120%, 130% or 140%; the choice is kept on his login (app_users.ui_scale) and follows him to any computer. Full-height screens and pop-ups still fit the window; pop-up menus and tooltips still open where you click. Printed PDFs and print pages do not change." },
   { date:"13 Nov 2026", summary:"Built on 2026-11-13T02:00:00Z, on top of 2026-11-13T00:00:00Z. SQL: structure_daily_report_2026-11-13.sql (both companies). DAILY REPORT AND ATTENDANCE (SOP Rev 0): the day report fills itself (cards done, checklist lines, cards moved, stale items owned with the answer given, the next working day) — the employee adds remarks, makes the PDF (blocked while a stale item blocks the daily report) and Posts it on the new Daily Reports wall; one per person per working day, a correction before midnight replaces it and keeps the earlier one; posting also marks the day report sent; the WhatsApp copy stays. The wall: HR and Super Admins see everyone, heads their department, everyone else himself. ATTENDANCE month grid for everyone except workers: Present (log-in and report), Present – report missing, Absent, Leave (half day), Holiday / Off; HR corrects a day only with a reason (logged); Excel and PDF downloads; HR ticks who is a worker (Factory Worker department to start; Production Incharge is staff)." },
   { date:"13 Nov 2026", summary:"Built on 2026-11-13T00:00:00Z, on top of 2026-11-12T22:00:00Z. SQL: structure_stale_blocks_2026-11-13.sql (both companies). STALE BLOCKS (Build 4 of the Order Status SOP): a step is stale when it is past its planned date by more than its stale days (the master); nothing goes stale until the standard days are filled. The owner post is blocked as the master says — new task cards (1, 2), order-side PDFs (3, 4, 6, 9, 10), new Purchase BOMs (5), the daily report PDF (8), order-side PDFs and the daily report PDF (11–18); 7 is a warning only; on 9 and 10 the Purchase Manager is blocked 2 days after the engineer. Quote PDFs are never blocked; the PDF / card / Purchase BOM for the stale contract itself is never blocked. The pop-up names the item, why, what to do and who gives the Stale unblock code. ORDER STATUS › STALE STEPS: answer each — revised date (one free, the second needs the department head), waiting on client / vendor with the email link (clock paused, chase card), ask for help (head told, 1 day), Stale unblock code (3 working days, the Super Admins are told); codes given there; the weekly DRIFT CHECK (orders not firm past 7 days, back-dated entries with the code used, duplicate cards, codes used, steps stale now by post) with a Monday bell to the Super Admins." },
@@ -45324,6 +45604,7 @@ function pbTotals(lines, pack){
 }
 // what is still missing before a line may go (empty = fine)
 function pbLineIssue(l){
+  if(l.added && !imtT(l.add_why)) return "say why this line is added";
   if(l.ov && (Number(l.buy_qty)||0)>1e-9 && !(pbBuyQty(l)>0)) return "give the qty to buy in "+(pbUom(l)||"the new unit");
   if(l.ov && !imtT(pbUom(l))) return "pick the unit";
   const b = pbBuyQty(l); if(b<=1e-9) return "";
@@ -45422,6 +45703,7 @@ async function pbBuild(cn, old){
         .map(v=>({ vendor:v.vendor_name, rate:Number(v.rate_in_uom), ccy:"INR", fx:1, rate_fc:Number(v.rate_in_uom), came_by:v.came_by, ref:v.ref||"", date:v.rate_date, from_master:true }));
       l.mode = "cmp"; l.chosen = ""; l.chose_reason = ""; l.mode_reason = ""; l.value = ""; l.desc = [l.shape,l.spec,l.grade].filter(Boolean).join(" "); }
   }
+  ((old && old.lines)||[]).filter(x=>x && x.added).forEach(x=>lines.push(x));   // 2026-11-13T06:00: lines added by Purchase stay
   return lines;
 }
 // the four material % on the Order Acceptance (INR): estimated (quote BOM) · Production BOM · budget (approved Purchase BOM) · actual (issued)
@@ -45465,6 +45747,44 @@ async function pbWho(cn, pb, user){
   const th = postHolders("technical_head"); const isTH = !!me && (typeof nameIn==="function" ? nameIn(th, me) : th.includes(me));
   return { me, owner, pm, th, sas, isSA, isPM, isTH, isOwner: !!me && me===owner, canMake: isSA || isPM || isTH || (!!me && me===owner) || (!owner && (user?.role==="admin")) };
 }
+// 2026-11-13T06:00 (CRM-Purchase): the Purchase BOM as a PDF (opens in the preview) and as an Excel review copy
+function pbPdf(cn, st, lines, row, T){
+  const J = window.jspdf && window.jspdf.jsPDF; if(!J){ alert("The PDF maker is not loaded — reload the app."); return; }
+  const doc = new J({ orientation:"landscape", unit:"mm", format:"a4" }); const M = (v)=> "Rs "+imtMoney(v||0);
+  doc.setFontSize(14); doc.setFont(undefined,"bold"); doc.text("Purchase BOM — for review", 12, 13);
+  doc.setFontSize(9.5); doc.setFont(undefined,"normal");
+  doc.text(ctOptLabel(cn, st.client)+"   ·   status "+((row&&row.status)||"draft")+"   ·   round "+((row&&row.round)||1)+"   ·   made "+fmtDMYTime(new Date().toISOString()), 12, 19);
+  doc.autoTable({ startY:23, head:[["#","Material (shape · spec · grade · size)","Need","From stock","To buy","How","Chosen vendor","Rate","Line value","Production BOM","vs BOM"]],
+    body: lines.map((l,i)=>{ const c = pbChosen(l); const lv = pbLineValue(l), ev = Number(l.est_value)||0; const vs = ev>0 ? (Math.round((lv-ev)/ev*1000)/10)+"%" : (l.added ? "not in BOM" : "—");
+      const how = { cmp:"Compare vendors", single:"Single vendor", value:"Value, no vendor" }[l.mode||"cmp"] || l.mode;
+      const note = l.added ? "ADDED — "+(l.add_why||"") : (l.mode==="single"||l.mode==="value") && l.mode_reason ? (l.mode==="value"?"Why no vendor: ":"Why one vendor: ")+l.mode_reason : "";
+      return [i+1, (l.added?"ADDED · ":"")+pbName(l)+(note?"\n"+note:""), imtQ(l.need)+" "+(l.uom||""), l.stock_qty>1e-9 ? imtQ(l.stock_qty) : "—", imtQ(pbBuyQty(l))+" "+(pbUom(l)||""), how, c ? c.vendor : (l.mode==="value"?"—":"no rate"), c ? M(c.rate) : "", M(lv), ev ? M(ev) : "—", vs]; }),
+    styles:{ fontSize:7.5, cellPadding:1.3, valign:"top" }, headStyles:{ fillColor:[15,95,74] }, columnStyles:{ 1:{ cellWidth:78 } }, margin:{ left:10, right:10 },
+    didParseCell:(d)=>{ if(d.section==="body" && lines[d.row.index] && lines[d.row.index].added) d.cell.styles.fillColor = [255,244,214]; } });
+  let y = doc.lastAutoTable.finalY + 6; doc.setFontSize(10);
+  doc.text("From stock "+M(T.stock)+"    To buy "+M(T.buy)+"    Packing "+M(T.pack)+"    Purchase BOM total "+M(T.total)+"    Production BOM "+M(T.est)+(st.po && st.po.value ? "    PO value "+M(st.po.value) : ""), 10, y);
+  const adds = lines.filter(l=>l.added); if(adds.length){ y += 5; doc.text(adds.length+" line"+(adds.length===1?"":"s")+" added by Purchase (not in the Production BOM): "+M(adds.reduce((a,l)=>a+pbLineValue(l),0)), 10, y); }
+  doc.addPage(); doc.setFontSize(12); doc.setFont(undefined,"bold"); doc.text("Vendor quotes and the approval trail", 10, 13); doc.setFont(undefined,"normal");
+  const qrows = []; lines.forEach((l,i)=>pbQuotes(l).forEach(q=>qrows.push([i+1, pbName(l), q.vendor, M(q.rate)+(q.ccy && q.ccy!=="INR" ? " ("+q.ccy+" "+q.rate_fc+" × "+q.fx+")" : ""), q.came_by||"", q.ref||"", q.date ? fmtDMY(q.date) : "", (pbChosen(l)||{}).vendor===q.vendor ? "chosen" : ""])));
+  doc.autoTable({ startY:17, head:[["#","Material","Vendor","Rate","Came by","Ref","Date",""]], body: qrows.length ? qrows : [["—","No vendor rates yet","","","","","",""]], styles:{ fontSize:7.5, cellPadding:1.2 }, headStyles:{ fillColor:[15,95,74] }, margin:{ left:10, right:10 } });
+  const hist = (row && row.history) || [];
+  doc.autoTable({ startY:doc.lastAutoTable.finalY+6, head:[["When","Who","What"]], body: hist.length ? hist.map(x=>[fmtDMYTime(x.at), x.by||"", x.what||""]) : [["—","","Not saved yet"]], styles:{ fontSize:8, cellPadding:1.2 }, headStyles:{ fillColor:[90,90,90] }, margin:{ left:10, right:10 } });
+  pdfShow(doc, "Purchase_BOM_"+String(cn).replace(/\W+/g,"_")+".pdf");
+}
+function pbXls(cn, st, lines, row, T){
+  try{
+    const L = [["#","Added","Material","Shape","Spec","Grade","Size","Need","Unit","From stock","To buy","Buy unit","How","Chosen vendor","Rate (Rs)","Line value (Rs)","Production BOM (Rs)","vs BOM %","Reason / note"]];
+    lines.forEach((l,i)=>{ const c = pbChosen(l); const lv = pbLineValue(l), ev = Number(l.est_value)||0;
+      L.push([i+1, l.added?"ADDED":"", pbName(l), l.shape||"", pbSpec(l)||"", l.grade||"", l.size||"", Number(l.need)||0, l.uom||"", Number(l.stock_qty)||0, pbBuyQty(l), pbUom(l)||"", l.mode||"cmp", c?c.vendor:"", c?Number(c.rate):"", lv, ev||"", ev>0 ? Math.round((lv-ev)/ev*1000)/10 : "", l.added ? (l.add_why||"") : (l.mode_reason||l.chose_reason||"")]); });
+    L.push([]); L.push(["","","From stock","","","","","","","","","","","","",T.stock]); L.push(["","","To buy","","","","","","","","","","","","",T.buy]); L.push(["","","Packing","","","","","","","","","","","","",T.pack]); L.push(["","","Purchase BOM total","","","","","","","","","","","","",T.total]);
+    const V = [["#","Material","Vendor","Rate (Rs)","Currency","Rate in currency","FX","Came by","Ref","Date","Chosen"]];
+    lines.forEach((l,i)=>pbQuotes(l).forEach(q=>V.push([i+1, pbName(l), q.vendor, Number(q.rate), q.ccy||"INR", q.rate_fc||"", q.fx||"", q.came_by||"", q.ref||"", q.date||"", (pbChosen(l)||{}).vendor===q.vendor?"yes":""])));
+    const H = [["When","Who","What"]].concat(((row && row.history)||[]).map(x=>[fmtDMYTime(x.at), x.by||"", x.what||""]));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(L), "Lines"); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(V), "Vendor rates"); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(H), "History");
+    XLSX.writeFile(wb, "Purchase_BOM_"+String(cn).replace(/\W+/g,"_")+".xlsx"); appToast("Excel made — Purchase_BOM_"+cn+".xlsx (for review)");
+  }catch(e){ alert("Could not make the Excel: "+(e.message||e)); }
+}
 function pbHist(row, by, what){ return [...((row && row.history)||[]), { at:new Date().toISOString(), by, what }]; }
 // release the stock set aside for a contract
 async function pbRelease(cn, by, why){
@@ -45496,6 +45816,10 @@ function PbModal({ cn, user, onClose }){
   const [show,setShow] = useState("all");
   const [ovFor,setOvFor] = useState(null);                 // 2026-11-11T13:00:00Z: line whose "buy as" is being changed
   const [specs,setSpecs] = useState([]); const [uoms,setUoms] = useState([]);
+  const [addL,setAddL] = useState(null);   // 2026-11-13T06:00: + Add a line (not in the Production BOM)
+  const pbSaveRef = useRef(null); const pbGuardMsg = "Purchase BOM "+cn+" — changes not saved";
+  useEffect(()=>{ setUnsavedGuard(!!(dirty && pbSaveRef.current), pbGuardMsg, async()=>{ if(pbSaveRef.current) await pbSaveRef.current(); }); },[dirty]);
+  useEffect(()=>()=>setUnsavedGuard(false, pbGuardMsg),[]);
   const load = async(rebuild)=>{
     setMsg("");
     const g = await pbGet(cn); if(g.missing){ setSt({ g }); return; }
@@ -45544,6 +45868,17 @@ function PbModal({ cn, user, onClose }){
   };
   const run = async(tag, fn)=>{ setBusy(tag); setMsg(""); try{ await fn(); }catch(e){ setMsg(String((e&&e.message)||e)); } setBusy(""); };
   const doSave = ()=> run("save", async()=>{ if(!editable) return; await save(null, "Saved"); await load(false); appToast("Purchase BOM saved"); });
+  pbSaveRef.current = editable ? doSave : null;
+  const addLine = ()=>{ const a = addL||{}; const qty = Number(a.qty);
+    if(a.from!=="typed" && !imtT(a.shape)) { setMsg("Pick the shape of the line to add."); return; }
+    if(!imtT(a.spec)) { setMsg(a.from==="typed" ? "Type what is to be bought." : "Pick the spec."); return; }
+    if(!(qty>0)) { setMsg("Give the quantity."); return; } if(!imtT(a.uom)) { setMsg("Pick the unit."); return; }
+    if(imtT(a.why).length<3) { setMsg("Say why this line is added — the endorser and approver see it."); return; }
+    const l = { key:"add|"+Date.now(), added:true, add_why:imtT(a.why), added_by:W.me, added_at:new Date().toISOString(),
+      shape: a.from==="typed" ? "Other" : imtT(a.shape), spec:imtT(a.spec), grade:imtT(a.grade), size:imtT(a.size), uom:imtT(a.uom), need:qty, buy_qty:qty, parts:[], est_value:0,
+      stock_qty:0, stock_value:0, stock_lots:[], item_code:"", stock_note:"", quotes:[], mode:"cmp", chosen:"", chose_reason:"", mode_reason:"", value:"", desc:[a.shape,a.spec,a.grade].filter(Boolean).join(" ") };
+    setLines(ls=>[...ls, l]); setDirty(true); setAddL(null); setMsg(""); appToast("Line added — enter its vendor rates, then Save"); };
+  const removeAdded = (l)=>{ setLines(ls=>ls.filter(x=>x.key!==l.key)); setDirty(true); };
   const refresh = ()=> run("refresh", async()=>{ if(dirty && row && !confirm("Unsaved changes are kept on the lines that are still in the BOM. Re-read the Production BOM and stock now?")) return; await load(true); });
   const sendEndorse = ()=> run("send", async()=>{
     if(!editable){ noPermission("send the Purchase BOM",{ posts:["purchase_engineer","purchase_manager"], roles:["super_admin"] }); return; }
@@ -45627,7 +45962,11 @@ function PbModal({ cn, user, onClose }){
     return h(React.Fragment,{key:l.key},
       h("tr",{"data-testid":"pb-line","data-key":l.key,style:{background:iss&&editable?"#fffaf3":"#fff"}},
         td(i+1,"right",{color:colors.muted}),
-        td(h("div",null, h("b",null,pbName(l)), h("div",{title:l.parts.join("\n"),style:{fontSize:10.5,color:colors.muted}},l.parts.length+" BOM line"+(l.parts.length===1?"":"s")+(l.item_code?" · "+l.item_code:"")+(l.stock_note?" · "+l.stock_note:"")))),
+        td(h("div",null, h("b",null,pbName(l)), l.added
+            ? h("div",{"data-testid":"pb-added",style:{fontSize:10.5,color:"#8a5a00"}}, h("span",{style:{fontWeight:800,background:"#fff2d6",borderRadius:8,padding:"0 6px"}},"ADDED"), " not in the Production BOM · by "+(l.added_by||"")+" · why: ",
+                editable ? h("input",{"data-testid":"pb-add-why-edit",value:l.add_why||"",onChange:e=>setL(l.key,{ add_why:e.target.value }),style:{...inputStyle,padding:"1px 5px",fontSize:11,width:200}}) : h("i",null,l.add_why||"—"),
+                editable ? h("button",{"data-testid":"pb-add-remove","data-nodelask":"1",onClick:()=>removeAdded(l),style:{border:"none",background:"none",color:"#a3312a",cursor:"pointer",fontSize:11}},"✕ remove") : null)
+            : h("div",{title:l.parts.join("\n"),style:{fontSize:10.5,color:colors.muted}},l.parts.length+" BOM line"+(l.parts.length===1?"":"s")+(l.item_code?" · "+l.item_code:"")+(l.stock_note?" · "+l.stock_note:"")))),
         td(imtQ(l.need)+" "+(l.uom||""),"right"),
         td(l.stock_qty>1e-9 ? h("div",{title:(l.stock_lots||[]).map(x=>x.tag+": "+imtQ(x.qty)+" @ "+imtMoney(x.rate)).join("\n")}, imtQ(l.stock_qty)+" "+(l.uom||""), h("div",{style:{fontSize:10.5,color:"#0b5a40"}},money(l.stock_value))) : h("span",{style:{color:colors.mutedLight}},"—"),"right"),
         td(buy ? h("div",null, h("b",null,imtQ(pbBuyQty(l))+" "+(pbUom(l)||"")),
@@ -45703,8 +46042,29 @@ function PbModal({ cn, user, onClose }){
     h("div",{style:{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginBottom:6}},
       h("span",{style:{fontSize:11.5,color:colors.muted}},"Show:"), [["all","All "+lines.length],["buy","To buy "+lines.filter(l=>pbBuyQty(l)>1e-9).length],["stock","From stock "+lines.filter(l=>l.stock_qty>1e-9).length],["issue","Not ready "+issues.length]].map(([k,t])=>h("button",{key:k,onClick:()=>setShow(k),style:{...btnSmall,fontSize:11,padding:"2px 8px",background:show===k?"#2a5a96":"#fff",color:show===k?"#fff":colors.text}},t)),
       h("span",{style:{flex:1}}),
+      editable ? h("button",{"data-testid":"pb-addline",onClick:()=>setAddL(addL ? null : { from:"masters", shape:"", spec:"", grade:"", size:"", qty:"", uom:"", why:"" }),style:{...btnSmall,fontSize:11.5,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c"}},"+ Add a line") : null,
+      h("button",{"data-testid":"pb-pdf",onClick:()=>pbPdf(cn, st, lines, row, T),title:"The Purchase BOM as a PDF — opens in the preview",style:{...btnSmall,fontSize:11.5}},"📄 PDF"),
+      h("button",{"data-testid":"pb-xls",onClick:()=>pbXls(cn, st, lines, row, T),title:"An Excel copy for review (Lines · Vendor rates · History)",style:{...btnSmall,fontSize:11.5}},"⬇ Excel"),
       editable ? h("button",{"data-testid":"pb-bulk",onClick:()=>setBulk({ vendor:"", ccy:"INR", fx:"", came_by:"Email quote", ref:"", date:toISODate(new Date()), rates:{} }),style:{...btnSmall,fontSize:11.5}},"Enter a vendor's rates…") : null,
       editable ? h("button",{"data-testid":"pb-refresh",disabled:!!busy,onClick:refresh,title:"Re-read the Production BOM, free stock and the packing box",style:{...btnSmall,fontSize:11.5}},busy==="refresh"?"Reading…":"⟳ Refresh from Production BOM") : null),
+    addL ? h("div",{"data-testid":"pb-add-form",style:{border:"1.5px solid #0f7a5c",background:"#f3faf6",borderRadius:8,padding:"9px 11px",marginBottom:8,display:"flex",flexDirection:"column",gap:7}},
+      h("b",{style:{color:"#0f5f4a",fontSize:13}},"Add a line that is not in the Production BOM"),
+      h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end",fontSize:11.5}},
+        h("label",null,"From",h("br"), h("select",{"data-testid":"pb-add-from",value:addL.from,onChange:e=>setAddL({ ...addL, from:e.target.value, shape:"", spec:"" }),style:{...inputStyle,padding:"3px 5px",fontSize:12,width:150}}, h("option",{value:"masters"},"Material masters"), h("option",{value:"typed"},"Other item (typed)"))),
+        addL.from==="typed" ? null : h("label",null,"Shape",h("br"), h("select",{"data-testid":"pb-add-shape",value:addL.shape,onChange:e=>setAddL({ ...addL, shape:e.target.value, spec:"" }),style:{...inputStyle,padding:"3px 5px",fontSize:12,width:150}},
+          h("option",{value:""},"— pick —"), Array.from(new Set(specs.map(x=>imtT(x.material_shape)).filter(Boolean))).sort().map(x=>h("option",{key:x,value:x},x)))),
+        h("label",null, addL.from==="typed" ? "What is to be bought" : "Spec", h("br"), addL.from==="typed"
+          ? h("input",{"data-testid":"pb-add-spec",value:addL.spec,onChange:e=>setAddL({ ...addL, spec:e.target.value }),placeholder:"e.g. Spiral wound gasket 50NB 150#",style:{...inputStyle,padding:"3px 6px",fontSize:12,width:280}})
+          : h("select",{"data-testid":"pb-add-spec",value:addL.spec,onChange:e=>setAddL({ ...addL, spec:e.target.value }),style:{...inputStyle,padding:"3px 5px",fontSize:12,width:240}}, h("option",{value:""},"— pick —"), specsOf(addL.shape).map(x=>h("option",{key:x,value:x},x)))),
+        h("label",null,"Grade",h("br"), h("input",{"data-testid":"pb-add-grade",value:addL.grade,onChange:e=>setAddL({ ...addL, grade:e.target.value }),style:{...inputStyle,padding:"3px 6px",fontSize:12,width:130}})),
+        h("label",null,"Size",h("br"), h("input",{"data-testid":"pb-add-size",value:addL.size,onChange:e=>setAddL({ ...addL, size:e.target.value }),style:{...inputStyle,padding:"3px 6px",fontSize:12,width:110}})),
+        h("label",null,"Qty",h("br"), h("input",{"data-testid":"pb-add-qty",type:"number",value:addL.qty,onChange:e=>setAddL({ ...addL, qty:e.target.value }),style:{...inputStyle,padding:"3px 6px",fontSize:12,width:80}})),
+        h("label",null,"Unit",h("br"), h("select",{"data-testid":"pb-add-uom",value:addL.uom,onChange:e=>setAddL({ ...addL, uom:e.target.value }),style:{...inputStyle,padding:"3px 5px",fontSize:12,width:90}}, h("option",{value:""},"—"), uoms.map(x=>h("option",{key:x,value:x},x))))),
+      h("label",{style:{fontSize:11.5}},"Why it is added (required — the endorser and approver see it)",h("br"), h("input",{"data-testid":"pb-add-why",value:addL.why,onChange:e=>setAddL({ ...addL, why:e.target.value }),style:{...inputStyle,padding:"3px 6px",fontSize:12,width:"100%"}})),
+      h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},
+        h("button",{"data-testid":"pb-add-ok",onClick:addLine,style:{...btnSmall,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c"}},"Add the line"),
+        h("button",{onClick:()=>setAddL(null),style:btnSmall},"Cancel"),
+        h("span",{style:{fontSize:11,color:colors.muted}},"Vendor rates go on the line like any other. Added lines never change the Production BOM or the master BOM."))) : null,
     lines.length ? h("div",{style:{maxHeight:"calc(52vh / var(--uiz,1))",overflow:"auto",border:"1px solid "+colors.border,borderRadius:6}},
       h("table",{style:{width:"100%",borderCollapse:"collapse"}},
         h("thead",{style:{position:"sticky",top:0,background:"#faf9f5"}}, h("tr",null, th("#",24,"right"), th("Material (shape · spec · grade · size)"), th("Need",80,"right"), th("From stock (free)",110,"right"), th("To buy",90,"right"), th("How",170), th("Vendor rates (₹ per unit)"), th("Chosen",80,"right"), th("Line value",95,"right"), showPct ? th("Production BOM",95,"right") : null, showPct ? th("vs BOM",64,"right") : null, th("Last PO",130))),
@@ -48575,7 +48935,96 @@ function QpdfViewer({ list, start, kind0, saved, onClose, onOpenQuote, user, onS
         : "Draft preview — not saved.") : null,
     making ? h(QpdfMaker,{ key:making.ref, user, refNo:making.ref, preview:making.preview, onDone:onMade }) : null);
 }
+
+// 2026-11-13T06:00 (CRM-Purchase): Quote Register — Contact under the customer name: the address on that quote, the contact on that quote
+// (phone, WhatsApp, email) and the customer's other contacts.
+
+// 2026-11-13T06:00: Admin › Logs › Save Failures — every save that failed: who, where, what, why; and whether it went through later
+function SaveFailsScreen({ user }){
+  const [rows,setRows] = useState(null); const [err,setErr] = useState(""); const [days,setDays] = useState(7);
+  useEffect(()=>{ (async()=>{ setRows(null); const from = new Date(Date.now()-days*864e5).toISOString();
+    const { data, error } = await sb.from("save_fail_tbl").select("*").gte("at",from).order("at",{ascending:false}).limit(2000);
+    if(error){ setErr(/save_fail_tbl|relation|schema cache/i.test(error.message||"") ? "Run "+SV_SQL+" first (both companies)." : error.message); setRows([]); return; }
+    setRows(data||[]); })(); },[days]);
+  if(user?.role!=="super_admin") return h("div",{style:{padding:20}},"For Super Admins.");
+  const today = toISODate(new Date()); const R = rows||[];
+  const top = (k)=>{ const m = new Map(); R.forEach(r=>{ const v = r[k]||"—"; m.set(v,(m.get(v)||0)+1); }); return [...m.entries()].sort((a,b)=>b[1]-a[1])[0]; };
+  const ts = top("screen"), tr = top("reason");
+  const box = (t, v)=> h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"8px 12px",minWidth:150}}, h("div",{style:{fontSize:11.5,color:colors.muted}},t), h("div",{style:{fontSize:typeof v==="number"?22:14,fontWeight:700}},v));
+  const td = { padding:"6px 8px", borderBottom:"1px solid #efede5", fontSize:12.5, verticalAlign:"top" };
+  return h("div",{"data-testid":"save-fails",style:{padding:"14px 20px",maxWidth:1200}},
+    h("div",{style:{fontSize:18,fontWeight:700}},"Save failures"),
+    h("div",{style:{fontSize:12.5,color:colors.muted,marginBottom:8}},"Every save that did not go through, with the reason the person was shown. A screen that keeps failing needs fixing."),
+    h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10,alignItems:"stretch"}},
+      box("Failed today", R.filter(r=>String(r.at).slice(0,10)===today).length), box("In the last "+days+" days", R.length),
+      box("Most failing screen", ts ? ts[0]+" ("+ts[1]+")" : "—"), box("Most common reason", tr ? tr[0]+" ("+tr[1]+")" : "—"),
+      h("select",{value:days,onChange:e=>setDays(Number(e.target.value)),style:{...inputStyle,width:150,alignSelf:"center"}}, [1,7,30,90].map(d=>h("option",{key:d,value:d},"Last "+d+" day"+(d===1?"":"s"))))),
+    err ? h("div",{style:{color:colors.danger,marginBottom:8}},err) : null,
+    !rows ? h("div",{style:{color:colors.muted}},"Reading…") :
+    h("div",{style:{overflowX:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8}},
+      h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:900}},
+        h("thead",null, h("tr",null, ["When","Who","Screen","What","Why (as shown)","Table","Detail"].map(t=>h("th",{key:t,style:{...td,background:"#f6f5ef",textAlign:"left",fontWeight:700}},t)))),
+        h("tbody",null, R.length ? R.map(r=>h("tr",{key:r.id}, h("td",{style:{...td,whiteSpace:"nowrap"}},fmtDMYTime(r.at)), h("td",{style:td},r.username||"—"), h("td",{style:td},r.screen||r.tab||"—"), h("td",{style:td},r.action||"—"),
+            h("td",{style:td},r.reason||"—"), h("td",{style:{...td,whiteSpace:"nowrap"}},(r.table_name||"")+" "+(r.op||"")), h("td",{style:{...td,fontSize:11,color:colors.muted,maxWidth:280}},String(r.raw||"").slice(0,240))))
+          : h("tr",null, h("td",{colSpan:7,style:{...td,color:colors.muted}},"No failed saves in this period.")) ))));
+}
+function QrContactModal({ r, onClose }){
+  const [d,setD] = useState(null);
+  useEffect(()=>{ (async()=>{
+    const ref = r.reference_number, co = r.customer_name;
+    const [est, leg, comp, cons, adrs] = await Promise.all([
+      r.is_legacy ? Promise.resolve(null) : sb.from("estimates").select("*").eq("reference_number",ref).limit(1).then(x=>(x.data||[])[0]||null, ()=>null),
+      r.is_legacy ? sb.from("legacy_quotes_tbl").select("*").eq("reference_number",ref).limit(1).then(x=>(x.data||[])[0]||null, ()=>null) : Promise.resolve(null),
+      sb.from("companies").select("*").eq("company_name",co).limit(1).then(x=>(x.data||[])[0]||null, ()=>null),
+      sb.from("contacts").select("*").eq("company_name",co).then(x=>x.data||[], ()=>[]),
+      sb.from("customer_addresses").select("*").eq("company_name",co).then(x=>x.data||[], ()=>[]) ]);
+    const q = est || leg || {};
+    const qName = String(q.contact_name || q.kind_attn || q.attention || q.contact_person || "").trim();
+    const pa = adrs.find(a=>a.is_primary===true || /yes/i.test(String(a.is_primary||""))) || adrs[0] || null;
+    const addr = String(q.customer_address || (pa && pa.address_text) || [comp && comp.billing_address, comp && comp.billing_city, comp && comp.billing_state, comp && comp.billing_country].filter(Boolean).join(", ") || "").trim();
+    const gst = (pa && pa.gst_number) || (comp && (comp.gst_number || comp.gstin)) || "";
+    const isP = (c)=> c.is_primary===true || /yes/i.test(String(c.is_primary||""));
+    const main = (qName && cons.find(c=>sameName(c.contact_name, qName))) || null;
+    const quoteContact = main || (qName ? { contact_name:qName, designation:q.contact_designation||"" } : (cons.find(isP) || null));
+    const others = cons.filter(c=>c!==quoteContact).sort((a,b)=>(isP(b)?1:0)-(isP(a)?1:0));
+    setD({ addr, gst, qc:quoteContact, qFromQuote:!!qName, others, city:r.city, state:r.state });
+  })(); },[r.reference_number]);
+  const phoneOf = (c)=> String((c && (c.phone || c.mobile || c.phone_no || c.mobile_no)) || "").trim();
+  const wa = (p)=>{ let x = String(p||"").replace(/\D/g,""); if(x.length===10) x = "91"+x; return x ? "https://wa.me/"+x : ""; };
+  const copy = ()=>{ if(!d) return; const c = d.qc || {}; const t = [r.customer_name, d.addr, d.gst?"GSTIN "+d.gst:"", c.contact_name ? "Kind attn: "+c.contact_name+(c.designation?", "+c.designation:"") : "", phoneOf(c)?"Phone "+phoneOf(c):"", c.email?"Email "+c.email:""].filter(Boolean).join("\n");
+    try{ navigator.clipboard.writeText(t).then(()=>appToast("Copied — address and contact"), ()=>prompt("Copy this:", t)); }catch(e){ prompt("Copy this:", t); } };
+  const pill = { display:"inline-flex",alignItems:"center",textDecoration:"none",fontSize:13.5,fontWeight:600,borderRadius:8,padding:"6px 12px",border:"1px solid #bfdccd",color:"#0f5f4a",background:"#fff" };
+  const c = d && d.qc;
+  return h("div",{"data-testid":"qr-contact",onClick:e=>{ if(e.target===e.currentTarget) onClose(); },style:{position:"fixed",inset:0,background:"rgba(20,22,18,.5)",zIndex:2600,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"50px 14px",overflowY:"auto"}},
+    h("div",{style:{background:"#fff",borderRadius:12,width:580,maxWidth:"100%",overflow:"hidden",boxShadow:"0 12px 40px rgba(0,0,0,.3)",color:colors.text}},
+      h("div",{style:{background:"#0f5f4a",color:"#fff",padding:"13px 18px",display:"flex",gap:10,alignItems:"flex-start"}},
+        h("div",{style:{flex:1}}, h("div",{style:{fontSize:18,fontWeight:700}},r.customer_name), h("div",{style:{fontSize:13,opacity:.9}},"Quote "+r.reference_number+(r.city?" · "+r.city:"")+(r.state?", "+r.state:""))),
+        h("button",{onClick:onClose,style:{background:"none",border:"1px solid rgba(255,255,255,.6)",color:"#fff",borderRadius:6,padding:"3px 10px",cursor:"pointer",fontSize:13}},"Close")),
+      !d ? h("div",{style:{padding:20,color:colors.muted}},"Reading the customer…") :
+      h("div",{style:{padding:"14px 18px",display:"flex",flexDirection:"column",gap:14,fontSize:14.5}},
+        h("div",null, h("div",{style:{fontSize:12,fontWeight:700,color:colors.muted,textTransform:"uppercase",letterSpacing:".04em"}},"Address on this quote"),
+          h("div",{"data-testid":"qr-c-addr",style:{whiteSpace:"pre-line",marginTop:3}}, d.addr || "No address on record — add it in CRM › Customers."),
+          d.gst ? h("div",{style:{fontSize:12.5,color:colors.muted}},"GSTIN "+d.gst) : null),
+        h("div",{style:{background:"#f6fbf8",border:"1px solid #cfe9d8",borderRadius:10,padding:"11px 13px",display:"flex",flexDirection:"column",gap:6}},
+          h("div",{style:{fontSize:12,fontWeight:700,color:"#0f5f4a",textTransform:"uppercase",letterSpacing:".04em"}}, d.qFromQuote ? "Contact on this quote" : "Main contact (none named on the quote)"),
+          c ? h(React.Fragment,null,
+            h("div",{"data-testid":"qr-c-name"}, h("b",{style:{fontSize:16}},c.contact_name||"—"), (c.designation||c.department) ? h("span",{style:{color:colors.muted,fontSize:13.5}}," · "+[c.designation,c.department].filter(Boolean).join(", ")) : null),
+            h("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
+              phoneOf(c) ? h("a",{href:"tel:"+phoneOf(c).replace(/[^\d+]/g,""),"data-testid":"qr-c-phone",style:{...pill,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c"}},"Call "+phoneOf(c)) : h("span",{style:{fontSize:13,color:colors.muted}},"No phone on record"),
+              phoneOf(c) ? h("a",{href:wa(phoneOf(c)),target:"_blank",rel:"noopener",style:pill},"WhatsApp") : null,
+              c.email ? h("a",{href:"mailto:"+c.email,style:pill},c.email) : null))
+            : h("div",{style:{color:colors.muted}},"No contact on record for this customer — add one in CRM › Customers.")),
+        d.others.length ? h("details",null, h("summary",{style:{cursor:"pointer",fontWeight:700,color:"#0f5f4a"}},"Other contacts at this customer ("+d.others.length+")"),
+          h("div",{style:{border:"1px solid #efede5",borderRadius:8,marginTop:6}}, d.others.map((o,i)=>h("div",{key:i,style:{display:"grid",gridTemplateColumns:"1.3fr 130px 1fr",gap:8,padding:"7px 10px",borderBottom:"1px solid #efede5",fontSize:13.5}},
+            h("b",null,(o.contact_name||"—")+(o.designation?" · "+o.designation:"")+((o.is_primary===true||/yes/i.test(String(o.is_primary||"")))?" ★":"")),
+            phoneOf(o) ? h("a",{href:"tel:"+phoneOf(o).replace(/[^\d+]/g,"")},phoneOf(o)) : h("span",{style:{color:colors.muted}},"—"),
+            o.email ? h("a",{href:"mailto:"+o.email,style:{overflow:"hidden",textOverflow:"ellipsis"}},o.email) : h("span",{style:{color:colors.muted}},"—"))))) : null),
+      h("div",{style:{padding:"10px 18px 14px",borderTop:"1px solid #efede5",display:"flex",gap:8,justifyContent:"flex-end",flexWrap:"wrap"}},
+        h("button",{onClick:copy,style:btnSecondary},"Copy address & contact"),
+        h("button",{onClick:()=>{ onClose(); appOpenTab("customers"); },style:btnSecondary},"Open in CRM › Customers"))));
+}
 function QuotesReportScreen({ user, onOpenQuote, initialFilters, onOpenContract }){
+  const [qrContact,setQrContact] = useState(null);   // 2026-11-13T06:00: Contact under the customer name
   const [qpdfSaved,setQpdfSaved] = useState([]); const [qpdfOpen,setQpdfOpen] = useState(null);   // 2026-11-03T04:00:00Z
   const [qpdfFill,setQpdfFill] = useState(null);   // 2026-11-03T08:00:00Z: Super Admin — save PDFs for all sent quotes
   const qpdfLoad = useCallback(()=>{ qpdfRows(null).then(setQpdfSaved); },[]);
@@ -49373,6 +49822,7 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters, onOpenContract 
           [["offers","Offers"],["orders","Orders"]].map(([k,l])=>h("button",{key:k,onClick:()=>pickMode(k),style:{border:0,padding:"7px 18px",fontSize:14,fontWeight:700,cursor:"pointer",background:qrMode===k?"#0f6e56":"#fff",color:qrMode===k?"#fff":"#0f6e56"}},l))))),
     h(OrdersReceivedList,{ onOpenContract, user })));
   return h("div",{ref:reportRef,style:{background:"#fff",overflow:isFull?"auto":undefined,height:isFull?"calc(100vh / var(--uiz,1))":undefined}},
+  qrContact ? h(QrContactModal,{ r:qrContact, onClose:()=>setQrContact(null) }) : null,
   qpdfOpen ? h(QpdfViewer,{ list:qpdfOpen.list, start:qpdfOpen.start, kind0:qpdfOpen.kind, saved:qpdfSaved, onOpenQuote, user, onSaved:async()=>{ setQpdfSaved(await qpdfRows(null)); }, onClose:()=>{ setQpdfOpen(null); qpdfLoad(); } }) : null,
   qpdfFill ? h(QpdfBackfill,{ user, list:qpdfFill, onClose:()=>{ setQpdfFill(null); qpdfLoad(); } }) : null,
   h("div",{style:{padding:"20px 24px",fontSize:14}},
@@ -49530,7 +49980,8 @@ function QuotesReportScreen({ user, onOpenQuote, initialFilters, onOpenContract 
             r.__old ? h("div",{style:{fontSize:10.5,fontWeight:400,color:colors.mutedLight}},"Superseded by "+r.__by) : null   // 141
           ),
           h("td",{style:{padding:"10px",whiteSpace:"nowrap"}},fmtDMY(r.reference_date)||"\u2014"),
-          h("td",{style:{padding:"10px"}},r.customer_name),
+          h("td",{style:{padding:"10px"}},r.customer_name,
+            r.customer_name ? h("div",null, h("button",{"data-testid":"qr-contact-btn",onClick:()=>setQrContact(r),title:"Address and contact details",style:{marginTop:4,display:"inline-flex",gap:4,alignItems:"center",fontSize:11.5,fontWeight:600,color:"#0f5f4a",background:"#e6f2ec",border:"1px solid #bfdccd",borderRadius:12,padding:"1px 9px",cursor:"pointer"}},"☎ Contact")) : null),   // 2026-11-13T06:00
           h("td",{style:{padding:"10px"}},r.region),
           h("td",{style:{padding:"10px",whiteSpace:"nowrap"}},regTabLabel(regTabOfQuote(regMap, r.reference_number))||"\u2014"),   // 137
           h("td",{style:{padding:"10px"}},r.city),
@@ -58785,7 +59236,7 @@ function App() {
     try{ const raw=sessionStorage.getItem("flometriq_user"); return raw?JSON.parse(raw):null; } catch(e){ return null; }
   });
   const [tab,setTab]=useState("home");
-  window.__curTab = tab;   // 2026-11-13T00:00: the stale gate knows a quote PDF from an order-side one
+  window.__curTab = tab; window.__svUser = user && user.username;   // 2026-11-13T00:00: the stale gate knows a quote PDF from an order-side one
   // 225: Full screen — the browser goes full screen (Windows taskbar and browser bars hidden) and the app's top bar and menu fold away
   const [focusMode,setFocusMode]=useState(false); const [focusMenu,setFocusMenu]=useState(false);
   const enterFocus = ()=>{ setFocusMode(true); setFocusMenu(false); try{ const el = document.documentElement; const p = el.requestFullscreen ? el.requestFullscreen() : el.webkitRequestFullscreen ? el.webkitRequestFullscreen() : null; if(p && p.catch) p.catch(()=>{}); }catch(e){} };
@@ -59175,6 +59626,7 @@ function App() {
   },[user?.role,user?.company_id,sessionCompanyId]);
 
   useEffect(()=>{ if(user) loadMasterData(setMasterData); },[user]);
+  useEffect(()=>{ if(user) ctClientLoad().then(()=>ctFindLoad()).catch(()=>{}); },[user]);   // 2026-11-13T06:00: the quote numbers for Contract – Quote – Client
   useEffect(()=>{ if(user) refreshDraftCount(); },[user,refreshDraftCount]);
   useEffect(()=>{ if(user) prAutoMake(user); },[user && user.id]);   // 148: the weekly / monthly report, if the timer did not make it
   useEffect(()=>{ if(user) refreshLateCounts(); },[user,refreshLateCounts]);
@@ -59201,7 +59653,7 @@ function App() {
   if(tab==="po_register" && window.__poAll && accTabMode==="none") accTabMode = "view";   // 301
   if(tab==="purchase_owners" && accTabMode==="none") accTabMode = "view";
   if(tab==="imt_units" && accTabMode==="none") accTabMode = "view";
-  if((tab==="os_std_days" || tab==="os_golive" || tab==="sales_desk" || tab==="my_plan" || tab==="os_stale" || tab==="dr_wall" || tab==="att_grid") && accTabMode==="none") accTabMode = "view";   // the screens check their own rights   // Build 2: the screens check their own rights
+  if((tab==="os_std_days" || tab==="os_golive" || tab==="sales_desk" || tab==="my_plan" || tab==="os_stale" || tab==="save_fails" || tab==="dr_wall" || tab==="att_grid") && accTabMode==="none") accTabMode = "view";   // the screens check their own rights   // Build 2: the screens check their own rights
   if((tab==="imt_overrun" || tab==="sp_report" || tab==="sp_report_st") && accTabMode==="none") accTabMode = "view";   // Part B: the screens check their own access   // 2026-11-12: Unit tracker — the screen checks its own access   // 2026-11-03T07:00:00Z: the screen checks its own access
   { const _mk = modOfTab(tab); const _md = MOD_DEFS.find(m=>m.key===_mk); window.__modCur = { tab, module:_mk, level:_mLv, codeFree:!!(_md && _md.codeFree) }; window.__roGuard = _mLv==="view" || _mLv==="link"; }   // 2026-10-28T08:00:00Z
   return h("div",{style:{minHeight:"calc(100vh / var(--uiz,1))"}},
@@ -59261,7 +59713,7 @@ function App() {
       h(TopBar,{user,onRef:()=>setRefOpen(o=>!o),refOn:refOpen,onBars:appIsInstalled()?null:(()=>{ appInFull() ? appFullOff() : appFullOn(); }),barsHidden,onFull:focusMode?exitFocus:enterFocus,inFull:focusMode,sessionCompanyId,sessionCompany,onOpenVersions:user.role==="super_admin"?(()=>pickTab("version_history")):null,flags:h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}},h(MyDayFlags,{data:myDay,isSales:isFseOrTelecaller,hasEmp:myDayHasEmp,onOpen:openMyDay}),h(OsFlag,{user})),onChangeCompany:user.role==="super_admin"?(()=>setSessionCompanyIdPersisted(null)):null,onLogout:()=>{setUserPersisted(null);setSessionCompanyIdPersisted(null);setMasterData({models:[],gradesBySpec:new Map(),rateBySpecGrade:new Map(),allSpecs:[],loadingMaster:true});}}),
       h(MenuTabs,{user,active:tab,onChange:pickTab,
         onRefresh: ["estimator","saved","sale_order","home","tour","user_manual","faq","change_password","version_history"].includes(tab) ? null
-          : ()=>{ if(!confirmLeaveIfDirty()) return; setUnsavedGuard(false); setScreenKey(k=>k+1); }}),
+          : async()=>{ if(!(await svAskLeave())) return; setUnsavedGuard(false); setScreenKey(k=>k+1); }}),
       h(NavStrip,{ stack:navStack.current, cur:navCurSnap, onBack:goBack, onHome:goHome, n:navN })
     ),
     h(AppVersionBanner,null),
@@ -59308,8 +59760,8 @@ function App() {
         })
       );
     })(),
-    h("div",{style:{display:tab==="estimator" && accTabMode!=="none"?"block":"none"}},h(Estimator,{user:uTab,masterData,sessionCompanyId,sessionCompany,onRefresh:refresh,onOpenQuote:(ref,slNo,openDatasheet)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo,openDatasheet:!!openDatasheet});setTab("saved");},initialModel:openModelTarget,onConsumedInitialModel:()=>setOpenModelTarget(null),pendingNewSlNo,onConsumedPendingNewSlNo:()=>setPendingNewSlNo(null),onGoToTab:setTab})),
-    h(React.Fragment,{key:"scr"+screenKey},
+    h("div",{"data-sv-screen":"estimator",style:{display:tab==="estimator" && accTabMode!=="none"?"block":"none"}},h(Estimator,{user:uTab,masterData,sessionCompanyId,sessionCompany,onRefresh:refresh,onOpenQuote:(ref,slNo,openDatasheet)=>{setQuoteToOpen({reference_number:ref,item_sl_no:slNo,openDatasheet:!!openDatasheet});setTab("saved");},initialModel:openModelTarget,onConsumedInitialModel:()=>setOpenModelTarget(null),pendingNewSlNo,onConsumedPendingNewSlNo:()=>setPendingNewSlNo(null),onGoToTab:setTab})),
+    h("div",{key:"scr"+screenKey,"data-sv-screen":tab},   /* 2026-11-13T06:00: the screen area (the save badge watches forms in it) */
     accTabMode==="none" && tab!=="estimator" ? h(AccessDenied,{tab}) :
     tab==="saved"?h(SavedEstimates,{user:uTab,sessionCompany,openTarget:quoteToOpen,onConsumedTarget:()=>setQuoteToOpen(null),onGoToTab:setTab,onNewSlNo:(ref,slNo,headerFields)=>{setPendingNewSlNo({reference_number:ref,item_sl_no:slNo,headerFields:headerFields||null});setTab("estimator");},onOpenContract:openContract,cameFromQuotesReport,onBackToQuotesReport:()=>{setCameFromQuotesReport(false); setTab("quotes_report");}}):
     tab==="sale_order_entry"?h(SaleOrderContractPicker,{user:uTab,onOpenContract:openContract,startCreate:soStart,onConsumedStart:()=>setSoStart(null)}):
@@ -59354,7 +59806,8 @@ function App() {
     tab==="imt_overrun"?h(ImtOverrunScreen,{user}):   // 2026-11-12 Part B
     tab==="os_std_days"?h(NdMasterScreen,{user}):
     tab==="sales_desk"?h(SalesDeskScreen,{user}):   // 2026-11-12T20:00
-    tab==="os_stale"?h(OsStaleScreen,{user}):   // 2026-11-13T00:00
+    tab==="os_stale"?h(OsStaleScreen,{user}):
+    tab==="save_fails"?h(SaveFailsScreen,{user}):   // 2026-11-13T06:00   // 2026-11-13T00:00
     tab==="my_plan"?h(MyPlanScreen,{user}):   // 2026-11-12T14:00 Build 2
     tab==="os_golive"?h(NdGoLiveScreen,{user}):
     (tab==="sp_report"||tab==="sp_report_st")?h(SpendReportScreen,{user}):   // 2026-11-12 Part B
@@ -63939,6 +64392,12 @@ const docHoldTag = (h)=> h==="Full Hold" ? {background:"#fdecea",color:"#a3312a"
 // options (optional) = the caller's own [cn, name] list (e.g. that customer's contracts); extra = fixed first lines [[value,label]] (Stock, General, All contracts).
 // remember = carry the last picked contract across screens that say so (this session).
 const CTF = { list:null, at:0, p:null, last:"" };
+// 2026-11-13T06:00 (CRM-Purchase): Contract – Quote No – Client everywhere. Quote = Contract Register quote number, else the OA's quote.
+const CT_QUOTE = {};
+function ctQNote(cr, so){ (so||[]).forEach(r=>{ const k = String(r.contract_number||"").trim(), q = String(r.quote_reference_number||"").trim(); if(k && q && !CT_QUOTE[k]) CT_QUOTE[k] = q; });
+  (cr||[]).forEach(r=>{ const k = String(r.contract_number||"").trim(), q = String(r.quote_number||"").trim(); if(k && q) CT_QUOTE[k] = q; }); }
+function ctQ(ct){ return CT_QUOTE[String(ct||"").trim()] || ""; }
+function ctQOr(ct){ return ctQ(ct) || "No Quote"; }
 async function ctFindLoad(force){
   if(!force && CTF.list && Date.now()-CTF.at<120000) return CTF.list;
   if(CTF.p) return CTF.p;
@@ -63946,8 +64405,9 @@ async function ctFindLoad(force){
     const m = new Map(), shut = new Set();
     try{
       const [cr, so] = await Promise.all([
-        fetchPaged(()=>sb.from("contract_register_tbl").select("contract_number,client,status")).catch(()=>[]),
-        fetchPaged(()=>sb.from("sale_order_tbl").select("contract_number,customer_name,status")).catch(()=>[]) ]);
+        fetchPaged(()=>sb.from("contract_register_tbl").select("contract_number,client,status,quote_number")).catch(()=>fetchPaged(()=>sb.from("contract_register_tbl").select("contract_number,client,status")).catch(()=>[])),
+        fetchPaged(()=>sb.from("sale_order_tbl").select("contract_number,customer_name,status,quote_reference_number")).catch(()=>fetchPaged(()=>sb.from("sale_order_tbl").select("contract_number,customer_name,status")).catch(()=>[])) ]);
+      ctQNote(cr, so);
       (cr||[]).forEach(r=>{ const k = String(r.contract_number||"").trim(); if(!k) return; if(!m.has(k)) m.set(k, String(r.client||"").trim()); if(/cancel/i.test(r.status||"")) shut.add(k); });
       (so||[]).forEach(r=>{ const k = String(r.contract_number||"").trim(); if(!k) return; if(r.customer_name) m.set(k, String(r.customer_name).trim()); else if(!m.has(k)) m.set(k,""); if(/closed|cancel/i.test(r.status||"")) shut.add(k); });
     }catch(e){ console.warn("contract list", e); }
@@ -63968,20 +64428,20 @@ function ContractFind({ value, onChange, options, extra, placeholder, width, dis
   const v = value==null ? "" : String(value);
   const exHit = ex.find(o=>o[0]===v);
   const curName = exHit ? null : (opts.find(o=>o[0]===v) || [v, ctFindName(v, all)])[1];
-  const shown = !v ? "" : exHit ? exHit[1] : v+(curName ? " – "+curName : "");
+  const shown = !v ? "" : exHit ? exHit[1] : v+" – "+ctQOr(v)+(curName ? " – "+curName : "");
   const lc = (x)=> String(x||"").toLowerCase();
   const words = lc(q).split(/\s+/).filter(Boolean);
   const hitEx = ex.filter(o=>!words.length || words.every(w=>lc(o[1]).includes(w)));
-  const hitCt = (words.length ? opts.filter(o=>{ const t = lc(o[0]+" "+o[1]); return words.every(w=>t.includes(w)); }) : opts)
+  const hitCt = (words.length ? opts.filter(o=>{ const t = lc(o[0]+" "+ctQOr(o[0])+" "+o[1]); return words.every(w=>t.includes(w)); }) : opts)
     .slice().sort((a,b)=> (words.length && a[0].startsWith(words[0]) ? 0 : 1) - (words.length && b[0].startsWith(words[0]) ? 0 : 1) || b[0].localeCompare(a[0])).slice(0,200);
-  const list = [...hitEx.map(o=>({ v:o[0], a:o[1], b:"", ex:true })), ...hitCt.map(o=>({ v:o[0], a:o[0], b:o[1] }))];
+  const list = [...hitEx.map(o=>({ v:o[0], a:o[1], b:"", ex:true })), ...hitCt.map(o=>({ v:o[0], a:o[0], q:ctQOr(o[0]), b:o[1] }))];
   const pick = (o)=>{ setOpen(false); setQ(""); if(!o.ex && o.v) CTF.last = o.v; onChange && onChange(o.v); };
   const mark = (txt)=>{ if(!words.length) return txt; const t = String(txt); for(const w of words){ const i = lc(t).indexOf(w); if(i>=0) return [t.slice(0,i), h("b",{key:"m",style:{background:"#fff3b0",color:"#1c1f1a"}},t.slice(i,i+w.length)), t.slice(i+w.length)]; } return t; };
   const W = width || 320;
   return h("span",{ref,"data-testid":testid||"ct-find",style:{position:"relative",display:"inline-block",width:W,maxWidth:"100%",verticalAlign:"middle",opacity:disabled?0.55:1}},
     h("input",{"data-testid":(testid||"ct-find")+"-in", className:"find-quote", disabled:!!disabled, autoComplete:"off",
       value: open ? q : shown, title: shown,
-      placeholder: open ? (shown || "Type the number or the customer") : (placeholder || "Contract number or customer…"),
+      placeholder: open ? (shown || "Type the contract, quote number or customer") : (placeholder || "Contract, quote number or customer…"),
       onFocus:()=>{ setOpen(true); setQ(""); setHi(0); },
       onChange:e=>{ setQ(e.target.value); setOpen(true); setHi(0); },
       onKeyDown:e=>{ if(e.key==="ArrowDown"){ e.preventDefault(); setOpen(true); setHi(x=>Math.min(x+1, list.length-1)); } else if(e.key==="ArrowUp"){ e.preventDefault(); setHi(x=>Math.max(x-1,0)); }
@@ -63992,7 +64452,7 @@ function ContractFind({ value, onChange, options, extra, placeholder, width, dis
     open ? h("div",{"data-testid":(testid||"ct-find")+"-list",style:{position:"absolute",top:"100%",left:0,minWidth:"100%",width:typeof W==="number"?Math.max(W,400):400,maxWidth:"calc(92vw / var(--uiz,1))",maxHeight:320,overflowY:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8,boxShadow:"0 8px 22px rgba(0,0,0,.18)",zIndex:300,marginTop:3}},
       list.length ? list.map((o,i)=>h("div",{key:(o.ex?"x|":"")+o.v,"data-v":o.v,onMouseDown:e=>{ e.preventDefault(); pick(o); },onMouseEnter:()=>setHi(i),
           style:{padding:"6px 10px",fontSize:12.5,cursor:"pointer",background:i===hi?"#eef3fb":"#fff",borderBottom:"1px solid #f2f0e8",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",color:colors.text}},
-          o.ex ? h("i",null,mark(o.a)) : [h("b",{key:"a"},mark(o.a)), h("span",{key:"b",style:{color:colors.muted}}," – ", mark(o.b||"—"))]))
+          o.ex ? h("i",null,mark(o.a)) : [h("b",{key:"a"},mark(o.a)), h("span",{key:"q",style:{color:o.q==="No Quote"?"#a8720f":"#0f5f4a",fontWeight:600}}," – ", mark(o.q)), h("span",{key:"b",style:{color:colors.muted}}," – ", mark(o.b||"—"))]))
         : h("div",{style:{padding:"8px 10px",fontSize:12,color:colors.muted}}, all.length || options ? "No open order matches “"+q+"”." : "Reading the orders…")) : null);
 }
 // a row belongs to the picked contract (rows carry it as contract_number / contract_ref / cn …)
@@ -64022,15 +64482,15 @@ async function ctClientLoad(force){
   if(CT_CLIENT.p) return CT_CLIENT.p;
   CT_CLIENT.p = (async()=>{
     const m = {};
-    try{ const reg = await fetchAll("contract_register_tbl","contract_number,client"); (reg||[]).forEach(r=>{ const k=String(r.contract_number||"").trim(); if(k && r.client && !m[k]) m[k]=String(r.client).trim(); }); }catch(e){}
-    try{ const so = await fetchAll("sale_order_tbl","contract_number,customer_name"); (so||[]).forEach(r=>{ const k=String(r.contract_number||"").trim(); if(k && r.customer_name) m[k]=String(r.customer_name).trim(); }); }catch(e){}
+    try{ const reg = await fetchAll("contract_register_tbl","contract_number,client,quote_number").catch(()=>fetchAll("contract_register_tbl","contract_number,client")); ctQNote(reg, null); (reg||[]).forEach(r=>{ const k=String(r.contract_number||"").trim(); if(k && r.client && !m[k]) m[k]=String(r.client).trim(); }); }catch(e){}
+    try{ const so = await fetchAll("sale_order_tbl","contract_number,customer_name,quote_reference_number").catch(()=>fetchAll("sale_order_tbl","contract_number,customer_name")); ctQNote(null, so); (so||[]).forEach(r=>{ const k=String(r.contract_number||"").trim(); if(k && r.customer_name) m[k]=String(r.customer_name).trim(); }); }catch(e){}
     CT_CLIENT.map = m; CT_CLIENT.at = Date.now(); CT_CLIENT.p = null; return m;
   })();
   return CT_CLIENT.p;
 }
 function clientShort(n){ const w=String(n||"").replace(/\s+/g," ").trim().split(" ").filter(Boolean); return w.length<=2 ? w.join(" ") : w.slice(0,2).join(" "); }
 function ctClientOf(ct){ return CT_CLIENT.map[String(ct||"").trim()]||""; }
-function ctOptLabel(ct, name){ const n = name||ctClientOf(ct); return String(ct)+(n?" \u2013 "+n:""); }
+function ctOptLabel(ct, name){ const n = name||ctClientOf(ct); return String(ct)+" \u2013 "+ctQOr(ct)+(n?" \u2013 "+n:""); }
 // 255: PROJECT DUE DATE on cards for quotes and contracts. Contract: its delivery date (v_contract_delivery, else the earliest
 // Contract Register / line despatch date, as in the Delivery tiles). Quote or enquiry: the enquiry's last date for submission.
 // Read once and kept for 5 minutes. The card's own due date stays as it is (Task due / Card due).
@@ -64078,7 +64538,7 @@ const HOLD_HEAD = { "Full Hold":"#a3312a", "Inspection Hold":"#b06d08", "Final H
 const HOLD_ORDER = ["Full Hold","Inspection Hold","Final Hold"];
 // Contract – first two words of the client (punctuation dropped): "260116 – Alfa Laval"
 function ctShortName(n){ return clientShort(String(n||"").replace(/[,;:()\[\]"]+/g," ").replace(/\s+-\s+/g," ")); }
-function ctLabel(ct, name){ const s = ctShortName(name||ctClientOf(ct)); return String(ct||"")+(s?" – "+s:""); }
+function ctLabel(ct, name){ const s = ctShortName(name||ctClientOf(ct)); return String(ct||"")+(ct?" – "+ctQOr(ct):"")+(s?" – "+s:""); }
 const CT_SUBS = new Set(); function ctNotify(){ CT_SUBS.forEach(f=>{ try{ f(); }catch(e){} }); }
 // Per contract: open hold documents by level, the Order Acceptance, BOM and the latest document movement. Kept 5 minutes.
 const CT_HOLD = { by:null, at:0, p:null };
@@ -64158,7 +64618,7 @@ function CtRef({ ct, name, mono, color, compact, noDot }){
     const left = Math.max(8, Math.min(r.left, (window.innerWidth/UI_Z) - w - 8)); const below = r.bottom + 8; const up = below + 320 > (window.innerHeight/UI_Z) && r.top > 340;
     setPos({ left, top: up ? null : below, bottom: up ? (window.innerHeight/UI_Z) - r.top + 8 : null }); if(!CT_HOLD.by && !CT_HOLD.p) ctHoldLoad(); };
   const hide = ()=>{ tm.current = setTimeout(()=>setPos(null), 180); };
-  const label = String(c)+(ctShortName(full)?" – "+ctShortName(full):"");
+  const label = String(c)+" – "+ctQOr(c)+(ctShortName(full)?" – "+ctShortName(full):"");
   const dot = noDot ? null : h("i",{style:{width:8,height:8,borderRadius:"50%",display:"inline-block",flex:"0 0 8px",background: g ? HOLD_DOT[lvl||""] : "#c9c6b8", marginRight:5}, title: g ? holdLabel(lvl||"") : "Reading…"});
   const docLine = (x,i)=>{ const d = ctDays(x.since);
     return h("div",{key:i,style:{display:"flex",justifyContent:"space-between",gap:8,padding:"2px 0 2px 9px",borderLeft:"2px solid #eceae0"}},
@@ -64186,7 +64646,7 @@ function CtRef({ ct, name, mono, color, compact, noDot }){
         nav.goTab ? btn("Document Control", ()=>nav.goTab("doc_board")) : null))), document.body) : null;
   return h("span",{ref, onMouseEnter:show, onMouseLeave:hide, onClick:e=>{ if(pos){ setPos(null); } else { show(); } e.stopPropagation(); },
       style:{display:"inline-flex",alignItems:"center",whiteSpace:compact?"nowrap":undefined,cursor:"help",borderBottom:"1px dashed #b5b2a6"}},
-    dot, h("b",{style:{color:color||undefined,fontFamily:mono?"monospace":undefined}}, c), ctShortName(full) ? h("span",{style:{fontWeight:compact?400:600,marginLeft:3}}, "– "+ctShortName(full)) : null, tag);
+    dot, h("b",{style:{color:color||undefined,fontFamily:mono?"monospace":undefined}}, c), h("span",{"data-testid":"ct-q",style:{fontWeight:600,marginLeft:3,color:ctQ(c)?undefined:"#a8720f"}}, "– "+ctQOr(c)), ctShortName(full) ? h("span",{style:{fontWeight:compact?400:600,marginLeft:3}}, "– "+ctShortName(full)) : null, tag);
 }
 function CtNavOnce({ setTab, openContract }){
   useEffect(()=>{ window.__ctNav = { goTab:setTab, openSO: async(ct)=>{ try{ const { data } = await sb.from("sale_order_tbl").select("*").eq("contract_number",ct).maybeSingle(); if(data) openContract(data); }catch(e){} } }; });
@@ -70360,7 +70820,7 @@ async function shipLetterPdf(C, no, user){
   para("Thanking you,"); y += 2;
   doc.text("For "+pdfFooterCompanyName(co), 10, y); y += 16; doc.text(dcName||"", 10, y); y += 4.6; doc.text("Document Controller", 10, y);
   despPdfFooter(doc, co, "Shipping details request "+C.cn);
-  doc.save("Shipping_details_request_"+C.cn+"_No"+no+".pdf");
+  pdfShow(doc, "Shipping_details_request_"+C.cn+"_No"+no+".pdf");   // 2026-11-13T06:00: every PDF opens in the preview first
 }
 // the chase box on the OA's Despatch details panel
 function ShipChaseBox({ C, user, canAct, onChanged }){
@@ -70464,7 +70924,7 @@ async function dclPdf(row){
   doc.text("Received by · Production Manager", 10+cw+2, y+4); doc.text(row.received_at ? (row.received_by||"")+" · "+fmtDMYTime(row.received_at) : "sign / date / time", 10+cw+2, y+24);
   doc.text("Gate pass · Stores", 10+cw*2+2, y+4); doc.text("GP no. ______ · sign / date", 10+cw*2+2, y+24);
   despPdfFooter(doc, co, "Despatch Clearance "+row.dcl_no);
-  doc.save("Despatch_Clearance_"+String(row.dcl_no).replace(/\//g,"-")+".pdf");
+  pdfShow(doc, "Despatch_Clearance_"+String(row.dcl_no).replace(/\//g,"-")+".pdf");   // 2026-11-13T06:00: preview first
 }
 function DclPanel({ dc, D, C, user, me, P, onAskDetails }){
   const [row,setRow] = useState(undefined); const [form,setForm] = useState(null); const [busy,setBusy] = useState(false); const [msg,setMsg] = useState(""); const [missing,setMissing] = useState(false);
@@ -72856,7 +73316,7 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
   const card = (x)=>{
     const head = (txt)=> h("div",{style:{fontWeight:700,fontSize:12.5,color:"#1c1f1a"}},txt);
     if(x.kind==="contract") return h("div",{key:"c"+x.cn,"data-testid":"os-card","data-ct":x.cn,...((can("pm")||isSA||(myKeys||[]).some(p=>p==="purchase_manager"||p==="purchase_engineer"))?dragProps({ kind:"contract", cn:x.cn, from:1 }):{}),style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"8px 10px",marginBottom:8,cursor:can("pm")?"grab":"default"}},
-      head(x.cn+" – "+(x.s.customer_name||"")),
+      head(x.cn+" – "+ctQOr(x.cn)+" – "+(x.s.customer_name||"")),
       h("div",{style:{fontSize:11.5,color:colors.muted}},(x.s.basis_number?"PO "+x.s.basis_number+" · ":"")+(x.s.go_ahead_state?woLabel(x.s.go_ahead_state):"Work order not released")),
       h(PurOwnerTag,{ cn:x.cn, small:true }),   // 2026-11-03T07:00:00Z
       h("div",{style:{fontSize:11.5,marginTop:3}}, x.ord ? (x.left+" of "+x.ord+" Nos left") : ""),
@@ -72870,7 +73330,7 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
         can("pm") ? h("button",{"data-testid":"os-items-ready",onClick:()=>{ if(!woReleased(x.s.go_ahead_state) && !confirm("The work order of "+x.cn+" is not released (“"+(x.s.go_ahead_state?woLabel(x.s.go_ahead_state):"Hold")+"”).\n\nMark items ready anyway?")) return; setReady(x.cn); },style:{...btnSmall,fontSize:11.5,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontWeight:700}},"Items ready") : null,
         h("button",{onClick:()=>osGotoSo(x.cn, null),"data-testid":"os-open-contract",style:{...btnSmall,fontSize:11.5}},"Open contract →")));
     if(x.kind==="placed") return h("div",{key:"p"+x.cn,"data-testid":"os-card",...((x.pc<7 && (can("pm")||can("acc")))?dragProps({ kind:"placed", cn:x.cn, from:x.pc }):{}),style:{background:"#fff",border:"1px dashed "+colors.border,borderRadius:8,padding:"8px 10px",marginBottom:8}},
-      head(x.cn+" – "+(x.s.customer_name||"")),
+      head(x.cn+" – "+ctQOr(x.cn)+" – "+(x.s.customer_name||"")),
       h("div",{style:{fontSize:11.5,color:colors.muted}},(x.s.basis_number?"PO "+x.s.basis_number+" · ":"")+"Placed by "+(x.p.moved_by||x.p.placed_by||"")+" on "+osDmy(x.p.moved_at||x.p.placed_at)),
       x.p.note ? h("div",{style:{fontSize:11.5,marginTop:2}},x.p.note) : null,
       x.pc<7 && (can("pm") || (can("acc") && x.pc===6)) ? h("select",{value:"","data-testid":"os-place-move",onChange:async e=>{ const c = Number(e.target.value); if(!c) return;
@@ -72966,7 +73426,7 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
     const matB = ["bom","pbm","pbe","pba","pr","pa"].includes(k) && ps.forms.length ? ps.forms.map((f,i)=>ospBadge(f+(ps.fac.has(f)?" ✓":""), ps.fac.has(f)?"ok":"gy", "f"+i)) : [];
     const apB = st.pur_approved_at && st.pa_pct!=null ? [ospBadge("Approved "+st.pa_pct+"%","bl","ap")] : [];
     return h("div",{key:"pre"+k+x.cn,"data-testid":"osp-card","data-ct":x.cn,...(mayDrag?dragProps({ kind:"pre", cn:x.cn, from:k }):{}),style:{background:"#fff",border:"1px solid "+colors.border,borderLeft:late?"4px solid #a3312a":(ps.ov?"4px solid #5b3fa3":"1px solid "+colors.border),borderRadius:8,padding:"8px 10px",marginBottom:8,cursor:mayDrag?"grab":"default"}},
-      h("div",{style:{display:"flex",justifyContent:"space-between",gap:6,alignItems:"baseline"}}, h("div",{style:{fontWeight:700,fontSize:12.5}},x.cn+" – "+(x.client||"")),
+      h("div",{style:{display:"flex",justifyContent:"space-between",gap:6,alignItems:"baseline"}}, h("div",{style:{fontWeight:700,fontSize:12.5}},x.cn+" – "+ctQOr(x.cn)+" – "+(x.client||"")),
         st.pa_pct!=null && ((k==="pa" && st.pa_sent_at) || k==="pur") ? h("b",{"data-testid":"osp-pa-pct",title:"Material cost ÷ PO value × 100",style:{fontSize:k==="pa"?18:13,color:"#5b3fa3",whiteSpace:"nowrap"}},st.pa_pct+"%") : null),
       osMvEl(x.cn, k==="pa" ? "pur" : k, null, op),   // 2026-11-12T22:00
       ps.ov ? h("div",{style:{fontSize:10.5,color:"#5b3fa3",marginTop:2}},(ps.ov.back?"↩ Moved back":"⇢ Placed")+" by "+(ps.ov.by||"")+": "+(ps.ov.why||"")) : null,
@@ -78062,7 +78522,9 @@ async function drPost(st, remarks, pdf, user){
   try{ window.dispatchEvent(new CustomEvent("flo-cal-changed")); }catch(err){}
   return ex ? "Replaced today's report (the earlier one is kept in its history)." : "Posted on the Daily Reports wall.";
 }
-function drOpenPdf(b64, name){ try{ const a = document.createElement("a"); a.href = b64; a.download = name || "daily_report.pdf"; a.target = "_blank"; document.body.appendChild(a); a.click(); a.remove(); }catch(e){ alert("Could not open the PDF."); } }
+function drOpenPdf(b64, name){   // 2026-11-13T06:00: opens in the app's PDF preview (Download / Print inside)
+  try{ const bin = atob(String(b64).split(",")[1]||""); const u = new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) u[i] = bin.charCodeAt(i);
+    const blob = new Blob([u], { type:"application/pdf" }); pdfShow({ output:(k)=> k==="blob" ? blob : blob }, name || "daily_report.pdf"); }catch(e){ alert("Could not open the PDF."); } }
 // the part added to the day report dialog: stale items, remarks, Generate PDF, Post
 function DrPostBox({ st, user, pal, onPosted }){
   const [remarks,setRemarks] = useState(""); const [pdf,setPdf] = useState(null); const [msg,setMsg] = useState(""); const [busy,setBusy] = useState(false); const [stale,setStale] = useState([]); const [prev,setPrev] = useState(null);
@@ -78182,7 +78644,7 @@ function AttGridScreen({ user, company }){
       doc.setFontSize(13); doc.text("Attendance — "+month, 10, 12); doc.setFontSize(8); doc.text("P Present · M Present, report missing · A Absent · L Leave · H Half-day leave · O Holiday / Off", 10, 17);
       doc.autoTable({ startY:20, head:[["Employee","Dept",...G.days.map(d=>d.slice(8)),"P","M","A","L"]], body:G.rows.map(r=>[r.e.employee_name, r.e.department||"", ...r.cells.map(c=>c.s==="F"?"":c.s==="O"?"·":c.s), r.sum.P, r.sum.M, r.sum.A, r.sum.L]),
         styles:{ fontSize:6.5, cellPadding:0.8, halign:"center" }, columnStyles:{ 0:{ halign:"left", cellWidth:34 }, 1:{ halign:"left", cellWidth:24 } }, headStyles:{ fillColor:[15,95,74] }, margin:{ left:8, right:8 } });
-      doc.save("Attendance_"+month+".pdf"); }catch(e){ window.__pdfFree = false; setMsg("✗ PDF: "+e.message); } };
+      pdfShow(doc, "Attendance_"+month+".pdf"); }catch(e){ window.__pdfFree = false; setMsg("✗ PDF: "+e.message); } };
   const cellW = 26;
   return h("div",{"data-testid":"att-grid",style:{padding:"14px 20px"}},
     h("div",{style:{fontSize:18,fontWeight:700}},"Attendance"),
@@ -78254,6 +78716,7 @@ function DayReportModal({ user, company, day, forced, onClose }){
 // the gateway: 17:30 once a day, at Sign out after 17:30, and the next morning (cannot be put off) when the last working day's report was not sent
 function calRequired(user, ctx){ return !!ctx && !!ctx.meE && user?.role!=="super_admin" && String(ctx.meE.status||"")!=="Inactive"; }
 async function calLogoutGate(user, onLogout){
+  try{ if(!(await svAskLeave("this screen"))) return; }catch(e){}   // 2026-11-13T06:00: Quit without saving?
   try{ if(calNowHM()>=CAL_DR_TIME){ const ctx = await calCtx(user); if(calRequired(user, ctx)){ const today = toISODate(new Date()); const s = await calReportSent(ctx.me, today);
     if(!s){ calOpenDayReport(user, today, false, onLogout); return; } } } }catch(e){}
   onLogout();
