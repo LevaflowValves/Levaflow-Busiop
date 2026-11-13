@@ -60,7 +60,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-11-13T12:00:00Z";
+  var APP_BUILD_VERSION = "2026-11-13T13:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -1076,6 +1076,14 @@ async function loadNameAliases(force){
 function nameAliases(n){ const k = nameKey(n); return k ? Array.from(new Set([String(n).trim(), ...(NAME_ALIAS[k]||[])])) : []; }
 function sameName(a, b){ const ka = nameKey(a), kb = nameKey(b); if(!ka || !kb) return false; if(ka===kb) return true; return (NAME_ALIAS[ka]||[]).some(x=>nameKey(x)===kb); }
 function nameIn(list, n){ return (list||[]).some(x=>sameName(x, n)); }
+// 2026-11-13T13:00:00Z: ANYTHING IN DRAFT — its creator deletes it freely (no admin rights, no code); still asked "are you sure", always logged
+function draftMine(createdBy, user){ if(!createdBy || !user) return false; return sameName(createdBy, user.username) || (!!user.employee_name && sameName(createdBy, user.employee_name)); }
+async function draftDelConfirm(what){
+  if(SV && SV.delOk && Date.now()-SV.delOk < 4000) return true;   // the red "Going to delete" box was just answered
+  const v = await svDialog({ tone:"r", title:"Going to delete — are you sure?", lines:[what], note:"It is still a draft and you made it, so no code is needed. It cannot be brought back from the screen (admins can still see it in the audit log).",
+    check:"Yes, I want to delete this", buttons:[{ t:"No, keep it", v:"no" }, { t:"Delete", v:"yes", red:true, needCheck:true }] });
+  return v==="yes";
+}
 function postHas(postKey, n){ return nameIn(postHolders(postKey), n); }
 loadNameAliases();
 // "Veenai Vimal (Technical Head)" — or, vacant:
@@ -17654,6 +17662,14 @@ function SavedEstimates({ autoFile, user, sessionCompany, openTarget, onConsumed
   };
 
   const quoteAnyNonDraft = ()=> refs.some(r=>r.reference_number===refFilter && r.quote_status && r.quote_status!=="Draft");
+  // 2026-11-13T13:00:00Z: a Draft quote — the creator of the Sl No or of the quote may delete it freely
+  const isDraftRow = (r)=> !r.quote_status || r.quote_status==="Draft";
+  const quoteRowsOf = (ref)=> refs.filter(r=>r.reference_number===ref);
+  const quoteCreator = (ref)=>{ const rs = quoteRowsOf(ref).slice().sort((a,b)=>String(a.created_at||"").localeCompare(String(b.created_at||""))||(Number(a.item_sl_no)||0)-(Number(b.item_sl_no)||0)); return rs[0] ? rs[0].created_by : ""; };
+  const draftDelSl = (r)=> !!r && mode!=="contract" && isDraftRow(r) && quoteRowsOf(r.reference_number).every(isDraftRow) && (draftMine(r.created_by, user) || draftMine(quoteCreator(r.reference_number), user));
+  const draftDelQuote = (ref)=> !!ref && mode!=="contract" && quoteRowsOf(ref).length>0 && quoteRowsOf(ref).every(isDraftRow) && draftMine(quoteCreator(ref), user);
+  const familyRefs = (ref)=>{ const base = (ref||"").replace(/-Rev-\d+$/,""); return Array.from(new Set(refs.filter(r=>r.reference_number===base||(r.reference_number||"").startsWith(base+"-Rev-")).map(r=>r.reference_number))); };
+  const draftDelFamily = (ref)=> !!ref && mode!=="contract" && familyRefs(ref).length>0 && familyRefs(ref).every(draftDelQuote);
   const quoteFamilyAnyNonDraft = ()=>{
     const base = (refFilter||"").replace(/-Rev-\d+$/,"");
     return refs.some(r=>(r.reference_number===base||(r.reference_number||"").startsWith(base+"-Rev-")) && r.quote_status && r.quote_status!=="Draft");
@@ -20046,9 +20062,11 @@ function SavedEstimates({ autoFile, user, sessionCompany, openTarget, onConsumed
     finally { setDeletingSlNo(null); }
   };
   const deleteSlNo=async(ref)=>{
-    if(!isAdmin && !soTrimOk){ noPermission("delete quotes",{roles:["admin","super_admin"]}); return; }
-    const ok=confirm("Delete "+ref.reference_number+" \u00b7 Sl No "+ref.item_sl_no+(ref.model?" (\u201c"+ref.model+"\u201d)":"")+"?\n\nThis removes this Sl No and all of its BOM lines. This cannot be undone.");
-    if(!ok) return;
+    const mineDraft = !isAdmin && !soTrimOk && draftDelSl(ref);
+    if(!isAdmin && !soTrimOk && !mineDraft){ noPermission("delete quotes",{roles:["admin","super_admin"]}); return; }
+    if(mineDraft){ if(!(await draftDelConfirm(ref.reference_number+" · Sl No "+ref.item_sl_no+(ref.model?" ("+ref.model+")":"")+" and all its BOM lines"))) return; }
+    else { const ok=confirm("Delete "+ref.reference_number+" \u00b7 Sl No "+ref.item_sl_no+(ref.model?" (\u201c"+ref.model+"\u201d)":"")+"?\n\nThis removes this Sl No and all of its BOM lines. This cannot be undone.");
+    if(!ok) return; }
     // Once a Sl No isn't Draft, deleting it needs a Super-Admin-issued delete
     // code — being an Admin alone is no longer enough (stricter than edits).
     if(ref.quote_status && ref.quote_status!=="Draft" && user.role!=="super_admin" && !soTrimOk){
@@ -20073,9 +20091,11 @@ function SavedEstimates({ autoFile, user, sessionCompany, openTarget, onConsumed
     return Array.from(familyNums).some(n=>n>thisNum);
   };
   const [blockedDeleteMsg,setBlockedDeleteMsg]=useState(null);
-  const openDeleteQuote=()=>{
-    if(!isAdmin){ noPermission("delete quotes",{roles:["admin","super_admin"]}); return; }
+  const openDeleteQuote=async()=>{
+    const mineDraft = !isAdmin && draftDelQuote(refFilter);
+    if(!isAdmin && !mineDraft){ noPermission("delete quotes",{roles:["admin","super_admin"]}); return; }
     if(!refFilter) return;
+    if(mineDraft && !higherRevisionExists(refFilter)){ if(await draftDelConfirm("Draft quote "+refFilter+" — every Sl No and its BOM lines")) doConfirmDeleteQuote(); return; }
     if(higherRevisionExists(refFilter)){
       setBlockedDeleteMsg("Can't delete "+revisionLabelOf(refFilter)+" — a newer revision of "+refFilter.replace(/-Rev-\d+$/,"")+" still exists. Delete the newer revision(s) first, or use \"Delete Entire Quote\" to remove the whole family at once.");
       return;
@@ -20095,9 +20115,11 @@ function SavedEstimates({ autoFile, user, sessionCompany, openTarget, onConsumed
   const [deletingEntireQuote,setDeletingEntireQuote]=useState(false);
   const [showDeleteEntireQuoteModal,setShowDeleteEntireQuoteModal]=useState(false);
   const [deleteEntireQuoteConfirmText,setDeleteEntireQuoteConfirmText]=useState("");
-  const openDeleteEntireQuote=()=>{
-    if(!isAdmin){ alert(mode==="contract"?"Only Admins can delete Order Acceptances.":"Only Admins can delete quotes."); return; }
+  const openDeleteEntireQuote=async()=>{
+    const mineDraft = !isAdmin && draftDelFamily(refFilter);
+    if(!isAdmin && !mineDraft){ alert(mode==="contract"?"Only Admins can delete Order Acceptances.":"Only Admins can delete quotes — or the person who made it, while every revision is still Draft."); return; }
     if(!refFilter) return;
+    if(mineDraft){ if(await draftDelConfirm("Draft quote "+refFilter.replace(/-Rev-\d+$/,"")+" — every revision, Sl No and BOM line")) doConfirmDeleteEntireQuote(); return; }
     setDeleteEntireQuoteConfirmText(""); setShowDeleteEntireQuoteModal(true);
   };
   const doConfirmDeleteEntireQuote=async()=>{
@@ -22827,7 +22849,7 @@ function SavedEstimates({ autoFile, user, sessionCompany, openTarget, onConsumed
     {key:"end",cap:"",row:2,push:true,items:[
       {id:"close",label:"Close",icon:"x",color:colors.danger,onClick:()=>attemptCloseOrNewQuotes("close"),why:noOpen},
       {id:"del",label:"Delete ▾",icon:"trash",color:colors.danger,
-        why:noOpen||(isAdmin?null:"Only Admins can delete."),
+        why:noOpen||((isAdmin||(openRef && (draftDelQuote(openRef.reference_number)||draftDelFamily(openRef.reference_number))))?null:"Only Admins can delete — or the person who made it, while it is still Draft."),
         menu:[{label:"Delete this Revision",onClick:openDeleteQuote},{label:isSO?"Delete Entire Order Acceptance":"Delete Entire Quote",onClick:openDeleteEntireQuote}]}
     ]}
   ];
@@ -23356,7 +23378,7 @@ function SavedEstimates({ autoFile, user, sessionCompany, openTarget, onConsumed
                 h("div",{style:{fontSize:10.5,opacity:0.6,marginTop:2}},(r.created_by||"")+" · "+fmtDMY(r.created_at)),
                 r.datasheet_skipped && h("span",{style:{display:"inline-block",marginTop:4,fontSize:10,fontWeight:600,padding:"1px 7px",borderRadius:4,background:active?"rgba(255,255,255,0.2)":"#fff4d6",color:active?"#fac775":"#854f0b"}},"Datasheet skipped")
               ),
-              isAdmin && h("button",{
+              (isAdmin || draftDelSl(r)) && h("button",{
                 "aria-label":"Delete Sl No "+r.item_sl_no,
                 onClick:(e)=>{ e.stopPropagation(); deleteSlNo(r); },
                 disabled:deletingSlNo===r.id,
@@ -23513,7 +23535,7 @@ function SavedEstimates({ autoFile, user, sessionCompany, openTarget, onConsumed
                     style:{...btnSmall,border:"1px solid "+colors.border,opacity:busyBom===openRef.item_sl_no?0.5:1}},
                     "Restore BOM"),
                   h("button",{onClick:refreshMasterData,title:"Pull the latest Shapes, Specs, Grades, Rates, UOM and Item options — useful if you (or someone else, in another tab) just added or fixed one",style:{...btnSmall,border:"1px solid "+colors.border,color:colors.text}},"↻ Refresh master data"),
-                  h("button",{onClick:()=>soBlock() ? null : isAdmin ? deleteSlNo(openRef) : noPermission("delete a Sl No"),disabled:deletingSlNo===openRef.id,style:{...(isAdmin?{}:{opacity:0.5,cursor:"help"}),...btnSmall,border:"1px solid "+colors.danger,color:colors.danger,opacity:deletingSlNo===openRef.id?0.5:1}},deletingSlNo===openRef.id?"Deleting…":"Delete this Sl No"),
+                  h("button",{onClick:()=>soBlock() ? null : (isAdmin || draftDelSl(openRef)) ? deleteSlNo(openRef) : noPermission("delete a Sl No"),disabled:deletingSlNo===openRef.id,style:{...((isAdmin || draftDelSl(openRef))?{}:{opacity:0.5,cursor:"help"}),...btnSmall,border:"1px solid "+colors.danger,color:colors.danger,opacity:deletingSlNo===openRef.id?0.5:1}},deletingSlNo===openRef.id?"Deleting…":"Delete this Sl No"),
                   h("button",{onClick:()=>setFullScreenBOM(f=>!f),style:{...btnSecondary,fontSize:11,padding:"4px 10px"}}, fullScreenBOM?"Esc · Close full screen":"⛶ Full screen BOM")
                 )
               ),
@@ -24324,7 +24346,7 @@ function SavedEstimates({ autoFile, user, sessionCompany, openTarget, onConsumed
                             {disabled:busy,title:"Put back the BOM that was here before the fresh BOM was started"}),
                           h("span",{style:{width:10}}),
                           slot("g",deletingSlNo===r.id?"…":"Remove",()=>deleteSlNo(r),
-                            editFirst||((isAdmin||soTrimOk)?null:"Only Admins can remove a Sl No."),72,
+                            editFirst||((isAdmin||soTrimOk||draftDelSl(r))?null:"Only Admins can remove a Sl No — or the person who made it, while the quote is Draft."),72,
                             {disabled:deletingSlNo===r.id,style:{borderColor:"#f0b8b8",color:colors.danger}})
                         );
                       })()
@@ -36303,6 +36325,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"13 Nov 2026", summary:"Built on 2026-11-13T13:00:00Z, on top of 2026-11-13T12:00:00Z. No SQL in the app (Levaflow rights by data_levaflow_rights_multitask_2026-11-13.sql). DRAFTS: whoever made something still in Draft can delete it freely — no admin rights, no code — after the red \u201cGoing to delete — are you sure\u201d box; it is logged. Quotes: a Sl No (its maker or the quote\u2019s maker, while every Sl No of the quote is Draft), the whole revision, and the whole quote (every revision Draft). Purchase: Discard draft PO by its maker (no code, no reason). Despatch: Discard draft DC by its maker. Draft invoices, draft PIs and task cards were already deletable by the people working on them. Past Draft nothing changes: an admin with a delete code, or a Super Admin. Order Acceptances are not covered (they go through the order-cancellation rules)." },
   { date:"13 Nov 2026", summary:"Built on 2026-11-13T12:00:00Z, on top of 2026-11-13T11:00:00Z. No SQL. TASK BUILD — APPROVALS SPLIT: on your board ✅ My approvals holds only what waits on the posts you hold (and Purchase BOMs for a Super Admin or the Managing Director post); 🤝 On others\u2019 behalf lists what you may approve for other posts, a section per department with the post and its holders — open by default, each section can be hidden (remembered). Purchase BOM cards show order value, estimated cost and cost % (red above 41%); clicking opens the BOM the Purchase Manager proposes, with Approve / Send back. A Super Admin or the Managing Director post approves a Purchase BOM — whoever is first closes it for both. Today for you: Approvals is the first chapter, counting your own only, with the Purchase BOM % and a separate line for on-behalf work. APP-MADE CARDS CLOSE ONLY WITH THE WORK: an Order Status or pending-step card cannot be moved to Completed or Under Approval by hand — it says so and opens where the work is done (W/O release, OA, Procurement Gantt …); a Super Admin / admin can mark it Not needed with a reason, which closes the stage or step too. A stage whose cards were all closed gets fresh cards for today\u2019s post holders; once a day an open step whose card was closed gets it back, and one with no card gets one. App-made cards carry a \u201cMade by the app\u201d band. Posts: a holder name that is not exactly an employee name is flagged red." },
   { date:"13 Nov 2026", summary:"Built on 2026-11-13T11:00:00Z, on top of 2026-11-13T10:00:00Z. No SQL. ORDER STATUS BOARD: all orders are back to one row of columns that scrolls sideways (as before 12 Nov), now with a second scrollbar on top of the board that moves it too; the two rows (1–10 before production, then production to payment) show only when one contract is picked in the filter. Full screen and Hide 1–10 keep one row; the card details (in since, moved by) stay." },
   { date:"13 Nov 2026", summary:"Built on 2026-11-13T10:00:00Z, on top of 2026-11-13T08:00:00Z. No SQL. SAVE BADGE: filter and search boxes no longer show \u201cNot saved\u201d — Apply / Apply filters / Show / Export / PDF / Print buttons, buttons ending in \u201c…\u201d or starting with \u201c+\u201d, and Create Order Acceptance no longer make a screen count as a form; \u201cAll\u201d pickers, \u201ce.g.\u201d boxes, contract finders and the calendar view pickers are ignored. A sweep of every screen leaves only real forms (calculation sheets, Despatch settings, Go-live dates, Standard days, Purchase rules, Serials at start, FSE per tab). FSE PLANNING: people who have left (Inactive / Left / Relieved / Resigned) are not on the Sales Team Desk, My plan or the FSE pickers." },
@@ -62383,6 +62406,7 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
           po.id && po.stage==="Approved" && (isOwner || who.pm || who.sa) ? h("button",{onClick:()=>setSentDlg({ on:toISODate(new Date()), to:po.vendor_contact||"", how:"Email", note:"", link:"" }),style:{...btnPrimary,background:"#085041"}},"Mark as sent…") : null,
           !legacy && po.id && po.stage==="Approved" && (who.make||isOwner) ? h("button",{onClick:()=>setReasonDlg("reopen"),style:btnSmall},"Reopen to edit…") : null,
           po.id && ["Sent","Partly received","Received"].includes(po.stage) && (isOwner||who.pm||who.sa) ? h("button",{onClick:()=>setAmdDlg({ why:"", what:[] }),style:{...btnSmall,color:"#8a5200",borderColor:"#c47a00",fontWeight:700}},"Amend PO…") : null,
+          !legacy && po.id && po.stage==="Draft" && !who.cancel && isOwner ? h("button",{"data-testid":"po-draft-delete",onClick:async()=>{ if(!(await draftDelConfirm("Draft PO "+po.po_no+(po.vendor_name?" — "+po.vendor_name:"")))) return; await cancelPo("Draft discarded by the person who made it"); },style:{...btnSmall,color:"#8a2d2d"}},"Discard draft PO") : null,
           !legacy && po.id && po.stage!=="Cancelled" && po.stage!=="Received" && who.cancel ? h("button",{onClick:async()=>{ if(po.stage!=="Draft" && !who.sa){ const c = prompt("PO "+po.po_no+" has been issued ("+po.stage+"). Cancelling it needs a Deletion code from a Super Admin:"+delCodeFrom()); if(c===null) return; const r = await verifyAndConsumeDeletionCode(c, user?.username||"unknown"); if(!r.ok){ alert(r.reason); return; } } setReasonDlg("cancel"); },style:{...btnSmall,color:"#8a2d2d"}},"Cancel PO…") : null,
           h("button",{onClick:close,style:btnSmall},"Close"))),
       legacy ? h("div",{style:{fontSize:12,background:"#faf9f4",border:"1px solid "+colors.border,borderRadius:6,padding:"7px 10px",marginBottom:10}},
@@ -72398,6 +72422,8 @@ function DcEditor({ user, me, P, S, dcId, contract, lot, onClose, onChanged }){
   const qcDocsDone = async()=>{ setBusy(true); try{ await qcSkipDocsIn(dc, null, me||who(), user?.username, P); }catch(e){ setMsg(e.message); } setBusy(false); await load(); };
   if(st==="With Accounts" && despCan("acc",user,me,P)){ acts.push(h("button",{key:"b",onClick:()=>setBack({to:"Draft",label:lotRow?"Accounts sends back to the Production Manager":"Accounts sends back to Stores"}),style:btnSecondary},"Send back"));
     acts.push(h("button",{key:"a",onClick:approveAccounts,disabled:busy,"data-testid":"dc-acc-approve",style:btnPrimary},lotRow?"Approve and number (despatch clearance)":"Approve and number")); }
+  if(dc.id && st==="Draft" && !(despCan(lotMaker,user,me,P)||despCan("acc",user,me,P)) && (draftMine(dc.created_by, user) || draftMine(dc.created_by, { username:me })))   // 2026-11-13T13:00:00Z
+    acts.push(h("button",{key:"cd","data-testid":"dc-draft-delete",onClick:async()=>{ if(!(await draftDelConfirm("Draft DC "+despNo(dc)))) return; await cancelDc("Draft discarded by the person who made it"); await load(); },style:btnDanger},"Discard draft DC"));
   if(dc.id && ["Draft","With PM","With QC","QC cleared","With Accounts"].includes(st) && (despCan(lotMaker,user,me,P)||despCan("acc",user,me,P)))
     acts.push(h("button",{key:"c",onClick:()=>setBack({to:"Cancelled",label:"Cancel this DC"}),style:btnDanger},"Cancel DC"));
   if(st==="Approved" && !dc.is_test && !dc.gate_pass_id && (despCan("acc",user,me,P)||isAdm))
