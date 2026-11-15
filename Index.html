@@ -60,7 +60,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-11-14T02:00:00Z";
+  var APP_BUILD_VERSION = "2026-11-15T09:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -819,6 +819,7 @@ function svWatch(b, table, op){
   const quiet = SV_QUIET.test(String(table||""));
   const act = SV.act && Date.now()-SV.act.last < 8000 ? SV.act : null;
   if(quiet || !act) return;
+  if(act.done){ act.done = false; act.reopened = (act.reopened||0)+1; }   // 2026-11-14T06:00:00Z: a late write of the same click (PR, task cards, stage) reopens it, so it is settled again
   act.pending++; act.last = Date.now(); if(act.pending===1 && SV.state!=="failed" && SV_ACTBTN.test(act.label||"")) svSetState("saving");
   const ot = b.then;
   b.then = function(res, rej){
@@ -846,6 +847,7 @@ function svFinish(act){
     if(!svIsDirty()) svSetState(isDel ? "deleted" : "saved", (act.label ? act.label : "")+(act.screen ? " — "+act.screen : ""));
     else svSetState("dirty");
     if(!act.toasted && !act.alerted) try{ appToast((isDel ? "✓ Deleted" : SV_SAVEBTN.test(act.label) && !/^\W*(approve|endorse|send|post|submit)/i.test(act.label) ? "✓ Saved" : "✓ Done — "+(act.label||"saved"))+(act.screen ? " · "+act.screen : "")); }catch(e){}
+    act.toasted = true;   // 2026-11-14T06:00:00Z: one toast per click, even when late writes reopen it
     return;
   }
   // schema-missing side tables after a successful main save: keep it green, log it quietly
@@ -853,7 +855,7 @@ function svFinish(act){
   const f0 = hard[0] || fails[0]; const R = svReason(f0.err, f0.table, f0.op);
   const info = { what:(act.label||"Save")+(act.screen?" · "+act.screen:""), why:R.why, todo:R.todo, raw:R.raw, table:f0.table, op:f0.op, tab:window.__curTab||"", screen:act.screen, partial: oks.length>0 && hard.length>0, okCount: hard.length ? oks.length : 0 };
   svLogFail(info);
-  if(!hard.length){ svSyncGuard(); if(!svIsDirty()) svSetState("saved", act.label||""); if(!act.toasted && !act.alerted) try{ appToast("✓ Saved"+(act.screen?" · "+act.screen:"")); }catch(e){} return; }
+  if(!hard.length){ svSyncGuard(); if(!svIsDirty()) svSetState("saved", act.label||""); else if(SV.state==="saving") svSetState("dirty"); if(!act.toasted && !act.alerted) try{ appToast("✓ Saved"+(act.screen?" · "+act.screen:"")); }catch(e){} act.toasted = true; return; }
   SV.fail = info; svSetState("failed", R.why); svFailBox(info);
 }
 // a click starts an "action"; the writes that follow belong to it
@@ -898,6 +900,11 @@ document.addEventListener("click", (e)=>{
 setInterval(()=>{ try{
   if(SV.dirty && !SV.dirty.scope.isConnected){ SV.dirty = null; svSyncGuard(); }
   if((SV.state==="saved"||SV.state==="deleted") && Date.now()-SV.at>15000) svSetState("clean");
+  // 2026-11-14T06:00:00Z: safety net — "Saving…" never stays up for ever
+  if(SV.state==="saving" && Date.now()-SV.at>45000){ const a = SV.act;
+    if(a && a.pending>0){ SV.fail = { what:(a.label||"Save")+(a.screen?" · "+a.screen:""), why:"No reply from the server for 45 seconds.", todo:"Refresh the screen and check whether the entry is there before saving again.", raw:"no reply after 45 s ("+a.pending+" write"+(a.pending===1?"":"s")+" waiting)", table:"", op:"", tab:window.__curTab||"", screen:a.screen };
+      svSetState("failed", "No reply from the server yet — refresh and check the entry"); }
+    else svSetState(svIsDirty() ? "dirty" : "clean"); }
   if(window.__curTab!==SV.tab){ SV.tab = window.__curTab;
     if(SV.dirty && SV.dirty.scope.hasAttribute && SV.dirty.scope.hasAttribute("data-sv-screen")){ SV.dirty = null; svSyncGuard(); }
     if(SV.state!=="failed" && !svIsDirty()) svSetState("clean"); }
@@ -3437,7 +3444,7 @@ const CODE_FREE_TYPES = ["stale_close","task_reopen","pdf_unblock","acc_export",
 // 2026-11-06T09:30 (approval build): every code is named by its kind — never just "code"
 const CODE_NAMES = { stale_unblock:"Stale unblock code", stage_edit:"Order step Edit code", wo_override:"W/O release override code", edit:"Edit code", delete:"Delete code", direct_price:"Direct Price code", price_check:"Price-check code", pdf_unblock:"PDF unblock code",
   stale_close:"Stale close code", task_reopen:"Task reopen code", acc_export:"Accounts Export code", acc_rollback:"Accounts Roll-back code", rollback:"Accounts Roll-back code",
-  grn_no_bill:"GRN no-bill code", qc_skip:"Bill-first code", qcsr_fix:"Serial-correction code", doc_add:"Add-document code", open_entry_ext:"Open-entry extension code", deletion:"Deletion code", irn_cancel:"E-invoice cancel code", ewb_cancel:"E-way bill cancel code", clock_pause:"Clock pause code" };
+  grn_no_bill:"GRN no-bill code", qc_skip:"Bill-first code", qcsr_fix:"Serial-correction code", doc_add:"Add-document code", open_entry_ext:"Open-entry extension code", deletion:"Deletion code", irn_cancel:"E-invoice cancel code", ewb_cancel:"E-way bill cancel code", clock_pause:"Clock pause code", order_hold:"Order hold code" };
 const codeName = (t)=> CODE_NAMES[t] || (t ? String(t).replace(/_/g," ")+" code" : "code");
 const aCode = (t)=>{ const n = codeName(t); return (/^[AEIOU]/i.test(n) ? "an " : "a ")+n; };
 // the one-time PINs (Admin generates one per action)
@@ -15643,6 +15650,7 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
     // separate entirely from the three-section approval workflow above,
     // which still requires the right role/Admin to sign off.
     await sb.from("sale_order_tbl").update({status:newStatus}).eq("id",contractInfo.id); try{ oaLoadMine(user); }catch(e){}   // 2026-10-30T12:00:00Z
+    if(/closed/i.test(newStatus||"")) await regFollowOa(contractInfo.contract_number, newStatus, user?.username||"");   // 2026-11-15T09:30:00Z
     await logAudit("UPDATE","sale_order_tbl",contractInfo.contract_number,"Status changed to "+newStatus,user?.username||"unknown",null,null);
     if(onChanged) onChanged();
   };
@@ -36337,6 +36345,10 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"15 Nov 2026", summary:"Built on 2026-11-15T09:30:00Z, on top of 2026-11-15T06:00:00Z. No SQL. REFRESH BUILD: (1) a draft Purchase BOM with no lines (e.g. opened by SQL) fills itself from the Production BOM when it is opened \u2014 no Refresh needed; it is marked unsaved so the buyer saves it. (2) The Contract Register follows the OA: an order cancelled through Cancel order\u2026 sets its register line to Cancelled; an order closed (every lot paid, or the OA status set to Closed) sets it to Closed; each change goes on the audit log. (3) Releasing an On hold order that has no OA yet (a register line on hold) sets its register line back from On Hold to Pending, so it shows at Order Acceptance pending again." },
+  { date:"15 Nov 2026", summary:"Built on 2026-11-15T06:00:00Z, on top of 2026-11-14T06:00:00Z. NEEDS SQL: structure_order_hold_2026-11-15.sql (BOTH companies, before deploying). ON HOLD GATEWAY (Order Status): a new first list \u201c0 \u00b7 On hold\u201d for orders in turmoil. \u23f8 Put on hold (toolbar): Technical Head or VP Projects post, with an Order hold code from the Sales Head post / Super Admins (Order Status \u203a Standard days & codes \u203a Give an Order hold code). Reason from a list (client technical change, client asked to hold, payment / commercial, client approval after W/O, possible cancellation / dispute, internal material / vendor, internal quality / rework, other) or + Add a new reason; the reason decides the Monday card (FSE = account owner, or the post), the price question and the delivery clock (client side: clock stops through the delivery clock hold; internal: clock runs). Price impact yes: the FSE card carries revised cost \u2192 revised offer \u2192 PO amendment \u2192 OA amendment, and the Estimation Engineer post gets a revised-cost card. Review date: a card to the Sales Head and VP Projects posts, and a daily bell once it is due. The Monday card comes back to the top (due today + bell) on the first sync of every week. While on hold: the stage cards of that order close, no new PO, no PO sent for approval or approved, no PR release; the Gantt, POs and PR are not touched. \u25b6 Release (on the hold card): Sales Head, Technical Head or VP Projects post, any time, with a reason; picks up where it left off or at a stage they choose; keep the current delivery commitment or give a changed date (set as the committed date); price outcome asked when there was a price impact. Stage report / table / Excel / PDF carry the On hold rows." },
+  { date:"14 Nov 2026", summary:"Built on 2026-11-14T06:00:00Z, on top of 2026-11-14T03:00:00Z. No SQL. SAVE BADGE FIX: the badge stayed on \u201cSaving\u2026 Please wait\u201d after a save that writes more a few seconds later (e.g. Purchase BOM approval: PR, task cards, Order Status stage), though the save had gone through. Late writes now reopen the same click, so the badge settles to Saved \u2713 (or shows Save failed if a late write fails); one green toast per click; and a safety net \u2014 Saving\u2026 for over 45 s clears itself, or says \u201cNo reply from the server yet \u2014 refresh and check the entry\u201d if a write is still waiting." },
+  { date:"14 Nov 2026", summary:"Built on 2026-11-14T03:00:00Z, on top of 2026-11-14T02:00:00Z. No SQL. PROCUREMENT GANTT \u2014 LINES: the chart has a new switch next to Rows: Plan + actual (as before, the planned line over the actual line), Plan only, or Actual only. Actual only colours each day by its step: green = completed, yellow = in progress and not delayed, red = overdue (a running step past its planned end, or a step not started after its planned end \u2014 red from its planned start to today). The choice is remembered on this computer. Excel / PDF downloads are unchanged (plan + actual)." },
   { date:"14 Nov 2026", summary:"Built on 2026-11-14T02:00:00Z, on top of 2026-11-13T17:30:00Z. NEEDS SQL: structure_pr_2026-11-14.sql (BOTH companies, before deploying). PURCHASE REQUISITION (PR build): one PR per contract (PR-260180; stock contracts PR-ST/\u2026), made by itself when a Super Admin approves the Purchase BOM \u2014 the lines to buy (stock set aside left out; packing stays on the packing box). No editing: changes are amendments A1, A2 \u2026 with a reason (by hand on the PR, or by themselves when the Purchase BOM is re-approved); an OA amendment that changes qty / items tells the PR posts to check the PR. The Stores In Charge or the Purchase Manager post releases the PR and each amendment (Purchase \u203a Procurement \u203a Purchase Requisitions, Stores \u203a Inventory \u203a Purchase Requisitions, or the card on the Order Status board) \u2014 the first release is the board\u2019s PR release. POs: tick PR lines \u2192 Make PO fills a new PO; every PO line can pick its PR line (else it matches by material). A PO cannot be approved while its PR waits for release, nor go over a PR line\u2019s qty or buy in another unit. PR PDF opens in the preview. Contracts past PR release before this build get no PR (their POs work as before). The Super Admin purchase approval after PR release is unchanged." },
   { date:"13 Nov 2026", summary:"Built on 2026-11-13T17:30:00Z, on top of 2026-11-13T17:00:00Z. No SQL. PO PRICE IS MANDATORY: an Order Acceptance cannot be approved (Commercial Terms, or the technical approval where it is asked) while any Sl No has no client PO price. The button shows \u201cPending \u2014 why?\u201d and the box says \u201cNo client PO price on Sl 1, 2 \u2014 the PO price is mandatory\u201d with where to enter it (Cart \u203a PO price column). The approval button comes back as soon as the last price is saved. The Deletion Code override does not skip it. (260165 reached the Purchase BOM with no PO price on Sl 1 and 2, so its Purchase BOM had no PO value or material %.)" },
   { date:"13 Nov 2026", summary:"Built on 2026-11-13T17:00:00Z, on top of 2026-11-13T16:30:00Z. No SQL. \ud83d\udd14 BELL LIST ON EVERY BOARD: what the bell asks of a person is now also the first list on their board (the bell stays). Do it \u2014 bells with a button to press, cleared by themselves when the job is done; Look at it \u2014 bells that point to a record, cleared with \u2713 Done; For your information \u2014 collapsed at the bottom, cleared with \u2713 Seen. Each has a due date: the app's own rule for that kind (approvals 2 working days), otherwise 3 working days after the bell came; past it the item shows stale in red, on top, like an overdue card. Bells that only open a task card already on the board, and OA approval bells (already in \u2705 My approvals), are not repeated. From before this build only the open Do it bells of the last 30 days are brought in; older Look at it / information bells are left as they are. Others see a person's Bell list on that person's board; only the owner presses its buttons." },
@@ -45930,8 +45942,9 @@ function PbModal({ cn, user, onClose }){
     let ls = g.row ? (g.row.lines||[]) : [];
     const editable = !g.row || ["draft","back"].includes(g.row.status);
     if(!g.row && !osStaleGate("pbm", cn)){ onClose && onClose(); return; }   // Build 4: a stale Purchase BOM stops new ones (not the one that clears it)
-    if(!g.row || (rebuild && editable)) ls = await pbBuild(cn, g.row);
-    setSt({ g, who, pack, packRow:pk.row||null, po, client:(so&&so.customer_name)||"", plan }); setLines(ls); setDirty(!g.row || !!rebuild);
+    const autoBuild = !!g.row && editable && !(g.row.lines||[]).length;   // 2026-11-15T09:30:00Z (refresh build): an empty draft fills itself
+    if(!g.row || (rebuild && editable) || autoBuild) ls = await pbBuild(cn, g.row);
+    setSt({ g, who, pack, packRow:pk.row||null, po, client:(so&&so.customer_name)||"", plan }); setLines(ls); setDirty(!g.row || !!rebuild || (autoBuild && ls.length>0));
   };
   useEffect(()=>{ load(false);
     sb.from("vendor_tbl").select("vendor_name").eq("is_archived",false).order("vendor_name").then(r=>{ if(r && !r.error) setVendors((r.data||[]).map(v=>v.vendor_name)); });
@@ -46481,6 +46494,7 @@ function PrModal({ cn, user, onClose }){
   const run = async(tag, fn)=>{ setBusy(tag); setMsg(""); try{ await fn(); }catch(e){ setMsg(String((e&&e.message)||e)); } setBusy(""); };
   const release = ()=> run("rel", async()=>{
     if(!W || !W.mayRelease){ noPermission("release the PR",{ posts:["stores","purchase_manager"], roles:["super_admin"] }); return; }
+    { const hb = await ohPoBlock(cn, "its PR cannot be released"); if(hb){ setMsg(hb); return; } }   // 2026-11-15T06:00:00Z: ON HOLD
     const n = Number(pr.amend_no)||0;
     if(!confirm("Release "+prqLabel(pr)+" ("+label+")?\n\n"+(n ? "Amendment A"+n+": "+(((pr.amends||[]).find(a=>a.no===n)||{}).reason||"") : prLive(pr).length+" line(s) to buy")+"\n\nThe Purchase posts can then make POs from it.")) return;
     if(!pbIsStock(cn)){ const { data: st } = await sb.from("order_stage_tbl").select("pr_released_at").eq("contract_number",String(cn)).maybeSingle();
@@ -46757,6 +46771,26 @@ function pgTplPairs(rows, lvl){ const out = []; rows.forEach(r=>{
   const split = pgDisplayRows(r);
   if(split){ split.forEach(g=>{ out.push({ r, title:g.title, steps:g.steps, ctx:r.steps, sub:false, dk:"General|"+g.k }); if(lvl==="step" && g.steps.length>1) g.steps.forEach(st=>out.push({ r, title:st.label, steps:[st], ctx:r.steps, sub:true, dk:"General|"+g.k })); }); return; }
   out.push({ r, title:r.title, steps:r.steps, sub:false }); if(lvl==="step") r.steps.forEach(st=>out.push({ r, title:st.label, steps:[st], ctx:r.steps, sub:true })); }); return out; }
+// ---- 2026-11-14T03:00:00Z: the template Gantt can show Plan + actual (as before), Plan only, or Actual only.
+// Actual only colours each day by the state of its step: green = completed, yellow = in progress and not delayed,
+// red = overdue (a running step past its planned end, or a step not started whose planned end has passed — red from
+// its planned start to today). Where steps overlap on a day, red wins over yellow, yellow over green.
+const PG_ACT3 = { G:"#2E7D32", Y:"#F2C94C", R:"#C00000" };
+function pgActStates(steps, today){
+  const S = {}, rank = { G:1, Y:2, R:3 };
+  const put = (d, k, ch)=>{ const o = S[d]; if(!o || rank[k]>rank[o.k]) S[d] = { k, ch }; };
+  steps.forEach(st=>{
+    let pe = pgDue(st.plan && st.plan.e), ps = pgDue(st.plan && st.plan.s) || pe;
+    if(pe && st.plan.e && st.plan.e.t==="w") pe = pgWe(pe); if(ps && st.plan.s && st.plan.s.t==="w" && pgDue(st.plan.s)) ps = pgWs(ps);
+    let as = pgDue(st.act && st.act.s) || pgDue(st.act && st.act.e); if(as && st.act.s && st.act.s.t==="w" && pgDue(st.act.s)) as = pgWs(as); if(as && as>today) as = "";
+    let ae = pgDue(st.act && st.act.e); if(ae && st.act.e.t==="w") ae = pgWe(ae); if(ae && ae>today) ae = today;
+    const ch = pgLetter(st);
+    if(as && ae){ for(let d = as; d<=ae; d = pgAdd(d,1)) put(d, "G", ch); return; }
+    if(as){ for(let d = as; d<=today; d = pgAdd(d,1)) put(d, pe && d>pe ? "R" : "Y", ch); return; }
+    if(pe && pe<today){ for(let d = ps||pe; d<=today; d = pgAdd(d,1)) put(d, "R", ch); } });
+  return S;
+}
+const pgShowLabel = { both:"Plan + actual", plan:"Plan only", act:"Actual only" };
 // ---- 2026-10-27T04:30:00Z: RIGHT-CLICK ZOOM on the template Gantt — one material drawn big, its steps in a table below ----
 const PG_ZNAME = { bom:"BOM", pbom:"Purchase BOM", draft:"PO Draft", appr:"PO Approval", rel:"PO Release", rs:"RFI Stamping", rt:"Test", fac:"At Our Factory" };
 const pgZShort = (s)=> s ? Number(s.slice(8,10))+" "+PG_MON[Number(s.slice(5,7))-1] : "";
@@ -46847,7 +46881,8 @@ function PgTplZoom({ p, today, deliv, idx, n, selKey, onClose, onPrev, onNext, o
     sec("Steps — table"),
     h("div",{style:{overflowX:"auto",padding:"0 12px 12px"}}, table));
 }
-function PgTplChart({ plan, rows, today, onRow, scale, lvl, full, scrollRef }){
+function PgTplChart({ plan, rows, today, onRow, scale, lvl, full, scrollRef, show }){
+  show = show || "both";   // 2026-11-14T03:00:00Z
   const [zm,setZm] = useState(null);   // right-click zoom: {k: the material row's key, sel: the step clicked}
   const lpRef = useRef(null);
   const range = pgTplRange(plan, rows, today), cols = pgTplCols(range, scale), bands = pgMonthBands(cols), daily = scale==="d";
@@ -46879,17 +46914,26 @@ function PgTplChart({ plan, rows, today, onRow, scale, lvl, full, scrollRef }){
       else if(e.key==="ArrowDown"||e.key==="ArrowUp"){ const tg = e.target && e.target.tagName; if(tg==="INPUT"||tg==="SELECT"||tg==="TEXTAREA") return; e.preventDefault(); zGo(e.key==="ArrowDown"?1:-1); } };
     window.addEventListener("keydown",k,true); return ()=>window.removeEventListener("keydown",k,true); },[zm, zi, mains.length]);
   const body = []; allPairs.forEach((p,pi)=>{ const t = pgTplPair(p.steps, today, p.ctx);
-    const cell = (c, planned, ci)=>{ const x = pgTplCell(t, c, planned, daily);
-      return h("td",{key:c.s,"data-ci":ci,style:{width:cw,minWidth:cw,maxWidth:cw,height:22,padding:0,textAlign:"center",fontSize:9.5,fontWeight:700,borderRight:bd,borderBottom:planned?bd:"2px solid #d9d6cc",
+    const S3 = show==="act" ? pgActStates(p.steps, today) : null;   // 2026-11-14T03:00:00Z
+    const lastRow = (planned)=> show==="both" ? !planned : true;
+    const cell = (c, planned, ci)=>{
+      if(S3 && !planned){ const hs = c.days.map(d=>S3[d]).filter(Boolean); const x = hs.find(y=>y.k==="R") || hs.find(y=>y.k==="Y") || hs[0];
+        return h("td",{key:c.s,"data-ci":ci,"data-pgact3":x?x.k:undefined,style:{width:cw,minWidth:cw,maxWidth:cw,height:22,padding:0,textAlign:"center",fontSize:9.5,fontWeight:700,borderRight:bd,borderBottom:"2px solid #d9d6cc",
+          background: x ? PG_ACT3[x.k] : c.wkend ? "#f7f6f1" : "#fff", color: x ? (x.k==="Y" ? "#5a4300" : "#fff") : "rgba(0,0,0,.6)", ...mark(c)}}, x && daily ? x.ch : ""); }
+      const x = pgTplCell(t, c, planned, daily);
+      return h("td",{key:c.s,"data-ci":ci,style:{width:cw,minWidth:cw,maxWidth:cw,height:22,padding:0,textAlign:"center",fontSize:9.5,fontWeight:700,borderRight:bd,borderBottom:lastRow(planned)?"2px solid #d9d6cc":bd,
         background: x ? colour[x.kind] : c.wkend ? "#f7f6f1" : "#fff", color: x && (x.kind==="A"||x.kind==="L") ? "#fff" : "rgba(0,0,0,.6)", ...mark(c)}}, x ? x.ch : ""); };
     const k = (p.dk||p.r.form||"General")+(p.sub?"|"+p.steps[0].key:"");
     const go = { onClick:()=>{ if(lpRef.fired && Date.now()-lpRef.fired<1500){ lpRef.fired = 0; return; } onRow && onRow(p.r); }, title:(onRow?"Click to see / fill the dates of "+p.r.title+" \u00b7 ":"")+"Right-click to zoom into "+(p.sub?p.r.title:p.title), style:{cursor:onRow?"pointer":"context-menu"} };
     const notStarted = !t.started;
-    body.push(h("tr",{key:"p"+k,"data-pgtpl":k,...go,...zEv(p,t,true)},
-      h("td",{rowSpan:2,style:{...fix(0,W0,{textAlign:p.sub?"left":"center",fontWeight:p.sub?400:700,color:p.sub?colors.muted:colors.text,fontSize:p.sub?11:12,whiteSpace:"normal",lineHeight:1.2,borderBottom:"2px solid #d9d6cc",paddingLeft:p.sub?16:6})}},p.sub?"↳ "+p.title:p.title),
-      h("td",{style:fix(W0,W1)},"Planned"), h("td",{style:fix(W0+W1,W2)},t.PS?pgDmy(t.PS):"—"), h("td",{style:fix(W0+W1+W2,W3,{borderRight:"2px solid "+colors.border})},t.PE?pgDmy(t.PE):"no dates"),
+    const titleTd = h("td",{rowSpan:show==="both"?2:1,style:{...fix(0,W0,{textAlign:p.sub?"left":"center",fontWeight:p.sub?400:700,color:p.sub?colors.muted:colors.text,fontSize:p.sub?11:12,whiteSpace:"normal",lineHeight:1.2,borderBottom:"2px solid #d9d6cc",paddingLeft:p.sub?16:6})}},p.sub?"↳ "+p.title:p.title);
+    const pb = show==="plan" ? { borderBottom:"2px solid #d9d6cc" } : {};
+    if(show!=="act") body.push(h("tr",{key:"p"+k,"data-pgtpl":k,...go,...zEv(p,t,true)},
+      titleTd,
+      h("td",{style:fix(W0,W1,pb)},"Planned"), h("td",{style:fix(W0+W1,W2,pb)},t.PS?pgDmy(t.PS):"—"), h("td",{style:fix(W0+W1+W2,W3,{borderRight:"2px solid "+colors.border,...pb})},t.PE?pgDmy(t.PE):"no dates"),
       cols.map((c,ci)=>cell(c,true,ci))));
-    body.push(h("tr",{key:"a"+k,"data-pgtplact":k,...go,...zEv(p,t,false)},
+    if(show!=="plan") body.push(h("tr",{key:"a"+k,"data-pgtplact":k,...go,...zEv(p,t,false)},
+      show==="act" ? titleTd : null,
       h("td",{style:fix(W0,W1,{borderBottom:"2px solid #d9d6cc"})},"Actual"), h("td",{style:fix(W0+W1,W2,{borderBottom:"2px solid #d9d6cc"})},t.AS?pgDmy(t.AS):"—"),
       h("td",{"data-pgns":notStarted?"1":undefined,style:fix(W0+W1+W2,W3,{borderRight:"2px solid "+colors.border,borderBottom:"2px solid #d9d6cc",...(notStarted?{background:PG_TPL.late,color:"#fff",fontWeight:700}:{})})},notStarted?"not started":t.done?pgDmy(t.AE):"running"),
       cols.map((c,ci)=>cell(c,false,ci)))); });
@@ -47976,6 +48020,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
   useEffect(()=>{ if(initial && initial.contract){ setCur(String(initial.contract)); try{ localStorage.setItem("pg_cur",String(initial.contract)); }catch(e){} } },[initial && initial.contract]);   // 147: opened from a card
   const [chartMode,setChartMode] = useState("plan");   // 144: opens in Plan every time (157: the old Plan / Progress charts are replaced by the template chart)
   const [tplLvl,setTplLvl] = useState("mat");   // 157: one row pair per material, or the steps too
+  const [tplShow,setTplShow] = useState(()=>{ try{ const v = localStorage.getItem("pg_show"); return ["both","plan","act"].includes(v) ? v : "both"; }catch(e){ return "both"; } });   // 2026-11-14T03:00:00Z
   const [chartScale,setChartScale] = useState(()=>{ try{ return localStorage.getItem("pg_scale")||"w"; }catch(e){ return "w"; } });
   const [fullScreen,setFullScreen] = useState(false);
   const [exporting,setExporting] = useState("");
@@ -47987,7 +48032,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
   const [stripOpen,setStripOpen] = useState({});   // 154: bars under each line item, folded unless opened
   const chartRef = useRef(null);
   const jumpToday = ()=>{ const box = chartRef.current; if(!box) return; const th = box.querySelector('[data-pgtoday="1"]'); if(th) box.scrollLeft = Math.max(0, th.offsetLeft - 390 - box.clientWidth/4); };
-  useEffect(()=>{ const t = setTimeout(jumpToday,60); return ()=>clearTimeout(t); },[cur, chartScale, chartMode, tplLvl, fullScreen, view]);
+  useEffect(()=>{ const t = setTimeout(jumpToday,60); return ()=>clearTimeout(t); },[cur, chartScale, chartMode, tplLvl, tplShow, fullScreen, view]);
   useEffect(()=>{ if(!fullScreen) return; const k = (e)=>{ if(e.key==="Escape") setFullScreen(false); }; window.addEventListener("keydown",k); return ()=>window.removeEventListener("keydown",k); },[fullScreen]);
 
   useEffect(()=>{ (async()=>{ const emp = await pgEmp(user); setMe((emp&&emp.employee_name)||user?.username||""); const ce = await pgCanEdit(user); setCanEdit(ce); pgFormCan(user, ce).then(setCanForm).catch(()=>{}); setStoresOnly(!ce && await pgStoresCan(user)); })(); },[user && user.id]);
@@ -48369,6 +48414,8 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
       // 144: chart controls — Plan / Progress, Weeks / Days, Jump to today, Full screen, downloads
       (!ed && view==="chart") ? h("div",{style:{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",padding:"0 12px 8px",fontSize:11.5,color:colors.muted}},
         "Rows:", seg([["mat","One row per material"],["step","Show the steps"]], tplLvl, setTplLvl),
+        h("span",{style:{marginLeft:8}},"Lines:"), seg([["both","Plan + actual"],["plan","Plan only"],["act","Actual only"]], tplShow, (v)=>{ setTplShow(v); try{ localStorage.setItem("pg_show",v); }catch(e){} }),   // 2026-11-14T03:00:00Z
+        tplShow==="act" ? h("span",{"data-testid":"pg-act3-key",style:{display:"inline-flex",gap:8,alignItems:"center",marginLeft:4}}, [["G","Completed"],["Y","In progress, on time"],["R","Overdue"]].map(([k,t])=>h("span",{key:k,style:{display:"inline-flex",gap:3,alignItems:"center"}}, h("span",{style:{width:12,height:10,background:PG_ACT3[k],display:"inline-block",borderRadius:2}}), t))) : null,
         h("span",{style:{marginLeft:8}},"Show:"), seg([["w","Weeks"],["d","Days"]], chartScale, (v)=>{ setChartScale(v); try{ localStorage.setItem("pg_scale",v); }catch(e){} }),
         h("button",{style:{...btnSmall,marginLeft:8},onClick:jumpToday},"Jump to today"),
         PgZBadge("Right-click a row to zoom",{marginLeft:6}),
@@ -48376,7 +48423,7 @@ function ProcGanttScreen({ user, onGoToTab, initial, onOpenCard }){
           h("button",{style:btnSmall,disabled:!!exporting,onClick:async()=>{ setExporting("x"); try{ await pgExportExcel(plan, shown, today, chartScale, tplLvl); }catch(e){ alert("Could not make the Excel file:\n\n"+(e.message||e)); } finally{ setExporting(""); } }},exporting==="x"?"Making Excel…":"Download Excel"),
           h("button",{style:btnSmall,disabled:!!exporting,onClick:()=>{ setExporting("p"); setTimeout(()=>{ try{ pgExportPdf(plan, shown, today, chartScale, tplLvl); }catch(e){ alert("Could not make the PDF:\n\n"+(e.message||e)); } finally{ setExporting(""); } },30); }},exporting==="p"?"Making PDF…":"Download PDF"),
           h("button",{style:{...btnSmall,fontWeight:700},onClick:()=>setFullScreen(f=>!f)},fullScreen?"Exit full screen":"Full screen"))) : null,
-      (!ed && view==="chart") ? h(PgTplChart,{plan, rows:shown, today, scale:chartScale, lvl:tplLvl, full:fullScreen, scrollRef:chartRef, onRow:(canEdit||storesOnly) ? (r)=>openEdit(r.form) : null}) : table());
+      (!ed && view==="chart") ? h(PgTplChart,{plan, rows:shown, today, scale:chartScale, lvl:tplLvl, show:tplShow, full:fullScreen, scrollRef:chartRef, onRow:(canEdit||storesOnly) ? (r)=>openEdit(r.form) : null}) : table());
 
   const modal = (title, body, foot, onClose, wide)=> h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:1300,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"30px 16px",overflow:"auto"}},
     h("div",{style:{background:"#fff",borderRadius:10,width:wide?1100:600,maxWidth:"100%",padding:"16px 18px"}},
@@ -62642,6 +62689,7 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
   };
   const save = async(extra)=>{
     const e = validate(); if(e){ alert(e); return null; }
+    if(!po.id){ const hb = await ohPoBlock(po.contract_ref, "no new PO can be made"); if(hb){ alert(hb); return null; } }   // 2026-11-15T06:00:00Z: ON HOLD
     if(po.id && Number(po.rev)>0){ const g = await purAmdGuard(po, lines); if(g){ alert(g); return null; } }   // 217
     setBusy(true); setMsg("");
     try{
@@ -62684,6 +62732,7 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
     finally{ setBusy(false); }
   };
   const submit = async(skipAsk)=>{
+    { const hb = await ohPoBlock(po.contract_ref, "no PO can be sent for approval"); if(hb){ alert(hb); return; } }   // 2026-11-15T06:00:00Z: ON HOLD
     if(po.po_kind!=="SPO"){ const m = po.mtc||{};   // 217
       if(!m.type){ alert("Set the material certificate first (Documents tab): 3.1, 3.2, 3.1 & 3.2, Not required or Others."); setTab("docs"); return; }
       if(m.type==="Others" && !String(m.other||"").trim()){ alert("Material certificate is Others: say which certificate (Documents tab)."); setTab("docs"); return; }
@@ -62708,6 +62757,7 @@ function PurchaseOrderEditor({ user, who:whoIn, poId, createKind, onClose, onCha
   };
   const approve = async(which, stagesIn)=>{   // 237: the Purchase Manager's approval completes it; a 3.2 PO needs its inspection stages
     if(dirty){ alert("Save first."); return; }
+    { const hb = await ohPoBlock(po.contract_ref, "no PO can be approved"); if(hb){ alert(hb); return; } }   // 2026-11-15T06:00:00Z: ON HOLD
     { const g = await ospPurGate(po.contract_ref, po.po_no);   // 2026-11-01T06:00:00Z: no PO release before the Super Admin approves the purchase
       if(!g.ok){ alert("Contract "+g.cn+" is waiting for "+(g.stage==="pr"?"its PR release (Stores / Purchase Manager)":g.stage==="pa"?"the purchase approval (Super Admin)":"its Purchase BOM approval (Super Admin) and then the PR release")+" on the Order Status board.\n\n"+po.po_no+" can stay a draft and be edited; it can be approved once the purchase is approved."); return; } }
     { const pe = await prPoGate(po, lines).catch(()=>"");   // 2026-11-14T02:00:00Z: PR released, PR lines not exceeded
@@ -73335,6 +73385,15 @@ async function osPaidFromBooks(invIds){
   return res;
 }
 // Close the contract when every quantity is in lots and every lot is paid.
+// 2026-11-15T09:30:00Z (refresh build): the Contract Register line follows the OA — Cancelled / Closed
+async function regFollowOa(cn, oaStatus, by){
+  const s = /cancel/i.test(oaStatus||"") ? "Cancelled" : /closed/i.test(oaStatus||"") ? "Closed" : null; if(!s) return;
+  try{ const { data: r } = await sb.from("contract_register_tbl").select("status").eq("contract_number",String(cn)).maybeSingle();
+    if(!r || r.status===s || (s==="Closed" && r.status==="Cancelled")) return;
+    const { error } = await sb.from("contract_register_tbl").update({ status:s }).eq("contract_number",String(cn));
+    if(!error) await logAudit("UPDATE","contract_register_tbl",String(cn),"Register status "+(r.status||"—")+" → "+s+" (follows the OA)",by||"App",{ status:r.status },{ status:s });
+  }catch(e){ console.warn("register follow", e); }
+}
 async function osCheckClose(cn, by){
   try{
     const { data: so } = await sb.from("sale_order_tbl").select("id,status,customer_name").eq("contract_number",cn).maybeSingle();
@@ -73352,6 +73411,7 @@ async function osCheckClose(cn, by){
 async function osCloseContract(cn, so, by, why){
   const { error } = await sb.from("sale_order_tbl").update({ status:"Closed" }).eq("contract_number",cn);
   if(error){ console.warn("close contract", error); return; }
+  await regFollowOa(cn, "Closed", by);   // 2026-11-15T09:30:00Z
   await logAudit("UPDATE","sale_order_tbl",cn,"Contract closed by the Order Status board — "+why,by||"App",null,null);
   await loadPostPeople(true);
   await notifyPeople([...postHolders("production_manager"), ...postHolders("accounts"), ...postHolders("sales_head")], "✓ Contract "+cn+(so && so.customer_name?" ("+so.customer_name+")":"")+" is closed — "+why+".", "order_status", { kind:"open", open:{ contract:cn }, help:{ btn:"Open the Order Acceptance", what:"For your information — contract closed", do:["Nothing to press."] } });
@@ -73857,7 +73917,8 @@ function OsDashboard({ rows, lots, dcBy, invBy }){
 }
 // 2026-11-01T10:00:00Z: every live contract (and lot) under the stage it stands at — Order Acceptance pending → Payment received — on screen,
 // as one PDF (one section per stage) or one stage at a time; Excel too. Follows the board's search / one-order / Mine filters.
-const OS_REP_STAGES = ()=> [...OSP_COLS.map((c,i)=>({ id:"p"+i, label:(i+1)+" · "+c.label })), ...OS_COLS.map(c=>({ id:"c"+c.n, label:OSN(c.n)+" · "+c.label }))];
+const OH_REP_LABEL = "0 · On hold";   // 2026-11-15T06:00:00Z
+const OS_REP_STAGES = ()=> [{ id:"phold", label:OH_REP_LABEL }, ...OSP_COLS.map((c,i)=>({ id:"p"+i, label:(i+1)+" · "+c.label })), ...OS_COLS.map(c=>({ id:"c"+c.n, label:OSN(c.n)+" · "+c.label }))];
 function osRepGroups(preRows, rows){
   return OS_REP_STAGES().map(st=>({ ...st, rows: st.id[0]==="p" ? preRows.filter(r=>r.colLabel===st.label) : rows.filter(r=>"c"+r.col===st.id) }));
 }
@@ -73961,6 +74022,7 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
   const [badges,setBadges] = useState(ospBadgesShown()); const [ownN,setOwnN] = useState({}); const [paSend,setPaSend] = useState(null);   // Label
   const [pbOpen,setPbOpen] = useState(null);   // 2026-11-10T17:00: the Purchase BOM
   const [prOpen,setPrOpen] = useState(null);   // 2026-11-14T02:00:00Z: the PR
+  const [ohPutOpen,setOhPutOpen] = useState(null); const [ohRelOpen,setOhRelOpen] = useState(null);   // 2026-11-15T06:00:00Z: ON HOLD
   useEffect(()=>{ (async()=>{ try{ await loadPostPeople(); const sup = await superAdminNames(); const n = {};
     OSP_COLS.forEach(c=>{ n[c.k] = [...(c.posts||[]).map(k=>postHolders(k).join(", ")), ...(c.sa?[sup.join(", ")]:[])].filter(Boolean).join(" · "); });
     const lotPost = { prod:"production_manager", dc:"production_manager", qc:"qc", acc:"accounts", irn:"accounts", send:"accounts", clear:"stores", ship:"accounts", paid:"accounts" };
@@ -74010,6 +74072,7 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
   if(D.err) return h("div",{style:{padding:20,color:colors.danger}},D.err);
   const can = (k)=> despCan(k, user, me, P);
   const isSA = user?.role==="super_admin";
+  const ohCanPut = isSA || OH_PUT_POSTS.some(p=>(myKeys||[]).includes(p)); const ohCanRel = isSA || OH_REL_POSTS.some(p=>(myKeys||[]).includes(p));   // 2026-11-15T06:00:00Z
   const soBy = new Map(D.sos.map(s=>[String(s.contract_number), s]));
   const dcBy = new Map(D.dcs.map(d=>[d.id, d]));
   const invBy = new Map(D.invs.map(i=>[i.dc_id, i]));
@@ -74027,9 +74090,13 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
   // the cards, per column
   const cols = [...OS_COLS, ...OS_INV_COLS].map(()=>[]);   // 344: index n-1 (8, 9 = the invoice columns)
   const pre = OSP_COLS.map(()=>[]);   // 2026-11-01T06:00:00Z: the six stages before production
+  const holdList = [];   // 2026-11-15T06:00:00Z: 0 · On hold — the first list
+  const ohOf = (cn)=> (M && M.oh && M.oh.get(String(cn))) || null;
   const preMine = (k)=>{ const c = OSP_COLS.find(z=>z.k===k); if(!c) return false; if(c.sa) return isSA; if(k==="bom") return (myKeys||[]).includes("technical_head"); return (c.posts||[]).some(p=>(myKeys||[]).includes(p)); };
   D.sos.forEach(s=>{
     const cn = String(s.contract_number); if(/cancel/i.test(s.status||"")) return;
+    { const hd = ohOf(cn); if(hd && !/closed/i.test(s.status||"")){ if(one && cn!==String(one)) return; if(!match(cn, s.customer_name, s.basis_number)) return; if(mine && !ohCanRel) return;
+      holdList.push({ kind:"hold", cn, s, hd, client:s.customer_name||"" }); return; } }
     const p = placeBy.get(cn), lots = lotsOf.get(cn)||[];
     if(p && !lots.length){
       if(one && cn!==String(one)) return;
@@ -74055,12 +74122,15 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
     cols[0].push({ kind:"contract", cn, s, ord, left, lots, nextK:"pm", since:s.created_at, ps });
   });
   // register lines with no Order Acceptance yet -> 1 · Order Acceptance pending
-  if(M && !M.missing) M.reg.forEach((r, cn)=>{ if(soBy.has(cn)) return; const ps = ospStage(cn, M); if(ps.stage!=="so") return;
+  if(M && !M.missing) M.reg.forEach((r, cn)=>{ if(soBy.has(cn)) return;
+    { const hd = ohOf(cn); if(hd){ if(one && cn!==String(one)) return; if(!match(cn, r.client, r.po_no||r.loi_ref)) return; if(mine && !ohCanRel) return; holdList.push({ kind:"hold", cn, s:{ customer_name:r.client||"" }, hd, client:r.client||"" }); return; } }
+    const ps = ospStage(cn, M); if(ps.stage!=="so") return;
     if(!match(cn, r.client, r.po_no||r.loi_ref)) return; if(one && cn!==String(one)) return; if(mine && !preMine("so")) return;
     pre[OSP_COLS.findIndex(c=>c.k==="so")].push({ kind:"pre", cn, s:{ customer_name:r.client||"" }, ps, client:r.client||"" }); });
   D.lots.forEach(l=>{
     if(l.status==="Returned") return;
     const dc = dcBy.get(l.dc_id)||null; const c = osLotCol(l, dc); if(!c) return;
+    if(c<=5 && ohOf(l.contract_number)) return;   // 2026-11-15T06:00:00Z: a held order's lots wait in the hold list (shipped / paid lots stay)
     if(c===7 && !showOld && osDays(l.paid_at)>30) return;
     const s = soBy.get(String(l.contract_number))||{};
     if(!match(l.contract_number, s.customer_name, s.basis_number)) return;
@@ -74198,6 +74268,20 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
     try{ await ospPress(k==="pur"?"start":k, x.cn, user, extra); }catch(e){ alert(String(e.message||e)); }
     setPBusy(""); load();
   };
+  const holdCard = (x)=>{   // 2026-11-15T06:00:00Z
+    const hd = x.hd; const rv = hd.review_date ? String(hd.review_date).slice(0,10) : ""; const late = rv && rv < ospToday();
+    const pill = (t,bg,fg)=> h("span",{style:{fontSize:10.5,fontWeight:700,borderRadius:9,padding:"1px 7px",background:bg,color:fg,marginRight:4,display:"inline-block",marginTop:3}},t);
+    return h("div",{key:"oh"+x.cn,"data-testid":"oh-card-"+x.cn,style:{background:"#fff",border:"1px solid #e3b4b4",borderLeft:"4px solid #9b2c2c",borderRadius:8,padding:"7px 9px",marginBottom:7,fontSize:12}},
+      h("div",{style:{display:"flex",gap:6,alignItems:"baseline"}}, h("b",{style:{fontSize:13}},x.cn), h("span",{style:{color:colors.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}},x.client||"")),
+      h("div",{style:{fontWeight:600,color:"#9b2c2c",marginTop:2}},hd.reason_label||"On hold"),
+      hd.note ? h("div",{style:{color:colors.text,marginTop:2}},hd.note) : null,
+      h("div",{style:{color:colors.muted,marginTop:3}},"Held from: "+(hd.held_from_label||"—")+(hd.release_to && hd.release_to!==hd.held_from_k?" · release to "+ospLabelOf(hd.release_to):"")),
+      h("div",{style:{color:colors.muted}},"Since "+fmtDMY(hd.held_at)+" ("+wdSince(hd.held_at)+" wd) by "+(hd.held_by||"?")+(hd.code_by?" · code "+hd.code_by:"")),
+      h("div",null, pill(ohPriceTxt(hd.price_impact), hd.price_impact==="yes"?"#fff4d6":"#f0efe8", hd.price_impact==="yes"?"#8a5a00":colors.muted),
+        pill(hd.clock_pause?"⏸ Clock stopped":"Clock running", hd.clock_pause?"#e8f0fa":"#fdecea", hd.clock_pause?"#2a5a96":"#a3312a"),
+        rv ? pill("Review "+fmtDMY(rv), late?"#fdecea":"#eef3fb", late?"#a3312a":"#2a5a96") : null),
+      ohCanRel ? h("button",{"data-testid":"oh-release-"+x.cn,onClick:()=>setOhRelOpen(hd),style:{...btnSmall,marginTop:6,background:"#0f7a5c",color:"#fff",borderColor:"#0f7a5c",fontSize:11.5}},"▶ Release") : null);
+  };
   const preCard = (x, k)=>{
     const ps = x.ps, st = ps.st||{}, op = (st.opened||{})[k==="pur"&&ps.pct>=100?"start":k];
     const col = OSP_COLS.find(c=>c.k===k); const wd = op ? wdSince(op) : 0; const late = col.days>0 && op && wd>col.days;
@@ -74285,7 +74369,7 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
       const ps = x.ps; if(ps && ps.forms && ["bom","pbm","pbe","pba","pr","pa","pur","prod"].includes(k)) ps.forms.forEach(f=>out.push([f+(ps.fac && ps.fac.has(f)?" ✓":""), ps.fac && ps.fac.has(f)?"ok":"gy"]));
       if(ps && ps.st && ps.st.pur_approved_at && ps.st.pa_pct!=null) out.push(["Approved "+ps.st.pa_pct+"%","bl"]);
       return out; }catch(e){ return []; } },
-    opts: (r)=>{ const out = [];
+    opts: (r)=>{ const out = []; if(r.k==="hold") return out;   // 2026-11-15T06:00:00Z: a held order moves only by Release
       if(r.k){ const fi = ospIx(r.k); const own = preMine(r.k);
         const nx = OSP_ORDER[fi+1], pv = OSP_ORDER[fi-1];
         const stuck = r.x && r.x.ps ? r.x.ps.soStuck : null;
@@ -74358,7 +74442,7 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
       if(error) return { error:"Not recorded: "+error.message };
       await logAudit("UPDATE","sale_order_tbl",String(r.cn),"OA issued "+d+" to "+String(mail).trim()+" (CC "+OA_CC+") — recorded on the Stage report",by,null,null);
       load(); return { ok:true }; },
-    bulkable: (r)=> isSA && (!!r.k || (r.x && (r.x.kind==="contract" || r.x.kind==="placed"))),
+    bulkable: (r)=> isSA && r.k!=="hold" && (!!r.k || (r.x && (r.x.kind==="contract" || r.x.kind==="placed"))),
     bulk: async(list, to, why)=>{
       if(!isSA) return; const done = []; const errs = [];
       if(/^c\d$/.test(to)){ const col = Number(to.slice(1));
@@ -74378,10 +74462,12 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
       load(); return { done, errs };
     },
   };
-  const preRows = pre.flatMap((list,i)=>list.map(x=>({ x, col:0, k:OSP_COLS[i].k, colLabel:(i+1)+" · "+OSP_COLS[i].label, name:x.cn, cn:x.cn, lot:"", client:x.client||"", po:(x.s&&x.s.basis_number)||"", nos:"", sls:"",
-    where: OSP_COLS[i].k==="pur" ? "Material in "+x.ps.pct+"%" : OSP_COLS[i].k==="wo" ? ((x.s&&x.s.go_ahead_state)==="Start Engineering" ? "Engineering started" : "Work order not released") : OSP_COLS[i].label, whoName:ospPostText(OSP_COLS[i].posts, OSP_COLS[i].sa), days:osDays(((x.ps.st||{}).opened||{})[OSP_COLS[i].k]), dc:"", dcStatus:"", gp:"", inv:"", amount:null, due:"", overdue:false, qcDocs:"", shipDocs:"", mode:"" })));
+  const preRows = [...holdList.map(x=>({ x, col:0, k:"hold", colLabel:OH_REP_LABEL, name:x.cn, cn:x.cn, lot:"", client:x.client||"", po:(x.s&&x.s.basis_number)||"", nos:"", sls:"",
+      where:"On hold — "+(x.hd.reason_label||"")+(x.hd.note?": "+x.hd.note:"")+" · held from "+(x.hd.held_from_label||"—")+" · review "+(x.hd.review_date?fmtDMY(x.hd.review_date):"—"), whoName:"Sales Head · Technical Head · VP Projects", days:osDays(x.hd.held_at), dc:"", dcStatus:"", gp:"", inv:"", amount:null, due:"", overdue:false, qcDocs:"", shipDocs:"", mode:"" })),
+    ...pre.flatMap((list,i)=>list.map(x=>({ x, col:0, k:OSP_COLS[i].k, colLabel:(i+1)+" · "+OSP_COLS[i].label, name:x.cn, cn:x.cn, lot:"", client:x.client||"", po:(x.s&&x.s.basis_number)||"", nos:"", sls:"",
+    where: OSP_COLS[i].k==="pur" ? "Material in "+x.ps.pct+"%" : OSP_COLS[i].k==="wo" ? ((x.s&&x.s.go_ahead_state)==="Start Engineering" ? "Engineering started" : "Work order not released") : OSP_COLS[i].label, whoName:ospPostText(OSP_COLS[i].posts, OSP_COLS[i].sa), days:osDays(((x.ps.st||{}).opened||{})[OSP_COLS[i].k]), dc:"", dcStatus:"", gp:"", inv:"", amount:null, due:"", overdue:false, qcDocs:"", shipDocs:"", mode:"" })))];
   const oneList = Array.from(new Set([...D.sos.filter(s=>!/cancel|closed/i.test(s.status||"")).map(s=>String(s.contract_number)), ...(M && !M.missing ? Array.from(M.reg.keys()).filter(cn=>{ const r = M.reg.get(cn); return r && r.status==="Pending"; }) : [])])).sort();
-  const total = cols.reduce((n,c)=>n+c.length,0) + pre.reduce((n,c)=>n+c.length,0);
+  const total = cols.reduce((n,c)=>n+c.length,0) + pre.reduce((n,c)=>n+c.length,0) + holdList.length;
   const myLots = rows.filter(r=>r.x.kind==="lot" && strict(r.x.nextK));
   // table + exports
   const TCOLS = [
@@ -74411,6 +74497,7 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
         view==="table" ? h(React.Fragment,null,
           h("button",{"data-testid":"os-xl",onClick:()=>exportRowsToExcel(TCOLS, [...preRows, ...rows], "Order Status", fname),style:btnSmall},"Excel"),
           h("button",{"data-testid":"os-pdf",onClick:()=>exportRowsToPdf("Order Status — "+osDmy(osIso())+(mine?" — waiting on "+(me||user.username):"")+(q?" — “"+q+"”":""), TCOLS.filter(c=>!["QC docs","Shipping docs","Sl Nos"].includes(c.label)), [...preRows, ...rows], fname),style:btnSmall},"PDF")) : null,
+        ohCanPut && M && !M.missing && !M.ohMissing ? h("button",{"data-testid":"oh-put-open",onClick:()=>setOhPutOpen({ cn:one||"" }),style:{...btnSmall,color:"#9b2c2c",borderColor:"#e3b4b4"}},"⏸ Put on hold") : null,
         canPlace ? h("button",{"data-testid":"os-place-open",onClick:()=>setPlaceOpen(true),style:btnSmall},"Place old contracts"+(placeOpenUntil?" (until "+osDmy(placeOpenUntil)+")":"")) : null,
         h("button",{"data-testid":"os-fullscreen",onClick:()=>setOsFs(v=>!v),title:osFs?"Back to the normal screen (Esc)":"The board fills the window; each list scrolls under its frozen heading",style:{...btnSmall,fontWeight:700}},osFs?"✕ Exit full screen":"⛶ Full screen"),
         h("button",{onClick:load,"data-testid":"os-refresh",style:btnSmall},"Refresh"))),
@@ -74435,7 +74522,14 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
     !osTwo ? h(OsTopScroll,{ key:"ts"+(osFs?1:0)+(hidePre?1:0) }) : null,
     h("div",{"data-testid":"os-lists","data-rows":osTwo?"2":"1",style: osFs ? {display:"flex",gap:10,overflowX:"auto",overflowY:"hidden",alignItems:"stretch",paddingBottom:6,flex:1,minHeight:0}
       : !osTwo ? {display:"flex",gap:10,overflow:"auto",alignItems:"flex-start",paddingBottom:10,maxHeight:"calc(calc(100vh / var(--uiz,1)) - 200px)"}
-      : {display:"grid",gridTemplateColumns:"repeat("+(OSP_COLS.length)+",minmax(118px,1fr))",gap:8,overflowX:"auto",alignItems:"start",paddingBottom:10}},   // 2026-11-12T22:00: two rows — 1–10 before production, then production to payment
+      : {display:"grid",gridTemplateColumns:"repeat("+(OSP_COLS.length+1)+",minmax(118px,1fr))",gap:8,overflowX:"auto",alignItems:"start",paddingBottom:10}},   // 2026-11-12T22:00: two rows — 1–10 before production, then production to payment
+      M && !M.missing ? h("div",{key:"ohcol","data-testid":"oh-col",style:{minWidth:osTwo?0:190,flex:"1 1 0",background:"#f4f2ea",borderRadius:10,padding:8,minHeight:120,...osColFs}},
+        h("div",{"data-testid":"os-head",style:{background:"#fbe3e3",color:"#9b2c2c",borderRadius:8,padding:"7px 10px",marginBottom:8,...osHeadFix}},
+          h("div",{style:{fontWeight:700,fontSize:13}},OH_REP_LABEL+"  ("+holdList.length+")"),
+          h("div",{style:{fontSize:11}},"Technical Head · VP Projects put on hold; Sales Head · Technical Head · VP Projects release"),
+          ohCanPut && !M.ohMissing ? h("button",{"data-testid":"oh-put-open2",onClick:()=>setOhPutOpen({ cn:one||"" }),style:{...btnSmall,fontSize:11,marginTop:4,background:"#fff"}},"⏸ Put an order on hold") : null),
+        h("div",{style:osBodyFs}, M.ohMissing ? h("div",{style:{fontSize:12,color:colors.danger,padding:"4px 6px"}},"Run "+OH_SQL+" (both companies) to use the hold list.")
+          : holdList.length ? holdList.map(holdCard) : h("div",{style:{fontSize:12,color:colors.mutedLight,padding:"4px 6px"}},"Nothing on hold."))) : null,
       M && !M.missing && hidePre ? h("div",{key:"prehid",onClick:()=>setHidePre(false),title:"Show the stages before production",style:{minWidth:46,maxWidth:46,background:"#efe9fb",borderRadius:10,padding:"8px 4px",cursor:"pointer",writingMode:"vertical-rl",fontSize:12,fontWeight:700,color:"#5b3fa3",textAlign:"center"}},"1–8 Before production ("+pre.reduce((n,c)=>n+c.length,0)+") ▸") : null,
       M && !M.missing && !hidePre ? OSP_COLS.map((c,i)=>h("div",{key:"p"+c.k,"data-testid":"osp-col-"+c.k,
           onDragOver:e=>{ if(!drag || !(drag.kind==="pre" || drag.kind==="contract")) return; e.preventDefault(); if(over!=="p"+c.k) setOver("p"+c.k); }, onDragLeave:()=>{ if(over==="p"+c.k) setOver(0); }, onDrop:e=>{ e.preventDefault(); dropPre(c.k); },
@@ -74456,6 +74550,8 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
     paSend ? h(OspPaSendModal,{ cn:paSend.cn, client:paSend.client, user, onClose:()=>setPaSend(null), onDone:()=>{ setPaSend(null); load(); } }) : null,
     pbOpen ? h(PbModal,{ cn:pbOpen.cn, user, onClose:()=>{ setPbOpen(null); load(); } }) : null,
     prOpen ? h(PrModal,{ cn:prOpen, user, onClose:()=>{ setPrOpen(null); load(); } }) : null,
+    ohPutOpen ? h(OhPutModal,{ user, M, oneList, presetCn:ohPutOpen.cn, onClose:()=>setOhPutOpen(null), onDone:()=>{ setOhPutOpen(null); appToast("Put on hold."); load(); } }) : null,
+    ohRelOpen ? h(OhReleaseModal,{ user, h0:ohRelOpen, onClose:()=>setOhRelOpen(null), onDone:()=>{ setOhRelOpen(null); appToast("Released from hold."); load(); } }) : null,
     ready ? h(OsItemsReady,{ cn:ready, so:soBy.get(String(ready)), user, me, P, onClose:()=>setReady(null), onDone:(lot)=>{ setReady(null); load(); if(lot && confirm(osLotName(lot)+" is made.\n\nMake its DC and packing slip now?")) setDcOpen({ new:lot.contract_number, lot:lot.id }); } }) : null,
     lotOpen ? (()=>{ const lt = D.lots.find(z=>z.id===Number(lotOpen)); return h(OsLotPanel,{ key:lotOpen+"|"+(lotIntent||""), lotId:Number(lotOpen), intent:lotIntent, needSql2:D.needSql2, user, me, P, so: lt ? soBy.get(String(lt.contract_number)) : null, sessionCompany, onOpenDc:(x)=>setDcOpen(x), onClose:()=>{ setLotOpen(null); setLotIntent(null); }, onChanged:load }); })() : null,
     docsFor ? (()=>{ const lt = D.lots.find(z=>z.id===Number(docsFor)); return lt ? h(OsDocsDialog,{ lot:lt, dc:dcBy.get(lt.dc_id)||null, user, me, P, onClose:()=>setDocsFor(null), onSaved:()=>{ setDocsFor(null); load(); } }) : null; })() : null,
@@ -74697,6 +74793,7 @@ async function socApply(o){
   // 6. whole: Stage, task cards, pending steps
   if(whole){
     await sb.from("sale_order_tbl").update({ status:"Cancelled" }).eq("contract_number",cn);
+    await regFollowOa(cn, "Cancelled", by); done.push("Contract Register line set to Cancelled");   // 2026-11-15T09:30:00Z
     try{ const { data: ts } = await sb.from("task_tbl").select("id").eq("ref",cn).neq("status","done");
       for(const t of (ts||[])){ await sb.from("task_tbl").update({ status:"done", moved_by:by, moved_at:now, moved_what:"Order cancelled: "+reasonTxt }).eq("id",t.id); try{ await taskLog(t.id, by, "Closed — order cancelled: "+reasonTxt); }catch(x){} }
       if((ts||[]).length) done.push((ts||[]).length+" task card(s) closed"); }catch(e){}
@@ -75080,6 +75177,270 @@ async function ospMayAct(k, user){
   if(!col || col.sa) return false;
   try{ const { keys } = await myPostKeys(user); return (col.posts||[]).some(p=>(keys||[]).includes(p)); }catch(e){ return false; }
 }
+// ---------------------------------------------------------------- 2026-11-15T06:00:00Z: ON HOLD — orders in turmoil
+// One list, the first on the Order Status board. Put on hold by the Technical Head or VP Projects post with an Order hold code
+// (Sales Head post / Super Admins). The reason decides who gets the Monday card, the price question and whether the
+// delivery clock stops. While on hold: no new PO, no PO sent for approval or approved, no PR release. Release any time by the
+// Sales Head, Technical Head or VP Projects post with a reason — it picks up where it left off (or at a stage they choose),
+// and asks: keep the delivery commitment or a changed date. Nothing on the Gantt, POs or PR is touched.
+const OH_SQL = "structure_order_hold_2026-11-15.sql";
+const OH_PUT_POSTS = ["technical_head","vp_projects"];
+const OH_REL_POSTS = ["sales_head","technical_head","vp_projects"];
+const OH_REVIEW_POSTS = ["sales_head","vp_projects"];
+const OH_EST_POSTS = ["estimation_engineer","estimation_head","technical_head"];   // the first post with holders makes the revised cost
+const OH_CARD_POSTS = [["fse","The FSE (account owner)"],["purchase_manager","Purchase Manager"],["qc","QC"],["production_manager","Production Manager"],["doc_controller","Document Controller"],["accounts","Accounts"],["sales_head","Sales Head"],["putter","Whoever puts it on hold"]];
+const ohMissingErr = (e)=> /order_hold|relation|schema cache|does not exist/i.test(String((e&&e.message)||e||""));
+const ohToday = ()=> toISODate(new Date());
+function ohMon(iso){ const d = new Date(String(iso||ohToday()).slice(0,10)+"T12:00:00"); d.setDate(d.getDate()-((d.getDay()+6)%7)); return toISODate(d); }
+function ohNextMon(iso){ const m = ohMon(iso); const d = new Date(m+"T12:00:00"); d.setDate(d.getDate()+7); return toISODate(d); }
+const ohPriceTxt = (p)=> p==="yes" ? "Price impact: yes" : p==="no" ? "No price impact" : "Price impact: not known";
+let OH_REASONS = null;
+async function ohReasons(force){
+  if(OH_REASONS && !force) return OH_REASONS;
+  try{ const r = await sb.from("order_hold_reason_tbl").select("*").eq("active",true).order("sort"); if(r.error) return OH_REASONS || []; OH_REASONS = r.data||[]; }catch(e){ return OH_REASONS || []; }
+  return OH_REASONS;
+}
+async function ohGet(cn){ try{ const r = await sb.from("order_hold_tbl").select("*").eq("contract_number",String(cn)).eq("status","on").maybeSingle(); if(r.error) return ohMissingErr(r.error) ? { missing:true } : { err:r.error.message }; return { row:r.data||null }; }catch(e){ return { err:String(e) }; } }
+async function ohHasPost(user, posts){ if(!user) return false; if(user.role==="super_admin") return true; try{ const { keys } = await myPostKeys(user); return (posts||[]).some(p=>(keys||[]).includes(p)); }catch(e){ return false; } }
+const ohMayPut = (user)=> ohHasPost(user, OH_PUT_POSTS);
+const ohMayRelease = (user)=> ohHasPost(user, OH_REL_POSTS);
+async function ohNamesOf(posts){ await loadPostPeople(); return Array.from(new Set((posts||[]).flatMap(k=>postHolders(k)).filter(Boolean))); }
+async function ohEstNames(){ await loadPostPeople(); for(const k of OH_EST_POSTS){ const n = postHolders(k); if(n.length) return { post:k, names:n }; } return { post:"technical_head", names:[] }; }
+// '' = fine; else why the PO cannot go ahead (new PO, sent for approval, approved)
+async function ohPoBlock(ref, what){
+  for(const cn of prRefCns(ref)){ const g = await ohGet(cn); if(!g.row) continue;
+    const R = await ohNamesOf(OH_REL_POSTS);
+    return "Contract "+cn+" is ON HOLD ("+(g.row.reason_label||"")+", since "+fmtDMY(g.row.held_at)+") — "+(what||"no PO can go ahead")+" until it is released by the Sales Head, Technical Head or VP Projects post ("+(R.join(", ")||"nobody holds them")+") on the Order Status board."; }
+  return "";
+}
+// the cards of one hold that are missing (Monday card, revised cost, review) — made once, healed if deleted
+function ohChecklist(h0, reason, est){
+  const t = ohToday(); const d = (n)=> wdAdd(t, n);
+  const items = [];
+  const first = { client_change:"Get the client's change (AVL / spec / scope / drawings) in writing", client_hold:"Get the restart date from the client in writing", payment:"Get the advance / LC / overdue payment cleared", approval:"Get the revised documents approved by the client", dispute:"Talk to the client and note where the order stands", mat_vendor:"Find the material / vendor fix and the new date", quality:"Close the NCR / rework and give the new date" }[h0.reason_key] || "Follow up and note what has changed";
+  items.push({ id:"oh1", text:first, due:d(2), done:false, items:[] });
+  if(h0.price_impact==="yes"){
+    items.push({ id:"oh2", text:"Get the revised cost from the "+postLabel(est.post)+" post ("+(est.names.join(", ")||"post vacant")+")", due:d(5), done:false, items:[] });
+    items.push({ id:"oh3", text:"Send the revised offer to the client", due:d(7), done:false, items:[] });
+    items.push({ id:"oh4", text:"Get the client's PO amendment", due:d(14), done:false, items:[] });
+    items.push({ id:"oh5", text:"Enter the OA amendment in the app", due:d(16), done:false, items:[] }); }
+  items.push({ id:"oh9", text:"Tell the Sales Head / VP Projects when it can be released", due:"", done:false, items:[] });
+  return [{ id:"hold", name:"On hold — "+(reason ? reason.label : h0.reason_label||""), items }];
+}
+async function ohCardMake(n, cn, client, title, due, note, checklists, postKey){
+  try{ const { data: ex } = await sb.from("task_tbl").select("id").eq("assignee",n).eq("ref",String(cn)).eq("title",title).neq("status","done").limit(1);
+    if(ex && ex.length) return ex[0].id;
+    let dept = null; try{ const { data: e } = await sb.from("employee_tbl").select("department").eq("employee_name",n).limit(1).maybeSingle(); dept = (e && e.department)||null; }catch(x){}
+    const row = { title, assignee:n, department:dept, labels:["Order Status","On hold"], links:[], ref:String(cn), customer:client||null, created_by:"App", status:"open", checklists:checklists||[], due_date:due||null, notes:note, post_key:postKey||null };
+    let { data: t, error } = await sb.from("task_tbl").insert(row).select().single();
+    if(error && /post_key/.test(error.message||"")){ delete row.post_key; ({ data: t, error } = await sb.from("task_tbl").insert(row).select().single()); }
+    if(error) return null; try{ await taskLog(t.id, "App", "Made by the app: "+title); }catch(x){} return t.id;
+  }catch(e){ return null; }
+}
+async function ohCards(h0, M){
+  const cn = String(h0.contract_number); const cards = { ...(h0.cards||{}) }; const reasons = await ohReasons(); const reason = reasons.find(r=>r.key===h0.reason_key) || null;
+  const so = M && M.so ? M.so.get(cn) : null; const reg = M && M.reg ? M.reg.get(cn) : null;
+  let client = (so && so.customer_name) || (reg && reg.client) || "";
+  if(!so && !reg){ try{ const { data } = await sb.from("sale_order_tbl").select("customer_name,quote_reference_number").eq("contract_number",cn).maybeSingle(); if(data){ client = data.customer_name||""; h0._q = data.quote_reference_number; } }catch(e){} }
+  await loadPostPeople(true);
+  let live = new Map(); try{ const ids = Object.values(cards).flat().filter(x=>x!=null); if(ids.length){ const { data } = await sb.from("task_tbl").select("id,status").in("id",ids); (data||[]).forEach(r=>live.set(String(r.id), r.status)); } }catch(e){ return cards; }
+  const alive = (k)=> (cards[k]||[]).some(id=>{ const s = live.get(String(id)); return s && s!=="done"; });
+  const note = "On hold since "+fmtDMY(h0.held_at)+" — "+(h0.reason_label||"")+(h0.note?": "+h0.note:"")+". "+ohPriceTxt(h0.price_impact)+". Made by the app; it closes when the order is released. It comes back to the top every Monday.";
+  // 1. the Monday card — the FSE and / or the posts of the reason
+  if(!alive("mon")){
+    const posts = (reason && reason.card_posts) || []; let names = [];
+    if(!reason || reason.fse || posts.includes("fse")) names = await soFsePeople({ quote_reference_number:(so && so.quote_reference_number)||h0._q||(reg && reg.quote_number)||"", customer_name:client });
+    posts.filter(p=>p!=="fse" && p!=="putter").forEach(p=>names.push(...postHolders(p)));
+    if(posts.includes("putter") && h0.held_by) names.push(h0.held_by);
+    if(!names.length) names = postHolders("sales_head");
+    const est = await ohEstNames(); const ids = [];
+    for(const n of Array.from(new Set(names))){ const id = await ohCardMake(n, cn, client, "On hold — "+cn+(client?" "+client:"")+": follow up ("+(h0.reason_label||"")+")", wdAdd(ohToday(),2), note, ohChecklist(h0, reason, est), null); if(id) ids.push(id); }
+    cards.mon = ids;
+    if(ids.length) try{ await notifyPeople(names, "⏸ "+cn+(client?" "+client:"")+" is ON HOLD ("+(h0.reason_label||"")+"). Your follow-up card is on your board — it comes back every Monday until the order is released.", "order_status", { kind:"act", open:{ tab:"order_board" }, group:"ohmon:"+cn }); }catch(e){}
+  }
+  // 2. the revised cost (price impact = yes)
+  if(h0.price_impact==="yes" && !alive("est")){
+    const est = await ohEstNames(); const ids = [];
+    for(const n of est.names){ const id = await ohCardMake(n, cn, client, "Revised cost — "+cn+(client?" "+client:"")+" (on hold: "+(h0.reason_label||"")+")", wdAdd(ohToday(),5), note+" Work out the cost of the change so the FSE can send the revised offer.", [], est.post); if(id) ids.push(id); }
+    cards.est = ids;
+  }
+  // 3. the review — Sales Head and VP Projects posts, due on the review date
+  if(h0.review_date && !alive("rev")){
+    const names = await ohNamesOf(OH_REVIEW_POSTS); const ids = [];
+    for(const n of names){ const id = await ohCardMake(n, cn, client, "Review the hold — "+cn+(client?" "+client:""), String(h0.review_date).slice(0,10), note+" Release it on the Order Status board, or give it a new review date.", [], null); if(id) ids.push(id); }
+    cards.rev = ids;
+  }
+  return cards;
+}
+// once per sync: missing cards, the Monday bring-up, the review bell
+async function ohSync(M, by){
+  if(!M || !M.oh || M.ohMissing) return;
+  const today = ohToday(); const mon = ohMon(today);
+  for(const [cn, h0] of M.oh){
+    try{ const patch = {};
+      const cards = await ohCards(h0, M); if(JSON.stringify(cards)!==JSON.stringify(h0.cards||{})) patch.cards = cards;
+      if(!h0.weekly_on){ patch.weekly_on = mon; }   // the first card is the bring-up of this week
+      else if(String(h0.weekly_on).slice(0,10) < mon){
+        const ids = (cards.mon||[]); if(ids.length){ await sb.from("task_tbl").update({ due_date:today }).in("id",ids).neq("status","done");
+          try{ const { data } = await sb.from("task_tbl").select("assignee").in("id",ids); const who = Array.from(new Set((data||[]).map(r=>r.assignee).filter(Boolean)));
+            await notifyPeople(who, "📅 Monday — "+cn+" is still ON HOLD ("+(h0.reason_label||"")+", "+wdSince(h0.held_at)+" working days). Your follow-up card is due today.", "order_status", { kind:"act", open:{ tab:"order_board" }, group:"ohmon:"+cn }); }catch(e){} }
+        patch.weekly_on = mon; }
+      if(h0.review_date && String(h0.review_date).slice(0,10) <= today && String(h0.review_told_on||"").slice(0,10)!==today){
+        const to = await ohNamesOf(OH_REVIEW_POSTS);
+        try{ await notifyPeople(to, "⏰ Review the hold on "+cn+" — review date "+fmtDMY(h0.review_date)+(String(h0.review_date).slice(0,10)<today?" (passed)":"")+". Reason: "+(h0.reason_label||"")+". Release it or give a new review date.", "order_status", { kind:"act", open:{ tab:"order_board" }, group:"ohrev:"+cn }); }catch(e){}
+        patch.review_told_on = today; }
+      if(Object.keys(patch).length){ const { error } = await sb.from("order_hold_tbl").update(patch).eq("id",h0.id); if(!error) Object.assign(h0, patch); }
+    }catch(e){ console.warn("hold sync "+cn, e); }
+  }
+}
+// where the contract stands now (for the "held from" line)
+function ohWhere(cn, M, D){
+  const c = String(cn); const placed = D && D.places ? D.places.get(c) : null;
+  if(M && M.lots && M.lots.get(c)) return { k:"prod", label:"Production — lots under way", prod:true };
+  if(M && M.placed && M.placed.has(c)) return { k:"prod", label:"Production (placed on the board)", prod:true };
+  if(M){ try{ const x = ospStage(c, M); if(x && x.stage) return { k:x.stage, label:ospLabelOf(x.stage), prod:x.stage==="prod" }; }catch(e){} }
+  return { k:null, label:"", prod:false };
+}
+// put on hold — returns '' or the error
+async function ohPut({ cn, reason, note, price, review, releaseTo, user, M }){
+  cn = String(cn||"").trim();
+  if(!cn) return "Pick the contract.";
+  if(!reason) return "Pick the reason.";
+  if(String(note||"").trim().length<3) return "Write what has happened (it stays on the card and its history).";
+  if(!review || review<=ohToday()) return "Give a review date after today.";
+  if(!(await ohMayPut(user))){ noPermission("put an order on hold",{ posts:OH_PUT_POSTS, roles:["super_admin"] }); return "Only the Technical Head or VP Projects post (or a Super Admin) puts an order on hold."; }
+  const ex = await ohGet(cn); if(ex.missing) return "Run "+OH_SQL+" first (both companies)."; if(ex.err) return ex.err; if(ex.row) return cn+" is already on hold.";
+  const code = await ndAskCode("order_hold", cn, "Put "+cn+" ON HOLD — "+reason.label+": "+String(note).trim(), user); if(!code) return "Not put on hold (no Order hold code).";
+  let me = ""; try{ me = await despMe(user); }catch(e){} me = me || user?.username || "";
+  const w = ohWhere(cn, M || await ospLoad().catch(()=>null), null);
+  let dv = null; try{ await delEffCheck(); const r = await delQ().select("contract_number,delivery_date,delivery_state").eq("contract_number",cn).maybeSingle(); dv = r && r.data; }catch(e){}
+  let dh = null;
+  if(reason.clock_pause){ try{ const { data: open } = await sb.from("delivery_hold_tbl").select("id").eq("contract_number",cn).is("released_on",null).limit(1);
+    if(open && open.length) dh = open[0].id;
+    else { const { data: d1 } = await sb.from("delivery_hold_tbl").insert({ contract_number:cn, held_from:ohToday(), reason:"Order on hold — "+reason.label+": "+String(note).trim(), held_by:me }).select("id").single(); dh = d1 ? d1.id : null; } }catch(e){} }
+  const row = { contract_number:cn, status:"on", reason_key:reason.key, reason_label:reason.label, note:String(note).trim(), price_impact:price||"unknown", clock_pause:!!reason.clock_pause,
+    held_from_k:w.k, held_from_label:w.label, release_to:releaseTo||w.k||null, review_date:review, delivery_at_hold: dv && dv.delivery_state!=="ON HOLD" && dv.delivery_date ? String(dv.delivery_date).slice(0,10) : null,
+    delivery_hold_id:dh, held_by:me, code_by:code.by||"", cards:{}, history:[{ at:new Date().toISOString(), by:me, what:"Put on hold — "+reason.label+": "+String(note).trim()+" (Order hold code by "+(code.by||"?")+")" }] };
+  const { data: h0, error } = await sb.from("order_hold_tbl").insert(row).select().single();
+  if(error) return /duplicate|order_hold_one_on/i.test(error.message||"") ? cn+" is already on hold." : ohMissingErr(error) ? "Run "+OH_SQL+" first (both companies)." : error.message;
+  await ospMoveLog(cn, w.k||"", "hold", "hold", reason.label+": "+String(note).trim(), me, { codeBy:code.by||null });
+  await logAudit("INSERT","order_hold_tbl",cn,"Order put ON HOLD — "+reason.label+": "+String(note).trim()+" · "+ohPriceTxt(price)+" · review "+review+(reason.clock_pause?" · delivery clock stopped":" · delivery clock runs"),user?.username||me,null,row);
+  try{ const to = await ohNamesOf([...OH_REL_POSTS]); await notifyPeople(to, "⏸ "+cn+" put ON HOLD by "+me+" — "+reason.label+": "+String(note).trim()+". "+ohPriceTxt(price)+". Review "+fmtDMY(review)+".", "order_status", { kind:"open", open:{ tab:"order_board" } }); }catch(e){}
+  try{ const M2 = await ospLoad(); h0.cards = await ohCards(h0, M2); await sb.from("order_hold_tbl").update({ cards:h0.cards, weekly_on:ohMon(ohToday()) }).eq("id",h0.id); await ospSync([cn], me, M2); }catch(e){ console.warn("hold cards", e); }
+  return "";
+}
+// release — returns '' or the error
+async function ohRelease({ h0, why, to, keep, newDate, priceOut, user }){
+  const cn = String(h0.contract_number);
+  if(String(why||"").trim().length<3) return "Write why it is released.";
+  if(!keep && !newDate) return "Give the changed delivery date, or keep the current commitment.";
+  if(h0.price_impact==="yes" && !priceOut) return "Say what happened to the price.";
+  if(!(await ohMayRelease(user))){ noPermission("release the hold",{ posts:OH_REL_POSTS, roles:["super_admin"] }); return "Only the Sales Head, Technical Head or VP Projects post (or a Super Admin) releases a hold."; }
+  let me = ""; try{ me = await despMe(user); }catch(e){} me = me || user?.username || "";
+  const now = new Date().toISOString(); const today = ohToday();
+  const delTxt = keep ? (h0.delivery_at_hold ? "kept the commitment "+fmtDMY(h0.delivery_at_hold) : "delivery unchanged") : "new delivery date "+fmtDMY(newDate);
+  const hist = [ ...(h0.history||[]), { at:now, by:me, what:"Released — "+String(why).trim()+" · picks up at "+(to?ospLabelOf(to):"where it left off")+" · "+delTxt+(priceOut?" · price: "+priceOut:"") } ];
+  const { data: upd, error } = await sb.from("order_hold_tbl").update({ status:"released", released_by:me, released_at:now, release_reason:String(why).trim(), release_to:to||null, release_delivery:keep?"keep":"new", new_delivery:keep?null:newDate, price_outcome:priceOut||null, history:hist }).eq("id",h0.id).eq("status","on").select("id");
+  if(error) return error.message; if(!(upd||[]).length) return cn+" was already released.";
+  // the delivery clock restarts
+  try{ if(h0.delivery_hold_id) await sb.from("delivery_hold_tbl").update({ released_on:today, released_by:me, release_note:"Order hold released — "+String(why).trim() }).eq("id",h0.delivery_hold_id).is("released_on",null); }catch(e){}
+  // the committed delivery date
+  const firm = keep ? (h0.delivery_at_hold ? String(h0.delivery_at_hold).slice(0,10) : null) : toISODate(newDate);
+  if(firm){ try{ let v = null; try{ await delEffCheck(); const r = await delQ().select("contract_number,delivery_date,delivery_state").eq("contract_number",cn).maybeSingle(); v = r && r.data; }catch(e){}
+    const reason = "order hold released — "+(keep?"kept the current commitment":"changed date")+": "+String(why).trim();
+    const { error: fe } = await sb.from("sale_order_tbl").update({ delivery_firm_date:firm, delivery_firm_by:user?.username||me, delivery_firm_at:now, delivery_firm_reason:reason }).eq("contract_number",cn);
+    if(!fe){ try{ await sb.from("delivery_date_history_tbl").insert({ contract_number:cn, event_type:"override", date_before:(v&&v.delivery_date)||null, date_after:firm, state_before:(v&&v.delivery_state)||null, state_after:"FIRM", field_changed:"committed delivery date", value_before:(v&&v.delivery_date)||null, value_after:firm, stages_shifted:0, reason, changed_by:user?.username||me }); }catch(e){}
+      ND_FIRM_AT = 0; } }catch(e){} }
+  // where it picks up: a stage before production other than the one the data gives is pinned (as a Super Admin place does)
+  if(to && to!=="prod"){ try{ const M2 = await ospLoad(); const x = ospStageData(cn, M2); if(x.stage!==to) await ospStageUpsert(cn, { pos_override:{ k:to, from:"hold", why:"Released from hold: "+String(why).trim(), by:me, at:now, placed:true } }); }catch(e){} }
+  try{ const { data: so0 } = await sb.from("sale_order_tbl").select("id").eq("contract_number",cn).maybeSingle();   // 2026-11-15T09:30:00Z: a register line on hold (no OA yet) goes back to Pending
+    if(!so0){ const { data: r0 } = await sb.from("contract_register_tbl").select("status").eq("contract_number",cn).maybeSingle();
+      if(r0 && r0.status==="On Hold"){ const { error: re } = await sb.from("contract_register_tbl").update({ status:"Pending" }).eq("contract_number",cn);
+        if(!re) await logAudit("UPDATE","contract_register_tbl",cn,"Register status On Hold → Pending (released from hold)",user?.username||me,{ status:"On Hold" },{ status:"Pending" }); } } }catch(e){}
+  await ospMoveLog(cn, "hold", to||h0.held_from_k||"", "release", String(why).trim()+" · "+delTxt, me);
+  await ospTasksClose(Object.values(h0.cards||{}).flat().filter(x=>x!=null), me, "Done — "+cn+" released from hold");
+  await logAudit("UPDATE","order_hold_tbl",cn,"Order RELEASED from hold — "+String(why).trim()+" · "+delTxt+(priceOut?" · price: "+priceOut:""),user?.username||me,null,null);
+  try{ const to2 = await ohNamesOf([...OH_REL_POSTS]); await notifyPeople(to2, "▶ "+cn+" released from hold by "+me+" — "+String(why).trim()+". Picks up at "+(to?ospLabelOf(to):"where it left off")+"; "+delTxt+".", "order_status", { kind:"open", open:{ tab:"order_board" } }); }catch(e){}
+  try{ await ospSync([cn], me); }catch(e){}
+  return "";
+}
+function OhPutModal({ user, M, oneList, presetCn, onClose, onDone }){
+  const [cn,setCn] = useState(presetCn||""); const [rs,setRs] = useState(null); const [rk,setRk] = useState(""); const [note,setNote] = useState(""); const [price,setPrice] = useState("unknown");
+  const [review,setReview] = useState(wdAdd(ohToday(),5)); const [rel,setRel] = useState(""); const [add,setAdd] = useState(null); const [err,setErr] = useState(""); const [busy,setBusy] = useState(false);
+  useEffect(()=>{ ohReasons(true).then(setRs); },[]);
+  const reason = (rs||[]).find(r=>r.key===rk) || null;
+  const w = cn ? ohWhere(cn, M, null) : null;
+  const pick = (k)=>{ if(k==="__add"){ setAdd({ label:"", side:"client", post:"fse", price:"unknown" }); setRk(""); return; } setAdd(null); setRk(k); const r = (rs||[]).find(z=>z.key===k); if(r) setPrice(r.price_default||"unknown"); };
+  const saveReason = async()=>{ const l = String(add.label||"").trim(); if(l.length<4){ setErr("Name the new reason."); return; }
+    if((rs||[]).some(r=>r.label.toLowerCase()===l.toLowerCase())){ setErr("That reason is already on the list."); return; }
+    let me = ""; try{ me = await despMe(user); }catch(e){}
+    const key = "r_"+l.toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"").slice(0,30)+"_"+Date.now().toString(36);
+    const row = { key, label:l, side:add.side, card_posts:[add.post], fse:add.post==="fse", price_default:add.price, clock_pause:add.side==="client", sort:500, active:true, added_by:me||user?.username||"" };
+    const { error } = await sb.from("order_hold_reason_tbl").insert(row); if(error){ setErr(error.message); return; }
+    try{ await logAudit("INSERT","order_hold_reason_tbl",key,"New hold reason: "+l,user?.username||me,null,row); }catch(e){}
+    const n = await ohReasons(true); setRs(n); setAdd(null); setRk(key); setPrice(add.price); setErr(""); };
+  const go = async()=>{ setBusy(true); setErr(""); const e = await ohPut({ cn, reason, note, price, review, releaseTo:rel||null, user, M }); setBusy(false); if(e){ setErr(e); return; } onDone && onDone(); };
+  const lab = { fontSize:12, fontWeight:600, marginBottom:3, marginTop:10 };
+  const pre = OSP_COLS.filter(c=>c.k!=="doc" && c.k!=="ph");
+  return h(OsModal,{ title:"⏸ Put an order on hold", sub:"Technical Head or VP Projects post, with an Order hold code from the Sales Head post. The Gantt, POs and PR stay as they are; no new PO, PO approval or PR release until it is released.", onClose, width:640 },
+    h("div",{"data-testid":"oh-put"},
+      h("div",{style:lab},"Contract"), h(ContractFind,{testid:"oh-cn",value:cn,onChange:v=>setCn(v||""),options:oneList,width:360,placeholder:"Type the contract number or customer…"}),
+      w && w.label ? h("div",{style:{fontSize:12,color:colors.muted,marginTop:4}},"Now at: ",h("b",null,w.label)) : null,
+      h("div",{style:lab},"Reason"),
+      rs===null ? h("div",{style:{fontSize:12,color:colors.muted}},"Reading…") :
+      h("select",{"data-testid":"oh-reason",value:add?"__add":rk,onChange:e=>pick(e.target.value),style:{...inputStyle,width:"100%"}},
+        h("option",{value:""},"— pick the reason —"),
+        h("optgroup",{label:"Client side (delivery clock stops)"}, rs.filter(r=>r.side!=="internal").map(r=>h("option",{key:r.key,value:r.key},r.label))),
+        h("optgroup",{label:"Internal (delivery clock keeps running)"}, rs.filter(r=>r.side==="internal").map(r=>h("option",{key:r.key,value:r.key},r.label))),
+        h("option",{value:"__add"},"+ Add a new reason…")),
+      add ? h("div",{"data-testid":"oh-add",style:{border:"1px dashed "+colors.border,borderRadius:8,padding:"8px 10px",marginTop:6,display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,fontSize:12}},
+        h("input",{"data-testid":"oh-add-label",value:add.label,onChange:e=>setAdd({ ...add, label:e.target.value }),placeholder:"The new reason",style:{...inputStyle,gridColumn:"1 / 3"}}),
+        h("label",null,"Side ",h("select",{value:add.side,onChange:e=>setAdd({ ...add, side:e.target.value }),style:inputStyle},h("option",{value:"client"},"Client side — clock stops"),h("option",{value:"internal"},"Internal — clock runs"))),
+        h("label",null,"Monday card to ",h("select",{value:add.post,onChange:e=>setAdd({ ...add, post:e.target.value }),style:inputStyle},OH_CARD_POSTS.map(([k,l])=>h("option",{key:k,value:k},l)))),
+        h("label",null,"Price impact ",h("select",{value:add.price,onChange:e=>setAdd({ ...add, price:e.target.value }),style:inputStyle},h("option",{value:"yes"},"Yes"),h("option",{value:"no"},"No"),h("option",{value:"unknown"},"Not known"))),
+        h("span",{style:{display:"flex",gap:6,justifyContent:"flex-end"}}, h("button",{onClick:()=>setAdd(null),style:btnSmall},"Cancel"), h("button",{"data-testid":"oh-add-save",onClick:saveReason,style:{...btnSmall,background:colors.dark,color:"#fff"}},"Add the reason"))) : null,
+      reason ? h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:4}}, reason.clock_pause ? "Client side — the delivery clock stops while it is on hold." : "Internal — the delivery clock keeps running (the delay is ours).") : null,
+      h("div",{style:lab},"What has happened"),
+      h("textarea",{"data-testid":"oh-note",value:note,onChange:e=>setNote(e.target.value),rows:3,placeholder:"e.g. Customer changed the AVL for the castings",style:{...inputStyle,width:"100%",boxSizing:"border-box"}}),
+      h("div",{style:{display:"flex",gap:14,flexWrap:"wrap"}},
+        h("div",null, h("div",{style:lab},"Price impact"),
+          h("select",{"data-testid":"oh-price",value:price,onChange:e=>setPrice(e.target.value),style:inputStyle},h("option",{value:"yes"},"Yes — revised cost and offer"),h("option",{value:"no"},"No"),h("option",{value:"unknown"},"Not known yet"))),
+        h("div",null, h("div",{style:lab},"Review date"), h("input",{"data-testid":"oh-review",type:"date",value:review,min:wdAdd(ohToday(),1),onChange:e=>setReview(e.target.value),style:inputStyle})),
+        h("div",null, h("div",{style:lab},"On release, pick up at"),
+          h("select",{"data-testid":"oh-relto",value:rel,onChange:e=>setRel(e.target.value),disabled:!!(w && w.prod),style:inputStyle},
+            h("option",{value:""},"Where it left off"+(w && w.label?" ("+w.label+")":"")), w && w.prod ? null : pre.map(c=>h("option",{key:c.k,value:c.k},c.label))))),
+      price==="yes" ? h("div",{style:{fontSize:11.5,color:"#8a5a00",marginTop:6}},"Price impact: the FSE gets a card (revised cost → revised offer → PO amendment → OA amendment) and the "+postLabel("estimation_engineer")+" post a revised-cost card.") : null,
+      err ? h("div",{"data-testid":"oh-err",style:{color:colors.danger,fontSize:12.5,marginTop:8}},err) : null,
+      h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}},
+        h("button",{onClick:onClose,style:btnSecondary},"Cancel"),
+        h("button",{"data-testid":"oh-put-go",disabled:busy||!!add,onClick:go,style:{...btnPrimary,background:"#9b2c2c",borderColor:"#9b2c2c",opacity:busy?0.6:1}},busy?"Putting on hold…":"Put on hold (Order hold code)"))));
+}
+function OhReleaseModal({ user, h0, onClose, onDone }){
+  const [why,setWhy] = useState(""); const [to,setTo] = useState(h0.release_to && h0.release_to!==h0.held_from_k ? h0.release_to : ""); const [keep,setKeep] = useState(true); const [nd,setNd] = useState(""); const [po,setPo] = useState("");
+  const [err,setErr] = useState(""); const [busy,setBusy] = useState(false);
+  const prod = h0.held_from_k==="prod";
+  const go = async()=>{ setBusy(true); setErr(""); const e = await ohRelease({ h0, why, to:to||null, keep, newDate:nd, priceOut:po, user }); setBusy(false); if(e){ setErr(e); return; } onDone && onDone(); };
+  const lab = { fontSize:12, fontWeight:600, marginBottom:3, marginTop:10 };
+  return h(OsModal,{ title:"▶ Release "+h0.contract_number+" from hold", sub:"On hold since "+fmtDMY(h0.held_at)+" ("+wdSince(h0.held_at)+" working days) — "+(h0.reason_label||"")+(h0.note?": "+h0.note:""), onClose, width:600 },
+    h("div",{"data-testid":"oh-rel"},
+      h("div",{style:lab},"Why it is released"),
+      h("textarea",{"data-testid":"oh-rel-why",value:why,onChange:e=>setWhy(e.target.value),rows:2,placeholder:"e.g. Client confirmed the old AVL stands",style:{...inputStyle,width:"100%",boxSizing:"border-box"}}),
+      h("div",{style:lab},"Picks up at"),
+      h("select",{"data-testid":"oh-rel-to",value:to,onChange:e=>setTo(e.target.value),disabled:prod,style:inputStyle},
+        h("option",{value:""},"Where it left off"+(h0.held_from_label?" ("+h0.held_from_label+")":"")),
+        prod ? null : OSP_COLS.filter(c=>c.k!=="doc" && c.k!=="ph").map(c=>h("option",{key:c.k,value:c.k},c.label))),
+      h("div",{style:lab},"Delivery"),
+      h("label",{style:{display:"block",fontSize:12.5}}, h("input",{type:"radio","data-testid":"oh-rel-keep",checked:keep,onChange:()=>setKeep(true)})," Keep the current commitment"+(h0.delivery_at_hold?" ("+fmtDMY(h0.delivery_at_hold)+")":" (no date was set)")),
+      h("label",{style:{display:"flex",gap:6,alignItems:"center",fontSize:12.5,marginTop:4}}, h("input",{type:"radio","data-testid":"oh-rel-new",checked:!keep,onChange:()=>setKeep(false)}),"Changed delivery date ",
+        h("input",{type:"date","data-testid":"oh-rel-date",value:nd,disabled:keep,onChange:e=>setNd(e.target.value),style:inputStyle})),
+      h0.price_impact==="yes" ? h("div",null, h("div",{style:lab},"The price"),
+        h("select",{"data-testid":"oh-rel-price",value:po,onChange:e=>setPo(e.target.value),style:inputStyle},
+          h("option",{value:""},"— pick —"), h("option",{value:"OA amendment approved"},"OA amendment approved"), h("option",{value:"No price change"},"No price change"), h("option",{value:"Absorbed by us"},"Client refused — absorbed by us"))) : null,
+      err ? h("div",{"data-testid":"oh-rel-err",style:{color:colors.danger,fontSize:12.5,marginTop:8}},err) : null,
+      h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}},
+        h("button",{onClick:onClose,style:btnSecondary},"Cancel"),
+        h("button",{"data-testid":"oh-rel-go",disabled:busy,onClick:go,style:{...btnPrimary,background:"#0f7a5c",borderColor:"#0f7a5c",opacity:busy?0.6:1}},busy?"Releasing…":"Release"))));
+}
 // everything the stages need, read in one go
 async function ospLoad(){
   const M = { err:"", reg:new Map(), so:new Map(), plan:new Map(), fac:new Map(), rel:new Set(), po:new Set(), st:new Map(), lots:new Map(), placed:new Set(), missing:false };
@@ -75112,6 +75473,8 @@ async function ospLoad(){
     if(r.error){ if(pbErrMissing(r.error)) M.pbMissing = true; else M.partial = true; } else (r.data||[]).forEach(b=>M.pb.set(String(b.contract_number), b)); }catch(e){ M.partial = true; }
   M.pr = new Map();   // 2026-11-14T02:00:00Z: PRs (no table yet = the old "PR released" click)
   try{ const r = await sb.from("pr_tbl").select("id,pr_no,contract_number,status,amend_no,made_at,released_at,released_by"); if(!r.error) (r.data||[]).forEach(p=>M.pr.set(String(p.contract_number), p)); }catch(e){}
+  M.oh = new Map(); M.ohMissing = false;   // 2026-11-15T06:00:00Z: orders ON HOLD (no table yet = no hold list)
+  try{ const r = await sb.from("order_hold_tbl").select("*").eq("status","on"); if(r.error){ if(ohMissingErr(r.error)) M.ohMissing = true; else M.partial = true; } else (r.data||[]).forEach(x=>M.oh.set(String(x.contract_number), x)); }catch(e){ M.partial = true; }
   return M;
 }
 // Label: the documents of a contract — open Full Hold (not counting "status to confirm"), and any on the client's Production Hold
@@ -75140,6 +75503,7 @@ function ospGateTxt(fh){
 function ospStage(cn, M){
   const x = ospStageData(cn, M); const ov = x.st && x.st.pos_override;
   if(ov && ov.k && OSP_ORDER.includes(ov.k) && !(x.so && /cancel|closed/i.test(x.so.status||""))){ x.dataStage = x.stage; x.stage = ov.k; x.ov = ov; }
+  x.hold = (M && M.oh && M.oh.get(String(cn))) || null;   // 2026-11-15T06:00:00Z: ON HOLD — the stage underneath stays as it is
   return x;
 }
 // 2026-11-04T03:00:00Z: SO PENDING lasts until the Order Acceptance is made, approved AND marked sent (O.A out).
@@ -75280,10 +75644,11 @@ async function ospSync(only, by, Min){
       if(x.stage==="prod" && st.prod_started_at && !M.lots.get(cn)) want.add("prod");
       if(ospPoAwaited(x.reg) && !(x.so && /cancel|closed/i.test(x.so.status||""))) want.add("chase");
       { const ca = (st.esc||{}).oa_cust || {}; if(x.stage==="so" && x.soStuck==="sent" && x.so && wdSince(x.so.commercial_approved_at||x.so.created_at)>=3 && !(ca.a==="yes"||ca.a==="no")) want.add("oacust"); }   // 2026-11-04
+      if(x.hold) want.clear();   // 2026-11-15T06:00:00Z: ON HOLD — no stage cards, no escalations until it is released
       // close what is no longer wanted
       for(const k of Object.keys(tasks)){
         if(want.has(k) || closed[k]) continue;
-        await ospTasksClose(tasks[k], by||"App", "Done — "+cn+" moved on");
+        await ospTasksClose(tasks[k], by||"App", x.hold ? "Paused — "+cn+" is ON HOLD ("+(x.hold.reason_label||"")+")" : "Done — "+cn+" moved on");
         await notifDone("osstage:"+cn+":"+k, by||"App");
         closed[k] = today; dirty = true;
       }
@@ -75333,6 +75698,7 @@ async function ospSync(only, by, Min){
         try{ await ospStageUpsert(cn, { tasks, opened, esc }); }catch(e){
           try{ await ospStageUpsert(cn, { tasks, opened, esc }); }catch(e2){ console.warn("order stage not saved — the open cards are found again by title next time", e2.message); } } }
     }
+    if(!only){ try{ await ohSync(M, by); }catch(e){ console.warn("hold sync", e); } }   // 2026-11-15T06:00:00Z: Monday cards, review bells
     // 2026-11-06: GRNs cleared without the bill — a list once a week (the first sync from Monday) to the Finance Director and Accounts posts
     if(!only){ try{ const D2 = M.st.get("__daily__") || {}; const d2 = { ...(D2.esc||{}) }; const wk = grnWeekKey();
       if(d2.grnweek!==wk){ const { data: gs, error: ge } = await sb.from("grn_header").select("grn_no,grn_date,vendor_name,po_no,bill_no,status,bill_override");
@@ -75968,11 +76334,13 @@ async function ndCodeGivers(type){
   await loadPostPeople();
   const sas = await superAdminNames();
   if(type==="wo_override") return Array.from(new Set(sas));
+  if(type==="order_hold") return Array.from(new Set([...postHolders("sales_head"), ...sas]));   // 2026-11-15T06:00:00Z: the Sales Head post
   return Array.from(new Set([...sas, ...ND_EDIT_POSTS.flatMap(k=>postHolders(k))]));
 }
 async function ndCanGive(user, type){
   if(!user) return false; if(user.role==="super_admin") return true;
   if(type==="wo_override") return false;
+  if(type==="order_hold"){ try{ const me = (await despMe(user).catch(()=>"")) || user.username || ""; await loadPostPeople(); return nameIn(postHolders("sales_head"), me); }catch(e){ return false; } }
   try{ const me = (await despMe(user).catch(()=>"")) || user.username || ""; await loadPostPeople(); return ND_EDIT_POSTS.some(k=>nameIn(postHolders(k), me)); }catch(e){ return false; }
 }
 async function ndCodeMake(type, cn, user, note){
@@ -76121,11 +76489,11 @@ function NdMasterScreen({ user }){
   const isSA = user?.role==="super_admin";
   const [m,setM] = useState(null); const [ed,setEd] = useState({}); const [msg,setMsg] = useState(""); const [busy,setBusy] = useState(false); const [tick,setTick] = useState(0);
   const [cn,setCn] = useState(""); const [plan,setPlan] = useState(null);
-  const [canEdit,setCanEdit] = useState(false); const [canWo,setCanWo] = useState(false); const [code,setCode] = useState(null);
-  const [cCn,setCCn] = useState(""); const [cNote,setCNote] = useState(""); const [asks,setAsks] = useState([]); const [givers,setGivers] = useState({ e:[], w:[] });
+  const [canEdit,setCanEdit] = useState(false); const [canWo,setCanWo] = useState(false); const [code,setCode] = useState(null); const [canHold,setCanHold] = useState(false);
+  const [cCn,setCCn] = useState(""); const [cNote,setCNote] = useState(""); const [asks,setAsks] = useState([]); const [givers,setGivers] = useState({ e:[], w:[], o:[] });
   useEffect(()=>{ (async()=>{ await loadPostPeople(); await wdHolLoad(); const mm = await ndMasterLoad(true); setM(mm); setEd({});
-    setCanEdit(await ndCanGive(user,"stage_edit")); setCanWo(await ndCanGive(user,"wo_override"));
-    setGivers({ e:await ndCodeGivers("stage_edit"), w:await ndCodeGivers("wo_override") });
+    setCanEdit(await ndCanGive(user,"stage_edit")); setCanWo(await ndCanGive(user,"wo_override")); setCanHold(await ndCanGive(user,"order_hold"));
+    setGivers({ e:await ndCodeGivers("stage_edit"), w:await ndCodeGivers("wo_override"), o:await ndCodeGivers("order_hold") });
     try{ const { data } = await sb.from("notifications_tbl").select("id,message,created_at,action_group").like("action_group","ndcode:%").eq("is_read",false).order("id",{ ascending:false }).limit(40);
       const seen = new Set(); setAsks((data||[]).filter(n=>{ if(seen.has(n.action_group)) return false; seen.add(n.action_group); return true; })); }catch(e){} })(); },[tick]);
   if(!m) return h("div",{style:{padding:20,color:colors.muted}},"Reading…");
@@ -76194,20 +76562,21 @@ function NdMasterScreen({ user }){
             return h("tr",{key:s.k}, h("td",{style:td},s.sl), h("td",{style:td},s.label), h("td",{style:td},p.date?(p.guess?"≈ ":"")+fmtDMY(p.date):"—"),
               h("td",{style:{...td,color:colors.muted}}, mv ? (mv.kind==="placed" ? "Placed, real date unknown" : fmtDMY(mv.actual_date||mv.at)+" · "+(mv.kind==="app"?"by the app":(mv.username||mv.by_name||""))) : "—")); }))) : null) : null),
     // codes
-    (canEdit || canWo) ? h("div",{"data-testid":"nd-codes",style:{marginTop:18,border:"1px solid "+colors.border,borderRadius:8,background:"#fff",padding:"10px 14px"}},
+    (canEdit || canWo || canHold) ? h("div",{"data-testid":"nd-codes",style:{marginTop:18,border:"1px solid "+colors.border,borderRadius:8,background:"#fff",padding:"10px 14px"}},
       h("div",{style:{fontWeight:700,marginBottom:4}},"Order codes"),
-      h("div",{style:{fontSize:12,color:colors.muted,marginBottom:8}},"One use, that contract only, "+ND_CODE_HOURS+" hours. Order step Edit code: an actual date more than "+ND_FREE_BACK+" working days back (given by "+givers.e.join(", ")+"). W/O release override code: W/O release as “Start Production Code 2” without the Code 2 date (given by Super Admins: "+givers.w.join(", ")+")."),
+      h("div",{style:{fontSize:12,color:colors.muted,marginBottom:8}},"One use, that contract only, "+ND_CODE_HOURS+" hours. Order step Edit code: an actual date more than "+ND_FREE_BACK+" working days back (given by "+givers.e.join(", ")+"). W/O release override code: W/O release as “Start Production Code 2” without the Code 2 date (given by Super Admins: "+givers.w.join(", ")+"). Order hold code: putting an order ON HOLD (given by the Sales Head post: "+(givers.o||[]).join(", ")+")."),
       h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}},
         h("input",{"data-testid":"nd-code-cn",value:cCn,onChange:e=>setCCn(e.target.value),placeholder:"Contract no.",style:{...inputStyle,width:130}}),
         h("input",{value:cNote,onChange:e=>setCNote(e.target.value),placeholder:"What for (optional)",style:{...inputStyle,width:260}}),
         canEdit ? h("button",{"data-testid":"nd-give-edit",disabled:busy,onClick:()=>give("stage_edit"),style:{...btnSmall,background:"#0f5f4a",color:"#fff",borderColor:"#0f5f4a"}},"Give an Order step Edit code") : null,
-        canWo ? h("button",{"data-testid":"nd-give-wo",disabled:busy,onClick:()=>give("wo_override"),style:{...btnSmall,background:"#5b3fa3",color:"#fff",borderColor:"#5b3fa3"}},"Give a W/O release override code") : null),
+        canWo ? h("button",{"data-testid":"nd-give-wo",disabled:busy,onClick:()=>give("wo_override"),style:{...btnSmall,background:"#5b3fa3",color:"#fff",borderColor:"#5b3fa3"}},"Give a W/O release override code") : null,
+        canHold ? h("button",{"data-testid":"nd-give-hold",disabled:busy,onClick:()=>give("order_hold"),style:{...btnSmall,background:"#9b2c2c",color:"#fff",borderColor:"#9b2c2c"}},"Give an Order hold code") : null),
       code ? h("div",{"data-testid":"nd-code-out",style:{marginTop:10,padding:"10px 14px",background:"#eaf9f4",border:"1px solid #8fd0bf",borderRadius:6,display:"inline-block"}},
         h("div",{style:{fontSize:11,color:"#4a8d78"}},codeName(code.type)+" for "+code.cn), h("div",{style:{fontSize:26,fontWeight:700,letterSpacing:4,color:"#085041"}},code.k)) : null,
       asks.length ? h("div",{style:{marginTop:10}}, h("div",{style:{fontWeight:600,fontSize:12.5,marginBottom:4}},"Asked for"),
         asks.map(n=>{ const [, ty, c] = String(n.action_group).split(":"); return h("div",{key:n.id,style:{display:"flex",gap:8,alignItems:"center",fontSize:12,padding:"3px 0",borderTop:"1px solid #f0efe8"}},
           h("span",{style:{flex:1}},fmtDMYTime(n.created_at)+" — "+n.message),
-          ((ty==="wo_override" && canWo) || (ty==="stage_edit" && canEdit)) ? h("button",{onClick:()=>{ setCCn(c||""); },style:btnSmall},"Fill "+(c||"")) : null); })) : null) : null);
+          ((ty==="wo_override" && canWo) || (ty==="stage_edit" && canEdit) || (ty==="order_hold" && canHold)) ? h("button",{onClick:()=>{ setCCn(c||""); },style:btnSmall},"Fill "+(c||"")) : null); })) : null) : null);
 }
 
 // Order Status › Confirm delivery dates — go-live: every live order gets a firm (committed) delivery date
