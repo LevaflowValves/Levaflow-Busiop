@@ -60,7 +60,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-11-16T03:00:00Z";
+  var APP_BUILD_VERSION = "2026-11-16T04:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -13919,6 +13919,7 @@ function DocumentsBox({ mode, entityRef, user, isAdminOrAbove, withMandatoryAuth
     finally{ setBusy(false); }
   };
   const toggleMandatory = (r)=>{
+    if(!r.is_mandatory && docNeverMandatory(r.category)){ alert("A Delivery Challan cannot be mandatory — it is made only at despatch, so it would block the approvals for ever."); return; }
     withMandatoryAuth(async()=>{
       const make = !r.is_mandatory;
       const { error } = await sb.from("document_requests_tbl").update({ is_mandatory:make, source: make?"Order Acceptance":(r.source||"Customer request") }).eq("id",r.id);
@@ -15613,7 +15614,7 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
       L.push({ t:"Required Order Acceptance details are missing: "+miss.join(", ")+".", fix:"Open “"+(otherMissing.length+(billingMissing?1:0))+" to fix before approval” on this Order Acceptance and fill them"+(outstandingDocs.length?"; add the mandatory documents in Documents":"")+(billingMissing?"; Billing Address can be overridden and flagged for later":"")+". "+(isSuperAdmin?"Or use Super Admin: enter a Deletion code to override.":"If they can't be filled yet, a Super Admin ("+saNamesTxt()+") can override with a Deletion code.") }); }
     if(field==="technical_approved" || field==="commercial_approved"){ const g = await mtcSoGate(contractInfo.contract_number);   // 301: blocks both approvals
       if(g) L.push({ t:"MTC & AVL is not saved for this contract.", fix:"The Technical Head ("+soList(N.tech)+") opens MTC & AVL on this Order Acceptance, fills the MTC and the vendor of each component and saves."+(/^MTC is 3\.1/.test(g)?" "+g:"") }); }
-    if(!mayApproveField(field)) L.push({ t:"You can't approve "+SO_SECTION[field]+".", fix: field==="technical_approved"
+    if(!mayApproveField(field)) L.push({ t:"You can't approve "+SO_SECTION[field]+" — you are logged in as "+String(user.role||"user").replace(/_/g," ")+".", fix: field==="technical_approved"
       ? "It is approved by the FSE of this order ("+(soFse.length?soFse.join(", "):"none credited")+") or the Sales Head ("+soList(N.sales)+"), or a super admin. Ask one of them."
       : "It is approved by the Accounts Admin ("+soList(N.accounts)+"), or a super admin. Ask them." });
     return L;
@@ -15672,10 +15673,15 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
   };
   const row = (label,field)=>{   // 238: Approve is always there; it says what stops it and who approves
     const by = contractInfo[field+"_by"]; const can = mayApproveField(field) && canApproveAtAll;
+    // what is stopping it, counted here so the button can say so (MTC & AVL is checked when pressed)
+    const stops = [ ...(poMissSl.length ? ["Client PO price missing on Sl "+poMissSl.join(", ")] : []),
+      ...(!overrideActive ? otherMissing : []), ...(!overrideActive && billingMissing ? ["Billing Address"] : []),
+      ...(!mayApproveField(field) ? [field==="technical_approved" ? "Approved by the FSE / Sales Head or a super admin" : "Approved by the Accounts Admin or a super admin"] : []) ];
+    const lbl = can ? "Approve" : stops.length ? (mayApproveField(field) ? "Can't approve — "+stops.length+" missing ▸" : "Not yours to approve ▸") : "Pending — why?";
     return h("div",{style:{display:"flex",alignItems:"center",gap:6}},
       h("span",{style:{fontSize:11,color:colors.muted}},label+":"),
       by ? h("span",{style:{fontSize:11,fontWeight:600,color:/^Waived/.test(by)?"#854f0b":"#085041"},title:contractInfo[field+"_at"]?fmtDMYTime(contractInfo[field+"_at"]):undefined},(/^Waived/.test(by)?"⚑ ":"✓ ")+by)
-        : h("button",{"data-testid":"so-approve-"+field,onClick:()=>approve(field),title:can?"Approve":"See what is still needed and who approves",style:{...btnSmall,fontSize:10,padding:"2px 8px",...(can?{}:{color:colors.muted,borderStyle:"dashed"})}}, can ? "Approve" : "Pending — why?")
+        : h("button",{"data-testid":"so-approve-"+field,onClick:()=>approve(field),title:can?"Approve":(stops.length?stops.join("\n")+"\n\nPress for what to do and who fixes it.":"See what is still needed and who approves"),style:{...btnSmall,fontSize:10,padding:"2px 8px",...(can?{}:{color:"#a3312a",borderColor:"#e8a39b",borderStyle:"dashed",background:"#fff"})}}, lbl)
     );
   };
   const df = (key,placeholder,width)=>h("input",{value:draft[key],onChange:e=>setDraft(d=>({...d,[key]:e.target.value})),placeholder,style:{...inputStyle,padding:"5px 8px",fontSize:11.5,width:width||"100%"}});
@@ -18014,6 +18020,7 @@ function SavedEstimates({ autoFile, user, sessionCompany, openTarget, onConsumed
     if(mandatory) withMandatoryAuth(doInsert); else await doInsert();
   };
   const setRequirementMandatory = (reqRow, makeMandatory)=>{
+    if(makeMandatory && docNeverMandatory(reqRow && reqRow.category)){ alert("A Delivery Challan cannot be mandatory — it is made only at despatch, so it would block the approvals for ever."); return; }
     withMandatoryAuth(async()=>{
       const { error } = await sb.from("document_requests_tbl").update({ is_mandatory:makeMandatory, source: makeMandatory?"Order Acceptance":(reqRow.source||"Customer request") }).eq("id",reqRow.id);
       if(error){ alert("Failed: "+error.message); return; }
@@ -26216,8 +26223,10 @@ async function fetchDocumentRequirements(entityId){
 }
 // Outstanding = mandatory and nothing linked against it yet.
 function outstandingMandatory(requirements){
-  return (requirements||[]).filter(r=>r.is_mandatory && !r.fulfilled_document_id);
+  return (requirements||[]).filter(r=>r.is_mandatory && !r.fulfilled_document_id && !docNeverMandatory(r.category));
 }
+// 2026-11-16T04:00:00Z: the Delivery Challan only exists at despatch — it never blocks an approval and cannot be made mandatory
+function docNeverMandatory(cat){ const s = String(cat||"").trim(); return /delivery\s*challan/i.test(s) || /^d\.?\s?c\.?$/i.test(s); }
 function isPoDocRequirement(r){
   return String(r&&r.category||"").trim().toLowerCase()===PO_DOC_CATEGORY.toLowerCase();
 }
@@ -36631,6 +36640,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"16 Nov 2026", summary:"Built on 2026-11-16T04:00:00Z, on top of 2026-11-16T03:00:00Z. No SQL. A Delivery Challan is never a mandatory document: it no longer blocks Order Acceptance approvals, and it cannot be made mandatory (it only exists at despatch). Order Acceptance approval button: instead of “Pending — why?” it now says “Can't approve — n missing ▸” (or “Not yours to approve ▸”), red-dashed, with the list on hover; pressing it lists each item with who fixes it, and Super Admins still see the Deletion-code override. “You can't approve” now says which login you are using. The approval guide pop-up no longer says “Press Approve” when the button may say what is missing." },
   { date:"16 Nov 2026", summary:"Built on 2026-11-16T03:00:00Z, on top of 2026-11-16T02:00:00Z. No SQL. ORDER PROCESSING REVIEW: narrower rows. Notes · history is a button under the item and opens a pop-up (history newest first, Add note, ← Back). The owner shows the current owner in bold; each earlier owner is a badge under it with the day they had it until (newest first). ⚑ Mark urgent sits under the New owner picker; Change due date is the date with Reason + ✓ under it; Committed date sits over its reason. Fixed column widths so the table fits the screen." },
   { date:"16 Nov 2026", summary:"Built on 2026-11-16T02:00:00Z, on top of 2026-11-16T01:00:00Z. No SQL. ORDER PROCESSING REVIEW: two clear columns on every item — New owner (pick the person, Give) and Change due date (date, reason, ✓) — for Super Admins and the Document Controller / VP Projects posts, or anyone with a Review edit code (others see —). The status (late / due today / paused) is now a badge under the customer; the PO and Status columns are gone (PO date missing still shows under the due date). ⚑ Mark urgent and Notes · history are buttons under the item. The item's owner can now fill their own committed date and reason (as well as the chair, VP Projects and the Document Controller). When the meeting is not set up, the banner says the committed boxes stay closed until it is." },
   { date:"16 Nov 2026", summary:"Built on 2026-11-16T01:00:00Z, on top of 2026-11-16T00:00:00Z. NEEDS SQL: structure_order_review_edit_2026-11-16.sql (both companies). ORDER PROCESSING REVIEW: click an item's owner to give it to someone else, click its due date to change it (reason needed); a badge shows who had it before and how many times the date moved (and the first date). ⚑ Mark urgent: the item goes into an Urgent group at the top of the next sitting (even if not yet due) until the mark is taken off. Notes · history on every item (owner changes, date changes, urgent, notes — with who and when). Owner / due / urgent changes: Super Admins and the Document Controller and VP Projects posts straight away; anyone else with a Review edit code from them (one use, today's meeting; blank = ask them by bell). Meeting history: today's changes (also into the minutes at Close) and earlier sittings with their minutes. Code 3 and Code 2 resubmissions are now groups 7 and 8 with deadlines (3 and 5 working days from the client's comments, set in ⚙ Set up), owner = the document's owner." },
@@ -62186,7 +62196,7 @@ function apprOpenItem(i, setPo, setPb){
   if(i.open.po){ setPo && setPo(i.open.po); return; }
   if(i.open.task!=null){ appOpenCard(i.open.task); return; }
   if(i.open.contract){ bellGo({ action_open:{ contract:i.open.contract }, action_kind:"act", action_target:'[data-testid="so-approve-commercial_approved"]',
-    action_help:{ btn:"Approve", what:"Approve the Commercial Terms of Order Acceptance "+i.open.contract, do:["Check prices, payment terms, the advance and the PO value against the client's PO.","Press Approve beside Commercial Terms and answer the advance question."] } }); return; }
+    action_help:{ btn:"Approve", what:"Approve the Commercial Terms of Order Acceptance "+i.open.contract, do:["Check prices, payment terms, the advance and the PO value against the client's PO.","Press the button beside Commercial Terms. If it says Approve, approve and answer the advance question. If it says “Can't approve — n missing”, press it: it lists what is missing and who fixes it."] } }); return; }
   if(i.open.dc){ window.__despOpenId = i.open.dc; appOpenTab("despatch_dc"); return; }
   if(i.open.tab) appOpenTab(i.open.tab);
 }
@@ -68340,7 +68350,7 @@ async function soTellApprovers(so){
     const cn = so.contract_number, cu = so.customer_name ? " ("+so.customer_name+")" : "";
     await notifyPeople(N.accounts, "Order Acceptance "+cn+cu+" waits for your Commercial Terms approval.", "so_approval",
       { kind:"act", open:{ contract:cn }, target:'[data-testid="so-approve-commercial_approved"]', group:"so:"+cn+":commercial_approved",
-        help:{ btn:"Go and approve", what:"Approve the Commercial Terms of Order Acceptance "+cn, do:["Check prices, payment terms, the advance and the PO value against the client's PO.","Answer the advance question when it asks.","Press Approve beside Commercial Terms. If something is wrong, tell the FSE before approving."] } });
+        help:{ btn:"Go and approve", what:"Approve the Commercial Terms of Order Acceptance "+cn, do:["Check prices, payment terms, the advance and the PO value against the client's PO.","Answer the advance question when it asks.","Press the button beside Commercial Terms. If it says “Can't approve — n missing”, press it to see what is missing and who fixes it. If something is wrong, tell the FSE before approving."] } });
     if(SO_TECH_ASKED) await notifyPeople([...N.sales, ...fse], "Order Acceptance "+cn+cu+" waits for your approval (Everything else — technical).", "so_approval",
       { kind:"act", open:{ contract:cn }, target:'[data-testid="so-approve-technical_approved"]', group:"so:"+cn+":technical_approved",
         help:{ btn:"Go and approve", what:"Approve Everything else on Order Acceptance "+cn, do:["Check the Sl Nos, quantities, datasheets and BOM match the client's PO and drawings.","Check special tests, MOC and certification are as quoted.","Press Approve beside Everything else. Either the FSE or the Sales Head approving is enough."] } });
