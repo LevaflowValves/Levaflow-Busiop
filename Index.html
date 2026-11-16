@@ -60,7 +60,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-11-16T04:00:00Z";
+  var APP_BUILD_VERSION = "2026-11-16T05:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -3444,7 +3444,7 @@ const CODE_FREE_TYPES = ["stale_close","task_reopen","pdf_unblock","acc_export",
 // 2026-11-06T09:30 (approval build): every code is named by its kind — never just "code"
 const CODE_NAMES = { stale_unblock:"Stale unblock code", stage_edit:"Order step Edit code", wo_override:"W/O release override code", edit:"Edit code", delete:"Delete code", direct_price:"Direct Price code", price_check:"Price-check code", pdf_unblock:"PDF unblock code",
   stale_close:"Stale close code", task_reopen:"Task reopen code", acc_export:"Accounts Export code", acc_rollback:"Accounts Roll-back code", rollback:"Accounts Roll-back code",
-  grn_no_bill:"GRN no-bill code", qc_skip:"Bill-first code", qcsr_fix:"Serial-correction code", doc_add:"Add-document code", open_entry_ext:"Open-entry extension code", deletion:"Deletion code", irn_cancel:"E-invoice cancel code", ewb_cancel:"E-way bill cancel code", clock_pause:"Clock pause code", order_hold:"Order hold code", review_edit:"Review edit code" };
+  grn_no_bill:"GRN no-bill code", qc_skip:"Bill-first code", qcsr_fix:"Serial-correction code", doc_add:"Add-document code", open_entry_ext:"Open-entry extension code", deletion:"Deletion code", irn_cancel:"E-invoice cancel code", ewb_cancel:"E-way bill cancel code", clock_pause:"Clock pause code", order_hold:"Order hold code", review_edit:"Review edit code", no_docs:"No-documents code" };
 const codeName = (t)=> CODE_NAMES[t] || (t ? String(t).replace(/_/g," ")+" code" : "code");
 const aCode = (t)=>{ const n = codeName(t); return (/^[AEIOU]/i.test(n) ? "an " : "a ")+n; };
 // the one-time PINs (Admin generates one per action)
@@ -15511,6 +15511,10 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
   // all. One valid code unlocks all three Approve buttons together, not
   // per-section.
   const [showOverrideCode,setShowOverrideCode] = useState(false);
+  // 2026-11-16T05:00:00Z: the approval box
+  const [apN,setApN] = useState({ accounts:[], sales:[], tech:[], vp:[], dc:[] }); const [apMtc,setApMtc] = useState(null);
+  const [nd,setNd] = useState(null);   // null | { why, code, msg, gave }
+  const [apSent,setApSent] = useState("");
   const [overrideCodeInput,setOverrideCodeInput] = useState("");
   const [overrideActive,setOverrideActive] = useState(false);
   useEffect(()=>{ setPoNumber(quoteHeaderRow?.po_number||""); setPoDate(quoteHeaderRow?.po_date||""); },[quoteHeaderRow?.po_number,quoteHeaderRow?.po_date]);
@@ -15556,7 +15560,7 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
     !contractInfo.late_delivery && "Late Delivery",
     !contractInfo.signatory_name && "Signatory Name",
     !contractInfo.signatory_designation && "Signatory Designation",
-    outstandingDocs.length>0 && ("Mandatory documents ("+outstandingDocs.map(r=>r.category).join(", ")+")"),
+    outstandingDocs.length>0 && !contractInfo.no_docs_at && ("Mandatory documents ("+outstandingDocs.map(r=>r.category).join(", ")+")"),
   ].filter(Boolean);
   const billingMissing = !contractInfo.billing_address && !contractInfo.billing_address_overridden;
   // 2026-11-13T17:30:00Z: the client's PO price on every Sl No is mandatory before the Commercial Terms (or anything) can be
@@ -15797,8 +15801,105 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
       "The date the advance actually lands is what starts the delivery clock on contracts using that trigger.")
   );
 
+  // ===== 2026-11-16T05:00:00Z: APPROVAL BOX — every approval of this Order Acceptance in one place =====
+  useEffect(()=>{ let dead = false; (async()=>{ const N = await soApproverNames(); let vp = [], dc = [];
+      try{ await loadPostPeople(); vp = postHolders("vp_projects")||[]; dc = postHolders("doc_controller")||[]; }catch(e){}
+      let m = null; try{ m = await mtcSoGate(contractInfo.contract_number); }catch(e){}
+      if(!dead){ setApN({ ...N, vp, dc }); setApMtc(m||null); } })(); return ()=>{ dead = true; }; },[contractInfo.contract_number, contractInfo.commercial_approved_by]);
+  const apCn = contractInfo.contract_number;
+  const apSA = (saNamesTxt()||"").trim();
+  const apFields = ["commercial_approved", ...(SO_TECH_ASKED ? ["technical_approved"] : [])];
+  const apPending = apFields.filter(f=>!contractInfo[f+"_by"]);
+  const apList = (a)=> (a||[]).filter(Boolean).join(", ") || "—";
+  const ndCanSet = isSuperAdmin || IS_LEVAFLOW_SITE || soKeys.includes("vp_projects");
+  const ndGivers = Array.from(new Set([...(apN.vp||[])]));
+  // what stops approval, each with who fixes it
+  const apMiss = [
+    ...(poMissSl.length ? [{ t:"Client PO price missing on Sl "+poMissSl.join(", "), fix:"The FSE ("+apList(soFse)+") types it in Cart › PO price (per unit, as on the PO).", who:soFse }] : []),
+    ...(!overrideActive ? otherMissing.filter(x=>!/^Mandatory documents/.test(x)).map(x=>({ t:x+" not filled", fix:"Fill it in “to fix before approval” on this Order Acceptance"+(contractInfo.created_by?" (made by "+contractInfo.created_by+")":"")+".", who:contractInfo.created_by?[contractInfo.created_by]:[] })) : []),
+    ...(!overrideActive && billingMissing ? [{ t:"Billing Address not filled", fix:"Fill it, or override it for later (anyone can).", who:contractInfo.created_by?[contractInfo.created_by]:[] }] : []),
+    ...(!overrideActive && outstandingDocs.length && !contractInfo.no_docs_at ? [{ t:"Mandatory documents not on file: "+outstandingDocs.map(r=>r.category).join(", "), fix:"The Document Controller ("+apList(apN.dc)+") adds them in Documents — or, if this order needs none, use “No documents required” below.", who:apN.dc, docs:true }] : []),
+    ...(apMtc ? [{ t:"MTC & AVL is not saved", fix:"The Technical Head ("+apList(apN.tech)+") fills the MTC and the vendor of each component and saves.", who:apN.tech }] : []) ];
+  const apWho = (f)=> f==="technical_approved" ? "FSE of the order ("+apList(soFse)+") · or Sales Head ("+apList(apN.sales)+") · or a Super Admin ("+apSA+")"
+    : "Accounts Admin ("+apList(apN.accounts)+") · or a Super Admin ("+apSA+")";
+  const apWhoNames = (f)=> f==="technical_approved" ? [...soFse, ...(apN.sales||[])] : (apN.accounts||[]);
+  const apSend = async(names, what)=>{ const to = Array.from(new Set((names||[]).filter(Boolean))); if(!to.length){ setApSent("Nobody is set up to send to."); return; }
+    try{ await notifyPeople(to, what, "so_approval", { kind:"act", open:{ contract:apCn }, target:'[data-testid="so-approve-commercial_approved"]', group:"so:"+apCn+":ask:"+Date.now() }); setApSent("✓ Sent to "+to.join(", ")+" (their bell)."); }catch(e){ setApSent("✗ Could not send: "+(e.message||e)); } };
+  const ndSave = async(on, why, codeBy)=>{
+    const patch = on ? { no_docs_at:new Date().toISOString(), no_docs_by:user?.username||"unknown", no_docs_reason:why||null, no_docs_code_by:codeBy||null }
+                     : { no_docs_at:null, no_docs_by:null, no_docs_reason:null, no_docs_code_by:null };
+    const { error } = await sb.from("sale_order_tbl").update(patch).eq("id",contractInfo.id);
+    if(error){ setNd(s=>({ ...(s||{}), msg: /no_docs/.test(error.message||"") ? "✗ Run "+OA_APPR_SQL+" first (both companies)." : "✗ "+error.message })); return false; }
+    try{ await logAudit("UPDATE","sale_order_tbl",apCn, on ? "No documents required — set by "+(user?.username||"")+(codeBy?" with a No-documents code from "+codeBy:"")+(why?": "+why:"") : "No documents required — taken off by "+(user?.username||""), user?.username||"unknown", null, null); }catch(e){}
+    setNd(null); if(onChanged) onChanged(); return true; };
+  const ndGiveCode = async()=>{ const code = String(Math.floor(100000+Math.random()*900000));
+    const { error } = await sb.from("authorization_codes").insert({ code, code_type:"no_docs", generated_by:user?.username||"unknown", expires_at:new Date(Date.now()+24*3600e3).toISOString(), reference_number:"NODOC:"+apCn, note:"No documents required — "+apCn, used:false });
+    if(error){ setNd(s=>({ ...(s||{}), msg:"✗ Could not make the No-documents code: "+error.message })); return; }
+    try{ await logAudit("INSERT","authorization_codes","NODOC:"+apCn,"Made a No-documents code for "+apCn, user?.username||"unknown", null, null); }catch(e){}
+    setNd(s=>({ ...(s||{}), gave:code, msg:"" })); };
+  const ndUseCode = async()=>{ const s = nd||{}; const why = String(s.why||"").trim(); const c = String(s.code||"").trim();
+    if(!why){ setNd({ ...s, msg:"Write the reason (e.g. stock item, client wants no documents)." }); return; }
+    if(ndCanSet){ await ndSave(true, why, null); return; }
+    if(!c){ setNd({ ...s, msg:"Enter the No-documents code from "+apList(ndGivers)+", or press Ask." }); return; }
+    const { data, error } = await sb.from("authorization_codes").select("*").eq("code",c).eq("code_type","no_docs").eq("used",false).limit(5);
+    if(error){ setNd({ ...s, msg:"✗ Could not check the No-documents code: "+error.message }); return; }
+    const row = (data||[]).find(r=>!r.reference_number || r.reference_number==="NODOC:"+apCn);
+    if(!row){ setNd({ ...s, msg:"✗ That isn't an unused No-documents code for "+apCn+"." }); return; }
+    if(row.expires_at && new Date(row.expires_at) < new Date()){ setNd({ ...s, msg:"✗ That No-documents code has expired. Ask for a new one." }); return; }
+    const u = await sb.from("authorization_codes").update({ used:true, used_by:user?.username||"unknown", used_at:new Date().toISOString() }).eq("id",row.id).eq("used",false).select("id");
+    if(u.error || !(u.data||[]).length){ setNd({ ...s, msg:"✗ That No-documents code was just used. Ask for a new one." }); return; }
+    await ndSave(true, why, row.generated_by||null); };
+  const apBtn = { ...btnSmall, padding:"5px 12px", fontSize:12.5, marginTop:8, marginRight:6, background:"#fff" };
+  const apCell = (f)=>{ const by = contractInfo[f+"_by"]; const may = mayApproveField(f); const ready = !apMiss.length && canApproveAtAll;
+    return h("div",{key:f,style:{flex:1,minWidth:280,padding:"10px 14px",borderTop:"1px solid "+colors.border}},
+      h("div",{style:{fontWeight:700,fontSize:13.5}}, (f==="commercial_approved" ? "Commercial Terms" : "Everything else (technical)")),
+      h("div",{style:{fontSize:12,color:colors.muted}}, apWho(f), (!by && may) ? h("b",{style:{color:"#0c467e"}},"  ← you can approve") : null),
+      by ? h("div",{style:{marginTop:8,fontWeight:700,color:/^Waived/.test(by)?"#854f0b":"#0f6a4c"}}, (/^Waived/.test(by)?"⚑ ":"✓ ")+by+(contractInfo[f+"_at"]?" · "+fmtDMYTime(contractInfo[f+"_at"]):""))
+      : h("div",null,
+          apMiss.length ? h("div",{style:{marginTop:6}}, h("div",{style:{fontSize:12,fontWeight:700,color:"#8a2d2d"}},"Missing before anyone can approve:"),
+            h("ul",{"data-testid":"oa-appr-miss",style:{margin:"4px 0 0",paddingLeft:18}}, apMiss.map((m,i)=>h("li",{key:i,style:{fontSize:12.5,margin:"3px 0"}}, h("b",null,m.t)," — ",m.fix)))) : null,
+          h("button",{"data-testid":"so-approve-"+f,onClick:()=>approve(f),
+            style: ready && may ? { ...btnPrimary, padding:"6px 14px", fontSize:13, marginTop:8, marginRight:6 } : { ...apBtn, color:"#a3312a", borderColor:"#e8a39b", borderStyle:"dashed" }},
+            ready && may ? "Approve "+(f==="commercial_approved"?"Commercial Terms":"Everything else") : !may ? "Not yours to approve ▸" : "Approve — "+apMiss.length+" missing ▸"),
+          ready && !may ? h("button",{"data-testid":"oa-appr-send",onClick:()=>apSend(apWhoNames(f), "✅ Order Acceptance "+apCn+(contractInfo.customer_name?" ("+contractInfo.customer_name+")":"")+" is ready for your approval ("+(f==="commercial_approved"?"Commercial Terms":"Everything else")+"). Sent by "+(user?.username||"")+"."),style:apBtn},"🔔 Send to "+apList(apWhoNames(f))) : null,
+          apMiss.length ? h("button",{"data-testid":"oa-appr-remind",onClick:()=>apSend(apMiss.flatMap(m=>m.who||[]), "📋 Order Acceptance "+apCn+" can't be approved yet — please fix: "+apMiss.map(m=>m.t).join("; ")+". From "+(user?.username||"")+"."),style:apBtn},"🔔 Remind those who fix it") : null,
+          apMiss.length && isSuperAdmin && (otherMissing.length || billingMissing) && !overrideActive ? h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:4}},"Super Admin: missing OA details can be overridden with a Deletion code (",
+            h("span",{style:{color:"#0c447c",cursor:"pointer",textDecoration:"underline"},onClick:()=>{ setShowRequired(true); setShowOverrideCode(true); }},"override"),"). The PO price, MTC & AVL and documents cannot.") : null)); };
+  const apNoDocs = (()=>{
+    if(contractInfo.no_docs_at) return h("div",{"data-testid":"oa-nodocs-on",style:{padding:"8px 14px",borderTop:"1px solid "+colors.border,fontSize:12.5,background:"#f6f8f3"}},
+      h("b",null,"No documents required"), " — set by "+(contractInfo.no_docs_by||"")+" "+fmtDMY(String(contractInfo.no_docs_at).slice(0,10))+(contractInfo.no_docs_code_by?" (No-documents code from "+contractInfo.no_docs_code_by+")":"")+(contractInfo.no_docs_reason?": "+contractInfo.no_docs_reason:"")+". Mandatory documents are waived; the Purchase Order and the PO price are still needed. ",
+      ndCanSet ? h("span",{style:{color:"#0c447c",cursor:"pointer",textDecoration:"underline"},onClick:()=>{ if(confirm("Take “No documents required” off "+apCn+"? The mandatory documents will block the approvals again.")) ndSave(false); }},"take it off") : null);
+    if(!outstandingDocs.length || !apPending.length) return null;
+    const s = nd;
+    return h("div",{"data-testid":"oa-nodocs",style:{padding:"8px 14px",borderTop:"1px solid "+colors.border,fontSize:12.5,background:"#fffbea"}},
+      !s ? h("span",null,"This order needs no documents? ",
+          h("button",{"data-testid":"oa-nodocs-btn",onClick:()=>setNd({ why:"", code:"", msg:"" }),style:{...btnSmall,padding:"3px 10px"}},"No documents required"),
+          !IS_LEVAFLOW_SITE && ndCanSet ? h("button",{"data-testid":"oa-nodocs-give",onClick:()=>{ setNd({ why:"", code:"", msg:"" }); ndGiveCode(); },style:{...btnSmall,padding:"3px 10px",marginLeft:6}},"🔑 Give a No-documents code") : null)
+      : h("div",null,
+          h("div",{style:{marginBottom:4}}, ndCanSet ? "Mark "+apCn+" as No documents required — the mandatory documents stop blocking the approvals (the Purchase Order stays)."
+            : "No documents required needs a No-documents code from the VP Projects — "+apList(ndGivers)+"."),
+          h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}},
+            !ndCanSet ? h("input",{"data-testid":"oa-nodocs-code",value:s.code||"",onChange:e=>setNd({ ...s, code:e.target.value, msg:"" }),placeholder:"No-documents code",style:{...inputStyle,width:150,padding:"4px 8px"}}) : null,
+            h("input",{"data-testid":"oa-nodocs-why",value:s.why||"",onChange:e=>setNd({ ...s, why:e.target.value, msg:"" }),placeholder:"Reason (e.g. stock item, client wants no documents)",style:{...inputStyle,width:300,padding:"4px 8px"}}),
+            h("button",{"data-testid":"oa-nodocs-save",onClick:ndUseCode,style:{...btnPrimary,padding:"4px 12px",fontSize:12}}, ndCanSet ? "Mark No documents required" : "Use code"),
+            !ndCanSet ? h("button",{"data-testid":"oa-nodocs-ask",onClick:async()=>{ try{ await notifyPeople(ndGivers, "🔑 "+(user?.username||"")+" asks for a No-documents code for Order Acceptance "+apCn+(contractInfo.customer_name?" ("+contractInfo.customer_name+")":"")+".", "so_approval", { kind:"act", open:{ contract:apCn }, target:'[data-testid="oa-approval-box"]', group:"nodoc:"+apCn }); setNd({ ...s, msg:"Asked "+apList(ndGivers)+" (their bell)." }); }catch(e){ setNd({ ...s, msg:"✗ "+(e.message||e) }); } },style:btnSmall},"Ask "+apList(ndGivers)) : null,
+            h("button",{onClick:()=>setNd(null),style:btnSmall},"Cancel")),
+          s.gave ? h("div",{"data-testid":"oa-nodocs-gave",style:{marginTop:4}},"No-documents code for "+apCn+": ",h("b",{style:{fontSize:15,letterSpacing:1}},s.gave)," — one use, 24 hours. Give it to the person asking.") : null,
+          s.msg ? h("div",{style:{marginTop:4,color:/^✗/.test(s.msg)?colors.danger:"#0f6a4c"}},s.msg) : null)); })();
+  const apBox = apPending.length
+    ? h("div",{"data-testid":"oa-approval-box",id:"oa-approval-box",style:{background:"#fff",border:"2px solid #c9302c",borderRadius:10,margin:"8px 0",overflow:"hidden",scrollMarginTop:80}},
+        h("div",{style:{padding:"8px 14px",display:"flex",alignItems:"center",gap:10,background:"#fbe7e4",color:"#8a2d2d"}},
+          h("b",{style:{fontSize:15}},"⏳ Order Acceptance approval — "+apPending.length+" of "+apFields.length+" pending"), h("span",{style:{flex:1}}),
+          h("span",{style:{fontSize:12.5,fontWeight:600}}, apPending.some(f=>mayApproveField(f)) ? "⭐ "+apPending.filter(f=>mayApproveField(f)).length+" for you" : "Nothing for you — waiting on others")),
+        h("div",{style:{display:"flex",flexWrap:"wrap"}}, apFields.map(apCell)),
+        apNoDocs,
+        apSent ? h("div",{style:{padding:"4px 14px 8px",fontSize:12,color:/^✗/.test(apSent)?colors.danger:"#0f6a4c"}},apSent) : null)
+    : h("div",{"data-testid":"oa-approval-box",id:"oa-approval-box",style:{background:"#e3f1ea",border:"1px solid #8fc9ad",borderRadius:8,margin:"8px 0",padding:"6px 12px",fontSize:12.5,color:"#0f6a4c",scrollMarginTop:80}},
+        h("b",null,"✓ Order Acceptance approved"), " — "+apFields.map(f=>(f==="commercial_approved"?"Commercial Terms":"Everything else")+" by "+String(contractInfo[f+"_by"]||"")+(contractInfo[f+"_at"]?" "+fmtDMY(String(contractInfo[f+"_at"]).slice(0,10)):"")).join(" · "),
+        contractInfo.no_docs_at ? " · No documents required" : "");
   return h("div",{style:{marginTop:10}},
     h(CtfFlag,{ key:"ctf"+contractInfo.contract_number, cn:contractInfo.contract_number }),   // 2026-11-02T08:00:00Z
+    apBox,
     h(PurOwnerTag,{ key:"pot"+contractInfo.contract_number, cn:contractInfo.contract_number }),   // 2026-11-03T07:00:00Z
     oaPanel,
     delPanel,
@@ -15952,7 +16053,9 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
         title:"Sl No "+unissuedSlNos.map(e=>e.item_sl_no).join(", ")},
         unissuedSlNos.length+" Sl No"+(unissuedSlNos.length>1?"s":"")+" not on any work order"),
       unissuedSlNos.length>0 && goState.indexOf("Start Production")===0 && h("button",{onClick:()=>setWoOpen(true),style:{...btnSmall,fontSize:10,padding:"2px 8px"}},"Raise work order"),
-      row("Commercial Terms (Accounts Admin)","commercial_approved"),
+      h("span",{onClick:()=>{ const el = document.getElementById("oa-approval-box"); if(el) el.scrollIntoView({ behavior:"smooth", block:"start" }); },title:"Go to the approval box",
+        style:{fontSize:10.5,cursor:"pointer",borderRadius:9,padding:"2px 8px",fontWeight:600,...(contractInfo.commercial_approved_by?{background:"#e3f1ea",color:"#0f6a4c"}:{background:"#fbe7e4",color:"#a3312a"})}},
+        contractInfo.commercial_approved_by ? "✓ Commercial Terms approved" : "Commercial Terms: approval pending ↑"),   // 2026-11-16T05:00:00Z: the button lives in the approval box
       // Advance state, shown beside the approval it gates.
       advAnswered ? h("span",{style:{fontSize:10.5,color:contractInfo.has_advance?"#0f6e56":colors.mutedLight,
           background:contractInfo.has_advance?"#e6f4f1":"transparent",padding:contractInfo.has_advance?"2px 8px":0,borderRadius:9}},
@@ -22841,6 +22944,10 @@ function SavedEstimates({ autoFile, user, sessionCompany, openTarget, onConsumed
         why:refFilter?null:"You're already looking at all of them."}
     ]},
     {key:"this",cap:isSO?"This Order Acceptance":"This quote",row:1,items:[
+      ...(isSO ? [(()=>{ const n = contractInfo ? ["commercial_approved", ...(SO_TECH_ASKED?["technical_approved"]:[])].filter(f=>!contractInfo[f+"_by"]).length : 0;   // 2026-11-16T05:00:00Z
+        return {id:"appr",label:!contractInfo?"Approvals":n?"Approvals ("+n+")":"Approvals ✓",icon:"circle-check",color:!contractInfo?"#6b6a62":n?"#c9302c":"#0f6a4c","data-testid":"oa-rib-approvals",
+          onClick:()=>{ const el = document.getElementById("oa-approval-box"); if(el){ el.scrollIntoView({ behavior:"smooth", block:"start" }); el.style.boxShadow="0 0 0 5px #ffd36b"; setTimeout(()=>{ el.style.boxShadow=""; },900); } },
+          why:noOpen}; })()] : []),
       {id:"hdr",label:"Edit header",icon:"pencil",color:"#1d5fa8",onClick:openHeaderEdit,
         why:noOpen||(!quoteHeaderRow?"The header is still loading.":null)||(headerEditOpen?"The header is already open for editing, below.":null)},
       {id:"terms",label:"Commercial Terms",icon:"file-text",color:"#5c2d91",onClick:openCommercialTerms,why:noOpen},
@@ -36640,6 +36747,7 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"16 Nov 2026", summary:"Built on 2026-11-16T05:00:00Z, on top of 2026-11-16T04:00:00Z. SQL: structure_oa_approval_2026-11-16.sql (both companies). APPROVAL (build approval): (1) An approval box on every Order Acceptance, under the Step strip: Commercial Terms with who approves by name (Accounts Admin or a Super Admin), a big Approve button when it is yours and nothing is missing, otherwise the list of what is missing with who fixes each (PO price on a Sl No, OA details, mandatory documents, MTC & AVL), 🔔 Send to the approver / 🔔 Remind those who fix it, and the Super Admin Deletion-code override for missing OA details. Once approved it shrinks to one green line. (2) Ribbon › This Order Acceptance › Approvals (n) — red with the count while pending, green when done; jumps to the box. The approval button in the grey Contract strip is now a status chip that jumps to the box. (3) No documents required: from the box when documents are what is missing. Flometriq — the VP Projects post (and Super Admins) set it directly or give a one-use No-documents code (24 h) to the person asking, who can also press Ask to ring them; Levaflow — no code. Mandatory documents are then waived (the Purchase Order and the PO price still count), the order leaves the review meeting's document groups, who set it and why is shown and logged; take it off (VP Projects / Super Admin). (4) Super Admins checked across the app's approval points (Order Acceptance, Order Status steps, work order release, Purchase BOM, PR, QC serial fix, task approvals) — all already allow a Super Admin; overrides still need their code." },
   { date:"16 Nov 2026", summary:"Built on 2026-11-16T04:00:00Z, on top of 2026-11-16T03:00:00Z. No SQL. A Delivery Challan is never a mandatory document: it no longer blocks Order Acceptance approvals, and it cannot be made mandatory (it only exists at despatch). Order Acceptance approval button: instead of “Pending — why?” it now says “Can't approve — n missing ▸” (or “Not yours to approve ▸”), red-dashed, with the list on hover; pressing it lists each item with who fixes it, and Super Admins still see the Deletion-code override. “You can't approve” now says which login you are using. The approval guide pop-up no longer says “Press Approve” when the button may say what is missing." },
   { date:"16 Nov 2026", summary:"Built on 2026-11-16T03:00:00Z, on top of 2026-11-16T02:00:00Z. No SQL. ORDER PROCESSING REVIEW: narrower rows. Notes · history is a button under the item and opens a pop-up (history newest first, Add note, ← Back). The owner shows the current owner in bold; each earlier owner is a badge under it with the day they had it until (newest first). ⚑ Mark urgent sits under the New owner picker; Change due date is the date with Reason + ✓ under it; Committed date sits over its reason. Fixed column widths so the table fits the screen." },
   { date:"16 Nov 2026", summary:"Built on 2026-11-16T02:00:00Z, on top of 2026-11-16T01:00:00Z. No SQL. ORDER PROCESSING REVIEW: two clear columns on every item — New owner (pick the person, Give) and Change due date (date, reason, ✓) — for Super Admins and the Document Controller / VP Projects posts, or anyone with a Review edit code (others see —). The status (late / due today / paused) is now a badge under the customer; the PO and Status columns are gone (PO date missing still shows under the due date). ⚑ Mark urgent and Notes · history are buttons under the item. The item's owner can now fill their own committed date and reason (as well as the chair, VP Projects and the Document Controller). When the meeting is not set up, the banner says the committed boxes stay closed until it is." },
@@ -45281,6 +45389,7 @@ function EndUserRulesScreen({ user }){
 // Whatever stops an approval (or the Order Acceptance PDF) is listed, each with what to do.
 const SO_QC_NOT_NEEDED = "Not needed (QC approval dropped 23 Oct 2026)";
 const soAllApproved = (ci)=> !!(ci && ci.commercial_approved_by);   // 2026-10-30T08:00:00Z: only Accounts approves an Order Acceptance
+const OA_APPR_SQL = "structure_oa_approval_2026-11-16.sql";   // 2026-11-16T05:00:00Z: No documents required columns
 const SO_TECH_ASKED = false;   // the FSE / Sales Head approval ("Everything else") was dropped 30 Oct 2026
 const SO_TECH_NOT_NEEDED = "Not needed (FSE approval dropped 30 Oct 2026)";
 async function soFsePeople(ci){
@@ -79865,7 +79974,7 @@ async function rvwData(){
     safe(fetchAll("universal_document_history_tbl","id,document_id,rev_number,status,direction,changed_at")),
     safe(fetchAll("document_requests_tbl","*")),
     loadDocStatuses().then(x=>x||[], ()=>[]),
-    safe(fetchAll("sale_order_tbl","contract_number,basis_date,go_ahead_at,go_ahead_state,oa_issued_on,status")) ]);
+    safe(fetchAll("sale_order_tbl","contract_number,basis_date,go_ahead_at,go_ahead_state,oa_issued_on,status,no_docs_at").catch(()=>fetchAll("sale_order_tbl","contract_number,basis_date,go_ahead_at,go_ahead_state,oa_issued_on,status"))) ]);
   return { M, docs:docs||[], hist:hist||[], reqs:reqs||[], statuses:statuses||[], so2:new Map((sos2||[]).map(s=>[String(s.contract_number), s])) };
 }
 // the PO date of a contract, and whether it is the real PO / LOI date or only the date it was entered
@@ -79926,6 +80035,7 @@ function rvwBuild(cfg, D, prev, E){
   const liveCat = {};
   (D.docs||[]).forEach(d=>{
     if(d.entity_type!=="contract" || d.is_archived) return; const cn = String(d.entity_id||""); const m = meta.get(cn); if(!m) return;
+    if((D.so2.get(cn)||{}).no_docs_at) return;   // 2026-11-16T05:00:00Z: No documents required
     const k = rvwDocClass(d.category, d.doc_name); (liveCat[cn+"|"+String(d.category||"").trim().toLowerCase()] = true);
     const hs = H[String(d.id)]||[]; const last = hs[hs.length-1];
     if(last && skipLine(last)) return;
