@@ -60,7 +60,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-11-17T13:30:00Z";
+  var APP_BUILD_VERSION = "2026-11-19T12:00:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -3655,7 +3655,7 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
   ] : [
     { label:"Enquiry", tabs:[{key:"enquiries_list",label:"Enquiries"}] },
     { label:"Quotes", tabs:[{key:"saved",label:"Quotes"}] },
-    { label:"Order Acceptance", tabs:[{key:"sale_order_entry",label:"Order Acceptance"},{key:"wo_pending",label:"W/O Release pending"},{key:"wo_parked",label:"W/O Engineering / On Hold"},{key:"po_awaited",label:"PO awaited — LOI / verbal"},{key:"customer_requests",label:"Customer requests"}] },
+    { label:"Order Acceptance", tabs:[{key:"sale_order_entry",label:"Order Acceptance"},{key:"wo_pending",label:"W/O Release pending"},{key:"wo_parked",label:"W/O Engineering / On Hold"},{key:"po_awaited",label:"PO awaited — LOI / verbal"},{key:"customer_requests",label:"Customer requests"},{key:"my_orders_flow",label:"My orders — where they are"}] },
     { label:"Registers", tabs:[{key:"quote_register",label:"Quote Register"},{key:"contract_register",label:"Contract Register"}] },
     ...(canSeeValvePrice(user)?[{ label:"Pricelist", tabs:[{key:"valve_price",label:"Valve Price List"}] }]:[]),
   ];
@@ -3868,6 +3868,17 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
   if(user.role!=="hr_admin" && !visibleGroups.some(g=>g.label==="Production")){   // 2026-11-15T20:00:00Z: Manufacturing Part 1
     const qi = visibleGroups.findIndex(g=>g.label==="QC"); const pg = { label:"Production", subgroups:[{ label:"Route cards", tabs:[{key:"mfg_cards",label:"Route cards"},{key:"mfg_floor",label:"Shop-floor overview"}] }, { label:"Progress", tabs:[{key:"mfg_report",label:"Progress report"},{key:"mfg_dash",label:"Dashboard"}] }, { label:"Finished goods", tabs:[{key:"fg_stock",label:"Finished goods"}] }, { label:"Masters", tabs:[{key:"mfg_templates",label:"Route templates"},{key:"mfg_models",label:"Models → route"}] }] };
     if(qi>=0) visibleGroups.splice(qi+1,0,pg); else visibleGroups.push(pg); }
+  { // 2026-11-18T06:00:00Z: ⟶ Order flow — Order Status (after Pending Orders), Accounts › Billing, Purchase (Purchase Manager post), Production (Production Manager post)
+    const addSub = (label, sub, tab)=>{ const gi = visibleGroups.findIndex(g=>g.label===label); if(gi<0) return; let g = visibleGroups[gi];
+      if(g.tabs){ g = { ...g, subgroups:[{ label, tabs:g.tabs }] }; delete g.tabs; }
+      const sgs = (g.subgroups||[]).slice(); const si = sgs.findIndex(x=>x.label===sub); if(si>=0) sgs[si] = { ...sgs[si], tabs:[...sgs[si].tabs, tab] }; else sgs.push({ label:sub, tabs:[tab] });
+      visibleGroups[gi] = { ...g, subgroups:sgs }; };
+    const myNm = user.employee_name || user.username || ""; const holds = (k)=> user.role==="super_admin" || (postHolders(k)||[]).some(n=>sameName(n, myNm));
+    addSub("Order Status", "Flow", { key:"order_flow", label:"⟶ Order flow" });
+    addSub("Order Status", "Kick-off", { key:"kickoff", label:"🤝 Kick-off meetings" });   // 2026-11-18T13:00:00Z
+    addSub("Accounts", "Billing", { key:"order_flow_acc", label:"⟶ Order flow" });
+    if(holds("purchase_manager")) addSub("Purchase", "Procurement", { key:"order_flow_pur", label:"⟶ Order flow" });
+    if(holds("production_manager")) addSub("Production", "Progress", { key:"order_flow_pm", label:"⟶ Order flow" }); }
   { const tm = {}; visibleGroups1.forEach(g=>allTabsOf(g).forEach(t=>{ if(!tm[t.key]) tm[t.key] = g.label; })); [...groups].forEach(g=>allTabsOf(g).forEach(t=>{ if(!tm[t.key]) tm[t.key] = g.label; })); OM_KEYS.forEach(k=>{ if(!tm[k]) tm[k] = "Reports"; }); MFG_KEYS.forEach(k=>{ tm[k] = "Production"; }); if(!tm.orders_money) tm.orders_money = "Reports"; window.__tabMenu = tm; const tl = { home:"Home", authorization_codes:"Authorization Codes", deletion_codes:"Deletion Codes", rights_grid:"Rights Grid", despatch_dc:"Delivery Challans (DC)", despatch_opt1:"DC › Option 1 — DC → QC → bill", despatch_bill_first:"DC › Option 2 — bill first, QC later", orders_money:"Pending Orders – By value", om_pend:"Pending orders (by stage)", om_desp:"Despatches", om_coll:"Collections", om_ahead:"Look ahead", om_dash:"Dashboard – orders & money" }; [...visibleGroups1, ...groups].forEach(g=>allTabsOf(g).forEach(t=>{ if(!tl[t.key]) tl[t.key] = t.label; })); window.__tabLabel = tl; }
 
   const itemStyle = t => ({
@@ -8591,6 +8602,241 @@ function PriceListMaster({ user }){
   );
 }
 
+// ===== 2026-11-19T12:00:00Z: Level Gauge — questionnaire picks the model; CC rules fill qty/lengths; gateways add valves/plugs/illuminator =====
+const LG_K = 8*25.4*25.4*25.4;   // weight = L x W x T / (8 x 25.4^3) — the SOP's deliberate shop allowance
+const LG_NOZ = ["15nb","20nb","25nb","40nb","50nb"];
+const LG_DV_SIZES = ['1/2"','3/4"','1"'];
+const LG_DV_NB = {'1/2"':15,'3/4"':20,'1"':25};
+const LG_PLUG_SPEC = {'1/2"':'Plug-1/2" -NPTx1"lng','3/4"':'Plug-3/4"-NPTx1"lng','1"':'Plug-1" -NPTx1"lng'};
+const LG_ILLUM = ["None","Standard","Explosion-proof Dhanbad","Explosion-proof ATEX"];
+// WNRF flange weights (kg, approx. ASME B16.5) used only for the auto shut-off valve SOP weight: 4 kg + one flange
+const LG_FLANGE_KG = {150:{15:0.9,20:1.1,25:1.4,40:2.2,50:2.7},300:{15:1.1,20:1.6,25:2.0,40:3.6,50:4.1}};
+const LG_GATEWAY_DEFAULTS = [
+  {gateway:"isolation",option_label:"Auto shut-off",source:"sop_weight",pricelist_item:null,is_default:true},
+  {gateway:"isolation",option_label:"Ball valve",source:"pricelist",pricelist_item:"Ball Valve"},
+  {gateway:"isolation",option_label:"Gate valve",source:"pricelist",pricelist_item:"Gate Valve"},
+  {gateway:"drain",option_label:"Plug",source:"plug",is_default:true},{gateway:"drain",option_label:"Gate valve",source:"pricelist",pricelist_item:"Gate Valve"},
+  {gateway:"drain",option_label:"Ball valve",source:"pricelist",pricelist_item:"Ball Valve"},{gateway:"drain",option_label:"Needle valve",source:"pricelist",pricelist_item:"Needle Valve"},
+  {gateway:"vent",option_label:"Plug",source:"plug",is_default:true},{gateway:"vent",option_label:"Gate valve",source:"pricelist",pricelist_item:"Gate Valve"},
+  {gateway:"vent",option_label:"Ball valve",source:"pricelist",pricelist_item:"Ball Valve"},{gateway:"vent",option_label:"Needle valve",source:"pricelist",pricelist_item:"Needle Valve"}];
+function lgSolveGlass(cc, style){   // the SOP algorithm — fixed, nobody edits it
+  let best=null; const mx=Math.ceil(cc/240)+1;
+  for(let a=0;a<=mx;a++) for(let b=0;b<=mx;b++){
+    const n=a+b; if(!n) continue; const glass=340*a+240*b, sec=glass+20*(n-1);
+    if(style==="SS" ? sec>cc : sec>=cc-80) continue;
+    const c={n14:a,n10:b,n,glass,sec};
+    if(!best){ best=c; continue; }
+    const better = style==="SS" ? (glass>best.glass||(glass===best.glass&&(n<best.n||(n===best.n&&a>best.n14))))
+                                : (n>best.n||(n===best.n&&(glass>best.glass||(glass===best.glass&&a>best.n14))));
+    if(better) best=c;
+  }
+  return best;
+}
+function lgModelCode(q){ return (q.type)+"-"+q.mnt+"-"+q.cls+"-"+q.chf+"-"+(q.type==="TLG"&&q.mica?"M":"0")+(q.frost?"F":"0")+(q.scale?"S":"0"); }
+function lgVars(q){
+  const cc=Number(q.cc)||0, cls=Number(q.cls)||150, g=cc>0?lgSolveGlass(cc,q.mnt):null; if(!g) return null;
+  const typ=q.type, gps=typ==="RLG"?1:2;
+  const V={CC:cc,CHAMBER:cc+80,N14:g.n14,N10:g.n10,GPS:gps,CPT:cls===150?25:28,PLT:cls===150?32:40,CLS:cls,
+    BOLTS:typ==="RLG"?7*g.n14+5*g.n10:14*g.n14+10*g.n10,UBL:cls===150?220:230,VIS:g.sec-40,SEC:g.sec,GLASS:g.glass,NOZL:String(q.noz||"20nb").toLowerCase()};
+  V.VIS_M=Math.ceil(V.VIS/1000);
+  V.SOP_MODEL=typ+"-"+g.n10+""+g.n14+"-"+cc+(typ==="TLG"&&q.mica?"-M":"")+"-"+(q.illum&&q.illum!=="None"?"I":"0");
+  return V;
+}
+function lgFill(str, V){ return String(str==null?"":str).replace(/\{(\w+)\}/g,(m,k)=>V[k]!==undefined?V[k]:m); }
+function lgEval(rule, V){
+  const e=String(rule||"").replace(/[A-Z_][A-Z0-9_]*/g,k=>V[k]!==undefined?String(V[k]):"NaN");
+  if(!/^[0-9+\-*/(). NaN]*$/.test(e)) return 0;
+  try{ const v=Function('"use strict";return ('+e+')')(); return isFinite(v)?Math.max(0,Math.round(v)):0; }catch(x){ return 0; }
+}
+function lgUnitWeight(shape, spec, cut){
+  const n=(String(spec||"").match(/\d+(\.\d+)?/g)||[]).map(Number), c=(String(cut||"").match(/\d+(\.\d+)?/g)||[]).map(Number), s=String(shape||"").toLowerCase();
+  if(s==="sqbar") return (n[0]||0)*(n[0]||0)*(c[0]||0)/LG_K;
+  if(s==="flat")  return (n[0]||0)*(n[1]||0)*(c[0]||0)/LG_K;
+  if(s==="plate") return (c[0]||0)*(c[1]||0)*(c[2]||n[0]||0)/LG_K;
+  if(s==="rod")   return Math.PI/4*(n[0]||0)*(n[0]||0)*(c[0]||0)/LG_K;
+  return 0;
+}
+// master BOM rows of the picked model -> quote lines at this CC
+function lgTransform(rows, V){
+  const out=[];
+  (rows||[]).forEach(r=>{
+    const hasRule=!!(r.lg_qty_rule||r.lg_cut_rule||r.lg_spec_rule);
+    if(!hasRule){ out.push(r); return; }
+    const pieces = r.lg_qty_rule ? lgEval(r.lg_qty_rule,V) : (Number(r.cutting_plan_qty)||Number(r.qty_required)||0);
+    if(r.lg_qty_rule && pieces<=0) return;            // e.g. no 14" sections at this CC — line dropped, never a zero row
+    const spec = r.lg_spec_rule ? lgFill(r.lg_spec_rule,V) : r.material_spec;
+    const cut  = r.lg_cut_rule ? lgFill(r.lg_cut_rule,{...V,Q:pieces}) : (r.cutting_plan_layout_size||"");
+    const u=String(r.uom||"").toLowerCase().trim();
+    let qty=pieces;
+    if(u==="kg"||u==="kgs") qty=Math.round(pieces*lgUnitWeight(r.material_shape,spec,cut)*1000)/1000;
+    else if(["m","mtr","mtrs","meter","metre","meters","metres"].includes(u)) qty=Math.round(pieces*V.VIS/1000*1000)/1000;
+    out.push({...r, material_spec:spec, cutting_plan_layout_size:cut, cutting_plan_qty:cut?pieces:(r.cutting_plan_qty||0), qty_required:qty});
+  });
+  const ord=["Main Chamber","Cover Plate 14″","Cover Plate 10″","Glass 14″","Glass 10″","Gasket 14″","Gasket 10″","U-Bolts","Studs","Nuts","Mica 14″","Mica 10″","Frost Shield 14″","Frost Shield 10″","Scale","Flanges"];
+  const rk=c=>{ const i=ord.indexOf(c); return i<0?99:i; };
+  return out.map((r,i)=>[r,i]).sort((a,b)=>rk(a[0].component)-rk(b[0].component)||a[1]-b[1]).map(x=>x[0]);
+}
+function lgNbOf(size){ const m=String(size||"").match(/\d+/); return m?Number(m[0]):null; }
+async function lgPricelistFor(item, nb){
+  if(!item||!nb) return [];
+  const sizes=[nb+"nb",nb+"NB",nb+"Nb",nb+" nb",nb+" NB"];
+  const { data, error } = await sb.from("pricelist_models").select("model_code,item,size,valve_type,end_conn,rating,body,description,list_price,uplift_pct").eq("item",item).eq("active",true).in("size",sizes).order("list_price",{ascending:true}).limit(25);
+  if(error) return [];
+  return data||[];
+}
+async function lgIlluminators(){
+  const { data, error } = await sb.from("pricelist_models").select("model_code,item,size,valve_type,description,list_price,uplift_pct").ilike("item","%illuminator%").eq("active",true).order("list_price",{ascending:true}).limit(25);
+  return error?[]:(data||[]);
+}
+function lgPlLabel(r){ return [r.model_code, r.end_conn, r.rating, r.body].filter(Boolean).join(" · ")+" — ₹ "+fmt2(pricelistCost(r)); }
+function lgPickDefault(rows, prefEnds, cls){
+  if(!rows.length) return "";
+  for(const e of prefEnds){ const hit=rows.filter(r=>String(r.end_conn||"").toUpperCase()===e && (e!=="FL"||String(r.rating||"").replace(/\D/g,"")===String(cls))); if(hit.length) return hit[0].model_code; }
+  return rows[0].model_code;
+}
+// gateway lines (outside the model): isolation valves, drain, vent, illuminator
+function lgGatewayLines(q, V, sel, baseSf, kgUom){
+  const L=[]; const stamp=Date.now(); let k=0;
+  const mk=(o)=>({ id:"lg-gw-"+stamp+"-"+(k++), item:"Level Gauge", size:q.cls+"#", model:lgModelCode(q), sub_assembly:"", material_shape:"", cutting_plan_layout_size:"", cutting_plan_qty:0, cutting_plan_uom:"", sf:baseSf, _manual:true, ...o });
+  const isoQty=Math.max(0,Number(q.isoQty)||0);
+  if(isoQty>0){
+    if(sel.iso.source==="sop_weight"){
+      const nb=lgNbOf(V.NOZL)||20, fl=(LG_FLANGE_KG[V.CLS]||{})[nb]||1.1, each=Math.round((4+fl)*1000)/1000;
+      L.push(mk({ component:"Isolation Valve – Auto shut-off", _lg:"isolation", material_shape:"SqBar", material_spec:"SquareBar-40mm", uom:kgUom,
+        qty_required:Math.round(isoQty*each*1000)/1000, cutting_plan_layout_size:"Auto shut-off valve "+V.NOZL+" "+V.CLS+"# – SOP weight 4 kg + flange "+fl+" kg = "+each+" kg each ("+isoQty+" nos)", cutting_plan_qty:isoQty, cutting_plan_uom:"Nos" }));
+    } else if(sel.iso.row){
+      L.push(mk({ component:"Isolation Valve – "+sel.iso.label, _lg:"isolation", material_shape:"Valve", material_spec:sel.iso.row.item+" "+sel.iso.row.model_code, uom:"Nos", qty_required:isoQty, _rate:pricelistCost(sel.iso.row) }));
+    } else {
+      L.push(mk({ component:"Isolation Valve – "+sel.iso.label, _lg:"isolation", material_shape:"Valve", material_spec:sel.iso.label+" "+V.NOZL+" "+V.CLS+" LBS (not in price list)", uom:"Nos", qty_required:isoQty, _rate:0 }));
+    }
+  }
+  [["drain","Drain"],["vent","Vent"]].forEach(([g,word])=>{
+    const s=sel[g];
+    if(s.source==="plug") L.push(mk({ component:word+" Plug", _lg:g, material_shape:"Plug", material_spec:LG_PLUG_SPEC[s.size]||LG_PLUG_SPEC['3/4"'], uom:"Nos", qty_required:1 }));
+    else if(s.row) L.push(mk({ component:word+" Valve – "+s.label, _lg:g, material_shape:"Valve", material_spec:s.row.item+" "+s.row.model_code, uom:"Nos", qty_required:1, _rate:pricelistCost(s.row) }));
+    else L.push(mk({ component:word+" Valve – "+s.label, _lg:g, material_shape:"Valve", material_spec:s.label+" "+s.size+" (not in price list)", uom:"Nos", qty_required:1, _rate:0 }));
+  });
+  if(q.illum && q.illum!=="None"){
+    const r=sel.illum.row;
+    L.push(mk({ component:"Illuminator", _lg:"illuminator", material_shape:"Illuminator", material_spec:"Illuminator-"+q.illum+(r?" ("+r.model_code+")":""), uom:"Nos", qty_required:V.VIS_M,
+      cutting_plan_layout_size:"1 per metre of visible length ("+V.VIS+" mm)", _rate:r?pricelistCost(r):0 }));
+  }
+  return L;
+}
+function LevelGaugeQuestionnaire({ onClose, onBuild, initial }){
+  const [q,setQ]=useState(initial||{type:"RLG",mnt:"SS",cls:"150",chf:"SQ",mica:false,frost:false,scale:false,cc:"",noz:"20nb",isoType:"Auto shut-off",isoQty:"2",drainType:"Plug",drainSize:'3/4"',ventType:"Plug",ventSize:'3/4"',illum:"None"});
+  const [opts,setOpts]=useState(LG_GATEWAY_DEFAULTS);
+  const [pl,setPl]=useState({iso:[],drain:[],vent:[],illum:[]});
+  const [plSel,setPlSel]=useState({iso:"",drain:"",vent:"",illum:""});
+  const [master,setMaster]=useState({code:"",rows:null,err:""});
+  const [busy,setBusy]=useState(false);
+  const set=(k,v)=>setQ(p=>({...p,[k]:v}));
+  useEffect(()=>{ (async()=>{ try{ const { data, error } = await sb.from("lg_gateway_option_tbl").select("*").eq("active",true).order("sort_order"); if(!error && data && data.length) setOpts(data); }catch(e){} })(); },[]);
+  const optFor=(g)=>opts.filter(o=>o.gateway===g);
+  const optOf=(g,label)=>optFor(g).find(o=>o.option_label===label)||optFor(g)[0]||{source:"plug",option_label:label};
+  const V=useMemo(()=>lgVars(q),[q]);
+  const code=lgModelCode(q);
+  useEffect(()=>{ let dead=false; setMaster(m=>({...m,code,rows:null,err:""}));
+    sb.from("bom").select("*").eq("model",code).order("id").then(({data,error})=>{ if(dead) return; setMaster({code,rows:error?[]:(data||[]),err:error?error.message:""}); });
+    return ()=>{ dead=true; }; },[code]);
+  // price-list variants for each gateway that uses the price list
+  const isoO=optOf("isolation",q.isoType), drO=optOf("drain",q.drainType), veO=optOf("vent",q.ventType);
+  useEffect(()=>{ let dead=false; const nb=lgNbOf(q.noz);
+    (isoO.source==="pricelist"?lgPricelistFor(isoO.pricelist_item,nb):Promise.resolve([])).then(r=>{ if(dead) return; setPl(p=>({...p,iso:r})); setPlSel(s=>({...s,iso:lgPickDefault(r,["FL","SWSC","SCRD"],q.cls)})); });
+    return ()=>{ dead=true; }; },[q.isoType,q.noz,q.cls,isoO.pricelist_item,isoO.source]);
+  useEffect(()=>{ let dead=false;
+    (drO.source==="pricelist"?lgPricelistFor(drO.pricelist_item,LG_DV_NB[q.drainSize]):Promise.resolve([])).then(r=>{ if(dead) return; setPl(p=>({...p,drain:r})); setPlSel(s=>({...s,drain:lgPickDefault(r,["SCRD","SWSC","FL"],q.cls)})); });
+    return ()=>{ dead=true; }; },[q.drainType,q.drainSize,drO.pricelist_item,drO.source]);
+  useEffect(()=>{ let dead=false;
+    (veO.source==="pricelist"?lgPricelistFor(veO.pricelist_item,LG_DV_NB[q.ventSize]):Promise.resolve([])).then(r=>{ if(dead) return; setPl(p=>({...p,vent:r})); setPlSel(s=>({...s,vent:lgPickDefault(r,["SCRD","SWSC","FL"],q.cls)})); });
+    return ()=>{ dead=true; }; },[q.ventType,q.ventSize,veO.pricelist_item,veO.source]);
+  useEffect(()=>{ let dead=false; if(!q.illum||q.illum==="None"){ setPl(p=>({...p,illum:[]})); return; }
+    lgIlluminators().then(r=>{ if(dead) return; setPl(p=>({...p,illum:r})); const t=q.illum.toLowerCase(); const hit=r.find(x=>String((x.valve_type||"")+" "+(x.description||"")+" "+x.model_code).toLowerCase().includes(t.includes("atex")?"atex":t.includes("dhanbad")?"dhanbad":"standard")); setPlSel(s=>({...s,illum:hit?hit.model_code:""})); });
+    return ()=>{ dead=true; }; },[q.illum]);
+  const lines = useMemo(()=> (V && master.rows) ? lgTransform(master.rows, V) : [], [V, master.rows]);
+  const sel = { iso:{source:isoO.source,label:q.isoType,row:pl.iso.find(r=>r.model_code===plSel.iso)},
+    drain:{source:drO.source,label:q.drainType,size:q.drainSize,row:pl.drain.find(r=>r.model_code===plSel.drain)},
+    vent:{source:veO.source,label:q.ventType,size:q.ventSize,row:pl.vent.find(r=>r.model_code===plSel.vent)},
+    illum:{row:pl.illum.find(r=>r.model_code===plSel.illum)} };
+  const errs=[];
+  if(!(Number(q.cc)>0)) errs.push("CC distance is required.");
+  else if(!V) errs.push("No glass combination fits this CC distance.");
+  if(master.rows && !master.rows.length) errs.push("Model "+code+" is not in the master BOMs. Run lg_seed_level_gauge_models_2026-11-19.sql, or ask a Super Admin.");
+  const lab=(t,req)=>h("div",{style:{fontSize:11.5,color:colors.muted,margin:"8px 0 3px"}},t,req?h("span",{style:{color:"#c0392b",marginLeft:2}},"*"):null);
+  const sel1=(k,list,labels)=>h("select",{value:q[k],onChange:e=>set(k,e.target.value),style:{...inputStyle,fontSize:13,padding:"6px 8px"}},list.map((v,i)=>h("option",{key:v,value:v},labels?labels[i]:v)));
+  const chk=(k,t,dis)=>h("label",{style:{display:"flex",gap:6,alignItems:"center",fontSize:13,opacity:dis?0.45:1,margin:"6px 0"}},h("input",{type:"checkbox",disabled:dis,checked:!!q[k]&&!dis,onChange:e=>set(k,e.target.checked)}),t);
+  const plPick=(g,rows,src)=> src!=="pricelist" ? null :
+    rows.length ? h("select",{value:plSel[g],onChange:e=>setPlSel(s=>({...s,[g]:e.target.value})),style:{...inputStyle,fontSize:12,padding:"5px 7px",marginTop:4}},rows.map(r=>h("option",{key:r.model_code,value:r.model_code},lgPlLabel(r))))
+                : h("div",{style:{fontSize:11.5,color:"#a3312a",marginTop:4}},"Not in the price list for this size — the line is added without a price (flagged).");
+  const build=async()=>{
+    if(errs.length||!V||!master.rows) return;
+    setBusy(true);
+    const baseSf = Number((master.rows.find(r=>r.sf!=null)||{}).sf)||3.1;
+    const kgUom = (master.rows.find(r=>/^kgs?$/i.test(String(r.uom||"").trim()))||{}).uom||"Kg";
+    const gw = lgGatewayLines(q, V, sel, baseSf, kgUom);
+    onBuild({ q, V, model:code, size:q.cls+"#", lines:lines.concat(gw) });
+  };
+  const box={border:"1px solid "+colors.border,borderRadius:8,padding:"8px 10px",marginTop:8};
+  return h("div",{style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",zIndex:1060,display:"flex",alignItems:"flex-start",justifyContent:"center",padding:"24px 12px",overflowY:"auto"}},
+    h("div",{"data-testid":"lg-questionnaire",style:{background:"#fff",borderRadius:10,width:1180,maxWidth:"96vw",boxShadow:"0 10px 40px rgba(0,0,0,0.25)"}},
+      h("div",{style:{padding:"12px 16px",borderBottom:"1px solid "+colors.border,display:"flex",alignItems:"center",gap:10}},
+        h("div",{style:{fontWeight:700,color:colors.dark,fontSize:15}},"Level Gauge – questionnaire"),
+        h("div",{style:{fontSize:12,color:colors.muted}},"The answers pick the model; the CC distance sets the lengths and quantities."),
+        h("span",{style:{marginLeft:"auto"}}),
+        h("button",{onClick:onClose,style:{...btnSecondary,padding:"5px 12px"}},"Close")),
+      h("div",{style:{display:"grid",gridTemplateColumns:"360px 1fr",gap:14,padding:14}},
+        h("div",null,
+          h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}},
+            h("div",null,lab("Gauge type",1),sel1("type",["RLG","TLG"],["Reflex","Transparent"])),
+            h("div",null,lab("Mounting",1),sel1("mnt",["SS","EE"],["Side and Side","End and End"])),
+            h("div",null,lab("Pressure class",1),sel1("cls",["150","300"],["150#","300#"])),
+            h("div",null,lab("CC distance (mm)",1),h("input",{type:"number","data-testid":"lg-cc",value:q.cc,onChange:e=>set("cc",e.target.value),style:{...inputStyle,fontSize:13,padding:"6px 8px"}})),
+            h("div",null,lab("Chamber",1),sel1("chf",["SQ","PL"],["Square (40 sq bar)","Large flat (80 plate)"])),
+            h("div",null,lab("Nozzle size",1),sel1("noz",LG_NOZ))),
+          chk("mica","Mica shield (Transparent only)",q.type!=="TLG"), chk("frost","Frosting shield (acrylic)"), chk("scale","Scale (25 x 3)"),
+          h("div",{style:box},
+            h("div",{style:{fontWeight:600,fontSize:12.5,color:colors.dark}},"Isolation valves"),
+            h("div",{style:{display:"grid",gridTemplateColumns:"1fr 80px",gap:8}},
+              h("div",null,lab("Type",1),h("select",{value:q.isoType,onChange:e=>set("isoType",e.target.value),style:{...inputStyle,fontSize:13,padding:"6px 8px"}},optFor("isolation").map(o=>h("option",{key:o.option_label,value:o.option_label},o.option_label)))),
+              h("div",null,lab("Qty",1),h("input",{type:"number",value:q.isoQty,onChange:e=>set("isoQty",e.target.value),style:{...inputStyle,fontSize:13,padding:"6px 8px"}}))),
+            isoO.source==="sop_weight" ? h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:4}},"Made by us: priced by the SOP — 4 kg + one "+q.noz+" "+q.cls+"# flange, at the chamber material rate.") : plPick("iso",pl.iso,isoO.source)),
+          [["drain","Drain","drainType","drainSize"],["vent","Vent","ventType","ventSize"]].map(([g,word,tk,sk])=>{ const o=g==="drain"?drO:veO;
+            return h("div",{key:g,style:box},
+              h("div",{style:{fontWeight:600,fontSize:12.5,color:colors.dark}},word),
+              h("div",{style:{display:"grid",gridTemplateColumns:"1fr 90px",gap:8}},
+                h("div",null,lab("Plug or valve",1),h("select",{value:q[tk],onChange:e=>set(tk,e.target.value),style:{...inputStyle,fontSize:13,padding:"6px 8px"}},optFor(g).map(x=>h("option",{key:x.option_label,value:x.option_label},x.option_label)))),
+                h("div",null,lab("Size",1),sel1(sk,LG_DV_SIZES))),
+              o.source==="plug" ? h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:4}},LG_PLUG_SPEC[q[sk]]) : plPick(g,pl[g],o.source)); }),
+          h("div",{style:box},
+            h("div",{style:{fontWeight:600,fontSize:12.5,color:colors.dark}},"Illuminator"),
+            lab("Type",1), sel1("illum",LG_ILLUM),
+            q.illum!=="None" && (pl.illum.length ? h("select",{value:plSel.illum,onChange:e=>setPlSel(s=>({...s,illum:e.target.value})),style:{...inputStyle,fontSize:12,padding:"5px 7px",marginTop:4}},h("option",{value:""},"— no price-list item (line without price) —"),pl.illum.map(r=>h("option",{key:r.model_code,value:r.model_code},lgPlLabel(r))))
+              : h("div",{style:{fontSize:11.5,color:"#a3312a",marginTop:4}},"No illuminator in the price list yet — the line is added without a price (flagged).")))
+        ),
+        h("div",null,
+          h("div",{style:{display:"flex",gap:16,alignItems:"flex-end",flexWrap:"wrap"}},
+            h("div",null,h("div",{style:{fontSize:11,color:colors.muted}},"Model (picked by the app)"),h("div",{"data-testid":"lg-model",style:{fontFamily:"ui-monospace,Consolas,monospace",fontWeight:700,fontSize:17,color:colors.dark}},code)),
+            V && h("div",null,h("div",{style:{fontSize:11,color:colors.muted}},"SOP number"),h("div",{style:{fontFamily:"ui-monospace,Consolas,monospace",fontSize:14}},V.SOP_MODEL)),
+            V && h("div",{style:{fontSize:12,color:colors.muted}},V.N14+" × 14″ + "+V.N10+" × 10″ · section "+V.SEC+" · visible "+V.VIS+" · chamber "+V.CHAMBER+" mm")),
+          errs.length>0 && h("div",{style:{background:"#fdecea",color:"#a3312a",borderRadius:6,padding:"6px 10px",fontSize:12,marginTop:8}},errs.join(" ")),
+          h("div",{style:{fontWeight:600,fontSize:12.5,color:colors.dark,margin:"10px 0 4px"}},"BOQ",h("span",{style:{fontWeight:400,color:colors.muted,marginLeft:6}},"(model lines at this CC — gateway lines are added on Build BOM; grades are picked next, as for strainers)")),
+          master.rows===null ? h("div",{style:{fontSize:12,color:colors.muted}},"Loading the model…") :
+          h("div",{style:{maxHeight:420,overflowY:"auto"}},
+            h("table",{style:{width:"100%",borderCollapse:"collapse",fontSize:12}},
+              h("thead",null,h("tr",null,["Component","Shape","Material spec","Cutting plan","Qty","UOM"].map(t=>h("th",{key:t,style:{textAlign:"left",borderBottom:"2px solid #333",padding:"5px 6px"}},t)))),
+              h("tbody",null,lines.map((r,i)=>h("tr",{key:i},
+                h("td",{style:{padding:"4px 6px",borderBottom:"1px solid #eee",fontWeight:600}},r.component),
+                h("td",{style:{padding:"4px 6px",borderBottom:"1px solid #eee"}},r.material_shape),
+                h("td",{style:{padding:"4px 6px",borderBottom:"1px solid #eee"}},r.material_spec),
+                h("td",{style:{padding:"4px 6px",borderBottom:"1px solid #eee"}},r.cutting_plan_layout_size||"—"),
+                h("td",{style:{padding:"4px 6px",borderBottom:"1px solid #eee",textAlign:"right"}},r.qty_required),
+                h("td",{style:{padding:"4px 6px",borderBottom:"1px solid #eee"}},r.uom))))))
+        )),
+      h("div",{style:{padding:"10px 16px",borderTop:"1px solid "+colors.border,display:"flex",gap:8,justifyContent:"flex-end"}},
+        h("button",{onClick:onClose,style:btnSecondary},"Cancel"),
+        h("button",{"data-testid":"lg-build",disabled:!!errs.length||busy||master.rows===null,onClick:build,title:errs.join(" "),style:{...btnPrimary,opacity:(errs.length||busy||master.rows===null)?0.5:1}},"Build BOM →"))));
+}
+
 function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefresh, onOpenQuote, initialModel, onConsumedInitialModel, pendingNewSlNo, onConsumedPendingNewSlNo, onGoToTab }) {
   const { models = [], customModelName, itemOptions = [], modelCatalog = [], gradesBySpec, rateBySpecGrade, allSpecs = [], uoms = [], allComponents = [], subAssembliesByComponent, loadingMaster } = masterData;   // 2026-10-30T08:00:00Z: defaults — signing out and in as another login crashed here
   const [isCustomModel,setIsCustomModel]=useState(false);
@@ -9039,6 +9285,22 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     setCart(c=>c.slice(0,keep.cartIndex).concat([keep.original]).concat(c.slice(keep.cartIndex)));
     setPlSel(null); setPlOpts({});
     setPlAdded("Line "+(keep.cartIndex+1)+" put back unchanged.");
+  };
+  // 2026-11-19T12:00:00Z: Level Gauge — the questionnaire replaces the Size/Model pick
+  const isLG = norm(itemFilterEst)==="level gauge";
+  const [lgOpen,setLgOpen]=useState(false);
+  const [lgCtx,setLgCtx]=useState(null);
+  useEffect(()=>{ if(isLG && pricingWay!=="pricelist" && !lgCtx) setLgOpen(true); },[isLG]);
+  const buildLevelGauge = ({ q, V, model, size, lines:built })=>{
+    setLgOpen(false); setLgCtx({ q, V, model });
+    setPricingWay("bom"); setIsCustomModel(false); setSizeFilterEst(size); setModelFilter("");
+    setSelectedModel(model); setMocSelections({}); setMocMode("shape"); setFreeText(""); setParsedMatches(null); setNoBomAck(false); setNoBomPl(null);
+    const ov={}; built.forEach(l=>{ if(l._rate>0) ov[l.id]={rate:l._rate}; });
+    setOverrides(ov);
+    setLines(built); setLoadingLines(false);
+    const desc=(q.type==="RLG"?"Reflex":"Transparent")+" Level Gauge, "+(q.mnt==="SS"?"Side and Side":"End and End")+", "+q.cls+"#, CC "+V.CC+" mm, "+(q.chf==="SQ"?"square chamber":"large flat chamber")+(q.type==="TLG"&&q.mica?", mica":"")+(q.frost?", frosting shield":"")+(q.scale?", scale":"")+(q.illum&&q.illum!=="None"?", illuminator ("+q.illum+")":"")+", "+q.isoQty+" isolation valves ("+q.isoType+") "+q.noz+", drain: "+q.drainType+" "+q.drainSize+", vent: "+q.ventType+" "+q.ventSize+" — model "+model+" / "+V.SOP_MODEL;
+    setRefDesc(desc);
+    setMocLines(built.filter(l=>l._rate===undefined)); setShowMOC(true);
   };
   const selectModel = async(m)=>{
     setPricingWay(customModelName && m===customModelName ? "custom" : "bom");
@@ -9789,6 +10051,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
 
   const clearEstimate = ()=>{
     if(!confirm("Clear the current estimate and all cart items?")) return;
+    setLgCtx(null);   // 2026-11-19T12:00:00Z
     requestCodeConfirm(
       "Confirm clearing the cart",
       "This removes "+cart.length+" unsaved Sl No"+(cart.length===1?"":"s")+" and all header details entered for this quote. This can't be undone.",
@@ -10638,6 +10901,12 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
         h("div",{style:{fontSize:11,letterSpacing:"0.08em",color:colors.mutedLight,marginBottom:8}},"ITEM"),
         h("input",{list:"est-item-list",value:itemFilterEst,onChange:e=>handleItemSelectEst(e.target.value),placeholder:"Type or pick an item…",style:{...inputStyle,fontSize:13,marginBottom:8}}),
         h("datalist",{id:"est-item-list"},itemOptionsCascadeEst.map(m=>h("option",{key:m,value:m}))),
+        isLG ? h("div",{"data-testid":"lg-sidebox",style:{border:"1px solid #0f766e",borderRadius:8,padding:"8px 10px",background:"#eef6f5",marginBottom:8}},
+          h("div",{style:{fontSize:12,fontWeight:600,color:"#0f6e56",marginBottom:4}},"Level gauge"),
+          lgCtx ? h("div",{style:{fontSize:11.5,color:colors.text,marginBottom:6}},h("div",{style:{fontFamily:"ui-monospace,Consolas,monospace"}},lgCtx.model),"CC "+lgCtx.V.CC+" mm · "+lgCtx.V.SOP_MODEL)
+                : h("div",{style:{fontSize:11.5,color:colors.muted,marginBottom:6}},"Size and model are picked by the app from the questionnaire."),
+          h("button",{onClick:()=>setLgOpen(true),style:{...btnPrimary,width:"100%",fontSize:12,padding:"7px 8px"}},lgCtx?"Edit questionnaire (rebuild BOM)":"Open questionnaire")) :
+        h(React.Fragment,null,
         h("div",{style:{fontSize:11,letterSpacing:"0.08em",color:colors.mutedLight,marginBottom:8,opacity:itemFilterEst?1:0.5}},"SIZE"),
         h("input",{list:"est-size-list",disabled:!itemFilterEst,value:sizeFilterEst,onChange:e=>handleSizeSelectEst(e.target.value),placeholder:itemFilterEst?"Type or pick a size…":"Select item first",style:{...inputStyle,fontSize:13,marginBottom:8,background:itemFilterEst?"#fff":colors.bg,opacity:itemFilterEst?1:0.5}}),
         h("datalist",{id:"est-size-list"},sizeOptionsForItemEst.map(m=>h("option",{key:m,value:m}))),
@@ -10655,6 +10924,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
             ...(modelFieldFocused?{position:"absolute",width:360,zIndex:50,boxShadow:"0 4px 14px rgba(0,0,0,0.15)",border:"1px solid #0f766e"}:{})}
         })
         )
+        )
       ),
       h("div",{style:{overflowY:"auto",flex:1}},
         pricingWay==="pricelist" ? (
@@ -10670,6 +10940,7 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
           })
         ) :
         loadingMaster?h("div",{style:{padding:16,fontSize:12,color:colors.mutedLight}},"Loading models…"):
+        isLG?h("div",{style:{padding:16,fontSize:12,color:colors.mutedLight}},lgCtx?"Model "+lgCtx.model+" loaded. Pick grades in MOC; from here it works like any other BOM.":"Answer the level gauge questionnaire — the app picks the model."):
         !sizeFilterEst?h("div",{style:{padding:16,fontSize:12,color:colors.mutedLight}},"Pick an item and size above to see models."):
         filteredModels.map(m=>h("div",{key:m,onClick:()=>selectModel(m),style:{padding:"9px 16px",fontSize:13,cursor:"pointer",background:m===selectedModel?colors.dark:"transparent",color:m===selectedModel?"#fff":colors.text,borderBottom:"1px solid #f0eee5"}},m))
       ),
@@ -11135,6 +11406,9 @@ function Estimator({ user, masterData, sessionCompanyId, sessionCompany, onRefre
     // "+ Add to estimate" gateway — Quote# first, then branches to either
     // the full Save popup (new quote) or the simple save (new Sl No on an
     // existing quote), or navigates straight to Quotes (view existing).
+    lgOpen && h(LevelGaugeQuestionnaire,{ initial:lgCtx?lgCtx.q:null, onClose:()=>setLgOpen(false), onBuild:(b)=>{
+      if(lines.length && !window.confirm("Rebuild the level gauge BOM? The current lines (and grades picked) are replaced by the new build.")) return;
+      buildLevelGauge(b); } }),
     showAddGateway && h("div",{style:{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.5)",zIndex:1050,display:"flex",alignItems:"center",justifyContent:"center",padding:20}},
       h("div",{style:{background:"#fff",borderRadius:12,width:420,maxWidth:"calc(94vw / var(--uiz,1))",boxShadow:"0 8px 32px rgba(0,0,0,0.2)",overflow:"hidden"}},
         h("div",{style:{background:colors.dark,padding:"12px 16px"}},
@@ -15938,6 +16212,7 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
     ...(!overrideActive ? otherMissing.filter(x=>!/^Mandatory documents/.test(x)).map(x=>({ t:x+" not filled", fix:"Fill it in “to fix before approval” on this Order Acceptance"+(contractInfo.created_by?" (made by "+contractInfo.created_by+")":"")+".", who:contractInfo.created_by?[contractInfo.created_by]:[] })) : []),
     ...(!overrideActive && billingMissing ? [{ t:"Billing Address not filled", fix:"Fill it, or override it for later (anyone can).", who:contractInfo.created_by?[contractInfo.created_by]:[] }] : []),
     ...(!overrideActive && outstandingDocs.length && !contractInfo.no_docs_at ? [{ t:"Mandatory documents not on file: "+outstandingDocs.map(r=>r.category).join(", "), fix:"The Document Controller ("+apList(apN.dc)+") adds them in Documents — or, if this order needs none, use “No documents required” below.", who:apN.dc, docs:true }] : []),
+    ...(oaFinishMissing(contractInfo) ? [{ t:"Finish document not given (painting / pickling & passivation …)", fix:"Add it in Finish on this Order Acceptance — number, revision, title and link.", who:contractInfo.created_by?[contractInfo.created_by]:[] }] : []),   // 2026-11-18T13:00:00Z
     ...(apMtc ? [{ t:"MTC & AVL is not saved", fix:"The Technical Head ("+apList(apN.tech)+") fills the MTC and the vendor of each component and saves.", who:apN.tech }] : []) ];
   const apWho = (f)=> f==="technical_approved" ? "FSE of the order ("+apList(soFse)+") · or Sales Head ("+apList(apN.sales)+") · or a Super Admin ("+apSA+")"
     : "Accounts Admin ("+apList(apN.accounts)+") · or a Super Admin ("+apSA+")";
@@ -16017,7 +16292,8 @@ function ContractStatusBanner({ contractInfo, quoteHeaderRow, user, onChanged, o
         h("b",null,"✓ Order Acceptance approved"), " — "+apFields.map(f=>(f==="commercial_approved"?"Commercial Terms":"Everything else")+" by "+String(contractInfo[f+"_by"]||"")+(contractInfo[f+"_at"]?" "+fmtDMY(String(contractInfo[f+"_at"]).slice(0,10)):"")).join(" · "),
         contractInfo.no_docs_at ? " · No documents required" : "");
   return h("div",{style:{marginTop:10}},
-    h(CtfFlag,{ key:"ctf"+contractInfo.contract_number, cn:contractInfo.contract_number }),   // 2026-11-02T08:00:00Z
+    h(CtfFlag,{ key:"ctf"+contractInfo.contract_number, cn:contractInfo.contract_number }),
+    h(OaFinishBox,{ key:"fin"+contractInfo.contract_number, contractInfo, user, onChanged:()=>{ onChanged && onChanged(); } }),   // 2026-11-18T13:00:00Z   // 2026-11-02T08:00:00Z
     apBox,
     h(PurOwnerTag,{ key:"pot"+contractInfo.contract_number, cn:contractInfo.contract_number }),   // 2026-11-03T07:00:00Z
     oaPanel,
@@ -26448,6 +26724,11 @@ async function woReleaseRun({ ct, toState, expectFrom, username, reason, bom, cl
       if(free.length){ const created = await createWorkOrder(ct, free, username, "Raised automatically on production release"+(via?" ("+via+")":""));
         if(created.error) out.warn = (out.warn?out.warn+"\n":"")+"Work order release saved, but the work order was not raised: "+created.error; else out.wo = created.workOrder; }
     }catch(e){ out.warn = (out.warn?out.warn+"\n":"")+"Work order not raised: "+e.message; }
+  }
+  if(prod){   // 2026-11-18T13:00:00Z: the app gives the serials, and opens the Production Release Pack + kick-off
+    let ser = null;
+    try{ ser = await qcsrAutoSync(ct, username||"App", "W/O release", false); if(ser.err) out.warn = (out.warn?out.warn+"\n":"")+"Serials not given: "+ser.err; else if(ser.n) out.serials = ser; }catch(e){ out.warn = (out.warn?out.warn+"\n":"")+"Serials not given: "+e.message; }
+    try{ await rpOpen(ct, username||"App", toState, ser); }catch(e){ out.warn = (out.warn?out.warn+"\n":"")+"Production Release Pack not opened: "+e.message; }
   }
   return out;
 }
@@ -36905,6 +37186,11 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"19 Nov 2026", summary:"Built on 2026-11-19T12:00:00Z, on top of 2026-11-18T13:00:00Z. NEEDS SQL (both companies, already run): lg_structural_2026-11-19.sql then lg_seed_level_gauge_models_2026-11-19.sql. LEVEL GAUGES: in the Estimator, item Level Gauge opens a questionnaire (gauge type, mounting, class, CC, chamber, nozzle, mica, frosting shield, scale, isolation valves, drain, vent, illuminator). The answers pick one of the 96 master models automatically (no Size/Model pick); the CC distance sets the glass split, lengths, cutting plans and quantities by the SOP algorithm; a BOQ shows the lines. Build BOM loads them into the normal BOM screen with the gateway lines — isolation valves (auto shut-off by the SOP weight, ball/gate from the price list), drain and vent (plug by size, or gate/ball/needle valve from the price list) and illuminator (1 per metre). Grades are picked in MOC and from there it is the same as a strainer (add/delete lines, line and global Sf, save). The default Sf comes from the master (3.1; 2.1 in Levaflow). Edit questionnaire rebuilds the BOM." },
+  { date:"18 Nov 2026", summary:"Built on 2026-11-18T13:00:00Z, on top of 2026-11-18T07:00:00Z. NEEDS SQL: structure_release_pack_2026-11-18.sql (BOTH companies). SERIALS: given by the app when the W/O is released (one per unit, every Sl No); a raised OA quantity gets more, a lowered one marks spare serials (not on a DC) unused with the reason; QC's + New entry is gone; Super Admins get a one-time Catch-up for orders already in production. PRODUCTION RELEASE PACK: a live PDF per contract made at W/O release — Critical, what each head must chase, order summary & serials, testing, Finish, other requirements, document index with links, kick-off, who has read it, History. It updates itself until the OA is closed (payment received) or cancelled; critical changes ask every head to read again, routine ones come in a daily digest. Read by Super Admins and the Finance Director, Accounts, Purchase Manager, QC, VP Projects, Production Manager, Stores, Factory Manager, Sales Head, Technical Head and Document Controller posts. KICK-OFF MEETINGS (Order Status › Kick-off meetings): every released W/O waits here; red and a daily reminder after 2 days; started and closed by the VP Projects and Technical Head posts; attendance, actions (owner* due*) that go on the owner's card as checklist lines, minutes; once held it moves to history. FINISH ON THE OA: Order Acceptances made from now need a finish document (painting / pickling & passivation / galvanising …: number, revision, title, link) — they save as Draft with a red badge but can't be approved until it is given." },
+  { date:"18 Nov 2026", summary:"Built on 2026-11-18T07:00:00Z, on top of 2026-11-18T06:00:00Z. No SQL. COMPLETE THE INVOICE: nothing is mandatory while the invoice is a draft — no red boxes, no asterisks, no 'to fill' count; Save with whatever is known. When Ready for IRN is pressed, the same pop-up opens with every missing field red and mandatory (freight, insurance, LR no and date or No LR, mode, transporter GSTIN / ID, e-way distance, exchange rate and ports for exports) and Ready for IRN stays blocked until they are filled." },
+  { date:"18 Nov 2026", summary:"Built on 2026-11-18T06:00:00Z, on top of 2026-11-18T03:00:00Z. No SQL. FLOW — BADGES: Order Status › Flow, all contracts, now shows each step as a badge instead of a dot — done steps with their date, the current step with who holds it and its days (red when late); the IRN steps sit under With Accounts. New filters: Waiting on (department) and Only late. ⟶ ORDER FLOW BUTTONS: Order Status › Flow (after Pending Orders – By value); Accounts › Billing (opens on Accounts); Purchase › Procurement for the Purchase Manager post; Production › Progress for the Production Manager post. ORDER PROCESSING REVIEW — ✓ COMPLETED on every line (Super Admins, Document Controller post, VP Projects post, or the line's owner; New owner stays as it was): document lines = the task card's Send to client (date, link*, what changed — revision Out, card closes, chase starts, no assignee); OA = OA sent (date*, to*); W/O = release + mandatory pick of the next stage's person (Technical / Design & Estimation people + department heads) and due date — the BOM summary card goes on that person's board; PR (last stage) asks 'close this card?' then releases the PR; BOM summary is approved in Production BOM as before. Review refreshes after each press; ↩ Undo for 10 minutes. New last block UNASSIGNED ON DOCUMENT CONTROL: documents with no owner — 👤 Give an owner (that department's people + department heads, due date*) or ✓ Completed straight away." },
+  { date:"18 Nov 2026", summary:"Built on 2026-11-18T03:00:00Z, on top of 2026-11-17T13:30:00Z. No SQL. ORDER STATUS — FLOW VIEW: a third view next to Board and Table (all who open Order Status). All contracts: one dotted line per open contract — the order's stages, then each lot; red = a late step. One contract: boxes for OA made → Docs approved → W/O → BOM summary → Purchase BOM made / endorsed / approved → PR → Material in → Production, then one line per lot: Ready – DC & packing slip → With QC → With Accounts → Clearance – gate pass → Despatched → Payment received, with Accounts' GST steps (Invoice · ready for IRN, IRN in · to send) hanging below With Accounts. Each box: done date and by whom, who pushed it there and when, working days taken against the days allowed (late days in red); the box it is in now: with whom, for how many days. Purchase: PO made % and material in %. Production: each Sl No's route card — % done and the step it is at, with NCR / pause / job work / witness flags. Click a box for the detail. SALES › MY ORDERS — WHERE THEY ARE: the same flow for the FSE's own customers (account owner); the Sales Head and Super Admins pick any owner. DC OF A LOT: stage strip DC made › With QC › With Accounts › Cleared for despatch, and a banner with who has it now and since when (red when QC is over 3 days). Once the DC is with QC, Done – send to QC becomes Remind QC: a bell to the QC post and a line in the DC history, no new card (Done also checks the lot again before sending, so a second press never sends twice). A closed or cancelled order has no Done button and shows a red banner. ORDER STATUS BOARD: a lot With QC for more than 3 days turns red with the days shown." },
   { date:"17 Nov 2026", summary:"Built on 2026-11-17T13:30:00Z, on top of 2026-11-17T12:00:00Z. No SQL. ⬇ JSON FOR THE PORTAL: on a Ready-for-IRN invoice, a new button makes the portal's upload file (e-Invoice › Bulk Upload) from the app's invoice — the same e-invoice body the Clear gateway sends, with the app's values, taxes and round-off, so the signed JSON coming back matches. The window shows what goes (buyer details correctable) and what the portal would reject; nothing downloads until it is fixed. Each download is noted on the invoice. E-invoice inbox: the same for several Ready-for-IRN invoices at once (tick the ready ones, one file)." },
   { date:"17 Nov 2026", summary:"Built on 2026-11-17T12:00:00Z, on top of 2026-11-17T05:30:00Z. NEEDS SQL: structure_einvoice_json_2026-11-17.sql (BOTH companies; the last line switches e-invoicing on — Flometriq only). E-INVOICE FROM THE PORTAL JSON: on a Ready-for-IRN invoice, ⬆ Upload e-invoice JSON reads the file the portal gives (Download JSON), checks invoice no, date, both GSTINs, taxable value, GST and the total before round-off against the app's invoice (refused with a field-by-field table and what to do if any differs; HSN and round-off are warnings), then saves IRN, Ack, signed QR, the file and the portal's round-off (the app follows the portal), issues the invoice and marks it sent in the same step (FSE and Sales Head told). Backup OneDrive link optional at that moment — a card gives 3 days, then stale. JSON more than 1 working day after the portal's Ack: noted on the invoice and Super Admins told. Goods over ₹50,000 without the e-way bill: the IRN goes in and the invoice waits for it, as before. Invoices whose IRN was entered by hand can attach the JSON (adds the QR). Accounts › Billing: E-invoice inbox (several files at once, matched by invoice number) and the Invoices vs e-invoice report (date range, customer, domestic/export, status totals, Excel). Settings › gateway card: E-invoicing in use (off = buttons greyed)." },
   { date:"17 Nov 2026", summary:"Built on 2026-11-17T05:30:00Z, on top of 2026-11-17T05:00:00Z. No SQL. ORDER ACCEPTANCE: a Stage · Order status · Documents panel like the quote's Stage panel. Folded to one line by default (remembered per browser). Stage: the Stage dropdown is now tiles (same lock until the Commercial Terms are approved, asks before changing; Closed / Cancelled under “Or close it:”). Order status: OA → Documents → W/O release → BOM summary → Purchase BOM (made / endorsed / approved) → PR → Material in → Production, from the Order Status board, with placed-by-hand and On hold marks and the W/O gate line; click opens the board on the contract. Documents: the contract's cards per Document Control list (Initial pending, Code 3 In, Code 2 In, Out awaiting code, Code 2 Out, Code 1); click opens Document Control on the contract (and on the matching tile)." },
@@ -60891,6 +61177,12 @@ function App() {
     tab==="despatch_dc"?h(DespatchScreen,{user:uTab}):
     tab==="qc_serials"?h(QcSerialRegister,{user}):   // 2026-10-30T16:30:00Z
     tab==="order_board"?h(OrderStatusBoard,{user:uTab,sessionCompany}):
+    tab==="my_orders_flow"?h(MyOrdersFlow,{user:uTab}):   // 2026-11-18T03:00:00Z
+    tab==="order_flow"?h(OrderFlowScreen,{user:uTab,dept:""}):
+    tab==="kickoff"?h(KickoffScreen,{user:uTab}):   // 2026-11-18T13:00:00Z   // 2026-11-18T06:00:00Z
+    tab==="order_flow_acc"?h(OrderFlowScreen,{user:uTab,dept:"acc"}):
+    tab==="order_flow_pur"?h(OrderFlowScreen,{user:uTab,dept:"pur"}):
+    tab==="order_flow_pm"?h(OrderFlowScreen,{user:uTab,dept:"pm"}):
     tab==="stock_contracts"?h(StockContractRegister,{user:uTab,masterData,sessionCompany}):   // 347
     tab==="imt_master"?h(ImtMasterScreen,{user:uTab}):   // 348
     tab==="pb_approvals"?h(PbApprovalsScreen,{user:uTab}):   // 2026-11-10T17:00
@@ -61413,7 +61705,8 @@ async function stepLoadMine(user, force){
   try{ setTimeout(()=>oaMorningCheck(user), 6000); setTimeout(()=>oaScoreSweep(), 30000); }catch(e){}   // 2026-11-04T04:00:00Z
   try{ await socLoadMine(user); }catch(e){}   // 2026-10-31T10:00:00Z
   try{ await osStaleLoadMine(user, name); setTimeout(()=>osStaleSweepSoon((user&&user.username)||"App"), 40000); }catch(e){}   // 2026-11-13T00:00 (Build 4): stale order steps
-  try{ ospSyncSoon(user); }catch(e){}   // 2026-11-01T06:00:00Z: the order stages (tasks, escalations, PO chase), at most every 30 min
+  try{ ospSyncSoon(user); }catch(e){}
+  try{ rpSyncSoon(user); }catch(e){}   // 2026-11-18T13:00:00Z: Production Release Packs — history, re-reads, daily digest, kick-off reminders   // 2026-11-01T06:00:00Z: the order stages (tasks, escalations, PO chase), at most every 30 min
   try{ pgaSweepSoon(user); }catch(e){}
   try{ setTimeout(()=>pgMandSweep((user&&user.username)||"App"), 15000); }catch(e){}   // Label
   try{ setTimeout(()=>calSweep(), 25000); }catch(e){}
@@ -73104,7 +73397,7 @@ function QcSerialRegister({ user }){
       "Given on":r.given_on||"", "Given by":r.given_by||"", Kind:(QCSR_KIND[r.kind]||[r.kind])[0]+(r.void_at?" — unused: "+(r.void_reason||""):""), DC:dcOf.get(String(r.serial))||"", "Excel row":r.xl_row??"", "Client in Excel":r.xl_client||"", Note:r.match_note||"" }));
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(out), "Serials"); XLSX.writeFile(wb, "serial_number_register.xlsx");
   };
-  if(view==="new") return h(QcSerialNew,{ user, rows, nextNo, onBack:()=>setView("list"), onDone:()=>{ load(); } });
+  if(view==="catchup") return h(QcSerialCatchup,{ user, nextNo, onBack:()=>setView("list"), onDone:()=>{ load(); } });   // 2026-11-18T13:00:00Z
   if(view==="check") return h(QcSerialCheck,{ user, rows, dcOf, onBack:()=>setView("list"), onDone:()=>load() });   // 2026-11-06
   const th = (x,w)=> h("th",{style:{textAlign:"left",padding:"5px 7px",fontSize:10.5,letterSpacing:".04em",textTransform:"uppercase",color:colors.muted,borderBottom:"2px solid "+colors.dark,whiteSpace:"nowrap",width:w}},x);
   const td = (c,s)=> h("td",{style:{padding:"5px 7px",borderBottom:"1px solid "+colors.border,verticalAlign:"top",fontSize:12.5,...(s||{})}},c);
@@ -73124,8 +73417,8 @@ function QcSerialRegister({ user }){
         h("select",{value:kind,onChange:e=>{ setKind(e.target.value); setShow(200); },style:{...inputStyle,width:"auto"}},
           [["all","All"],["new","Given in the app"],["semi_legacy","Semi-legacy"],["legacy","Legacy"],["free","Not on a DC yet"]].map(([v,l])=>h("option",{key:v,value:v},l)))),
       canGive ? h("button",{"data-testid":"qcsr-check-btn",onClick:()=>setView("check"),style:{...btnSecondary,padding:"7px 14px",borderColor:"#c9302c",color:"#a3312a",fontWeight:600}},"Register check") : null,
-      canGive ? h("button",{"data-testid":"qcsr-new",onClick:()=>setView("new"),style:{...btnPrimary,padding:"7px 14px"}},"+ New entry")
-        : h("span",{style:{fontSize:11.5,color:colors.muted,maxWidth:260}},"Only QC and Super Admins give serials."),
+      h("span",{"data-testid":"qcsr-auto-note",style:{fontSize:12,color:colors.muted}},"Serials are given by the app when the W/O is released."),   // 2026-11-18T13:00:00Z: + New entry removed
+      user.role==="super_admin" ? h("button",{"data-testid":"qcsr-catchup-btn",onClick:()=>setView("catchup"),style:{...btnSecondary,padding:"7px 14px"}},"Catch-up — orders in production") : null,
       h("button",{onClick:toExcel,style:btn},"Excel")),
     h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:10,padding:"8px 10px",overflowX:"auto"}},
       h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:1240}},
@@ -73446,6 +73739,8 @@ function QcSerialNew({ user, rows, nextNo, onBack, onDone }){
 
 // 2026-11-01T17:00:00Z: the DC asks QC for serials — one task card per contract and Sl No to the QC post; closes itself when QC gives them
 async function dcAskQcSerials(user, cn, client, sl, qty, item, hint){
+  try{ const g = await qcsrAutoSync(cn, (await despMe(user))||user?.username||"App", "asked from the DC", false);   // 2026-11-18T13:00:00Z: the app gives them now
+    if(g && g.n){ alert("Given by the app: "+g.n+" serial"+(g.n>1?"s":"")+" ("+qcsrRange(g)+") for "+cn+". Open the DC again — the drop-downs fill."); return; } }catch(e){}
   try{ await loadPostPeople(); const names = postHolders("qc"); if(!names.length){ alert("The QC post is empty — "+postPersonText("qc")); return; }
     const title = "Give serials — "+cn+" Sl No "+sl+" ("+qty+" Nos)";
     const { data: open } = await sb.from("task_tbl").select("id").like("title","Give serials — "+cn+" Sl No "+sl+" %").neq("status","done");
@@ -73890,7 +74185,19 @@ function DcEditor({ user, me, P, S, dcId, contract, lot, onClose, onChanged }){
     if(!dc.id) onClose && onClose(id); else await load(); };
   // 2026-10-31T06:00:00Z (Deepak): a lot's DC — the Production Manager makes it and sends the lot to QC; QC's clearance sends
   // the DC to Accounts. If QC has already cleared the lot (it came back from Accounts), Done sends it straight to Accounts.
-  const lotDone = async()=>{ const id = await save(true); if(!id) return;
+  // 2026-11-18T03:00:00Z: a lot already with QC is never sent again — Done becomes Remind QC (bell to the QC post, no new card)
+  const remindQc = async()=>{ if(!lotRow) return; setBusy(true); const by = me || user?.username || ""; const L0 = lotRow;
+    try{ await notifyPeople(P.qc, "⏰ Reminder from "+by+": QC clearance for "+osLotName(L0)+" — DC "+despNo(dc)+" has been with QC since "+fmtDMYTime(L0.stores_done_at)+".", "order_status",
+        { kind:"act", open:{ oslot:L0.id }, target:'[data-testid="os-qc-issue"]', group:"oslot:"+L0.id+":qc" });
+      if(dc.id) await despHist(dc.id, null, "Reminded QC ("+(P.qc.join(", ")||"QC post")+") — not sent again", by, null);
+      appToast("⏰ QC reminded ("+(P.qc.join(", ")||"QC post")+") — the DC was not sent again"); }catch(e){ setMsg(String(e.message||e)); }
+    setBusy(false); try{ await load(); }catch(e){} };
+  const lotDone = async()=>{
+    if(/cancel|closed/i.test(String((C && C.so && C.so.status)||""))){ setMsg("Order "+C.cn+" is closed or cancelled — nothing can be sent from this DC."); return; }
+    try{ const { data: fresh } = await sb.from("so_lot_tbl").select("*").eq("id",lotRow.id).maybeSingle();
+      if(fresh && fresh.stores_done_at && !fresh.qc_at){ setLotRow(fresh); await remindQc(); return; } }catch(e){}
+    setBusy(true); try{ await lotDoneRun(); } finally { setBusy(false); } };
+  const lotDoneRun = async()=>{ const id = await save(true); if(!id) return;
     const by = me || user?.username || ""; const L = { ...lotRow, dc_id:id }; const nowI = new Date().toISOString();
     let r = await sb.from("so_lot_tbl").update({ dc_id:id, stores_done_by:by, stores_done_at:nowI, back_note:null }).eq("id",lotRow.id);
     if(r.error && /back_note/.test(r.error.message||"")) r = await sb.from("so_lot_tbl").update({ dc_id:id, stores_done_by:by, stores_done_at:nowI }).eq("id",lotRow.id);
@@ -73974,7 +74281,9 @@ function DcEditor({ user, me, P, S, dcId, contract, lot, onClose, onChanged }){
   const acts = [];
   const isAdm = user.role==="admin"||user.role==="super_admin";
   if(st==="Draft" && despCan(lotMaker,user,me,P)){ acts.push(h("button",{key:"s",onClick:saveDraft,disabled:busy,style:btnSecondary},busy?"Saving…":"Save draft"));
-    acts.push(lotRow ? h("button",{key:"p",onClick:lotDone,disabled:busy,"data-testid":"dc-lot-done",style:btnPrimary},lotRow.qc_at ? "Done \u2013 back to Accounts" : "Done \u2013 send to QC") : h("button",{key:"p",onClick:sendToPm,disabled:busy,style:btnPrimary},"Send to Production Manager")); }
+    acts.push(lotRow ? (/cancel|closed/i.test(String((C.so && C.so.status)||"")) ? null   // 2026-11-18T03:00:00Z: closed / cancelled order — no Done
+      : (lotRow.stores_done_at && !lotRow.qc_at) ? h("button",{key:"p",onClick:remindQc,disabled:busy,"data-testid":"dc-remind-qc",style:btnPrimary},"Remind QC")
+      : h("button",{key:"p",onClick:lotDone,disabled:busy,"data-testid":"dc-lot-done",style:btnPrimary},lotRow.qc_at ? "Done \u2013 back to Accounts" : "Done \u2013 send to QC")) : h("button",{key:"p",onClick:sendToPm,disabled:busy,style:btnPrimary},"Send to Production Manager")); }
   if(st==="With PM" && despCan("pm",user,me,P)){ acts.push(h("button",{key:"b",onClick:()=>setBack({to:"Draft",label:"Send back to Stores"}),style:btnSecondary},"Send back to Stores"));
     acts.push(h("button",{key:"q",onClick:()=>step("With QC",{ pm_qc_by:who(), pm_qc_at:now() },"Presented to QC"),disabled:busy,style:btnPrimary},"Present to QC")); }
   if(st==="With QC" && despCan("qc",user,me,P)){ acts.push(h("button",{key:"b",onClick:()=>setBack({to:"Draft",label:"QC objects — back to Stores"}),style:btnSecondary},"QC objects — send back"));
@@ -74088,6 +74397,19 @@ function DcEditor({ user, me, P, S, dcId, contract, lot, onClose, onChanged }){
   const flow = h("div",{style:{display:"flex",gap:4,flexWrap:"wrap",alignItems:"center",fontSize:11.5}},
     DC_FLOW.map((s,i)=>h(React.Fragment,{key:s}, i?h("span",{style:{color:colors.mutedLight}},"→"):null, h("span",{style:{padding:"1px 7px",borderRadius:9,fontWeight:s===st?700:400,background:s===st?(DC_TONE[s]||[])[0]:"transparent",color:s===st?(DC_TONE[s]||[])[1]:colors.mutedLight}},s))),
     st==="Cancelled" ? despStatusPill("Cancelled") : null);
+  // 2026-11-18T03:00:00Z: a lot's DC — DC made › With QC › With Accounts › Cleared for despatch, and who has it now
+  const lotShut = !!lotRow && /cancel|closed/i.test(String((C.so && C.so.status)||""));
+  const lotK = !lotRow ? null : (st==="Approved"||st==="Despatched") ? "clear" : st==="With Accounts" ? "acc" : (st==="Draft" && lotRow.stores_done_at && !lotRow.qc_at) ? "qc" : "dc";
+  const qcDaysL = lotRow && lotRow.stores_done_at ? osDays(lotRow.stores_done_at) : 0; const qcLateL = lotK==="qc" && qcDaysL>OSF_LOT_DAYS[3];
+  const lotBanner = !lotRow ? null : lotShut ? ["#fdecea","#a3312a","⛔ Order "+C.cn+" is "+(/cancel/i.test(String(C.so.status||""))?"cancelled":"closed")+" — nothing can be sent from this DC."]
+    : lotK==="qc" ? [qcLateL?"#fdecea":"#e8f0fe", qcLateL?"#a3312a":"#1a4fb5", "⏳ With QC — "+(P.qc.join(" / ")||"QC post empty")+" since "+fmtDMYTime(lotRow.stores_done_at)+" · "+qcDaysL+" day"+(qcDaysL===1?"":"s")+(qcLateL?" — over "+OSF_LOT_DAYS[3]+" days":"")+(lotRow.stores_done_by?" · sent by "+lotRow.stores_done_by:"")]
+    : lotK==="acc" ? ["#fff4d6","#854f0b","⏳ With Accounts — "+(P.acc.join(" / ")||"Accounts post empty")+((dc.pm_acc_at||lotRow.qc_at)?" since "+fmtDMYTime(dc.pm_acc_at||lotRow.qc_at):"")+" · despatch clearance"]
+    : lotK==="clear" ? ["#e4f3ed","#0f6b4f","✓ Cleared for despatch"+(dc.acc_at?" on "+fmtDMYTime(dc.acc_at):"")+" — Stores ("+(P.stores.join(" / ")||"post empty")+"): gate pass and despatch"]
+    : ["#f1f3f6","#555555","✎ DC made — with the Production Manager ("+(P.pm.join(" / ")||"post empty")+"). Press Done – send to QC when the lot is packed."+(lotRow.back_note?" ↩ QC objected: "+lotRow.back_note:"")];
+  const LOT_STRIP = [["dc","DC made"],["qc","With QC"],["acc","With Accounts"],["clear","Cleared for despatch"]];
+  const lotFlow = !lotRow ? null : h("div",{"data-testid":"dc-lot-strip",style:{display:"flex",gap:4,flexWrap:"wrap",alignItems:"center",fontSize:11.5}},
+    LOT_STRIP.map(([k,l],i)=>{ const ix = LOT_STRIP.findIndex(z=>z[0]===lotK); const dn = i<ix, nw = i===ix;
+      return h(React.Fragment,{key:k}, i?h("span",{style:{color:colors.mutedLight}},"›"):null, h("span",{style:{padding:"2px 9px",borderRadius:10,fontWeight:700,background:nw?(qcLateL&&k==="qc"?"#c0392b":"#1a4fb5"):dn?"#dff3e8":"#eef0f3",color:nw?"#fff":dn?"#1f8a4c":"#888"}},(dn?"✓ ":"")+l)); }));
   const stepWho = { "Draft":"Stores — "+(P.stores.join(" / ")||"post empty"), "With PM":"Production Manager — "+(P.pm.join(" / ")||"post empty"), "With QC":"QC — "+(P.qc.join(" / ")||"post empty"),
     "QC cleared":"Production Manager — "+(P.pm.join(" / ")||"post empty"), "With Accounts":"Accounts — "+(P.acc.join(" / ")||"post empty") }[st];
   return h("div",{style:{padding:"12px 18px"}},
@@ -74095,8 +74417,9 @@ function DcEditor({ user, me, P, S, dcId, contract, lot, onClose, onChanged }){
       h("button",{onClick:()=>onClose&&onClose(),style:btnSmall},"← All DCs"),
       h("h2",{style:{fontSize:18,margin:0}}, dc.id ? "DC "+despNo(dc) : "New DC"), dc.is_test ? despStatusPill("TEST") : null,
       h("span",{style:{fontSize:13,color:colors.muted}}, "Contract "+C.cn+" · "+C.customer+" · "+(C.isExport?"Export":"Domestic"))),
-    h("div",{style:{margin:"6px 0 8px"}}, flow),
-    stepWho ? h("div",{style:{fontSize:12,color:colors.muted,marginBottom:6}},"Waiting on: ",h("b",null,stepWho)) : null,
+    h("div",{style:{margin:"6px 0 8px"}}, lotRow ? lotFlow : flow),
+    lotRow ? h("div",{"data-testid":"dc-lot-banner",style:{background:lotBanner[0],color:lotBanner[1],borderRadius:8,padding:"8px 12px",fontWeight:700,fontSize:13,marginBottom:8}}, lotBanner[2])
+      : stepWho ? h("div",{style:{fontSize:12,color:colors.muted,marginBottom:6}},"Waiting on: ",h("b",null,stepWho)) : null,
     dc.returned_note && st==="Draft" ? h("div",{style:{background:"#fdecea",color:"#a3312a",borderRadius:6,padding:"6px 10px",fontSize:12.5,marginBottom:8}},"Sent back by "+(dc.returned_by||"")+" ("+fmtDMYTime(dc.returned_at)+"): "+dc.returned_note) : null,
     h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"8px 12px",marginBottom:10,fontSize:12.5}},
       h("div",{style:{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}, h("b",null,"Despatch details"), !despDetailsComplete(C.despatch, C.isExport) ? h("span",{style:{color:"#854f0b",fontWeight:700}},"missing") : null,
@@ -74951,6 +75274,801 @@ function OsStageReport({ preRows, rows, del, stage, setStage, title, mv, showBad
               h("option",{value:""},"Update stage"+(r.lot?" (Lot "+r.lot+")":"")+" ▾"), o.map((z,j)=>h("option",{key:j,value:String(j)},z.label))) : h("span",{style:{color:colors.mutedLight}},"—")) : null); }))) :
       h("div",{style:{fontSize:12,color:colors.mutedLight,padding:"3px 9px"}},"None"))));
 }
+// ---------------------------------------------------------------- 2026-11-18T03:00:00Z: ORDER STATUS — FLOW VIEW
+// A third way to see the same board: one contract as a line of boxes (the order's own stages), then one line per lot.
+// Accounts' GST e-invoice steps (ready for IRN, IRN in) hang below "With Accounts" instead of sitting on the line.
+// Every box says when it was done and by whom, who pushed it there and when, how long it took against the days
+// allowed, and — for the box it is in now — with whom it sits and for how many days. Purchase shows PO made % and
+// material in %; production shows where each Sl No is on its route card. Same data and names as Board and Table.
+const OSF_ORDER = [["so","OA made"],["doc","Docs approved (Code 2/1)"],["ph","Client hold lifted"],["wo","W/O released"],["bom","BOM summary"],
+  ["pbm","Purchase BOM made"],["pbe","P-BOM endorsed"],["pba","P-BOM approved"],["pr","PR released"],["pur","Material in"],["prod","Production"]];
+const OSF_LOT = [[2,"Ready – DC & packing slip"],[3,"With QC"],[4,"With Accounts"],[5,"Clearance – gate pass"],[6,"Despatched – payment awaited"],[7,"Payment received"]];
+const OSF_ACC_SUB = [[8,"Invoice · ready for IRN"],[9,"IRN in · to send"]];   // hang below With Accounts
+const OSF_LOT_DAYS = { 3:3, 8:3, 9:1 };   // 18 Nov: QC 3 days; the invoice clocks as on the board
+const OSF_LOT_POST = { 1:"production_manager", 2:"production_manager", 3:"qc", 4:"accounts", 8:"accounts", 9:"accounts", 5:"stores", 6:"accounts", 7:"" };
+const osfD = (iso)=> iso ? fmtDMY(String(iso).slice(0,10)) : "";
+const osfWd = (a, b)=> a ? Math.max(0, wdBetween(a, b || new Date().toISOString())) : null;
+const osfBy = (b)=> (b && b!=="App") ? String(b) : "";
+const osfPl = (n, w)=> n+" "+w+(Number(n)===1?"":"s");
+
+// the order's own stages, from the data the board already reads (M) plus this contract's full OA row and move log (E)
+function osfOrderNodes(cn, M, E){
+  cn = String(cn); const x = ospStage(cn, M); const so = (E && E.so) || x.so || {}; const st = x.st || {};
+  const pb = (M.pb && M.pb.get(cn)) || null; const pr = (M.pr && M.pr.get(cn)) || null; const plan = x.plan || null;
+  const shut = /closed/i.test(so.status||""), gone = /cancel/i.test(so.status||"");
+  const mv = (E && E.moves) || [];
+  const lastTo = (k)=>{ const m = mv.filter(v=>v.to_k===k); return m.length ? m[m.length-1] : null; };
+  const lastFrom = (k)=>{ const m = mv.filter(v=>v.from_k===k && v.kind!=="back"); return m.length ? m[m.length-1] : null; };
+  // purchase: PO made % and material in % (by material form, as Purchase Insights counts them)
+  const forms = x.forms || []; const lines = (E && E.lines) || null;
+  const actOf = (pfx)=>{ const m = new Map(); (lines||[]).forEach(l=>{ const [k,f] = String(l.line_key||"").split("|"); if(k===pfx && l.act_date) m.set(f, l.act_date); }); return m; };
+  const relM = actOf("rel"), facM = lines ? actOf("fac") : new Map(Array.from(x.fac||[]).map(f=>[f, null]));
+  const poN = lines ? forms.filter(f=>relM.has(f)).length : null, inN = forms.filter(f=>facM.has(f)).length;
+  const pur = { n:forms.length, poN, inN, poPct: forms.length && poN!=null ? Math.round(poN/forms.length*100) : null, inPct: forms.length ? Math.round(inN/forms.length*100) : (plan ? 100 : 0) };
+  const lastAct = (m)=> Array.from(m.values()).filter(Boolean).sort().pop() || null;
+  const fromM = (k)=>{ const v = lastFrom(k); return v ? { at:v.at, by:osfBy(v.by_name) } : { at:null, by:"" }; };
+  const done = {
+    so:  { at: so.oa_issued_on || so.commercial_approved_at || null, by: so.commercial_approved_by || "" },
+    doc: fromM("doc"), ph: fromM("ph"),
+    wo:  { at: so.go_ahead_at || null, by: so.go_ahead_by || "" },
+    bom: { at: (plan && plan.prod_bom_approved_at) || null, by: (plan && plan.prod_bom_approved_by) || "" },
+    pbm: { at: (pb && pb.sent_at) || null, by: (pb && (pb.sent_by || pb.owner)) || "" },
+    pbe: { at: (pb && pb.endorsed_at) || null, by: (pb && pb.endorsed_by) || "" },
+    pba: { at: (pb && pb.approved_at) || null, by: (pb && pb.approved_by) || "" },
+    pr:  { at: (pr && pr.released_at) || st.pr_released_at || null, by: (pr && pr.released_by) || st.pr_released_by || "" },
+    pur: { at: (forms.length && inN>=forms.length ? lastAct(facM) : null) || st.prod_started_at || null, by: st.prod_started_by ? "" : "" },
+    prod:{ at:null, by:"" } };
+  if(!done.doc.at){ const t = lastTo("wo")||lastTo("ph"); if(t && t.from_k==="doc") done.doc = { at:t.at, by:osfBy(t.by_name) }; }
+  const keys = OSF_ORDER.map(o=>o[0]);
+  const cur = x.stage; const ci = cur ? keys.indexOf(cur) : -1;
+  const nodes = []; let prev = { at: so.created_at || (x.reg && x.reg.created_at) || null, by: so.created_by || "" };
+  OSF_ORDER.forEach(([k,label], i)=>{
+    const col = OSP_COLS.find(c=>c.k===k) || {}; const allowed = Number(col.days)||0;
+    let s = shut ? "done" : gone ? "wait" : ci<0 ? "wait" : i<ci ? "done" : i===ci ? "now" : "wait";
+    const skip = (k==="ph" && s!=="now" && !done.ph.at && !lastTo("ph")) ||
+      (["pbm","pbe","pba"].includes(k) && s==="done" && !pb) ||
+      (k==="pur" && s==="done" && !forms.length && !done.pur.at);
+    if(skip){ nodes.push({ k, label, s:"skip" }); return; }
+    const mvIn = lastTo(k);
+    const inAt = (mvIn && mvIn.at) || prev.at; const inBy = (mvIn && osfBy(mvIn.by_name)) || prev.by;
+    const d = done[k] || { at:null, by:"" };
+    const n = { k, label, s, inAt, inBy, doneAt: s==="done" ? d.at : null, doneBy: s==="done" ? d.by : "", allowed, extra:[] };
+    if(s==="done"){ n.took = (inAt && d.at) ? osfWd(inAt, d.at) : null; n.delay = (allowed && n.took!=null && n.took>allowed) ? n.took-allowed : 0; }
+    if(s==="now"){ n.days = inAt ? osfWd(inAt) : null; n.late = !!(allowed && n.days!=null && n.days>allowed);
+      n.holders = k==="pba" ? ((E && E.sas) || []) : ctfNames(CTF_POSTS[k]||[]);
+      if(x.hold){ n.s = "hold"; n.extra.push("On hold — "+(x.hold.reason_label||"")+(x.hold.note?": "+x.hold.note:"")); }
+      if(k==="so") n.extra.push("Stuck at: "+ospSoStuckTxt(x));
+      if(k==="doc"||k==="ph"){ try{ const dd = ospDocs(cn, M); if(dd.gateTxt) n.extra.push(dd.gateTxt); n.extra.push(dd.open.length+" of "+dd.fh.length+" Full Hold documents open"); }catch(e){} }
+      if(["pbm","pbe","pba"].includes(k) && pb) n.extra.push("Purchase BOM: "+(PB_ST && PB_ST[pb.status] || pb.status)+(pb.pct!=null?" · "+pb.pct+"% of PO value":"")+(pb.back_note?" · sent back: "+pb.back_note:"")); }
+    if(k==="so"){ if(so.created_at) n.extra.push("OA made "+osfD(so.created_at)+(so.created_by?" by "+so.created_by:""));
+      if(so.commercial_approved_at) n.extra.push("Approved "+osfD(so.commercial_approved_at)+(so.commercial_approved_by?" by "+so.commercial_approved_by:""));
+      if(so.oa_issued_on) n.extra.push("Sent to the client "+osfD(so.oa_issued_on)); }
+    if(["pr","pur","prod"].includes(k) && forms.length && (s!=="wait"))
+      n.extra.push((pur.poPct!=null ? "PO made "+pur.poN+"/"+pur.n+" ("+pur.poPct+"%) · " : "")+"Material in "+pur.inN+"/"+pur.n+" ("+pur.inPct+"%)");
+    if(k==="prod" && E && E.route && E.route.length && s!=="wait"){ const t = E.route.reduce((a,r)=>a+r.pct,0)/E.route.length; n.extra.push("Route cards: "+Math.round(t)+"% done"); }
+    nodes.push(n); if(s==="done") prev = { at:d.at || prev.at, by:d.by || prev.by };
+  });
+  return { nodes, x, pur, shut, gone };
+}
+// one lot: DC → With QC → With Accounts (→ IRN below) → Clearance → Despatched → Paid
+function osfLotNodes(l, dc){
+  const col = osLotCol(l, dc); const iv = dc && dc._inv; const r = osRank(col);
+  const T = {
+    2:{ in:[l.ready_at, l.ready_by], done:[l.stores_done_at, l.stores_done_by] },
+    3:{ in:[l.stores_done_at, l.stores_done_by], done:[l.qc_at, l.qc_by] },
+    4:{ in:[(dc&&dc.pm_acc_at)||l.qc_at, (dc&&dc.pm_acc_by)||l.qc_by], done:[dc&&dc.acc_at, dc&&(dc.acc_by||dc.approved_by)] },
+    8:{ in:[(iv&&iv.ready_at)||(dc&&dc.acc_at), (iv&&(iv.ready_by||iv.created_by))||(dc&&dc.acc_by)], done:[iv&&(iv.ack_date||iv.irn_at||iv.issued_at), iv&&(iv.issued_by||iv.irn_by)] },
+    9:{ in:[iv&&(iv.ack_date||iv.irn_at||iv.issued_at), iv&&(iv.issued_by||iv.irn_by)], done:[iv&&iv.sent_at, iv&&iv.sent_by] },
+    5:{ in:[(iv&&iv.sent_at)||(dc&&dc.acc_at), (iv&&iv.sent_by)||(dc&&dc.acc_by)], done:[l.shipped_at, l.shipped_by] },
+    6:{ in:[l.shipped_at, l.shipped_by], done:[l.paid_at, l.paid_by] },
+    7:{ in:[l.paid_at, l.paid_by], done:[l.paid_at, l.paid_by] } };
+  const mk = (n, label)=>{ const t = T[n]; const allowed = OSF_LOT_DAYS[n]||0;
+    let s = col===7 ? "done" : osRank(n)<r ? "done" : osRank(n)===r ? "now" : "wait";
+    if(n===7 && col===7) s = "done";
+    if((n===8||n===9) && s==="done" && !iv) return { n, label, s:"skip" };   // old despatches: no IRN on file
+    const o = { n, label, s, inAt:t.in[0]||null, inBy:osfBy(t.in[1]), doneAt: s==="done" ? (t.done[0]||null) : null, doneBy: s==="done" ? osfBy(t.done[1]) : "", allowed, extra:[] };
+    if(s==="done"){ o.took = (o.inAt && o.doneAt) ? osfWd(o.inAt, o.doneAt) : null; o.delay = (allowed && o.took!=null && o.took>allowed) ? o.took-allowed : 0; }
+    if(s==="now"){ const since = osLotSince(l, dc) || o.inAt; o.inAt = since; o.days = since ? osDays(since) : null;
+      const ick = (n===8||n===9) ? osInvClock(dc) : null; o.late = ick ? !!ick.stale : !!(allowed && o.days!=null && o.days>allowed);
+      o.holders = OSF_LOT_POST[n] ? postHolders(OSF_LOT_POST[n]) : []; o.extra.push(osLotWhere(l, dc));
+      if(l.back_note && n===2) o.extra.push("QC objected: "+l.back_note); }
+    if(n===4 && dc && qcSkipOn(dc)) o.extra.push(qcSkipPending(dc) ? "Billed before QC — QC documents pending" : "QC documents in (after billing)");
+    if(n===8 && iv) o.extra.push("Invoice "+(iv.invoice_no||"")+(iv.irn?" · IRN in":""));
+    return o; };
+  return { col, main: OSF_LOT.map(([n,label])=>mk(n,label)), sub: OSF_ACC_SUB.map(([n,label])=>mk(n,label)) };
+}
+// production: where each Sl No is on its route card
+function osfRoute(cards, cells){
+  return (cards||[]).map(c=>{ const steps = (c.steps||[]).slice().sort((a,b)=>(a.n||0)-(b.n||0)); const q = Math.max(1, Number(c.qty)||1);
+    const my = (cells||[]).filter(z=>z.card_id===c.id);
+    const doneOf = (n)=> new Set(my.filter(z=>z.step_no===n && z.mark==="x").map(z=>z.piece)).size;
+    let cur = null, tot = 0;
+    steps.forEach(s=>{ const d = Math.min(q, doneOf(s.n)); tot += d; if(!cur && d<q) cur = { t: s.t || ("Step "+s.n), d }; });
+    const flags = {}; my.forEach(z=>{ if(["N","P","J","T","R","Q"].includes(z.mark)) flags[z.mark] = (flags[z.mark]||0)+1; });
+    return { sl:c.item_sl_no, model:c.model||"", qty:q, pct: steps.length ? Math.round(tot/(steps.length*q)*100) : 0, cur, flags, nSteps:steps.length }; });
+}
+async function osfLoadOne(cn, M){
+  cn = String(cn); const E = { so:null, moves:[], lines:null, route:[], sas:[] };
+  await Promise.all([
+    (async()=>{ try{ const r = await sb.from("sale_order_tbl").select("*").eq("contract_number",cn).maybeSingle(); E.so = r.data||null; }catch(e){} })(),
+    (async()=>{ try{ const r = await sb.from("order_stage_move_tbl").select("*").eq("contract_number",cn).order("at"); if(!r.error) E.moves = r.data||[]; }catch(e){} })(),
+    (async()=>{ const p = M && M.plan && M.plan.get(cn); if(!p) return; try{ const r = await sb.from("proc_line_tbl").select("line_key,act_date").eq("plan_id",p.id); if(!r.error) E.lines = r.data||[]; }catch(e){} })(),
+    (async()=>{ try{ const r = await sb.from("route_card_tbl").select("id,item_sl_no,model,qty,steps").eq("contract_number",cn).order("item_sl_no"); const cards = r.data||[];
+        let cells = []; const ids = cards.map(c=>c.id); if(ids.length){ const c2 = await sb.from("route_cell_tbl").select("card_id,step_no,piece,mark").in("card_id",ids); cells = c2.data||[]; }
+        E.route = osfRoute(cards, cells); }catch(e){} })(),
+    (async()=>{ try{ await loadPostPeople(); E.sas = await superAdminNames(); }catch(e){} })() ]);
+  return E;
+}
+// quick states for the all-contracts dots (no extra reads)
+function osfQuick(cn, M, lots, dcBy){
+  const x = ospStage(String(cn), M); const so = x.so || {}; const st = x.st || {};
+  const keys = OSF_ORDER.map(o=>o[0]); const ci = x.stage ? keys.indexOf(x.stage) : -1; const shut = /closed/i.test(so.status||"");
+  const op = x.stage ? ((st.opened||{})[x.stage==="pur" && x.pct>=100 ? "start" : x.stage]) : null; const col = OSP_COLS.find(c=>c.k===x.stage);
+  const late = !!(col && col.days>0 && op && wdSince(op)>col.days);
+  const order = OSF_ORDER.map(([k,label],i)=>{ const s = shut ? "done" : ci<0 ? "wait" : i<ci ? "done" : i===ci ? (x.hold ? "hold" : late ? "late" : "now") : "wait";
+    if(k==="ph" && s!=="now" && s!=="late") return null; return { k, label, s }; }).filter(Boolean);
+  const L = (lots||[]).map(l=>{ const dc = dcBy.get(l.dc_id); const q = osfLotNodes(l, dc); const fl = (z)=> z.s==="now" && z.late ? "late" : z.s;
+    return { l, name:osLotName(l), main:q.main.map(z=>({ ...z, s:fl(z) })), sub:q.sub.map(z=>({ ...z, s:fl(z) })) }; });
+  return { x, order, lots:L, stuck: order.some(o=>o.s==="late") || L.some(q=>[...q.main,...q.sub].some(z=>z.s==="late")) };
+}
+const OSF_TONE = { done:["#e7f6ee","#8fd0ab","#165c38"], now:["#e8f0fe","#1a4fb5","#163d8a"], late:["#fdecea","#d0493d","#8a2219"], hold:["#fff4d6","#e0b04a","#7a5200"], wait:["#f4f5f7","#d6dae0","#8a919c"], skip:["#fafafa","#d6dae0","#9aa1ab"] };
+function OsfBox({ n, onPick, picked }){
+  const s = n.s==="now" && n.late ? "late" : n.s; const T = OSF_TONE[s] || OSF_TONE.wait;
+  const who = (n.holders||[]).join(", ");
+  const lines = s==="done" ? [ "✓ "+(osfD(n.doneAt)||"done")+(n.doneBy?" · "+n.doneBy:""), n.took!=null ? "took "+osfPl(n.took,"day")+(n.delay?" · +"+n.delay+" late":"") : "" ]
+    : (s==="now"||s==="late"||s==="hold") ? [ (who||"—"), n.days!=null ? osfPl(n.days,"day")+(n.allowed?" (of "+n.allowed+")":"") : "", n.inBy ? "from "+n.inBy+(n.inAt?" "+osfD(n.inAt):"") : "" ]
+    : s==="skip" ? ["not needed"] : [];
+  return h("div",{"data-testid":"osf-box","data-state":s,onClick:()=>onPick&&onPick(n),title:n.label,
+      style:{width:142,flex:"none",minHeight:70,borderRadius:9,padding:"6px 8px",fontSize:11,lineHeight:1.3,cursor:"pointer",background:s==="skip"?"repeating-linear-gradient(45deg,#fafafa,#fafafa 6px,#f0f0f0 6px,#f0f0f0 12px)":T[0],
+        border:"2px solid "+(picked?"#1d2433":T[1]),color:T[2],boxShadow:(s==="now"||s==="late")?"0 0 0 3px "+(s==="late"?"rgba(208,73,61,.15)":"rgba(26,79,181,.15)"):"none"}},
+    h("div",{style:{fontWeight:700,fontSize:11.5,marginBottom:2}},n.label),
+    lines.filter(Boolean).map((t,i)=>h("div",{key:i,style:{fontWeight:(i===0&&(s==="now"||s==="late"))?700:400,color:(t.indexOf("late")>=0&&s==="done")?"#a3312a":undefined}},t)),
+    (n.extra||[]).filter(t=>/^(PO made|Material in|Route cards)/.test(t)).map((t,i)=>h("div",{key:"e"+i,style:{fontSize:10.5,marginTop:2,fontWeight:700}},t)));
+}
+const osfArr = (ok, v)=> v ? h("div",{style:{width:2,height:16,background:ok?"#8fd0ab":"#b9c0ca",margin:"0 auto"}})
+  : h("div",{style:{width:22,height:2,flex:"none",background:ok?"#8fd0ab":"#b9c0ca",marginTop:34}});
+function OsfDetail({ n, lotName, cn }){
+  if(!n) return null; const s = n.s==="now" && n.late ? "late" : n.s;
+  const row = (k,v)=> v ? h("div",{style:{display:"flex",gap:8,fontSize:12.5,padding:"2px 0"}}, h("span",{style:{width:150,flex:"none",color:colors.muted}},k), h("span",null,v)) : null;
+  return h("div",{"data-testid":"osf-detail",style:{marginTop:10,background:"#fffdf3",border:"1px solid #ecd98d",borderRadius:8,padding:"10px 12px"}},
+    h("div",{style:{fontWeight:700,fontSize:13.5,marginBottom:4}}, cn+(lotName?" · "+lotName:"")+" — "+n.label),
+    s==="skip" ? h("div",{style:{fontSize:12.5}},"Not needed for this order.") : null,
+    row("Pushed here by", n.inBy ? n.inBy+(n.inAt?" on "+fmtDMYTime(n.inAt):"") : (n.inAt ? "on "+fmtDMYTime(n.inAt) : "")),
+    s==="done" ? row("Done", (n.doneAt?fmtDMYTime(n.doneAt):"date not recorded")+(n.doneBy?" by "+n.doneBy:"")) : null,
+    s==="done" && n.took!=null ? row("Took", osfPl(n.took,"working day")+(n.allowed?" (allowed "+n.allowed+")":"")+(n.delay?" — "+n.delay+" day"+(n.delay===1?"":"s")+" late":" — on time")) : null,
+    (s==="now"||s==="late"||s==="hold") ? row("Now with", ((n.holders||[]).join(", ")||"post empty")) : null,
+    (s==="now"||s==="late"||s==="hold") && n.days!=null ? row("Stuck here", osfPl(n.days,"day")+(n.allowed?" (allowed "+n.allowed+")":"")+(s==="late"?" — over its days":"")) : null,
+    s==="wait" ? h("div",{style:{fontSize:12.5,color:colors.muted}},"Not reached yet.") : null,
+    (n.extra||[]).length ? h("div",{style:{marginTop:4}}, n.extra.filter(Boolean).map((t,i)=>h("div",{key:i,style:{fontSize:12.5}},"• "+t))) : null);
+}
+function OsFlowView({ D, M, one, q, filterCns, title, dept }){
+  const [scope,setScope] = useNavState("osf_scope", one ? "one" : "all");
+  const [wf,setWf] = useNavState("osf_wait_"+(dept||"all"), dept||""); const [onlyLate,setOnlyLate] = useState(false);   // 2026-11-18T06:00:00Z: waiting on a department · only late
+  const [cn,setCn] = useNavState("osf_cn", one ? String(one) : "");
+  const [E,setE] = useState(null); const [pick,setPick] = useState(null);
+  useEffect(()=>{ if(one){ setCn(String(one)); setScope("one"); } },[one]);
+  useEffect(()=>{ setPick(null); if(scope!=="one" || !cn || !M || M.missing){ setE(null); return; } let live = true; setE("loading");
+    osfLoadOne(cn, M).then(e=>{ if(live) setE(e); }).catch(()=>{ if(live) setE({ moves:[], route:[], sas:[] }); }); return ()=>{ live = false; }; },[scope, cn, M]);
+  if(!D || !M) return h("div",{style:{padding:20,color:colors.muted}},"Reading the orders…");
+  if(M.missing) return h("div",{style:{padding:14,color:colors.danger}},"Run "+UMA_SQL+" on this company (structure, both companies) to see the flow.");
+  const dcBy = new Map((D.dcs||[]).map(d=>[d.id, d]));
+  const lotsOf = new Map(); (D.lots||[]).filter(l=>l.status!=="Returned").forEach(l=>{ const k = String(l.contract_number); lotsOf.set(k,[...(lotsOf.get(k)||[]), l]); });
+  const live = (D.sos||[]).filter(s=>!/cancel|closed/i.test(s.status||"")).filter(s=>!filterCns || filterCns.has(String(s.contract_number)))
+    .filter(s=>!q || (String(s.contract_number)+" "+(s.customer_name||"")+" "+(s.basis_number||"")).toLowerCase().includes(String(q).toLowerCase()))
+    .sort((a,b)=>String(b.contract_number).localeCompare(String(a.contract_number)));
+  const seg = (k,l)=> h("button",{key:k,"data-testid":"osf-scope-"+k,onClick:()=>setScope(k),style:{...btnSmall,fontSize:12,padding:"4px 11px",background:scope===k?colors.dark:"#fff",color:scope===k?"#fff":colors.text}},l);
+  const legend = h("span",{style:{display:"flex",gap:10,fontSize:11,color:colors.muted,flexWrap:"wrap"}},
+    [["done","Done"],["now","Here now"],["late","Late (over its days)"],["hold","On hold"],["wait","Not reached"],["skip","Not needed"]].map(([k,l])=>h("span",{key:k,style:{display:"inline-flex",alignItems:"center",gap:4}}, h("i",{style:{display:"inline-block",width:11,height:11,borderRadius:3,background:OSF_TONE[k][1]}}),l)));
+  const bar = h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:8}},
+    title ? h("b",{style:{fontSize:14}},title) : null, seg("all","All contracts"), seg("one","One contract"),
+    scope==="one" ? h("select",{"data-testid":"osf-cn",value:cn,onChange:e=>setCn(e.target.value),style:{...inputStyle,width:320,padding:"5px 8px"}},
+      h("option",{value:""},"Pick a contract…"), live.map(s=>h("option",{key:s.contract_number,value:String(s.contract_number)},s.contract_number+" · "+(s.customer_name||"")))) : null,
+    legend);
+  // ---- all contracts: 2026-11-18T06:00:00Z — badges (done: step + date; now: step, who, days; late red), waiting-on filter, only late
+  if(scope!=="one"){
+    const DEPT_OF = { so:"sales", doc:"doc", ph:"doc", wo:"doc", bom:"tech", pbm:"pur", pbe:"pur", pba:"sa", pr:"pur", pur:"pur", prod:"pm" };
+    const LOT_DEPT = { 1:"pm", 2:"pm", 3:"qc", 4:"acc", 8:"acc", 9:"acc", 5:"stores", 6:"acc", 7:"" };
+    const rowsAll = live.map(s=>{ const c = String(s.contract_number); let O = null; try{ O = osfOrderNodes(c, M, null); }catch(e){ O = { nodes:[], x:{} }; }
+      const lots = (lotsOf.get(c)||[]).map(l=>({ l, ...osfLotNodes(l, dcBy.get(l.dc_id)) }));
+      const cur = O.nodes.find(n=>n.s==="now"||n.s==="hold"); const depts = new Set();
+      if(cur && cur.k!=="prod") depts.add(DEPT_OF[cur.k]||""); if(cur && cur.k==="prod" && !lots.length) depts.add("pm");
+      lots.forEach(L=>{ if(L.col && L.col!==7){ depts.add(LOT_DEPT[L.col]||""); if(L.col===2 || L.col===1) depts.add("pm"); } });
+      if(cur && cur.k==="prod" && lots.some(L=>L.col===1)) depts.add("pm");
+      const late = O.nodes.some(n=>n.s==="now" && n.late) || lots.some(L=>[...L.main, ...L.sub].some(n=>n.s==="now" && n.late));
+      return { s, c, O, lots, depts, late }; });
+    const shown = rowsAll.filter(r=>(!wf || r.depts.has(wf)) && (!onlyLate || r.late));
+    const ell = { whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" };
+    const chip = (n, key, go, small)=>{ const s = n.s==="now" && n.late ? "late" : n.s; const T = OSF_TONE[s] || OSF_TONE.wait; const strong = s==="now" || s==="late";
+      const l1 = (s==="done" ? "✓ " : s==="hold" ? "⏸ " : "")+n.label;
+      const l2 = s==="done" ? (n.doneAt ? osfD(n.doneAt).slice(0,5) : "") : (strong || s==="hold") ? ((n.holders||[]).slice(0,2).join(", ") || "—") : "";
+      const l3 = (strong || s==="hold") ? [n.days!=null ? osfPl(n.days,"day")+(n.allowed?" of "+n.allowed:"") : "", ...((n.extra||[]).filter(t=>/^(PO made|Material in|Route cards|On hold)/.test(t)))].filter(Boolean).join(" · ") : "";
+      return h("div",{key,"data-testid":"osf-chip","data-state":s,onClick:go,title:n.label+(l2?" — "+l2:"")+(l3?" — "+l3:""),
+        style:{ borderRadius:7, border:"1.5px solid "+(strong ? (s==="late" ? "#c0392b" : "#1a4fb5") : T[1]), background: strong ? (s==="late" ? "#c0392b" : "#1a4fb5") : T[0], color: strong ? "#fff" : T[2],
+          padding: small ? "2px 6px" : "3px 7px", fontSize: small ? 10 : 10.5, lineHeight:1.25, flex:"none", display:"flex", flexDirection:"column", justifyContent:"center", cursor:"pointer",
+          minHeight: small ? 22 : 42, minWidth: strong ? 130 : s==="wait" ? 58 : 74, maxWidth: strong ? 200 : 150, overflow:"hidden" }},
+        h("b",{style:{ fontSize: small ? 10 : 11, ...ell }}, l1), l2 ? h("span",{style:ell},l2) : null, l3 ? h("span",{style:ell},l3) : null); };
+    const cn2 = (k)=> h("span",{key:k,style:{width:10,height:2,background:"#cfd4db",flex:"none"}});
+    const WAIT = [["","Everyone"],["acc","Accounts"],["pur","Purchase"],["pm","Production"],["doc","Document Control"],["tech","Technical"],["qc","QC"],["stores","Stores"],["sales","Sales (OA)"],["sa","Super Admins"]];
+    return h("div",null, bar,
+      h("div",{style:{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",fontSize:12.5,marginBottom:6}},
+        h("span",null,"Waiting on:"), h("select",{"data-testid":"osf-wait",value:wf,onChange:e=>setWf(e.target.value),style:{...inputStyle,width:180,padding:"4px 7px"}}, WAIT.map(([k,l])=>h("option",{key:k,value:k},l))),
+        h("label",{style:{display:"flex",gap:5,alignItems:"center"}}, h("input",{type:"checkbox","data-testid":"osf-onlylate",checked:onlyLate,onChange:e=>setOnlyLate(e.target.checked)}),"only late"),
+        h("span",{style:{color:colors.muted}}, shown.length+" open contract"+(shown.length===1?"":"s")+(wf?" waiting on "+(WAIT.find(w=>w[0]===wf)||["",""])[1]:"")+" · "+rowsAll.filter(r=>r.late).length+" with a late step (red). Click a badge to open the contract's flow.")),
+      h("div",{"data-testid":"osf-all",style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"4px 10px",overflowX:"auto"}},
+        shown.map(({s,c,O,lots,late})=>{ const go = ()=>{ setCn(c); setScope("one"); };
+          const nodes = O.nodes.filter(n=>n.s!=="skip");
+          return h("div",{key:c,"data-testid":"osf-row",style:{display:"grid",gridTemplateColumns:"190px 1fr",gap:8,alignItems:"flex-start",padding:"8px 0",borderBottom:"1px solid #eef0f3"}},
+            h("div",{onClick:go,style:{cursor:"pointer"}}, h("b",{style:{fontSize:15}},c), late ? h("span",{style:{color:"#c0392b",fontWeight:700,marginLeft:6,fontSize:11}},"late") : null, h("div",{style:{fontSize:11,color:colors.muted}},s.customer_name||"")),
+            h("div",null,
+              h("div",{style:{display:"flex",alignItems:"center",flexWrap:"wrap",rowGap:6}}, nodes.map((n,i)=>h(React.Fragment,{key:n.k}, i ? cn2("l"+i) : null, chip(n, "o"+i, go)))),
+              lots.map((L,j)=>h("div",{key:"L"+j,style:{display:"flex",alignItems:"center",flexWrap:"wrap",rowGap:6,marginTop:6,paddingLeft:6,borderLeft:"3px solid #b9c0ca"}},
+                h("span",{style:{fontSize:11,fontWeight:700,color:"#555",width:48,flex:"none"}},"Lot "+(L.l.lot_no||j+1)),
+                L.main.map((n,i)=>h(React.Fragment,{key:"m"+i}, i ? cn2("ml"+i) : null,
+                  n.n===4 ? h("span",{style:{display:"inline-flex",flexDirection:"column",gap:3,alignItems:"stretch"}}, chip(n,"a",go), L.sub.filter(z=>z.s!=="skip").map((z,k2)=>chip(z,"s"+k2,go,true))) : chip(n,"x"+i,go))))))); }),
+        !shown.length ? h("div",{style:{padding:12,color:colors.muted}},"No open contracts"+(wf||onlyLate?" for this filter":filterCns?" for you":"")+".") : null));
+  }
+  // ---- one contract
+  if(!cn) return h("div",null, bar, h("div",{style:{padding:12,color:colors.muted}},"Pick a contract."));
+  const so = (D.sos||[]).find(s=>String(s.contract_number)===String(cn));
+  if(E==="loading" || !E) return h("div",null, bar, h("div",{style:{padding:12,color:colors.muted}},"Reading "+cn+"…"));
+  const O = osfOrderNodes(cn, M, E);
+  const lots = (lotsOf.get(String(cn))||[]).map(l=>({ l, ...osfLotNodes(l, dcBy.get(l.dc_id)) }));
+  const lane = (head, nodes, keyP, lotName, subOf)=> h("div",{style:{display:"flex",alignItems:"flex-start",margin:"6px 0",minWidth:"max-content"}},
+    h("div",{style:{width:96,flex:"none",fontWeight:700,fontSize:12,color:"#444",marginTop:26}},head),
+    nodes.map((n,i)=>{ const prevOk = i>0 && nodes[i-1].s==="done";
+      const box = h(OsfBox,{ n, picked: pick && pick.key===keyP+i, onPick:()=>setPick({ key:keyP+i, n, lotName }) });
+      const withSub = subOf && n.n===4 ? h("div",{style:{display:"flex",flexDirection:"column",alignItems:"center",flex:"none"}}, box, osfArr(subOf[0].s!=="wait", true),
+          h("div",{style:{border:"1px dashed #c9b6ef",borderRadius:10,padding:6,background:"#faf7ff"}}, h("div",{style:{fontSize:10,color:"#6b4bb0",fontWeight:700,textAlign:"center",marginBottom:4}},"Accounts · GST e-invoice"),
+            subOf.map((m,j)=>h(React.Fragment,{key:j}, j?osfArr(subOf[j-1].s==="done", true):null, h(OsfBox,{ n:m, picked: pick && pick.key===keyP+"s"+j, onPick:()=>setPick({ key:keyP+"s"+j, n:m, lotName }) }))))) : box;
+      return h(React.Fragment,{key:i}, i?osfArr(prevOk):null, withSub); }));
+  const shown = O.nodes; const hd = O.x.hold;
+  return h("div",null, bar,
+    h("div",{"data-testid":"osf-one",style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 12px",overflowX:"auto"}},
+      h("div",{style:{display:"flex",gap:10,alignItems:"baseline",flexWrap:"wrap"}}, h("b",{style:{fontSize:15}},cn+" · "+((so&&so.customer_name)||(E.so&&E.so.customer_name)||"")),
+        (E.so && E.so.basis_number) ? h("span",{style:{fontSize:12,color:colors.muted}},"PO "+E.so.basis_number) : null,
+        O.shut ? ospBadge("CLOSED","ok","c") : O.gone ? ospBadge("CANCELLED","rd","c") : null),
+      hd ? h("div",{style:{background:"#fff4d6",color:"#7a5200",borderRadius:6,padding:"5px 10px",fontSize:12.5,margin:"6px 0",fontWeight:700}},"⏸ On hold — "+(hd.reason_label||"")+(hd.note?": "+hd.note:"")) : null,
+      lane("Order", shown, "o", ""),
+      lots.length ? h("div",{style:{fontSize:11,color:colors.muted,margin:"10px 0 2px 96px"}},"↳ the order splits into "+osfPl(lots.length,"lot")) : h("div",{style:{fontSize:11,color:colors.muted,margin:"10px 0 2px 96px"}},"↳ lots appear here once production makes them"),
+      lots.length ? h("div",{style:{marginLeft:96,borderLeft:"2px dashed #b9c0ca",paddingLeft:10}},
+        lots.map((L,j)=>h("div",{key:L.l.id}, lane(osLotName(L.l).replace(/^.*·\s*/,""), L.main, "l"+j+"_", osLotName(L.l), L.sub)))) : null,
+      E.route && E.route.length ? h("div",{"data-testid":"osf-route",style:{marginTop:10,borderTop:"1px solid "+colors.border,paddingTop:8}},
+        h("div",{style:{fontWeight:700,fontSize:12.5,marginBottom:4}},"Production — route cards"),
+        E.route.map(r=>h("div",{key:r.sl,style:{display:"flex",gap:8,alignItems:"center",fontSize:12,padding:"2px 0"}},
+          h("span",{style:{width:60,fontWeight:700}},"Sl "+r.sl), h("span",{style:{width:200,color:colors.muted}},(r.model||"")+" × "+r.qty),
+          h("span",{style:{width:120,height:8,background:"#eef0f3",borderRadius:4,overflow:"hidden",display:"inline-block"}}, h("span",{style:{display:"block",height:8,width:r.pct+"%",background:"#2f8f6b"}})),
+          h("span",{style:{width:44}},r.pct+"%"),
+          h("span",null, r.cur ? "at "+r.cur.t+" ("+r.cur.d+" of "+r.qty+" done)" : (r.nSteps ? "all steps done" : "no steps on the card")),
+          Object.keys(r.flags).length ? h("span",{style:{color:"#a3312a",fontWeight:700}}, Object.entries(r.flags).map(([k,v])=>v+" "+((MFG_MK[k]||{}).t||k)).join(" · ")) : null))) : null),
+    pick ? h(OsfDetail,{ n:pick.n, lotName:pick.lotName, cn }) : h("div",{style:{fontSize:12,color:colors.muted,marginTop:8}},"Click a box for who pushed it, when, how long it took, and who has it now."));
+}
+// 2026-11-18T06:00:00Z: Order Status › Flow, Accounts › Billing, Purchase, Production — the same Flow, opened on the department's waiting orders
+
+// ==================================================================================================================
+// 2026-11-18T13:00:00Z: SERIALS AT W/O RELEASE · PRODUCTION RELEASE PACK · KICK-OFF MEETING · FINISH ON THE OA
+// Serials: the app gives them when the W/O is released (Start Production) — one per unit, every Sl No, no skipping —
+// and keeps them in step with the OA: a quantity raised gets more; a quantity lowered marks the spare ones (not on a
+// DC) unused with the reason. QC no longer gives them by hand; a one-time catch-up gives them to orders already in
+// production. The Production Release Pack is a live PDF per contract, made at W/O release and kept up to date until
+// the OA is closed (every lot paid) or cancelled — no revisions, a History chapter instead. Heads of every department
+// read it; a critical change (Code 3, hold, quantity / test / delivery change) asks them to read it again at once,
+// routine changes come in one daily digest. The kick-off meeting is a gateway like the Order Processing Review,
+// started and closed by the VP Projects and Technical Head posts, within 2 days of the release.
+// ==================================================================================================================
+const RP_SQL = "structure_release_pack_2026-11-18.sql";
+const RP_READ_POSTS = ["finance_director","accounts","purchase_manager","qc","vp_projects","production_manager","stores","factory_manager","sales_head","technical_head","doc_controller"];
+const KO_POSTS = ["vp_projects","technical_head"];
+const KO_DAYS = 2;
+const OA_FINISH_FROM = "2026-11-18T13:00:00Z";   // the finish rule is for Order Acceptances made from this build on
+const OA_FINISH_KINDS = ["Painting","Pickling & passivation","Galvanising","Electropolishing","Plating","Other finish"];
+const RP_DEPTS = [
+  ["sales","Sales",/sales|marketing|crm/i,["sales_head","sales_coordinator","oa"]],
+  ["doc","Document Control",/document/i,["doc_controller","vp_projects"]],
+  ["tech","Technical",/design|estimation|technical|engineering/i,["technical_head","estimation_head"]],
+  ["pur","Purchase",/purchase|procure/i,["purchase_manager","purchase_engineer"]],
+  ["prod","Production",/production|factory|shop|machin|fabric|weld/i,["production_manager","factory_manager"]],
+  ["qc","QC",/^\s*qc|quality|inspect/i,["qc"]],
+  ["stores","Stores",/store/i,["stores"]],
+  ["acc","Accounts",/account|finance/i,["accounts","finance_director","accountant"]],
+];
+function rpDeptOf(t){ const pk = String(t.post_key||""); for(const d of RP_DEPTS){ if(pk && d[3].includes(pk)) return d[0]; } const s = String(t.department||""); for(const d of RP_DEPTS){ if(d[2].test(s)) return d[0]; } return "other"; }
+const rpToday = ()=> toISODate(new Date());
+const rpDays = (a)=> a ? Math.max(0, Math.floor((Date.now()-new Date(a).getTime())/864e5)) : 0;
+const rpErr = (e)=> /release_pack|kickoff_meeting|finish_docs/i.test(String((e&&e.message)||e||"")) ? "Run "+RP_SQL+" in Supabase first (both companies)." : String((e&&e.message)||e||"");
+
+// ---------------------------------------------------------------- SERIALS
+// Gives what each Sl No still lacks (order qty less the live serials); with allowVoid, marks spare ones unused.
+async function qcsrAutoSync(cn, by, why, allowVoid){
+  cn = String(cn||"").trim(); const out = { n:0, from:null, to:null, voided:0, err:"" };
+  if(!cn) return out;
+  try{
+    const C = await despContract(cn); if(!C || !(C.lines||[]).length) return out;
+    const { data: regs, error: rErr } = await sb.from("qc_serial_register_tbl").select("id,serial,item_sl_no,void_at").eq("contract_number",cn);
+    if(rErr){ out.err = rErr.message; return out; }
+    const live = (regs||[]).filter(r=>!r.void_at && r.item_sl_no!=null);
+    const giveLines = [], spare = [];
+    C.lines.forEach(l=>{ const mine = live.filter(r=>String(r.item_sl_no)===String(l.item_sl_no)); const want = Math.max(0, Number(l.ordered)||0);
+      if(want > mine.length) giveLines.push({ sl:l.item_sl_no, qty:want-mine.length, item:l.item||"", size:qcsrSize(l.description), description:l.description||"" });
+      else if(allowVoid && mine.length > want) spare.push({ sl:l.item_sl_no, want, rows:mine.sort((a,b)=>b.serial-a.serial), n:mine.length-want }); });
+    // Sl Nos no longer on the OA at all
+    if(allowVoid){ const sls = new Set(C.lines.map(l=>String(l.item_sl_no))); const gone = live.filter(r=>!sls.has(String(r.item_sl_no))); if(gone.length) spare.push({ sl:"(removed)", want:0, rows:gone, n:gone.length }); }
+    if(giveLines.length){
+      const { data, error } = await sb.rpc("qc_serial_give",{ p_contract:cn, p_client:C.customer||"", p_lines:giveLines, p_by:by||"App" });
+      if(error){ out.err = error.message||String(error); }
+      else { const ss = (data||[]).map(r=>Number(r.serial)).filter(n=>!isNaN(n)).sort((a,b)=>a-b); out.n = ss.length; out.from = ss[0]??null; out.to = ss[ss.length-1]??null;
+        try{ await sb.from("qc_serial_register_tbl").update({ given_by:"App" }).in("serial",ss).eq("contract_number",cn); }catch(e){}
+        try{ await dcAskQcClose(cn, "App"); }catch(e){}
+        try{ await logAudit("INSERT","qc_serial_register_tbl",cn,"Serials given by the app ("+(why||"W/O release")+"): "+ss.length+(ss.length?" — "+ss[0]+(ss.length>1?" to "+ss[ss.length-1]:""):""),by||"App",null,null); }catch(e){} }
+    }
+    if(spare.length){
+      const ids = spare.flatMap(s=>s.rows.map(r=>r.id)); let onDc = new Set();
+      try{ const { data: ds } = await sb.from("dc_serial_tbl").select("serial").in("serial",spare.flatMap(s=>s.rows.map(r=>r.serial))); onDc = new Set((ds||[]).map(d=>String(d.serial))); }catch(e){}
+      const now = new Date().toISOString(); const kill = [];
+      spare.forEach(s=>{ let left = s.n; for(const r of s.rows){ if(!left) break; if(onDc.has(String(r.serial))) continue; kill.push({ id:r.id, serial:r.serial, why:"Quantity on the OA for Sl No "+s.sl+" is now "+s.want+(why?" ("+why+")":"") }); left--; } });
+      for(const k of kill){ const { error } = await sb.from("qc_serial_register_tbl").update({ void_at:now, void_by:by||"App", void_reason:k.why }).eq("id",k.id); if(!error) out.voided++; }
+      if(out.voided) try{ await logAudit("UPDATE","qc_serial_register_tbl",cn,out.voided+" serial(s) marked unused — the OA quantity went down",by||"App",null,null); }catch(e){}
+    }
+  }catch(e){ out.err = String(e.message||e); }
+  return out;
+}
+const qcsrRange = (s)=> !s || !s.n ? "" : (s.from===s.to ? String(s.from) : s.from+" – "+s.to);
+
+// One-time catch-up: every contract at Start Production whose Sl Nos have fewer live serials than the order qty
+async function qcsrCatchupList(){
+  const { data: sos } = await sb.from("sale_order_tbl").select("contract_number,customer_name,go_ahead_state,go_ahead_at,status").like("go_ahead_state","Start Production%");
+  const live = (sos||[]).filter(s=>!/cancel|closed/i.test(s.status||""));
+  const cns = live.map(s=>String(s.contract_number));
+  const regs = cns.length ? await fetchPaged(()=>sb.from("qc_serial_register_tbl").select("contract_number,item_sl_no,void_at").in("contract_number",cns), 1000) : [];
+  const out = [];
+  for(const s of live){
+    let C = null; try{ C = await despContract(s.contract_number); }catch(e){} if(!C || !(C.lines||[]).length) continue;
+    const mine = regs.filter(r=>String(r.contract_number)===String(s.contract_number) && !r.void_at);
+    let units = 0, sls = 0; C.lines.forEach(l=>{ const g = mine.filter(r=>String(r.item_sl_no)===String(l.item_sl_no)).length; const need = Math.max(0,(Number(l.ordered)||0)-g); if(need){ units += need; sls++; } });
+    if(units) out.push({ cn:String(s.contract_number), client:s.customer_name||C.customer||"", at:s.go_ahead_at, sls, units });
+  }
+  return out.sort((a,b)=>String(a.cn).localeCompare(String(b.cn)));
+}
+function QcSerialCatchup({ user, nextNo, onBack, onDone }){
+  const [rows,setRows] = useState(null); const [pick,setPick] = useState({}); const [busy,setBusy] = useState(false); const [msg,setMsg] = useState("");
+  useEffect(()=>{ qcsrCatchupList().then(r=>{ setRows(r); const p = {}; r.forEach(x=>p[x.cn] = true); setPick(p); }).catch(e=>{ setRows([]); setMsg(String(e.message||e)); }); },[]);
+  const sel = (rows||[]).filter(r=>pick[r.cn]); const total = sel.reduce((s,r)=>s+r.units,0);
+  let n = nextNo;
+  const apply = async()=>{
+    if(!sel.length || busy) return; if(!confirm("Give "+total+" serial numbers to "+sel.length+" contract(s)? They go into the register as given by the app.")) return;
+    setBusy(true); setMsg(""); const me = (await despMe(user)) || user.username; let given = 0; const bad = [];
+    for(const r of sel){ const s = await qcsrAutoSync(r.cn, me, "catch-up for orders already in production", false); given += s.n; if(s.err) bad.push(r.cn+": "+s.err); }
+    setBusy(false); setMsg("✓ Given "+given+" serial(s)."+(bad.length?" Not given — "+bad.join(" · "):"")); onDone && onDone();
+    qcsrCatchupList().then(setRows).catch(()=>{});
+  };
+  const th = (x)=> h("th",{style:{textAlign:"left",padding:"5px 7px",fontSize:10.5,textTransform:"uppercase",color:colors.muted,borderBottom:"2px solid "+colors.dark}},x);
+  const td = (c,s)=> h("td",{style:{padding:"5px 7px",borderBottom:"1px solid "+colors.border,fontSize:12.5,...(s||{})}},c);
+  const mono = { fontFamily:"'IBM Plex Mono',Consolas,monospace", whiteSpace:"nowrap" };
+  return h("div",{"data-testid":"qcsr-catchup",style:{padding:"16px 20px",maxWidth:1000}},
+    h("button",{onClick:onBack,style:{...btnSecondary,padding:"4px 10px",fontSize:12,marginBottom:8}},"← Register"),
+    h("h2",{style:{fontSize:17,margin:"0 0 3px"}},"Catch-up — orders already in production with no serials"),
+    h("div",{style:{fontSize:12.5,color:colors.muted,marginBottom:10}},"Every contract released to Start Production whose Sl Nos have fewer serials than the order quantity. Nothing is written until you press Apply."),
+    msg ? h("div",{style:{background:/^✓/.test(msg)?"#e4f3ed":"#fdecea",color:/^✓/.test(msg)?"#0f6b4f":"#a3312a",borderRadius:8,padding:"8px 12px",fontSize:12.5,marginBottom:8}},msg) : null,
+    !rows ? h("div",{style:{color:colors.muted}},"Looking…") : !rows.length ? h("div",{style:{color:"#0f6b4f",fontWeight:600}},"✓ Every order in production has its serials.") :
+    h("div",null, h("table",{style:{borderCollapse:"collapse",width:"100%"}},
+      h("thead",null,h("tr",null,th(""),th("Contract"),th("Client"),th("W/O released"),th("Sl Nos"),th("Units"),th("Serials to be given"))),
+      h("tbody",null, rows.map(r=>{ const on = !!pick[r.cn]; const b = on ? [n, n+r.units-1] : null; if(on) n += r.units;
+        return h("tr",{key:r.cn,"data-testid":"qcsr-cu-row"}, td(h("input",{type:"checkbox",checked:on,onChange:()=>setPick(p=>({ ...p, [r.cn]:!on }))})), td(r.cn,mono), td(r.client||"—"), td(r.at?fmtDMY(r.at):"—"), td(r.sls,mono), td(r.units,mono), td(b ? (b[0]===b[1]?b[0]:b[0]+" – "+b[1]) : "—",mono)); }))),
+      h("div",{style:{display:"flex",justifyContent:"flex-end",gap:8,marginTop:10}},
+        h("button",{onClick:onBack,style:btnSecondary},"Cancel"),
+        h("button",{"data-testid":"qcsr-cu-apply",disabled:!total||busy,onClick:apply,style:{...btnPrimary,opacity:total&&!busy?1:.5}}, busy ? "Giving…" : "Apply — give "+total+" serial"+(total===1?"":"s")))));
+}
+
+// ---------------------------------------------------------------- FINISH (painting / pickling & passivation …) ON THE OA
+const oaFinishRequired = (so)=> !!so && String(so.created_at||"") >= OA_FINISH_FROM && !/cancel/i.test(so.status||"");
+const oaFinishOk = (so)=> Array.isArray(so && so.finish_docs) && so.finish_docs.some(d=>d && d.kind && String(d.doc_no||"").trim() && String(d.rev??"").trim() && String(d.title||"").trim() && /^https?:\/\//i.test(String(d.link||"").trim()));
+const oaFinishMissing = (so)=> oaFinishRequired(so) && !oaFinishOk(so);
+function OaFinishBox({ contractInfo, user, onChanged }){
+  const so = contractInfo || {}; const list = Array.isArray(so.finish_docs) ? so.finish_docs : [];
+  const [f,setF] = useState(null); const [err,setErr] = useState(""); const [busy,setBusy] = useState(false);
+  const need = oaFinishRequired(so), miss = oaFinishMissing(so);
+  const save = async(next)=>{
+    setBusy(true); setErr("");
+    const { error } = await sb.from("sale_order_tbl").update({ finish_docs:next }).eq("contract_number",String(so.contract_number));
+    setBusy(false); if(error){ setErr(rpErr(error)); return false; }
+    try{ await logAudit("UPDATE","sale_order_tbl",String(so.contract_number),"Finish documents: "+next.map(d=>d.kind+" "+d.doc_no+" Rev "+d.rev).join(", "),user?.username||"",null,null); }catch(e){}
+    onChanged && onChanged({ finish_docs:next }); return true;
+  };
+  const add = async()=>{
+    const x = f||{}; const bad = [];
+    if(!x.kind) bad.push("finish"); if(!String(x.doc_no||"").trim()) bad.push("document number"); if(!String(x.rev??"").trim()) bad.push("revision");
+    if(!String(x.title||"").trim()) bad.push("title"); if(!/^https?:\/\//i.test(String(x.link||"").trim())) bad.push("link (https://…)");
+    if(bad.length){ setErr("Fill: "+bad.join(", ")+"."); return; }
+    const by = (await despMe(user)) || user?.username || "";
+    if(await save([...list, { kind:x.kind, doc_no:String(x.doc_no).trim(), rev:String(x.rev).trim(), title:String(x.title).trim(), link:String(x.link).trim(), by, at:new Date().toISOString() }])) setF(null);
+  };
+  const lab = (l, c)=> h("label",{style:{display:"grid",gap:2,fontSize:11,color:colors.muted,flex:"1 1 140px"}}, h("span",null,l,h("b",{style:{color:"#c0392b"}}," *")), c);
+  const inp = (k, ph)=> h("input",{"data-testid":"oaf-fin-"+k,value:(f&&f[k])||"",placeholder:ph||"",onChange:e=>setF(p=>({ ...(p||{}), [k]:e.target.value })),style:{...inputStyle,padding:"5px 7px"}});
+  return h("div",{"data-testid":"oa-finish",style:{background:"#fff",border:"1px solid "+(miss?"#c9302c":colors.border),borderRadius:10,margin:"8px 0",overflow:"hidden"}},
+    h("div",{style:{padding:"7px 14px",display:"flex",gap:10,alignItems:"center",background:miss?"#fbe7e4":"#f6f8fa"}},
+      h("b",null,"Finish — painting / pickling & passivation / galvanising …"),
+      miss ? h("span",{"data-testid":"oa-finish-badge",style:{background:"#c9302c",color:"#fff",borderRadius:10,padding:"1px 9px",fontSize:11.5,fontWeight:700}},"⚠ Finish document missing — Draft only") : list.length ? h("span",{style:{background:"#e3f1ea",color:"#0f6a4c",borderRadius:10,padding:"1px 9px",fontSize:11.5,fontWeight:700}},"✓ "+list.length+" on file") : null,
+      h("span",{style:{flex:1}}),
+      !f ? h("button",{"data-testid":"oa-finish-add",onClick:()=>{ setF({ kind:"" }); setErr(""); },style:{...btnSmall,fontWeight:700}},"+ Add finish document") : null),
+    h("div",{style:{padding:"6px 14px 10px",fontSize:12.5}},
+      need && miss ? h("div",{style:{color:"#8a2d2d",marginBottom:6}},"This Order Acceptance can be saved as a Draft, but it can't be approved or sent until its finish document is given — number, revision, title and link.") : null,
+      !need && !list.length ? h("div",{style:{color:colors.muted}},"Not required on Order Acceptances made before 18 Nov 2026 — add it if you have it; the Production Release Pack prints it.") : null,
+      list.map((d,i)=>h("div",{key:i,style:{display:"flex",gap:8,alignItems:"center",padding:"3px 0",borderBottom:"1px dashed "+colors.border}},
+        h("b",null,d.kind), h("span",null,d.doc_no+" Rev "+d.rev+" — "+d.title), h("a",{href:d.link,target:"_blank",rel:"noopener",style:{color:"#0c447c"}},"open ↗"),
+        h("span",{style:{flex:1}}), h("span",{style:{fontSize:11,color:colors.muted}},(d.by||"")+(d.at?" · "+fmtDMY(d.at):"")),
+        h("button",{onClick:async()=>{ if(confirm("Remove "+d.kind+" "+d.doc_no+" from this OA?")) await save(list.filter((_,j)=>j!==i)); },style:{...btnSmall,fontSize:11,color:"#a3312a"}},"Remove"))),
+      f ? h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end",marginTop:8}},
+        lab("Finish", h("select",{"data-testid":"oaf-fin-kind",value:f.kind||"",onChange:e=>setF(p=>({ ...p, kind:e.target.value })),style:{...inputStyle,padding:"5px 7px"}}, h("option",{value:""},"— choose —"), OA_FINISH_KINDS.map(k=>h("option",{key:k,value:k},k)))),
+        lab("Document no", inp("doc_no","e.g. PS-260160-01")), lab("Rev", inp("rev","0")), lab("Title", inp("title","Painting specification")), lab("Link", inp("link","https://…")),
+        h("button",{"data-testid":"oa-finish-save",disabled:busy,onClick:add,style:{...btnPrimary,padding:"6px 12px"}},busy?"Saving…":"Save"),
+        h("button",{onClick:()=>{ setF(null); setErr(""); },style:btnSmall},"Cancel")) : null,
+      err ? h("div",{style:{color:colors.danger,marginTop:6}},err) : null));
+}
+
+// ---------------------------------------------------------------- PACK — who reads it
+async function rpReaders(){
+  try{ await loadPostPeople(); }catch(e){}
+  const out = new Map();   // name -> post label
+  RP_READ_POSTS.forEach(k=>(postHolders(k)||[]).forEach(n=>{ if(n && !out.has(n)) out.set(n, postLabel(k)); }));
+  try{ (await superAdminNames()).forEach(n=>{ if(n && !out.has(n) && n!==POST_VACANT_CONTACT) out.set(n, "Super Admin"); }); }catch(e){}
+  return out;
+}
+const rpKoNames = ()=> Array.from(new Set(KO_POSTS.flatMap(k=>postHolders(k)||[]))).filter(Boolean);
+
+// made at W/O release (woReleaseRun)
+async function rpOpen(cn, by, toState, serials){
+  cn = String(cn); const now = new Date().toISOString();
+  const { data: ex, error: e0 } = await sb.from("release_pack_tbl").select("*").eq("contract_number",cn).maybeSingle();
+  if(e0) throw new Error(rpErr(e0));
+  const { data: so } = await sb.from("sale_order_tbl").select("customer_name").eq("contract_number",cn).maybeSingle();
+  const client = (so&&so.customer_name)||"";
+  if(!ex){ const { error } = await sb.from("release_pack_tbl").insert({ contract_number:cn, released_at:now, released_by:by||"", release_state:toState||"", state:"live", reread_from:now, updated_at:now });
+    if(error) throw new Error(rpErr(error)); }
+  else await sb.from("release_pack_tbl").update({ release_state:toState||ex.release_state, state:"live", reread_from:now, updated_at:now }).eq("contract_number",cn);
+  await rpHist(cn, "W/O released — "+woLabel(toState||"")+(serials&&serials.n?" · serials "+qcsrRange(serials)+" given":"")+(ex?" (released again)":" · pack opened"), by, true);
+  try{ const R = await rpReaders(); await notifyPeople(Array.from(R.keys()), "📦 Production Release Pack — "+cn+(client?" "+client:"")+": the W/O is released. Read the pack (Order Status › Kick-off meetings).", "info", { kind:"open", open:{ tab:"kickoff" }, group:"rp:"+cn+":open" }); }catch(e){}
+  try{ await loadPostPeople(); const ko = rpKoNames(); if(ko.length) await notifyPeople(ko, "🤝 Kick-off meeting due for "+cn+(client?" "+client:"")+" within "+KO_DAYS+" days of the W/O release. Start it in Order Status › Kick-off meetings.", "action", { kind:"open", open:{ tab:"kickoff" }, group:"ko:"+cn }); }catch(e){}
+  try{ await rpSyncOne(cn, by||"App", true); }catch(e){}
+}
+async function rpHist(cn, what, by, critical){ try{ await sb.from("release_pack_hist_tbl").insert({ contract_number:String(cn), at:new Date().toISOString(), what:String(what||"").slice(0,600), by:by||"App", critical:!!critical }); }catch(e){} }
+
+// ---------------------------------------------------------------- PACK — the data
+async function rpLoad(cn){
+  cn = String(cn);
+  const [P, soR, C, regR, slT, glT, dR, rR, hR, kR, tR] = await Promise.all([
+    sb.from("release_pack_tbl").select("*").eq("contract_number",cn).maybeSingle(),
+    sb.from("sale_order_tbl").select("*").eq("contract_number",cn).maybeSingle(),
+    despContract(cn).catch(()=>null),
+    sb.from("qc_serial_register_tbl").select("serial,item_sl_no,void_at").eq("contract_number",cn),
+    sb.from("quote_sl_testing_tbl").select("*").eq("reference_number",cn),
+    sb.from("quote_global_testing_tbl").select("*").eq("reference_number",cn),
+    sb.from("universal_documents_tbl").select("*").eq("entity_type","contract").eq("entity_id",cn),
+    sb.from("release_pack_read_tbl").select("*").eq("contract_number",cn),
+    sb.from("release_pack_hist_tbl").select("*").eq("contract_number",cn).order("at",{ ascending:false }).limit(300),
+    sb.from("kickoff_meeting_tbl").select("*").eq("contract_number",cn).maybeSingle(),
+    sb.from("task_tbl").select("id,title,assignee,department,post_key,due_date,created_at,status,ref,checklists").eq("ref",cn).neq("status","done"),
+  ]);
+  const so = soR.data || {}; const docs = (dR.data||[]).filter(d=>!d.is_archived);
+  let hist = []; if(docs.length){ const { data } = await sb.from("universal_document_history_tbl").select("*").in("document_id",docs.map(d=>d.id)); hist = data||[]; }
+  const docRows = docs.map(d=>{ const revs = hist.filter(x=>String(x.document_id)===String(d.id)).sort((a,b)=>(Number(a.rev_number)||0)-(Number(b.rev_number)||0) || String(a.changed_at||"").localeCompare(String(b.changed_at||"")) || (a.id-b.id));
+    const last = revs[revs.length-1]||{}; const linkRow = revs.slice().reverse().find(x=>x.link)||{};
+    return { id:d.id, number:d.doc_number||"", name:d.doc_name||d.category||"", category:d.category||"", rev:last.rev_number??"", status:last.status||"", dir:last.direction||"", at:last.changed_at||last.created_at||null,
+      link:linkRow.link||d.link||"", prod:!!(d.for_production||d.handed_over||/production/i.test(String(d.purpose||""))) }; })
+    .sort((a,b)=>String(a.category).localeCompare(String(b.category)) || String(a.number).localeCompare(String(b.number)));
+  let x = null; try{ const M = await ospLoad(); x = ospStage(cn, M); }catch(e){}
+  const serials = (regR.data||[]).filter(r=>!r.void_at);
+  const tests = [ ...(slT.data||[]).map(t=>({ sl:String(t.item_sl_no??""), test:String(t.test_name||"").trim() })), ...(glT.data||[]).map(t=>({ sl:t.item_sl_no!=null?String(t.item_sl_no):"all", test:String(t.test_name||"").trim() })) ].filter(t=>t.test);
+  return { cn, P:P.data||null, missing:!!P.error, so, lines:(C&&C.lines)||[], client:so.customer_name||(C&&C.customer)||"", serials, tests, docs:docRows,
+    reads:rR.data||[], hist:hR.data||[], meeting:kR.data||null, cards:tR.data||[], x };
+}
+function rpSerialText(serials, sl){ const s = serials.filter(r=>String(r.item_sl_no)===String(sl)).map(r=>Number(r.serial)).sort((a,b)=>a-b); if(!s.length) return "—";
+  const parts = []; let a = s[0], b = s[0]; for(let i=1;i<=s.length;i++){ if(s[i]===b+1){ b = s[i]; continue; } parts.push(a===b?String(a):a+"–"+b); a = s[i]; b = s[i]; } return parts.join(", "); }
+const rpCode = (st)=> { const m = String(st||"").match(/code\s*([123])/i); return m ? Number(m[1]) : 0; };
+function rpCritical(D){
+  const out = []; const so = D.so||{}, x = D.x||{};
+  const red = (t, d)=> out.push({ lv:"red", t, d }); const amb = (t, d)=> out.push({ lv:"amber", t, d });
+  if(x.hold) red("On hold", (x.hold.reason||x.hold.why||"")+(x.hold.by?" — "+x.hold.by:""));
+  if(/^Hold/.test(so.go_ahead_state||"")) red("Production on hold", "W/O state: "+(so.go_ahead_state||"Hold"));
+  if(x.stage==="bom") red("BOM summary not made / Production BOM not approved", "Purchase cannot start until it is.");
+  if(["pbm","pbe","pba"].includes(x.stage)) amb("Purchase BOM not approved yet", (OAF_SHORT[x.stage]||x.stage));
+  if(x.stage==="pr") amb("PR not released yet", "Purchase BOM approved — PR release pending.");
+  if(so.ship_tba || !String(so.shipping_address||"").trim()) red("Shipping address not given", "Needed for the DC and the invoice.");
+  if(oaFinishMissing(so)) red("Finish document missing on the OA", "Painting / pickling & passivation document — number, revision, title and link.");
+  D.docs.filter(d=>rpCode(d.status)===3).forEach(d=>red(d.number+" at Code 3", "Rework and resubmit — "+d.name));
+  D.docs.filter(d=>rpCode(d.status)===2).forEach(d=>amb(d.number+" at Code 2", "Resubmission due — "+d.name));
+  if(paymentTermSmellsOfAdvance(so.payment_term)) amb("Advance in the payment terms", "Accounts to confirm it is received — "+String(so.payment_term||"").slice(0,90));
+  const late = D.cards.filter(t=>t.due_date && t.due_date < rpToday());
+  if(late.length) amb(late.length+" open card"+(late.length>1?"s":"")+" late on this contract", Array.from(new Set(late.map(t=>t.assignee).filter(Boolean))).join(", "));
+  if(!(D.meeting && D.meeting.held_at) && D.P && rpDays(D.P.released_at) > KO_DAYS) red("Kick-off meeting not held", rpDays(D.P.released_at)+" days since the W/O release (limit "+KO_DAYS+").");
+  return out;
+}
+function rpChase(D){
+  const by = {}; RP_DEPTS.forEach(d=>by[d[0]] = []); by.other = [];
+  D.cards.forEach(t=>{ const k = rpDeptOf(t); const late = t.due_date && t.due_date < rpToday(); by[k].push({ t:t.title, who:t.assignee||"Unassigned", age:rpDays(t.created_at), due:t.due_date, late }); });
+  const so = D.so||{};
+  if(so.ship_tba || !String(so.shipping_address||"").trim()) by.sales.unshift({ t:"Shipping address from the client", who:"Sales", age:rpDays(so.created_at), late:true });
+  D.docs.filter(d=>rpCode(d.status)===3 || rpCode(d.status)===2).forEach(d=>by.doc.unshift({ t:d.number+" Rev "+d.rev+" — "+d.status, who:"Document Control", age:rpDays(d.at), late:rpCode(d.status)===3 }));
+  if(paymentTermSmellsOfAdvance(so.payment_term)) by.acc.unshift({ t:"Advance per payment terms — confirm received", who:"Accounts", age:rpDays(so.created_at) });
+  return by;
+}
+// what the History compares, and which changes are critical
+function rpFacts(D){
+  const f = {}; const so = D.so||{};
+  f["state"] = so.go_ahead_state||""; f["hold"] = D.x && D.x.hold ? "on hold" : "";
+  f["ship"] = (so.ship_tba || !String(so.shipping_address||"").trim()) ? "not given" : "given";
+  f["delivery"] = [so.delivery_days, so.delivery_trigger].filter(Boolean).join(" ");
+  D.lines.forEach(l=>{ f["qty|"+l.item_sl_no] = String(l.ordered); });
+  f["tests"] = Array.from(new Set(D.tests.map(t=>t.sl+":"+t.test))).sort().join(", ");
+  f["finish"] = (Array.isArray(so.finish_docs)?so.finish_docs:[]).map(d=>d.kind+" "+d.doc_no+" Rev "+d.rev).join(", ");
+  D.docs.forEach(d=>{ f["doc|"+(d.number||d.id)] = "Rev "+d.rev+" · "+(d.status||"—"); });
+  f["serials"] = String(D.serials.length);
+  f["stage"] = D.x && D.x.stage ? (OAF_SHORT[D.x.stage]||D.x.stage) : "";
+  return f;
+}
+function rpDiff(a, b){
+  const lines = []; const keys = Array.from(new Set([...Object.keys(a||{}), ...Object.keys(b||{})]));
+  const lab = (k)=> k==="state"?"W/O state":k==="hold"?"Hold":k==="ship"?"Shipping address":k==="delivery"?"Delivery":k==="tests"?"Tests":k==="finish"?"Finish documents":k==="serials"?"Serials given":k==="stage"?"Order stage":
+    k.startsWith("qty|")?"Quantity Sl No "+k.slice(4):k.startsWith("doc|")?k.slice(4):k;
+  keys.forEach(k=>{ const o = (a||{})[k]??"", n = (b||{})[k]??""; if(String(o)===String(n)) return;
+    const crit = k==="hold" ? !!n : k==="state" ? true : k==="delivery" ? !!o : k.startsWith("qty|") ? !!o : k==="tests" ? !!o || !!n : k.startsWith("doc|") ? rpCode(n)===3 : k==="ship" ? n!=="given" && !!o : false;
+    lines.push({ what:lab(k)+": "+(o===""?"—":o)+" → "+(n===""?"—":n), critical:crit }); });
+  return lines;
+}
+async function rpSyncOne(cn, by, quiet){
+  const D = await rpLoad(cn); if(!D.P) return null;
+  const so = D.so||{};
+  if(D.P.state==="live" && /closed|cancel/i.test(so.status||"")){
+    await sb.from("release_pack_tbl").update({ state:"frozen", frozen_at:new Date().toISOString(), frozen_reason:/cancel/i.test(so.status)?"OA cancelled":"Payment received — OA closed", updated_at:new Date().toISOString() }).eq("contract_number",String(cn));
+    await rpHist(cn, "Pack frozen — "+(/cancel/i.test(so.status)?"OA cancelled":"payment received, OA closed"), by, false); return D; }
+  if(D.P.state!=="live") return D;
+  try{ const s = await qcsrAutoSync(cn, "App", "OA quantity", true); if(s.n || s.voided) { await rpHist(cn, (s.n?"Serials given: "+qcsrRange(s):"")+(s.n&&s.voided?" · ":"")+(s.voided?s.voided+" serial(s) marked unused (quantity down)":""), "App", !!s.voided); if(s.n||s.voided) D.serials = ((await sb.from("qc_serial_register_tbl").select("serial,item_sl_no,void_at").eq("contract_number",String(cn))).data||[]).filter(r=>!r.void_at); } }catch(e){}
+  const facts = rpFacts(D); const prev = D.P.snapshot || null;
+  const changes = prev ? rpDiff(prev, facts) : [];
+  const now = new Date().toISOString(); const patch = { snapshot:facts, updated_at:now };
+  for(const c of changes) await rpHist(cn, c.what, "App", c.critical);
+  const crit = changes.filter(c=>c.critical);
+  if(crit.length){ patch.reread_from = now;
+    if(!quiet) try{ const R = await rpReaders(); await notifyPeople(Array.from(R.keys()), "⚠ Pack "+cn+(D.client?" "+D.client:"")+" — critical change: "+crit.map(c=>c.what).join(" · ").slice(0,300)+". Read the pack again.", "action", { kind:"open", open:{ tab:"kickoff" }, group:"rp:"+cn+":crit:"+now }); }catch(e){} }
+  // one daily digest of routine changes
+  const today = rpToday();
+  if(D.P.digest_day !== today){
+    const since = D.P.digest_at || D.P.released_at; const routine = (D.hist||[]).filter(r=>!r.critical && r.at > since && r.at < now);
+    const fresh = changes.filter(c=>!c.critical);
+    const all = [...routine.map(r=>r.what), ...fresh.map(c=>c.what)];
+    if(all.length && !quiet) try{ const R = await rpReaders(); await notifyPeople(Array.from(R.keys()), "📦 Pack "+cn+(D.client?" "+D.client:"")+" — "+all.length+" update"+(all.length>1?"s":"")+": "+all.slice(0,4).join(" · ").slice(0,300)+(all.length>4?" …":""), "info", { kind:"open", open:{ tab:"kickoff" }, group:"rp:"+cn+":day:"+today }); }catch(e){}
+    patch.digest_day = today; patch.digest_at = now; }
+  // kick-off reminder once a day after 2 days
+  if(!(D.meeting && D.meeting.held_at) && rpDays(D.P.released_at) > KO_DAYS && D.P.ko_remind_day !== today && !quiet){
+    try{ await loadPostPeople(); const ko = rpKoNames(); if(ko.length) await notifyPeople(ko, "🔴 Kick-off meeting for "+cn+(D.client?" "+D.client:"")+" is "+rpDays(D.P.released_at)+" days after the W/O release (limit "+KO_DAYS+"). Hold it in Order Status › Kick-off meetings.", "action", { kind:"open", open:{ tab:"kickoff" }, group:"ko:"+cn+":"+today }); }catch(e){}
+    patch.ko_remind_day = today; }
+  await sb.from("release_pack_tbl").update(patch).eq("contract_number",String(cn));
+  D.P = { ...D.P, ...patch }; return D;
+}
+let RP_SYNC_AT = 0;
+async function rpSyncAll(by){ RP_SYNC_AT = Date.now(); try{ const { data, error } = await sb.from("release_pack_tbl").select("contract_number").eq("state","live"); if(error) return; for(const r of (data||[])){ try{ await rpSyncOne(r.contract_number, by); }catch(e){ console.warn("pack sync", r.contract_number, e); } } }catch(e){} }
+function rpSyncSoon(user){ if(Date.now()-RP_SYNC_AT < 60*60000) return; RP_SYNC_AT = Date.now(); setTimeout(()=>{ rpSyncAll((user&&user.username)||"App"); }, 9000); }
+const rpReadValid = (D, name)=> (D.reads||[]).some(r=>sameName(r.reader, name) && (!D.P || !D.P.reread_from || r.read_at >= D.P.reread_from));
+
+// ---------------------------------------------------------------- PACK — the PDF (built fresh each time it is opened)
+async function rpPdf(D){
+  const { jsPDF } = window.jspdf; const doc = new jsPDF({ orientation:"portrait", unit:"mm", format:"a4" });
+  const W = 210, M = 14; const asof = "As of "+fmtDMYTime(new Date().toISOString())+" — the app has the latest";
+  const GRN = [15,122,92], RED = [163,49,42], AMB = [133,79,11], INK = [29,36,48], MUT = [106,115,128];
+  const R = await rpReaders(); const so = D.so||{};
+  const foot = ()=>{ const n = doc.getNumberOfPages(); for(let i=1;i<=n;i++){ doc.setPage(i); doc.setFontSize(7.5); doc.setTextColor(...MUT); doc.text(asof, W-M, 8, { align:"right" }); doc.text("Production Release Pack · "+D.cn+" · page "+i+" of "+n, M, 290); } };
+  let y = 0; const chap = (t)=>{ if(y > 250){ doc.addPage(); y = 18; } doc.setFontSize(9); doc.setTextColor(...GRN); doc.setFont(undefined,"bold"); doc.text(t.toUpperCase(), M, y); doc.setFont(undefined,"normal"); y += 4; };
+  const tbl = (head, body, opts)=>{ doc.autoTable({ startY:y, head:[head], body: body.length ? body : [[{ content:"—", colSpan:head.length }]], margin:{ left:M, right:M }, styles:{ fontSize:8.5, cellPadding:1.6, textColor:INK, overflow:"linebreak" }, headStyles:{ fillColor:[240,242,245], textColor:MUT, fontStyle:"bold" }, theme:"grid", ...(opts||{}) }); y = doc.lastAutoTable.finalY + 7; };
+  const para = (t, col)=>{ doc.setFontSize(9); doc.setTextColor(...(col||INK)); const ls = doc.splitTextToSize(t, W-2*M); if(y + ls.length*4 > 282){ doc.addPage(); y = 18; } doc.text(ls, M, y); y += ls.length*4 + 2; };
+  // cover
+  y = 26; doc.setFontSize(10); doc.setTextColor(...GRN); doc.setFont(undefined,"bold"); doc.text("PRODUCTION RELEASE PACK", M, y); y += 9;
+  doc.setFontSize(18); doc.setTextColor(...INK); doc.text(doc.splitTextToSize(D.cn+" · "+(D.client||""), W-2*M), M, y); y += 9; doc.setFont(undefined,"normal");
+  doc.setFontSize(9.5); doc.setTextColor(...MUT); doc.text(D.P && D.P.state==="frozen" ? "Frozen "+fmtDMY(D.P.frozen_at)+" — "+(D.P.frozen_reason||"") : "Live pack — it updates by itself until payment is received", M, y); y += 8;
+  const units = D.lines.reduce((s,l)=>s+(Number(l.ordered)||0),0);
+  tbl(["",""],[
+    ["Client PO", [so.po_number, so.po_date?fmtDMY(so.po_date):""].filter(Boolean).join(" · ")||"—"],
+    ["W/O released", D.P ? fmtDMY(D.P.released_at)+" by "+(D.P.released_by||"—") : "—"],
+    ["Release state", woLabel(so.go_ahead_state||"")+(/Code 2/.test(so.go_ahead_state||"")?" — documents may still change":"")],
+    ["Delivery", [so.delivery_days?so.delivery_days+" days":"", so.delivery_trigger||""].filter(Boolean).join(" from ")||"—"],
+    ["Items", D.lines.length+" Sl No · "+units+" units · "+D.serials.length+" serials given"],
+    ["Kick-off meeting", D.meeting && D.meeting.held_at ? "Held "+fmtDMY(D.meeting.held_at)+" ("+(D.meeting.held_by||"")+")" : "Not held yet — VP Projects / Technical Head"],
+  ], { showHead:false, columnStyles:{ 0:{ cellWidth:40, fontStyle:"bold", textColor:MUT } } });
+  chap("Contents"); para("1 Critical · 2 What each head must chase · 3 Order summary & serials · 4 Testing & inspection · 5 Finish (painting / pickling & passivation) · 6 Other special requirements · 7 Document index · 8 Kick-off meeting · 9 Who has read the pack · 10 History");
+  // 1 critical
+  doc.addPage(); y = 18; chap("1 · Critical — what can stop this order");
+  const cr = rpCritical(D); tbl(["","What","Detail"], cr.map(c=>[c.lv==="red"?"●":"◐", c.t, c.d||""]), { columnStyles:{ 0:{ cellWidth:7, textColor:RED } }, didParseCell:(d)=>{ if(d.section==="body" && d.column.index===0){ const c = cr[d.row.index]; if(c) d.cell.styles.textColor = c.lv==="red"?RED:AMB; } } });
+  // 2 chase
+  chap("2 · What each head must chase"); const ch = rpChase(D);
+  [...RP_DEPTS.map(d=>[d[0],d[1]]), ["other","Other"]].forEach(([k,l])=>{ const L = ch[k]||[]; if(!L.length && k==="other") return;
+    tbl([l+(L.length?" ("+L.length+")":""),"With","Age","Due"], L.map(i=>[i.t, i.who||"", i.age+" d", i.due?fmtDMY(i.due)+(i.late?" LATE":""):""]), { columnStyles:{ 1:{ cellWidth:34 }, 2:{ cellWidth:14 }, 3:{ cellWidth:26 } } }); });
+  // 3 summary
+  doc.addPage(); y = 18; chap("3 · Order summary & serials");
+  tbl(["Sl","Item","Description","Qty","Serials"], D.lines.map(l=>[l.item_sl_no, l.item||"", l.description||"", l.ordered, rpSerialText(D.serials, l.item_sl_no)]), { columnStyles:{ 0:{ cellWidth:9 }, 3:{ cellWidth:11 }, 4:{ cellWidth:38 } } });
+  // 4 tests
+  chap("4 · Testing & inspection");
+  const tmap = new Map(); D.tests.forEach(t=>{ const k = t.test; if(!tmap.has(k)) tmap.set(k, new Set()); tmap.get(k).add(t.sl); });
+  tbl(["Test","Sl Nos"], Array.from(tmap.entries()).map(([t,s])=>[t, Array.from(s).join(", ")]));
+  const ex = so.nde_note || so.test_note || so.nde_exception_note || ""; if(ex) para("Exceptions: "+ex, MUT);
+  // 5 finish
+  chap("5 · Finish — painting / pickling & passivation / galvanising");
+  const fin = Array.isArray(so.finish_docs) ? so.finish_docs : [];
+  tbl(["Finish","Document","Rev","Title","Link"], fin.map(d=>[d.kind, d.doc_no, d.rev, d.title, { content:"open", link:d.link }]), { didDrawCell:(d)=>{ if(d.section==="body" && d.column.index===4 && fin[d.row.index]) doc.link(d.cell.x, d.cell.y, d.cell.width, d.cell.height, { url:fin[d.row.index].link }); } });
+  if(!fin.length) para(oaFinishRequired(so) ? "MISSING — the finish document must be given on the Order Acceptance." : "Not given on this Order Acceptance (made before the finish rule).", oaFinishRequired(so)?RED:MUT);
+  // 6 other
+  chap("6 · Other special requirements");
+  const other = [ ["Payment terms", so.payment_term], ["Shipping address", so.ship_tba ? "To be advised" : so.shipping_address], ["Special notes", so.special_notes || so.notes || so.remarks] ].filter(r=>r[1]);
+  tbl(["",""], other.map(r=>[r[0], String(r[1])]), { showHead:false, columnStyles:{ 0:{ cellWidth:40, fontStyle:"bold", textColor:MUT } } });
+  // 7 documents
+  doc.addPage(); y = 18; chap("7 · Document index");
+  tbl(["Document","Name","Rev","Status","Link"], D.docs.map(d=>[d.number, d.name, String(d.rev), d.status||"—", d.link?{ content:"open" }:"—"]),
+    { didDrawCell:(c)=>{ const d = D.docs[c.row.index]; if(c.section==="body" && c.column.index===4 && d && d.link) doc.link(c.cell.x, c.cell.y, c.cell.width, c.cell.height, { url:d.link }); } });
+  para("Links open in OneDrive — the reader needs OneDrive access.", MUT);
+  // 8 meeting
+  chap("8 · Kick-off meeting"); const mt = D.meeting;
+  if(!mt || !mt.held_at) para(mt && mt.started_at ? "Started "+fmtDMY(mt.started_at)+" by "+(mt.started_by||"")+" — not closed yet." : "Not held yet. Started and closed by the VP Projects or Technical Head post.", MUT);
+  else { para("Held "+fmtDMYTime(mt.held_at)+" — "+(mt.held_by||"")+". Present: "+((mt.attendees||[]).join(", ")||"—")); if(mt.minutes) para("Minutes: "+mt.minutes);
+    tbl(["Action","Owner","Due"], (mt.actions||[]).map(a=>[a.text, a.owner, a.due?fmtDMY(a.due):""])); }
+  // 9 reads
+  chap("9 · Who has read the pack");
+  tbl(["Who","Post","Read"], Array.from(R.entries()).map(([n,p])=>{ const r = (D.reads||[]).filter(x=>sameName(x.reader,n)).sort((a,b)=>String(b.read_at).localeCompare(String(a.read_at)))[0]; const ok = rpReadValid(D, n);
+    return [n, p, r ? fmtDMYTime(r.read_at)+(ok?"":" — read again (critical change since)") : "not yet"]; }));
+  // 10 history
+  doc.addPage(); y = 18; chap("10 · History");
+  tbl(["When","What changed","By",""], (D.hist||[]).map(r=>[fmtDMYTime(r.at), r.what, r.by||"", r.critical?"critical":""]), { columnStyles:{ 0:{ cellWidth:30 }, 2:{ cellWidth:26 }, 3:{ cellWidth:16, textColor:RED } } });
+  foot(); return doc;
+}
+
+// ---------------------------------------------------------------- KICK-OFF MEETINGS (Order Status › Kick-off meetings)
+function KickoffScreen({ user }){
+  const [list,setList] = useState(null); const [sel,setSel] = useState(null); const [D,setD] = useState(null); const [missing,setMissing] = useState(false);
+  const [me,setMe] = useState(""); const [myK,setMyK] = useState([]); const [emps,setEmps] = useState([]); const [R,setR] = useState(new Map());
+  const [m,setM] = useState(null); const [busy,setBusy] = useState(false); const [msg,setMsg] = useState(""); const [pdf,setPdf] = useState(null); const [tick,setTick] = useState(0);
+  const [hist,setHist] = useState(false);
+  useEffect(()=>{ (async()=>{ setMe((await despMe(user))||user.username||""); try{ const r = await myPostKeys(user); setMyK((r&&r.keys)||[]); }catch(e){}
+    try{ const { data } = await sb.from("employee_tbl").select("employee_name,department,status").order("employee_name"); setEmps((data||[]).filter(empLive)); }catch(e){}
+    setR(await rpReaders()); })(); },[]);
+  useEffect(()=>{ (async()=>{
+    const [P, K] = await Promise.all([ sb.from("release_pack_tbl").select("*").order("released_at",{ ascending:false }), sb.from("kickoff_meeting_tbl").select("*") ]);
+    if(P.error || K.error){ setMissing(true); setList([]); return; }
+    const km = new Map((K.data||[]).map(k=>[String(k.contract_number), k]));
+    const cns = (P.data||[]).map(p=>p.contract_number); let cl = new Map();
+    if(cns.length){ const { data } = await sb.from("sale_order_tbl").select("contract_number,customer_name").in("contract_number",cns); (data||[]).forEach(s=>cl.set(String(s.contract_number), s.customer_name||"")); }
+    setList((P.data||[]).map(p=>({ ...p, client:cl.get(String(p.contract_number))||"", k:km.get(String(p.contract_number))||null })));
+  })(); },[tick]);
+  useEffect(()=>{ if(!sel){ setD(null); return; } setD(null); setMsg(""); rpSyncOne(sel, me||"App", true).then(d=>{ setD(d); const k = d && d.meeting;
+    setM(k && !k.held_at ? { attendees:k.attendees||[], minutes:k.minutes||"", actions:k.actions||[] } : null); }).catch(e=>setMsg(rpErr(e))); },[sel, tick]);
+  const mayRun = user.role==="super_admin" || KO_POSTS.some(k=>myK.includes(k));
+  const koWho = KO_POSTS.map(k=>postLabel(k)+" ("+((postHolders(k)||[]).join(", ")||"post empty")+")").join(" or ");
+  if(missing) return h("div",{style:{padding:20,maxWidth:760}}, h("h2",{style:{fontSize:17}},"Kick-off meetings"), h("div",{style:{background:"#fff4d6",color:"#854f0b",borderRadius:8,padding:"10px 12px",fontSize:13}},"Not set up on this company yet. A Super Admin runs "+RP_SQL+" in Supabase first."));
+  const waiting = (list||[]).filter(p=>!(p.k && p.k.held_at) && p.state==="live"), held = (list||[]).filter(p=>p.k && p.k.held_at);
+  const card = (p)=>{ const d = rpDays(p.released_at); const late = !(p.k&&p.k.held_at) && d > KO_DAYS;
+    return h("div",{key:p.contract_number,"data-testid":"ko-item",onClick:()=>setSel(String(p.contract_number)),style:{border:"1px solid "+(String(sel)===String(p.contract_number)?"#0f7a5c":colors.border),background:String(sel)===String(p.contract_number)?"#e4f3ed":"#fff",borderRadius:8,padding:"7px 10px",margin:"6px 0",cursor:"pointer"}},
+      h("b",null,p.contract_number), " · ", p.client||"—", h("br"),
+      h("span",{style:{fontSize:11.5,color:late?"#a3312a":colors.muted,fontWeight:late?700:400}}, p.k&&p.k.held_at ? "held "+fmtDMY(p.k.held_at)+" · "+((p.k.actions||[]).length)+" actions" : "W/O "+fmtDMY(p.released_at)+" · "+d+" day"+(d===1?"":"s")+(late?" — over "+KO_DAYS:"")+(p.k&&p.k.started_at?" · started":""))); };
+  const readNow = async()=>{ if(!D) return; const post = R.get(me) || "";
+    const { error } = await sb.from("release_pack_read_tbl").insert({ contract_number:D.cn, reader:me, post:post, read_at:new Date().toISOString() }); if(error){ setMsg(rpErr(error)); return; }
+    await rpHist(D.cn, "Read by "+me+(post?" ("+post+")":""), me, false); appToast("✓ Marked read"); setTick(x=>x+1); };
+  const openPdf = async()=>{ if(!D) return; try{ const doc = await rpPdf(D); setPdf({ doc, filename:"Production_Release_Pack_"+D.cn+".pdf" }); }catch(e){ alert("The pack could not be built: "+(e.message||e)); } };
+  const start = async()=>{ if(!mayRun){ alert("Only "+koWho+" or a Super Admin can start the kick-off meeting."); return; }
+    const row = { contract_number:D.cn, started_by:me, started_at:new Date().toISOString(), attendees:[], minutes:"", actions:[], status:"started" };
+    const { error } = D.meeting ? await sb.from("kickoff_meeting_tbl").update({ started_by:me, started_at:row.started_at, status:"started" }).eq("contract_number",D.cn) : await sb.from("kickoff_meeting_tbl").insert(row);
+    if(error){ setMsg(rpErr(error)); return; } await rpHist(D.cn, "Kick-off meeting started by "+me, me, false); setTick(x=>x+1); };
+  const saveM = async(close)=>{
+    if(!m || busy) return; if(!mayRun){ alert("Only "+koWho+" or a Super Admin can run the kick-off meeting."); return; }
+    const acts = (m.actions||[]).filter(a=>String(a.text||"").trim());
+    const bad = acts.filter(a=>!a.owner || !a.due); if(bad.length){ setMsg("Every action needs an owner and a due date ("+bad.length+" missing)."); return; }
+    if(close && !(m.attendees||[]).length){ setMsg("Tick who attended before closing the meeting."); return; }
+    setBusy(true); setMsg("");
+    try{
+      let out = acts;
+      if(close){ out = []; for(const a of acts){ if(a.done_card){ out.push(a); continue; } const id = await rpActionToCard(D.cn, D.client, a, me); out.push({ ...a, done_card:id||true }); } }
+      const patch = { attendees:m.attendees, minutes:m.minutes||"", actions:out, ...(close?{ held_at:new Date().toISOString(), held_by:me, status:"held" }:{}) };
+      const { error } = await sb.from("kickoff_meeting_tbl").update(patch).eq("contract_number",D.cn); if(error) throw new Error(rpErr(error));
+      if(close){ await rpHist(D.cn, "Kick-off meeting held — "+m.attendees.length+" present, "+out.length+" action(s)", me, false);
+        const absent = Array.from(R.keys()).filter(n=>!(m.attendees||[]).some(a=>sameName(a,n)));
+        try{ if(absent.length) await notifyPeople(absent, "🤝 Kick-off meeting held for "+D.cn+(D.client?" "+D.client:"")+" — you were not there. Read the pack and the minutes (Order Status › Kick-off meetings).", "action", { kind:"open", open:{ tab:"kickoff" }, group:"ko:"+D.cn+":held" }); }catch(e){}
+        appToast("✓ Kick-off meeting held — it moves to History; the pack stays live."); }
+      else appToast("✓ Saved");
+      setTick(x=>x+1);
+    }catch(e){ setMsg(String(e.message||e)); } finally{ setBusy(false); }
+  };
+  const th = (x)=> h("th",{style:{textAlign:"left",padding:"4px 6px",fontSize:10.5,textTransform:"uppercase",color:colors.muted,borderBottom:"2px solid "+colors.dark}},x);
+  const td = (c,s)=> h("td",{style:{padding:"4px 6px",borderBottom:"1px solid "+colors.border,fontSize:12.5,verticalAlign:"top",...(s||{})}},c);
+  const crit = D ? rpCritical(D) : []; const chase = D ? rpChase(D) : null;
+  const mayRead = R.has(me) || user.role==="super_admin";
+  return h("div",{"data-testid":"ko-screen",style:{padding:"14px 18px"}},
+    h("h2",{style:{fontSize:17,margin:"0 0 2px"}},"Kick-off meetings & Production Release Packs"),
+    h("div",{style:{fontSize:12.5,color:colors.muted,marginBottom:10}},"A contract lands here when its W/O is released. The kick-off is held within "+KO_DAYS+" days, started and closed by "+koWho+". Once held it becomes history; the pack stays live until payment is received."),
+    h("div",{style:{display:"grid",gridTemplateColumns:"280px 1fr",gap:14,alignItems:"start"}},
+      h("div",null,
+        h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"8px 10px"}}, h("b",null,"Waiting for kick-off ("+waiting.length+")"), !list ? h("div",{style:{color:colors.muted}},"Loading…") : waiting.length ? waiting.map(card) : h("div",{style:{fontSize:12,color:colors.muted,marginTop:6}},"None.")),
+        h("div",{style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"8px 10px",marginTop:10}},
+          h("div",{style:{display:"flex",alignItems:"center"}}, h("b",null,"Held — history ("+held.length+")"), h("span",{style:{flex:1}}), h("span",{onClick:()=>setHist(x=>!x),style:{fontSize:11.5,color:"#0c447c",cursor:"pointer"}},hist?"hide":"show")),
+          hist ? held.map(card) : null)),
+      !sel ? h("div",{style:{color:colors.muted,padding:20}},"Pick a contract on the left.") : !D ? h("div",{style:{color:colors.muted,padding:20}},msg||"Reading the pack…") :
+      h("div",{"data-testid":"ko-detail",style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"10px 14px"}},
+        h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}},
+          h("b",{style:{fontSize:15}},D.cn+" · "+(D.client||"")), h("span",{style:{flex:1}}),
+          h("button",{"data-testid":"rp-open",onClick:openPdf,style:{...btnSecondary,padding:"6px 12px",fontWeight:700}},"📦 Open the pack (PDF)"),
+          mayRead ? (rpReadValid(D, me) ? h("span",{style:{fontSize:12,color:"#0f6a4c",fontWeight:700}},"✓ You have read it") : h("button",{"data-testid":"rp-read",onClick:readNow,style:{...btnPrimary,padding:"6px 12px"}},"✓ I have read the pack")) : null,
+          !D.meeting || !D.meeting.started_at ? h("button",{"data-testid":"ko-start",onClick:start,title:mayRun?"":"Only "+koWho,style:{...btnPrimary,background:"#5b3fa3",borderColor:"#5b3fa3",padding:"6px 12px",opacity:mayRun?1:.55}},"▶ Start the kick-off meeting") : null),
+        h("div",{style:{fontSize:11.5,color:colors.muted,margin:"3px 0 8px"}}, "W/O released "+fmtDMY(D.P.released_at)+" by "+(D.P.released_by||"—")+" · "+woLabel(D.so.go_ahead_state||"")+(D.P.state==="frozen"?" · pack frozen ("+(D.P.frozen_reason||"")+")":" · pack live")),
+        msg ? h("div",{style:{color:colors.danger,fontSize:12.5,margin:"4px 0"}},msg) : null,
+        h("div",{style:{fontWeight:700,fontSize:13,margin:"6px 0 4px"}},"Critical"),
+        crit.length ? crit.map((c,i)=>h("div",{key:i,"data-testid":"rp-crit",style:{borderLeft:"4px solid "+(c.lv==="red"?"#c9302c":"#d08a1c"),background:c.lv==="red"?"#fdecea":"#fff4d6",padding:"4px 9px",margin:"3px 0",borderRadius:"0 6px 6px 0",fontSize:12.5}}, h("b",null,c.t), c.d?" — "+c.d:"")) : h("div",{style:{fontSize:12.5,color:"#0f6a4c"}},"✓ Nothing critical."),
+        h("div",{style:{fontWeight:700,fontSize:13,margin:"10px 0 4px"}},"What each head must chase"),
+        h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:8}}, [...RP_DEPTS.map(d=>[d[0],d[1]]), ["other","Other"]].filter(([k])=>(chase[k]||[]).length || k!=="other").map(([k,l])=>
+          h("div",{key:k,style:{border:"1px solid "+colors.border,borderRadius:8,padding:"6px 9px"}}, h("b",{style:{fontSize:12.5}},l+" "), (chase[k]||[]).length ? h("span",{style:{fontSize:11,color:(chase[k]).some(i=>i.late)?"#a3312a":"#0c467e",fontWeight:700}},(chase[k]).length+" open") : h("span",{style:{fontSize:11,color:"#0f6a4c"}},"nothing open"),
+            h("ul",{style:{margin:"3px 0 0",paddingLeft:16,fontSize:12}}, (chase[k]||[]).slice(0,6).map((i,j)=>h("li",{key:j,style:{color:i.late?"#a3312a":colors.text}}, i.t+" — "+i.who+" · "+i.age+" d")))))),
+        D.meeting && D.meeting.held_at ? h("div",{style:{marginTop:12,background:"#f6f8fa",borderRadius:8,padding:"8px 12px",fontSize:12.5}},
+            h("b",null,"Kick-off held "+fmtDMYTime(D.meeting.held_at)+" — "+(D.meeting.held_by||"")), h("div",null,"Present: "+((D.meeting.attendees||[]).join(", ")||"—")), D.meeting.minutes ? h("div",null,"Minutes: "+D.meeting.minutes) : null,
+            h("ul",{style:{margin:"4px 0 0",paddingLeft:16}}, (D.meeting.actions||[]).map((a,i)=>h("li",{key:i}, a.text+" — "+a.owner+" · due "+fmtDMY(a.due))))) :
+        m ? h("div",{"data-testid":"ko-meeting",style:{marginTop:12,borderTop:"2px solid #5b3fa3",paddingTop:8}},
+          h("b",{style:{color:"#5b3fa3"}},"Kick-off meeting — started "+fmtDMYTime(D.meeting.started_at)+" by "+(D.meeting.started_by||"")),
+          h("div",{style:{fontWeight:700,fontSize:12.5,margin:"8px 0 3px"}},"Attendance"),
+          h("div",{style:{display:"flex",flexWrap:"wrap",gap:"4px 14px",fontSize:12.5}}, Array.from(R.entries()).map(([n,p])=>h("label",{key:n}, h("input",{type:"checkbox","data-testid":"ko-att",checked:(m.attendees||[]).includes(n),onChange:()=>setM(x=>({ ...x, attendees:(x.attendees||[]).includes(n)?x.attendees.filter(a=>a!==n):[...(x.attendees||[]), n] }))})," "+n+" — "+p))),
+          h("div",{style:{fontWeight:700,fontSize:12.5,margin:"10px 0 3px"}},"Actions — each goes on the owner's card for "+D.cn+" as a checklist line"),
+          h("table",{style:{borderCollapse:"collapse",width:"100%"}}, h("thead",null,h("tr",null,th("Action"),th(h("span",null,"Owner",h("b",{style:{color:"#c0392b"}}," *"))),th(h("span",null,"Due",h("b",{style:{color:"#c0392b"}}," *"))),th(""))),
+            h("tbody",null, (m.actions||[]).map((a,i)=>{ const set = (p)=>setM(x=>({ ...x, actions:x.actions.map((y,j)=>j===i?{ ...y, ...p }:y) }));
+              return h("tr",{key:i}, td(h("input",{"data-testid":"ko-act-text",value:a.text||"",onChange:e=>set({ text:e.target.value }),style:{...inputStyle,width:"100%",padding:"4px 6px"}})),
+                td(h("select",{"data-testid":"ko-act-owner",value:a.owner||"",onChange:e=>set({ owner:e.target.value }),style:{...inputStyle,padding:"4px 6px",borderColor:!a.owner&&a.text?"#c9302c":undefined}}, h("option",{value:""},"— owner —"), emps.map(e=>h("option",{key:e.employee_name,value:e.employee_name},e.employee_name+(e.department?" · "+e.department:""))))),
+                td(h("input",{type:"date","data-testid":"ko-act-due",value:a.due||"",min:rpToday(),onChange:e=>set({ due:e.target.value }),style:{...inputStyle,padding:"4px 6px",borderColor:!a.due&&a.text?"#c9302c":undefined}})),
+                td(h("button",{onClick:()=>setM(x=>({ ...x, actions:x.actions.filter((_,j)=>j!==i) })),style:{...btnSmall,fontSize:11}},"✕"))); }),
+              h("tr",null, td(h("button",{"data-testid":"ko-act-add",onClick:()=>setM(x=>({ ...x, actions:[...(x.actions||[]), { text:"", owner:"", due:"" }] })),style:{...btnSmall,fontWeight:700}},"+ Add an action"),{ borderBottom:"none" })))),
+          h("div",{style:{fontWeight:700,fontSize:12.5,margin:"10px 0 3px"}},"Minutes / remarks"),
+          h("textarea",{"data-testid":"ko-minutes",value:m.minutes||"",onChange:e=>setM(x=>({ ...x, minutes:e.target.value })),rows:3,style:{...inputStyle,width:"100%",fontFamily:"inherit"}}),
+          h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:8}},
+            h("button",{onClick:()=>saveM(false),disabled:busy,style:btnSecondary},"Save and continue later"),
+            h("button",{"data-testid":"ko-close",onClick:()=>saveM(true),disabled:busy,style:{...btnPrimary,padding:"7px 14px"}},busy?"Saving…":"✓ Meeting held — close"))) : null)),
+    pdf ? h(PdfPreviewModal,{ doc:pdf.doc, filename:pdf.filename, onClose:()=>setPdf(null) }) : null);
+}
+// an action → a checklist line on the owner's open card for the contract (or a new card)
+async function rpActionToCard(cn, client, a, by){
+  const item = { id:"ko|"+Date.now()+"|"+Math.random().toString(36).slice(2,6), text:"Kick-off: "+a.text, due:a.due||"", done:false, items:[] };
+  const { data: ex } = await sb.from("task_tbl").select("id,checklists").eq("assignee",a.owner).eq("ref",String(cn)).neq("status","done").order("id",{ ascending:false }).limit(1);
+  let id = ex && ex[0] ? ex[0].id : null; let cls = ex && ex[0] ? (ex[0].checklists||[]) : null;
+  if(!id){ const ids = await ospTaskCards(String(cn), client||"", [a.owner], ()=>null, "Kick-off actions — "+cn+(client?" "+client:""), a.due||null, "From the kick-off meeting of "+cn+" ("+fmtDMY(new Date().toISOString())+", "+by+")."); id = ids[0]||null;
+    if(id){ const { data: t } = await sb.from("task_tbl").select("checklists").eq("id",id).maybeSingle(); cls = (t&&t.checklists)||[]; } }
+  if(!id) return null;
+  cls = Array.isArray(cls) ? cls.slice() : []; let ci = cls.findIndex(c=>c && c.id==="kickoff");
+  if(ci<0){ cls.push({ id:"kickoff", name:"Kick-off actions", items:[] }); ci = cls.length-1; }
+  cls[ci] = { ...cls[ci], items:[...(cls[ci].items||[]), item] };
+  await sb.from("task_tbl").update({ checklists:cls }).eq("id",id);
+  try{ await taskLog(id, by, "Kick-off action added: "+a.text); }catch(e){}
+  try{ await notifyPeople([a.owner], "🤝 Kick-off "+cn+": "+a.text+" — due "+fmtDMY(a.due)+" (on your card).", "action", { kind:"open", open:{ tab:"tasks" } }); }catch(e){}
+  return id;
+}
+
+function OrderFlowScreen({ user, dept }){
+  const [D,setD] = useState(null); const [M,setM] = useState(null);
+  useEffect(()=>{ let live = true; (async()=>{ try{ await loadPostPeople(); }catch(e){} const [d, mm] = await Promise.all([osLoadAll(), ospLoad()]); if(live){ setD(d); setM(mm); } })(); return ()=>{ live = false; }; },[]);
+  const T = { acc:"Accounts", pur:"Purchase", pm:"Production" }[dept||""];
+  return h("div",{style:{padding:"12px 16px"}},
+    h("div",{style:{display:"flex",gap:10,alignItems:"center",background:"#fff",border:"1px solid "+colors.border,borderRadius:10,padding:"10px 14px",marginBottom:10}},
+      h("div",{style:{fontSize:18,fontWeight:700}},"⟶ Order flow"), T ? h("span",{style:{fontSize:12.5,color:colors.muted}},"opened on the orders waiting on "+T+" — pick Everyone to see all") : null),
+    (!D || !M) ? h("div",{style:{padding:20,color:colors.muted}},"Reading the orders…") : h(OsFlowView,{ D, M, dept:dept||"" }));
+}
+// Sales › My orders — the FSE's own customers (Sales Head and Super Admins pick any owner)
+function MyOrdersFlow({ user }){
+  const [D,setD] = useState(null); const [M,setM] = useState(null); const [me,setMe] = useState(""); const [co,setCo] = useState([]); const [head,setHead] = useState(false);
+  const [who,setWho] = useNavState("mof_who","");
+  useEffect(()=>{ let live = true; (async()=>{ let m = ""; try{ m = await despMe(user); }catch(e){} if(!live) return; setMe(m||user?.username||"");
+      try{ await loadPostPeople(); }catch(e){}
+      let hk = user?.role==="super_admin"; try{ const { keys } = await myPostKeys(user); hk = hk || (keys||[]).includes("sales_head"); }catch(e){} setHead(hk);
+      const [d, mm, cs] = await Promise.all([osLoadAll(), ospLoad(), fetchPaged(()=>sb.from("companies").select("company_name,owner_employee_name")).catch(()=>[])]);
+      if(!live) return; setCo(cs||[]); setD(d); setM(mm); })(); return ()=>{ live = false; }; },[user && user.username]);
+  if(!D || !M) return h("div",{style:{padding:20,color:colors.muted}},"Reading your orders…");
+  const ownerOf = new Map(); (co||[]).forEach(c=>{ if(c.company_name) ownerOf.set(String(c.company_name).trim().toLowerCase(), c.owner_employee_name||""); });
+  const owners = Array.from(new Set((co||[]).map(c=>c.owner_employee_name).filter(Boolean))).sort();
+  const target = head ? who : me;
+  const cns = new Set((D.sos||[]).filter(s=>{ const o = ownerOf.get(String(s.customer_name||"").trim().toLowerCase())||""; return !target ? head : sameName(o, target); }).map(s=>String(s.contract_number)));
+  return h("div",{style:{padding:"12px 16px"}},
+    h("div",{style:{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",background:"#fff",border:"1px solid "+colors.border,borderRadius:10,padding:"10px 14px",marginBottom:10}},
+      h("div",{style:{fontSize:18,fontWeight:700}},"My orders — where they are"),
+      head ? h("select",{"data-testid":"mof-who",value:who,onChange:e=>setWho(e.target.value),style:{...inputStyle,width:240,padding:"5px 8px"}}, h("option",{value:""},"All account owners"), owners.map(o=>h("option",{key:o,value:o},o)))
+        : h("span",{style:{fontSize:12.5,color:colors.muted}},"Orders of the customers you own ("+(me||"")+")"),
+      (()=>{ const n = (D.sos||[]).filter(s=>cns.has(String(s.contract_number)) && !/cancel|closed/i.test(s.status||"")).length; return h("span",{style:{fontSize:12.5,color:colors.muted}}, n+" open order"+(n===1?"":"s")); })()),
+    h(OsFlowView,{ D, M, filterCns:cns }));
+}
+
 function OrderStatusBoard({ user, sessionCompany, startView }){
   const [D,setD] = useState(null); const [me,setMe] = useState(""); const [P,setP] = useState({ stores:[], pm:[], qc:[], acc:[], supers:[] }); const [S,setS] = useState({});
   const [mine,setMine] = useNavState("os_mine",false); const [q,setQ] = useNavState("os_q",""); const [showOld,setShowOld] = useNavState("os_old",false);
@@ -75183,12 +76301,14 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
     const l = x.l; const age = osDays(x.since);
     const overdue = l.shipped_at && !l.paid_at && l.due_date && new Date(l.due_date) < new Date();
     const mineNow = myKind(x.nextK); const nd = (l.qc_docs||[]).length+(l.despatch_docs||[]).length;
-    const ick = osInvClock(x.dc); const stl = !!(ick && ick.stale);   // 344: a stale invoice card turns red
+    const ick = osInvClock(x.dc); const qcLate = osLotCol(l, x.dc)===3 && age>OSF_LOT_DAYS[3];   // 2026-11-18T03:00:00Z: With QC over 3 days turns red
+    const stl = !!(ick && ick.stale) || qcLate;   // 344: a stale invoice card turns red
     return h("div",{key:"l"+l.id,"data-testid":"os-lot",...(stl?{"data-stale":"1"}:{}),...(mineNow?dragProps({ kind:"lot", id:l.id, from:osLotCol(l,x.dc), nextK:x.nextK }):{}),onClick:()=>openLot(l.id),style:{background:stl?"#fdecea":"#fff",border:"1px solid "+(stl?"#c0392b":mineNow?"#0f7a5c":colors.border),borderLeft:"4px solid "+(stl?"#c0392b":mineNow?"#0f7a5c":colors.border),borderRadius:8,padding:"8px 10px",marginBottom:8,cursor:mineNow?"grab":"pointer"}},
       h("div",{style:{display:"flex",alignItems:"flex-start",gap:4}}, h("div",{style:{flex:1}},head(osLotName(l))),
         h("button",{title:"Documents (QC and shipping)","data-testid":"os-card-docs",onClick:e=>{ e.stopPropagation(); setDocsFor(l.id); },style:{border:"1px solid "+colors.border,background:"#fff",borderRadius:5,fontSize:11,padding:"0 5px",cursor:"pointer"}},"📎"+(nd?" "+nd:""))),
       h("div",{style:{fontSize:11.5,color:colors.muted}},(x.s.customer_name||"")+(x.s.basis_number?" · PO "+x.s.basis_number:"")),
       h("div",{style:{fontSize:11.5,marginTop:3,color:(overdue||stl)?"#a3312a":colors.text,fontWeight:stl?700:400}}, osLotWhere(l, x.dc)),
+      qcLate ? h("div",{"data-testid":"os-qc-late",style:{fontSize:11.5,fontWeight:700,color:"#a3312a",marginTop:2}},"⚠ With QC "+age+" days — over "+OSF_LOT_DAYS[3]+" days") : null,
       osMvEl(l.contract_number, "c"+osLotCol(l, x.dc), l.id, x.since),   // 2026-11-12T22:00
       qcSkipOn(x.dc) ? h("div",{style:{marginTop:2}}, ospBadge(qcSkipPending(x.dc) ? "QC skipped — QC documents pending" : "QC documents in ✓ (after billing)", qcSkipPending(x.dc) ? "rd" : "ok", "qs")) : null,
       h("div",{style:{fontSize:10.5,color:colors.mutedLight,marginTop:3}}, (l.lines||[]).length+" Sl No"+((l.lines||[]).length===1?"":"s")+" · "+(l.lines||[]).reduce((n,z)=>n+Number(z.qty||0),0)+" Nos"+(x.nextK?" · next: "+whoName(x.nextK):"")+(age?" · "+age+" d here":"")),
@@ -75430,7 +76550,7 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
   return h("div",{"data-testid":"os-root",style: osFs ? {position:"fixed",inset:0,zIndex:1100,background:"#f6f4ee",padding:"8px 12px",display:"flex",flexDirection:"column",overflow:"hidden"} : {padding:"12px 16px"}},   // 2026-11-01T13:00:00Z: full screen
     h("div",{style:{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",background:"#fff",border:"1px solid "+colors.border,borderRadius:10,padding:"10px 14px",marginBottom:10}},
       h("div",{style:{fontSize:18,fontWeight:700}},"Order Status"),
-      h("div",{style:{display:"flex",gap:4}}, tabBtn("board","Board"), tabBtn("table","Table"), tabBtn("dash","Dashboard"), tabBtn("report","Stage report"), tabBtn("oa","O.A scorecard")),
+      h("div",{style:{display:"flex",gap:4}}, tabBtn("board","Board"), tabBtn("table","Table"), tabBtn("flow","Flow"), tabBtn("dash","Dashboard"), tabBtn("report","Stage report"), tabBtn("oa","O.A scorecard")),
       h("div",{style:{fontSize:12.5,color:colors.muted}}, total+" cards · "+D.lots.filter(l=>l.status!=="Returned").length+" lots"),
       h("input",{value:q,onChange:e=>setQ(e.target.value),placeholder:"Search contract, client, PO",style:{...inputStyle,width:220,padding:"6px 9px"}}),
       h(ContractFind,{testid:"os-one",value:one||"",onChange:v=>setOne(v),width:270,remember:true,options:oneList,placeholder:"One order: type number or customer…"}),
@@ -75464,6 +76584,7 @@ function OrderStatusBoard({ user, sessionCompany, startView }){
       myLots.length>8 ? h("span",{style:{color:colors.muted}},"+"+(myLots.length-8)+" more") : null,
       !mine ? h("button",{onClick:()=>setMine(true),style:{...btnSmall,fontSize:11.5,marginLeft:"auto"}},"Show only mine") : null) : null,
     view==="oa" ? h(OaScorecard,null) :   // 2026-11-04T04:00:00Z
+    view==="flow" ? h(OsFlowView,{ D, M, one, q }) :   // 2026-11-18T03:00:00Z
     view==="dash" ? h(OsDashboard,{ rows, lots:D.lots, dcBy, invBy }) :
     view==="report" ? h(OsStageReport,{ preRows, rows, del:repDel||{}, stage:repStage, setStage:setRepStage, mv:repMove, showBadges:badges, title:"Order Status — stage report"+(one?" — "+one:"")+(mine?" — waiting on "+(me||user.username):"")+(q?" — “"+q+"”":"") }) :
     view==="table" ? h("div",{style:{overflowX:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8}},
@@ -80425,8 +81546,10 @@ const RVW_BLOCKS = [
   // 2026-11-16T01:00:00Z: resubmissions as their own groups (were a list after the meeting)
   { k:"c3",   label:"Resubmission — Code 3",    rule:(c)=>"rejected — resubmit within "+c.days+" working days of the client's comments · document owner", posts:["doc_controller"] },
   { k:"c2",   label:"Resubmission — Code 2",    rule:(c)=>"approved with comments — resubmit within "+c.days+" working days of the comments · document owner", posts:["doc_controller"] },
+  // 2026-11-18T06:00:00Z: the stage the meeting missed — documents on the board nobody owns (no owner, no card)
+  { k:"una",  label:"Unassigned on Document Control", rule:()=>"documents on the Document Control board with no owner — give each an owner, or complete it here", posts:["doc_controller","vp_projects"] },
 ];
-const RVW_DAYS0 = { oa:2, gad:3, itp:3, proc:6, oth:3, wo:2, bom:2, c3:3, c2:5 };
+const RVW_DAYS0 = { oa:2, gad:3, itp:3, proc:6, oth:3, wo:2, bom:2, c3:3, c2:5, una:3 };
 // 2026-11-16T01:00:00Z: marked urgent → taken first, at the top of the next sitting (the item stays urgent until unmarked or done)
 const RVW_URG = { k:"urg", label:"Urgent", rule:()=>"marked urgent — taken first", posts:[] };
 const rvwBlockDef = (k)=> k==="urg" ? RVW_URG : RVW_BLOCKS.find(x=>x.k===k);
@@ -80574,7 +81697,8 @@ function rvwBuild(cfg, D, prev, E){
       const vl = (()=>{ try{ return docItemList(bi); }catch(e){ return null; } })();
       const rev = bi.last && bi.last.rev_number!=null ? " · Rev "+bi.last.rev_number : "";
       const title = (bi.name||"Document")+(bi.no?" ("+bi.no+")":"")+rev+" — "+(vl ? (vl.short||vl.label) : (resub ? "resubmit" : "initial submission pending"))+(resub ? " since "+fmtDMY(since) : "");
-      push(k, { cn, client: bi.customer || (m && m.client) || "", po: po.date, poReal: resub ? true : po.real, key:k+"|"+bi.key, title, due, owners: bi.owner ? [bi.owner] : [], unassigned: !bi.owner, board:true }, true);
+      push(bi.owner ? k : "una", { cn, client: bi.customer || (m && m.client) || "", po: po.date, poReal: resub ? true : po.real, key:k+"|"+bi.key, title, due, owners: bi.owner ? [bi.owner] : [], unassigned: !bi.owner, board:true,
+        cls:k, docId: bi.doc ? bi.doc.id : null, reqId: (!bi.doc && bi.req) ? bi.req.id : null, docKind: bi.kind, bi }, true);   // 2026-11-18T06:00:00Z: unassigned → its own last block; what ✓ Completed needs
     });
   } else {
   // 2-4 · initial submissions, and the resubmissions for after the meeting
@@ -80723,6 +81847,158 @@ function rvwScore(cfg, D, monday){
   return S;
 }
 
+
+// ---------------------------------------------------------------- 2026-11-18T06:00:00Z: ORDER PROCESSING REVIEW — ✓ COMPLETED
+// The task board's Done button, pressed from the review. Documents: the same "Send to client" as the card (revision Out,
+// card closes, chase starts) — nothing to assign. OA: OA sent. W/O: released, and the BOM summary must be given to a person
+// of the next department (or a department head). PR (last step on the review): released after a "close this card?" prompt.
+// Unassigned documents: give an owner (that department's people + all department heads), or complete straight away.
+// Super Admins, the Document Controller and VP Projects posts, and the line's owner. Undo for 10 minutes.
+const RVW_DONE_POSTS = ["doc_controller","vp_projects"];
+const RVW_DEPT_RE = { gad:/design|estimation|technical/i, itp:/quality|^\s*qc/i, proc:/quality|^\s*qc/i, oth:/document/i, c3:/document/i, c2:/document/i, bom:/design|estimation|technical/i };
+function rvwKindOf(it){ const p = String(it.key||"").split("|")[0];
+  if(it.docId || it.reqId) return "doc"; if(p==="oa") return "oa"; if(p==="wo") return "wo"; if(p==="pr") return "pr"; if(p==="bom") return "bomsum"; return ""; }
+// people of a department (by the department written on the employee) + every department head
+function rvwPickList(emps, re){
+  const inDept = (emps||[]).filter(e=>empLive(e) && re && re.test(String(e.department||""))).map(e=>e.employee_name).filter(Boolean);
+  const heads = []; Array.from(new Set(DEPT_HEAD_POST.map(x=>x[1]).concat(["technical_head","vp_projects"]))).forEach(k=>(postHolders(k)||[]).forEach(n=>{ if(n && !heads.some(x=>x[0]===n)) heads.push([n, postLabel(k)]); }));
+  return { dept: Array.from(new Set(inDept)).sort(), heads: heads.filter(([n])=>!inDept.includes(n)) };
+}
+function RvwPick({ value, onChange, list, deptName, testid }){
+  return h("select",{"data-testid":testid||"rvwc-pick",value:value||"",onChange:e=>onChange(e.target.value),style:{...inputStyle,padding:"6px 8px"}},
+    h("option",{value:""},"— pick a person —"),
+    list.dept.length ? h("optgroup",{label:(deptName||"Next department")}, list.dept.map(n=>h("option",{key:"d"+n,value:n},n))) : null,
+    h("optgroup",{label:"Department heads"}, list.heads.map(([n,p])=>h("option",{key:"h"+n,value:n},n+" — "+p))));
+}
+function RvwCompleteDlg({ it, kind, cfg, D, emps, me, user, onClose, onDone }){
+  const today = toISODate(new Date());
+  const so = (D && D.M && D.M.so.get(String(it.cn))) || {};
+  const [f,setF] = useState(()=>({ date:today, link:"", what:"", mail:"", st:"Start Production Code 2", note:"", pick:"", due: wdAdd(today, ((cfg.blocks||{}).bom||{}).days||2), owner:"", odue: wdAdd(today, 3) }));
+  const [busy,setBusy] = useState(false); const [err,setErr] = useState("");
+  const set = (p)=>{ setF(x=>({ ...x, ...p })); setErr(""); };
+  const lab = (l, req, c)=> h("label",{style:{display:"grid",gap:3,fontSize:11.5,color:colors.muted,marginTop:8}}, h("span",null,l, req ? h("span",{style:{color:"#c0392b",fontWeight:700}}," *") : null), c);
+  const by = me || user?.username || "";
+  const nextList = rvwPickList(emps, RVW_DEPT_RE.bom);
+  const ownList = rvwPickList(emps, RVW_DEPT_RE[it.cls||"oth"] || /document/i);
+  const ownDept = { gad:"Design & Estimation", itp:"QC", proc:"QC" }[it.cls||""] || "Document Control";
+  const head = { doc: it.reqId && !it.docId ? "Send to client" : (it.cls==="c3"||it.cls==="c2") ? "Send resubmission" : "Send to client", oa:"OA sent to the client", wo:"Release the W/O", pr:"Last stage — release the PR and close this card?", own:"Give an owner" }[kind] || "Mark completed";
+  const go = async()=>{
+    setErr("");
+    try{
+      if(kind==="doc"){
+        if(!f.date || f.date>today){ setErr("Give the date it was sent (today or earlier)."); return; }
+        if(!confirmDocumentLink(f.link, "The file sent")) return;
+        setBusy(true);
+        const r = await docSendFromTask({ doc_id:it.docId||null, doc_request_id:it.reqId||null }, { date:f.date, link:f.link, what:f.what }, by);
+        setBusy(false); if(r.error){ setErr(r.error); return; }
+        const docId = it.docId;
+        onDone({ msg:"✓ "+r.msg, label:it.cn+" · "+it.title+" — sent to the client",
+          undo: async()=>{ const { data } = await sb.from("universal_document_history_tbl").select("id,notes,changed_by").eq("document_id",docId).order("id",{ ascending:false }).limit(1);
+            const row = (data||[])[0]; if(!row || !/sent from the task card/.test(row.notes||"")) return "The last entry on this document is not the one made here — nothing was undone.";
+            const { error } = await sb.from("universal_document_history_tbl").delete().eq("id",row.id); if(error) return error.message;
+            await logAudit("DELETE","universal_document_history_tbl",String(it.cn),"Undone at the Order Processing Review: "+it.title+" sent", by, null, null);
+            try{ await docTasksSync(await docBoardLoad(), "App"); }catch(e){} return null; } });
+        return;
+      }
+      if(kind==="oa"){
+        if(!f.date || f.date>today){ setErr("Give the date the OA was sent (today or earlier)."); return; }
+        if(!String(f.mail||"").trim()){ setErr("Write whom the OA was sent to (e-mail)."); return; }
+        setBusy(true);
+        const { data: s0 } = await sb.from("sale_order_tbl").select("*").eq("contract_number",String(it.cn)).maybeSingle();
+        if(!s0){ setBusy(false); setErr("No Order Acceptance for "+it.cn+"."); return; }
+        try{ const mb = await mtcBlockCheck(String(it.cn), s0); if(mb.block){ setBusy(false); setErr("Not recorded — "+mb.block); return; } }catch(e){}
+        const was = { oa_issued_on:s0.oa_issued_on||null, oa_issued_by:s0.oa_issued_by||null, oa_recorded_by:s0.oa_recorded_by||null, oa_recorded_at:s0.oa_recorded_at||null, oa_issue_note:s0.oa_issue_note||null, status:s0.status };
+        const { error } = await sb.from("sale_order_tbl").update({ oa_issued_on:f.date, oa_issued_by:by, oa_recorded_by:by, oa_recorded_at:new Date().toISOString(), oa_issue_note:"To "+String(f.mail).trim()+" · CC "+OA_CC+" (Order Processing Review)", status:"Issued" }).eq("contract_number",String(it.cn));
+        if(error){ setBusy(false); setErr("Not recorded: "+error.message); return; }
+        await logAudit("UPDATE","sale_order_tbl",String(it.cn),"OA issued "+f.date+" to "+String(f.mail).trim()+" — recorded at the Order Processing Review", by, null, null);
+        try{ await ospSync([String(it.cn)], by); }catch(e){}
+        setBusy(false);
+        onDone({ msg:"✓ "+it.cn+": OA recorded as sent on "+fmtDMY(f.date)+".", label:it.cn+" — OA sent",
+          undo: async()=>{ const { error: e2 } = await sb.from("sale_order_tbl").update(was).eq("contract_number",String(it.cn)); if(e2) return e2.message;
+            await logAudit("UPDATE","sale_order_tbl",String(it.cn),"Undone at the Order Processing Review: OA sent", by, null, null); try{ await ospSync([String(it.cn)], by); }catch(e){} return null; } });
+        return;
+      }
+      if(kind==="wo"){
+        if(!f.pick){ setErr("Pick who takes the next stage (BOM summary)."); return; }
+        if(!f.due || f.due<today){ setErr("Give the BOM summary's due date (today or later)."); return; }
+        setBusy(true);
+        const from = so.go_ahead_state || "Hold";
+        const res = await woReleaseRun({ ct:String(it.cn), toState:f.st, expectFrom:from, username:user?.username, reason:f.note||"", client:it.client||"", via:"released at the Order Processing Review" });
+        if(res && res.error){ setBusy(false); setErr(res.error); return; }
+        const title = "BOM summary — "+it.cn+(it.client?" "+it.client:"");
+        let ids = []; try{ ids = await ospTaskCards(String(it.cn), it.client||"", [f.pick], ()=>"technical_head", title, f.due, "Given at the Order Processing Review by "+by+" when the W/O was released."); }catch(e){}
+        try{ await notifyPeople([f.pick], "📋 "+title+" is now with you (W/O released "+fmtDMY(today)+" at the Order Processing Review), due "+fmtDMY(f.due)+". Given by "+by+".", "order_status", { kind:"open", open:{ tab:"tasks" } }); }catch(e){}
+        setBusy(false);
+        onDone({ msg:"✓ "+it.cn+": W/O released as “"+woLabel(f.st)+"”. BOM summary given to "+f.pick+", due "+fmtDMY(f.due)+".", label:it.cn+" — W/O released, BOM summary with "+f.pick,
+          next:{ key:"bom|"+it.cn, owner:f.pick, due:f.due },
+          undo: async()=>{ const r2 = await setGoAheadState(String(it.cn), f.st, from, user?.username, "Undone at the Order Processing Review"); if(r2 && r2.error) return r2.error;
+            try{ await ospTasksClose(ids, by, "Undone at the Order Processing Review"); }catch(e){} try{ await ospSync([String(it.cn)], by); }catch(e){} return null; } });
+        return;
+      }
+      if(kind==="pr"){
+        setBusy(true);
+        await ospPress("pr", String(it.cn), user);
+        setBusy(false);
+        onDone({ msg:"✓ "+it.cn+": PR released — the card is closed (last step on the review).", label:it.cn+" — PR released, card closed",
+          undo: async()=>{ try{ await ospStageUpsert(String(it.cn), { pr_released_at:null, pr_released_by:null }); await logAudit("UPDATE","order_stage_tbl",String(it.cn),"Undone at the Order Processing Review: PR released", by, null, null); await ospSync([String(it.cn)], by); }catch(e){ return String(e.message||e); } return null; } });
+        return;
+      }
+      if(kind==="own"){
+        if(!f.owner){ setErr("Pick the owner."); return; }
+        if(!f.odue || f.odue<today){ setErr("Give a due date (today or later)."); return; }
+        setBusy(true);
+        const bi = it.bi || {}; const wE = (emps||[]).find(e=>e.employee_name===f.owner);
+        if(bi.doc) await sb.from("universal_documents_tbl").update({ owner:f.owner }).eq("id",bi.doc.id);
+        else if(bi.req) await sb.from("document_requests_tbl").update({ owner:f.owner }).eq("id",bi.req.id);
+        const t = bi.openTask;
+        if(t) await sb.from("task_tbl").update({ assignee:f.owner, due_date:f.odue, department:(wE && wE.department)||t.department||null, moved_by:by, moved_at:new Date().toISOString(), moved_what:(t.assignee||"Unassigned pile")+" → "+f.owner+", due "+fmtDMY(f.odue)+" (Order Processing Review)" }).eq("id",t.id);
+        try{ await docTasksSync(await docBoardLoad(), "App"); }catch(e){}
+        if(!t){ try{ const { data: nt } = await sb.from("task_tbl").select("id,due_date").eq("assignee",f.owner).eq(bi.doc ? "doc_id" : "doc_request_id", String(bi.doc ? bi.doc.id : bi.req.id)).neq("status","done").limit(1);
+          if(nt && nt[0] && !nt[0].due_date) await sb.from("task_tbl").update({ due_date:f.odue }).eq("id",nt[0].id); }catch(e){} }
+        await logAudit("UPDATE", bi.doc ? "universal_documents_tbl" : "document_requests_tbl", String(it.cn), "Owner given at the Order Processing Review: "+it.title+" → "+f.owner+", due "+fmtDMY(f.odue), by, null, null);
+        try{ await notifyPeople([f.owner], "📄 "+it.cn+(it.client?" "+it.client:"")+" — "+it.title+" is now yours (Order Processing Review), due "+fmtDMY(f.odue)+". Given by "+by+".", "tasks", { kind:"open", open:{ tab:"tasks" } }); }catch(e){}
+        setBusy(false);
+        onDone({ msg:"✓ "+it.title+" given to "+f.owner+" — the card is on their board.", label:it.cn+" · "+it.title+" → "+f.owner,
+          undo: async()=>{ if(bi.doc) await sb.from("universal_documents_tbl").update({ owner:null }).eq("id",bi.doc.id); else if(bi.req) await sb.from("document_requests_tbl").update({ owner:null }).eq("id",bi.req.id);
+            if(t) await sb.from("task_tbl").update({ assignee:t.assignee||null, due_date:t.due_date||null, department:t.department||null, moved_by:by, moved_at:new Date().toISOString(), moved_what:"Undone at the Order Processing Review" }).eq("id",t.id);
+            try{ await docTasksSync(await docBoardLoad(), "App"); }catch(e){} return null; } });
+        return;
+      }
+    }catch(e){ setBusy(false); setErr(String(e && e.message || e)); }
+  };
+  const goStates = GO_AHEAD_STATES.filter(x=>/^Start Production/.test(x));
+  return h("div",{"data-testid":"rvwc-dlg",onClick:e=>{ if(e.target===e.currentTarget && !busy) onClose(); },style:{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:9100,display:"flex",alignItems:"center",justifyContent:"center",padding:12}},
+    h("div",{style:{background:"#fff",borderRadius:10,padding:"18px 20px",width:470,maxWidth:"100%",maxHeight:"92vh",overflowY:"auto"}},
+      h("div",{style:{fontWeight:700,fontSize:15}},head),
+      h("div",{style:{fontSize:12.5,color:colors.muted,marginTop:3}}, h("b",null,it.cn+(it.client?" · "+it.client:"")), h("br"), it.title),
+      kind==="doc" ? h(React.Fragment,null,
+        h("div",{style:{background:"#e4f3ed",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:10,lineHeight:1.45}},"Same as ✓ Completed on the task card: the revision is logged Out on the Document Control board, the card closes and the "+DOC_CHASE_DAYS+"-day chase starts. Nothing is assigned now — a card opens by itself when the client replies."),
+        lab("Sent to the client on", true, h("input",{"data-testid":"rvwc-date",type:"date",value:f.date,max:today,onChange:e=>set({ date:e.target.value }),style:{...inputStyle,padding:"6px 8px"}})),
+        lab("Link to the file sent (OneDrive / Google Drive)", true, h("input",{"data-testid":"rvwc-link",value:f.link,placeholder:"https://…",onChange:e=>set({ link:e.target.value }),style:{...inputStyle,padding:"6px 8px"}})),
+        lab("What changed (optional)", false, h("input",{value:f.what,placeholder:"e.g. Revised as per CRS",onChange:e=>set({ what:e.target.value }),style:{...inputStyle,padding:"6px 8px"}}))) : null,
+      kind==="oa" ? h(React.Fragment,null,
+        lab("OA sent to the client on", true, h("input",{"data-testid":"rvwc-date",type:"date",value:f.date,max:today,onChange:e=>set({ date:e.target.value }),style:{...inputStyle,padding:"6px 8px"}})),
+        lab("Sent to (e-mail)", true, h("input",{"data-testid":"rvwc-mail",value:f.mail,placeholder:"buyer@client.com",onChange:e=>set({ mail:e.target.value }),style:{...inputStyle,padding:"6px 8px"}})),
+        h("div",{style:{fontSize:11.5,color:colors.muted,marginTop:8}},"The order then moves on, on the Order Status board, by itself.")) : null,
+      kind==="wo" ? h(React.Fragment,null,
+        lab("Release as", true, h("select",{value:f.st,onChange:e=>set({ st:e.target.value }),style:{...inputStyle,padding:"6px 8px"}}, goStates.map(x=>h("option",{key:x,value:x},woLabel(x))))),
+        lab("Note", false, h("input",{value:f.note,onChange:e=>set({ note:e.target.value }),style:{...inputStyle,padding:"6px 8px"}})),
+        h("div",{style:{marginTop:10,fontSize:12.5,fontWeight:700}},"Next stage: BOM summary and PR"),
+        lab("Assign the next stage to", true, h(RvwPick,{ value:f.pick, onChange:v=>set({ pick:v }), list:nextList, deptName:"Technical / Design & Estimation", testid:"rvwc-pick" })),
+        h("div",{style:{fontSize:11,color:colors.muted}},"Only that department's people and the department heads are listed."),
+        lab("BOM summary due", true, h("input",{type:"date",value:f.due,min:today,onChange:e=>set({ due:e.target.value }),style:{...inputStyle,padding:"6px 8px"}}))) : null,
+      kind==="pr" ? h("div",{style:{background:"#f3ecfb",color:"#5b3fa3",borderRadius:6,padding:"8px 10px",fontSize:12.5,marginTop:10,lineHeight:1.45}},"This is the last step on the review. The PR is released (as when it is pressed on the Order Status board), the card closes and the line goes off the review. It stays in the history.") : null,
+      kind==="own" ? h(React.Fragment,null,
+        h("div",{style:{background:"#fff4d6",borderRadius:6,padding:"7px 9px",fontSize:11.5,marginTop:10,lineHeight:1.45}},"No one owns this document. The person picked gets its card on their board, exactly as when the owner is set on the Document Control board."),
+        lab("Owner", true, h(RvwPick,{ value:f.owner, onChange:v=>set({ owner:v }), list:ownList, deptName:ownDept, testid:"rvwc-owner" })),
+        h("div",{style:{fontSize:11,color:colors.muted}},"Only "+ownDept+" people and the department heads are listed."),
+        lab("Due", true, h("input",{type:"date",value:f.odue,min:today,onChange:e=>set({ odue:e.target.value }),style:{...inputStyle,padding:"6px 8px"}}))) : null,
+      err ? h("div",{"data-testid":"rvwc-err",style:{color:colors.danger,fontSize:12,marginTop:8}},err) : null,
+      h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}},
+        h("button",{style:btnSmall,onClick:onClose,disabled:busy},"Cancel"),
+        h("button",{"data-testid":"rvwc-go",style:{...btnSmall,background:kind==="pr"?"#5b3fa3":"#0f7a5c",color:"#fff",borderColor:kind==="pr"?"#5b3fa3":"#0f7a5c",fontWeight:700},disabled:busy,onClick:go},
+          busy ? "Saving…" : kind==="pr" ? "Yes, release the PR and close" : kind==="own" ? "Give" : kind==="doc" ? (it.cls==="c3"||it.cls==="c2" ? "Resubmission sent ▸" : "Sent to client ▸") : "✓ Completed"))));
+}
 function OrderReviewScreen({ user }){
   const [R,setR] = useState(null);          // { cfg, missing, row }
   const [D,setD] = useState(null);          // data
@@ -80743,6 +82019,9 @@ function OrderReviewScreen({ user }){
   const [past,setPast] = useState(null);     // earlier sittings
   const [emps,setEmps] = useState([]);
   const [rf,setRf] = useState({});           // 2026-11-16T02:00:00Z: per-row New owner / Change due date inputs { key: { owner, due, why, oerr, derr } }
+  const [cmp,setCmp] = useState(null); const [undoR,setUndoR] = useState(null); const [myK,setMyK] = useState([]); const [empRows,setEmpRows] = useState([]);   // 2026-11-18T06:00:00Z: ✓ Completed
+  useEffect(()=>{ let dead = false; myPostKeys(user).then(r=>{ if(!dead) setMyK((r&&r.keys)||[]); }).catch(()=>{});
+    sb.from("employee_tbl").select("employee_name,department,status").order("employee_name").then(r=>{ if(!dead) setEmpRows((r&&r.data)||[]); }, ()=>{}); return ()=>{ dead = true; }; },[user && user.username]);
   const me = (user && (user.employee_name||user.username)) || "";
   useEffect(()=>{ let dead = false; (async()=>{
     try{ setErr(""); setA(null);
@@ -80778,6 +82057,21 @@ function OrderReviewScreen({ user }){
   const resume = async(it)=>{ await saveRec(it, { reason:null, paused:false, resumed:true }); setTick(x=>x+1); };
   // ---- 2026-11-16T01:00:00Z: owner / due date / urgent / notes ----
   const canChange = (direct || codeOk) && !R.missing && !EM.missing;
+  // 2026-11-18T06:00:00Z: ✓ Completed — who may, and what it does on each line
+  const cmpMay = (it)=> user?.role==="super_admin" || RVW_DONE_POSTS.some(k=>myK.includes(k)) || (it.owners||[]).some(n=>sameName(n, me) || (user && sameName(n, user.username)));
+  const cmpWho = ()=> "Only a Super Admin, the Document Controller ("+(postHolders("doc_controller").join(", ")||"post empty")+"), VP Projects ("+(postHolders("vp_projects").join(", ")||"post empty")+") or the line's owner can mark it completed.";
+  const cmpWhy = (it, kind)=>{ const x = (()=>{ try{ return D && D.M ? ospStage(String(it.cn), D.M) : null; }catch(e){ return null; } })();
+    if(kind==="doc" && it.docKind==="req") return "This document has no number yet: its first submission from Document Control gives it the number.";
+    if(kind==="oa" && x && x.soStuck && x.soStuck!=="sent") return "The OA is “"+ospSoStuckTxt(x)+"”: it can be completed here once it is approved and only waiting to be sent.";
+    if(kind==="bomsum") return "Approve the BOM summary in Production BOM — the line then moves on to the PR by itself.";
+    if(kind==="pr" && x && x.stage!=="pr") return "The Purchase BOM is not approved yet (now at “"+((OSP_COLS.find(c=>c.k===x.stage)||{}).label||x.stage)+"”): the PR can be released after it.";
+    if(!kind) return "Nothing to complete here."; return null; };
+  const cmpDone = async(r)=>{ setCmp(null); appToast(r.msg);
+    if(r.next){ try{ await saveEdit({ key:r.next.key, cn:String(r.next.key).split("|")[1], title:"BOM summary", blk:"bom" }, { owner:r.next.owner, due:r.next.due, owner_hist:[ ...((EM.map.get(r.next.key)||{}).owner_hist||[]), { from:"", to:r.next.owner, by:me, at:new Date().toISOString(), why:"W/O released at the review" } ] }, "next stage → "+r.next.owner); }catch(e){} }
+    try{ await logSess("✓ Completed: "+r.label); }catch(e){}
+    if(r.undo) setUndoR({ label:r.label, fn:r.undo, until:Date.now()+600000 }); setTick(x=>x+1); };
+  const cmpUndo = async()=>{ const u = undoR; if(!u) return; if(Date.now()>u.until){ setUndoR(null); appToast("Undo is over (10 minutes)."); return; }
+    const e = await u.fn(); setUndoR(null); if(e){ alert("Not undone: "+e); return; } appToast("↩ Undone: "+u.label); try{ await logSess("↩ Undone: "+u.label); }catch(x){} setTick(x=>x+1); };
   const canNote = !R.missing && !EM.missing;
   const logSess = async(line)=>{ if(!sess) return; const entry = { at:new Date().toISOString(), by:me, text:line };
     const log = [ ...((sess && sess.log)||[]), entry ]; setSess(s=>({ ...s, log }));
@@ -80935,8 +82229,8 @@ function OrderReviewScreen({ user }){
     if(!b.items.length) return h("div",{key:b.k,"data-testid":"rvw-block-"+b.k,style:{border:"1px solid "+colors.border,borderRadius:9,marginBottom:10,overflow:"hidden",opacity:.8}}, head);
     return h("div",{key:b.k,"data-testid":"rvw-block-"+b.k,style:{border:"1px solid "+(U?"#e8a39b":colors.border),borderRadius:9,marginBottom:10,overflow:"hidden"}}, head,
       h("div",{style:{overflowX:"auto"}}, h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:980,tableLayout:"fixed"}},
-        h("colgroup",null,[70,150,null,92,130,180,180,165].map((w,i)=>h("col",{key:i,style: w ? {width:w} : null}))),
-        h("thead",null,h("tr",null,["Contract","Customer","Item","Due","Owner","New owner","Change due date","Committed date & reason"].map(x=>h("th",{key:x,style:{...th, ...(x==="New owner"||x==="Change due date" ? { background:"#e7eef8", color:"#0c467e" } : null)}},x)))),
+        h("colgroup",null,[70,150,null,92,130,132,180,180,165].map((w,i)=>h("col",{key:i,style: w ? {width:w} : null}))),
+        h("thead",null,h("tr",null,["Contract","Customer","Item","Due","Owner","Completed","New owner","Change due date","Committed date & reason"].map(x=>h("th",{key:x,style:{...th, ...(x==="New owner"||x==="Change due date" ? { background:"#e7eef8", color:"#0c467e" } : x==="Completed" ? { background:"#e4f3ed", color:"#0b5a40" } : null)}},x)))),
         h("tbody",null,b.items.map(it0=>{ const r = recs[it0.key]||{}; const prevMiss = (r.misses||0);
           const it = (it0.state==="late" && rvwIsClient(r.reason)) ? { ...it0, state:"paused", pausedWhy:r.reason } : it0;   // paused in this sitting: shows at once
           const oh = it.ownerHist||[], dh = it.dueHist||[];
@@ -80962,6 +82256,12 @@ function OrderReviewScreen({ user }){
               earlier.length ? h("div",{"data-testid":"rvw-was",style:{marginTop:3}},
                 h("div",{style:{fontSize:11,color:colors.muted}},"earlier:"),
                 earlier.map(e=>h("div",{key:e.n,title:"had it until "+fmtDMYTime(e.until)}, pill(e.n+" · till "+fmtDMY(e.until).slice(0,5),"#e7eef8","#0c467e")))) : null),
+            (()=>{ const kind = rvwKindOf(it); const may = cmpMay(it); const why = cmpWhy(it, kind); const last = kind==="pr"; const una = it.blk==="una" || (it.unassigned && it.board);   // 2026-11-18T06:00:00Z: ✓ Completed
+              const st = { ...btnSmall, width:"100%", padding:"5px 6px", fontSize:12, fontWeight:700, background: (!may||why) ? "#f1f2f4" : last ? "#5b3fa3" : "#0f7a5c", color: (!may||why) ? "#9aa1ab" : "#fff", borderColor: (!may||why) ? colors.border : last ? "#5b3fa3" : "#0f7a5c", cursor: (!may||why) ? "not-allowed" : "pointer" };
+              return h("td",{style:{...td, background:"#f3faf6"}}, h("div",{style:stack},
+                h("button",{"data-testid":"rvw-complete",title: !may ? cmpWho() : (why || ""),onClick:()=>{ if(!may){ alert(cmpWho()); return; } if(why){ alert(why); return; } setCmp({ it, kind }); },style:st},"✓ Completed"),
+                h("div",{style:{fontSize:10.5,color:colors.muted}}, last ? "last stage — closes the card" : kind==="doc" ? "→ sent to the client" : kind==="oa" ? "→ OA sent" : kind==="wo" ? "→ BOM summary and PR" : ""),
+                una ? h("button",{"data-testid":"rvw-give-owner",onClick:()=>{ if(!may){ alert(cmpWho()); return; } setCmp({ it, kind:"own" }); },style:{...btnSmall,width:"100%",padding:"4px 6px",fontSize:11.5,fontWeight:700,background:"#fff4d6",borderColor:"#e0b04a",color:"#7a5200"}},"👤 Give an owner") : null)); })(),
             h("td",{style:chg}, canChange ? h("div",{style:stack},
                 h("div",{style:{display:"flex",gap:4}},
                   h("select",{"data-testid":"rvw-owner-sel",value:f.owner||"",onChange:e=>rfSet(it.key,{ owner:e.target.value, oerr:"" }),style:{...inp,flex:1,minWidth:0}},
@@ -81027,7 +82327,11 @@ function OrderReviewScreen({ user }){
           rr.committed_date ? "Committed: "+fmtDMY(String(rr.committed_date).slice(0,10))+(rr.reason?" ("+rr.reason+")":"") : (i.state==="late" ? "No committed date yet" : "") ] }; })),
         intro:(n)=>n+" item"+(n>1?"s":"")+" from the "+cfg.title+" are with you:", outro:"Please close them by the committed date." })),
       closed && sess.minutes ? h("button",{"data-testid":"rvw-wa-minutes",onClick:()=>waOpen("the group", sess.minutes+"\n\n— "+me),style:{border:"1px solid #25d366",background:"#25d366",color:"#fff",borderRadius:6,padding:"4px 10px",fontSize:12,fontWeight:700,cursor:"pointer"}},"💬 WhatsApp minutes") : null),
+    undoR && Date.now()<undoR.until ? h("div",{"data-testid":"rvw-undo-bar",style:{display:"flex",gap:10,alignItems:"center",background:"#fff4d6",border:"1px solid #e0b04a",borderRadius:8,padding:"7px 12px",marginBottom:10,fontSize:12.5}},
+      h("b",null,"✓ "+undoR.label), h("span",{style:{color:colors.muted}},"wrong press? Undo until "+calHM(new Date(undoR.until).toISOString())),
+      h("button",{"data-testid":"rvw-undo",onClick:cmpUndo,style:{...btnSmall,marginLeft:"auto",fontWeight:700}},"↩ Undo"), h("button",{onClick:()=>setUndoR(null),style:btnSmall},"✕")) : null,
     A.blocks.map(block),
+    cmp ? h(RvwCompleteDlg,{ it:cmp.it, kind:cmp.kind, cfg, D, emps:empRows, me, user, onClose:()=>setCmp(null), onDone:cmpDone }) : null,
     h("div",{style:{display:"flex",flexWrap:"wrap",gap:10,alignItems:"center",justifyContent:"space-between",borderTop:"1px solid "+colors.border,paddingTop:12,marginTop:6}},
       h("div",{"data-testid":"rvw-gate",style:{fontWeight:600,color: closed ? "#0f6a4c" : left.length ? "#b2342a" : "#0f6a4c"}},
         closed ? "Closed. Minutes went to the bell of everyone present and each owner." : left.length ? left.length+" of "+gateItems.length+" late items still need a committed date and a reason" : gateItems.length ? "All "+gateItems.length+" late items have a committed date (or are waiting on the client)." : "Nothing late today."),
@@ -85341,7 +86645,8 @@ async function invAskFm(inv, lines, irn, user, me){
   return { names:fm };
 }
 // ---- the pop-up ----
-function InvCompleteDialog({ inv, lines, user, me, dcl, canEdit, onClose, onSaved, onAmend, onRefresh, startMsg }){
+function InvCompleteDialog({ inv, lines, user, me, dcl, canEdit, onClose, onSaved, onAmend, onRefresh, startMsg, strict }){
+  // 2026-11-18T07:00:00Z: nothing is mandatory while making the draft — every field turns mandatory (red, *) only at Ready for IRN (strict)
   const ewbNeed = invEwbNeeded(inv, lines);
   const D = (dcl && dcl.data && dcl.data.desp) || {};
   const blank0 = (v)=> inv.completed_at ? (v==null?"":String(v)) : (Number(v) ? String(v) : "");
@@ -85360,9 +86665,9 @@ function InvCompleteDialog({ inv, lines, user, me, dcl, canEdit, onClose, onSave
   const probs = invCompleteProblems(merged, lines);
   const miss = (cond)=> cond ? { border:"1.5px solid #c0392b", background:"#fff6f5" } : {};
   const lab = { display:"flex", flexDirection:"column", gap:3, fontSize:11.5, color:colors.muted };
-  const inp = (k, label, o)=> h("label",{key:k,style:{ ...lab, flex:"1 1 "+((o&&o.w)||170)+"px" }}, h("span",null,label, o&&o.req ? h("b",{style:{color:"#c0392b"}}," *") : null),
+  const inp = (k, label, o0)=>{ const o = o0 ? { ...o0, req: strict && o0.req, bad: strict && o0.bad } : o0; return h("label",{key:k,style:{ ...lab, flex:"1 1 "+((o&&o.w)||170)+"px" }}, h("span",null,label, o&&o.req ? h("b",{style:{color:"#c0392b"}}," *") : null),
     o && o.options ? h("select",{"data-testid":"ic-"+k,value:f[k]||"",disabled:!canEdit,onChange:e=>set(k,e.target.value),style:{ ...inputStyle, padding:"6px 8px", ...miss(o.bad) }}, [["","— choose —"], ...o.options].map(([v,t])=>h("option",{key:v,value:v},t)))
-    : h("input",{"data-testid":"ic-"+k,type:(o&&o.type)||"text",value:f[k]||"",disabled:!canEdit || (o&&o.off),placeholder:(o&&o.ph)||"",onChange:e=>set(k, o&&o.upper ? e.target.value.toUpperCase() : e.target.value),style:{ ...inputStyle, padding:"6px 8px", ...miss(o && o.bad) }}));
+    : h("input",{"data-testid":"ic-"+k,type:(o&&o.type)||"text",value:f[k]||"",disabled:!canEdit || (o&&o.off),placeholder:(o&&o.ph)||"",onChange:e=>set(k, o&&o.upper ? e.target.value.toUpperCase() : e.target.value),style:{ ...inputStyle, padding:"6px 8px", ...miss(o && o.bad) }})); };
   const sec = (n, title, sub, ...kids)=> h("div",{key:"s"+n,style:{ border:"1px solid "+colors.border, borderRadius:8, padding:"8px 10px", marginTop:8 }},
     h("div",{style:{ fontSize:12.5, fontWeight:700 }}, n+" · "+title), sub ? h("div",{style:{ fontSize:11, color:colors.muted, margin:"1px 0 6px" }}, sub) : null, ...kids);
   const row = (...k)=> h("div",{style:{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:6 }}, ...k);
@@ -85397,8 +86702,10 @@ function InvCompleteDialog({ inv, lines, user, me, dcl, canEdit, onClose, onSave
   return h("div",{"data-testid":"inv-complete",onClick:e=>{ if(e.target===e.currentTarget) onClose(); },style:{ position:"fixed", inset:0, background:"rgba(0,0,0,.45)", zIndex:2600, display:"flex", alignItems:"flex-start", justifyContent:"center", padding:"30px 16px", overflowY:"auto" }},
     h("div",{style:{ background:"#fff", borderRadius:10, width:880, maxWidth:"100%", padding:"14px 16px" }},
       h("div",{style:{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}, h("b",{style:{ fontSize:15 }},"Complete the invoice — "+inv.invoice_no),
-        h("span",{style:{ fontSize:11.5, fontWeight:700, borderRadius:10, padding:"2px 9px", background: probs.length ? "#fdecea" : "#dff3ea", color: probs.length ? "#a3312a" : "#0f5b45" }}, probs.length ? probs.length+" to fill" : "Complete")),
-      h("div",{style:{ fontSize:11.5, color:colors.muted, marginTop:2 }}, "What the Order Acceptance does not give. Red must be filled before Ready for IRN. You can change everything here until the IRN goes in; then the invoice is frozen."),
+        strict ? h("span",{style:{ fontSize:11.5, fontWeight:700, borderRadius:10, padding:"2px 9px", background: probs.length ? "#fdecea" : "#dff3ea", color: probs.length ? "#a3312a" : "#0f5b45" }}, probs.length ? probs.length+" to fill" : "Complete")
+          : h("span",{"data-testid":"ic-optional",style:{ fontSize:11.5, fontWeight:700, borderRadius:10, padding:"2px 9px", background:"#eef1f5", color:"#4a5563" }}, "Nothing mandatory yet")),
+      h("div",{style:{ fontSize:11.5, color:colors.muted, marginTop:2 }}, strict ? "Before the IRN every field below is mandatory — red must be filled now. You can change everything here until the IRN goes in; then the invoice is frozen."
+        : "What the Order Acceptance does not give. Fill what you know now and Save — nothing is mandatory while the invoice is a draft. Everything becomes mandatory when you press Ready for IRN."),
       sec(1, "Must enter", ewbNeed ? "Goods over ₹50,000 — the e-way bill needs the distance and the transporter (or the vehicle)." : "No e-way bill needed (services, or under ₹50,000).",
         row(inp("freight_amount","Freight amount ("+String(inv.currency||"INR").toUpperCase()+")",{ req:true, w:150, bad:invIsBlank(f.freight_amount), ph:"0 if none" }),
             inp("insurance_amount","Insurance amount ("+String(inv.currency||"INR").toUpperCase()+")",{ req:true, w:150, bad:invIsBlank(f.insurance_amount), ph:"0 if none" }),
@@ -85421,7 +86728,7 @@ function InvCompleteDialog({ inv, lines, user, me, dcl, canEdit, onClose, onSave
         canEdit ? h("div",{style:{ marginTop:6 }}, h("button",{"data-testid":"ic-refresh",onClick:()=>onRefresh && onRefresh(),style:btnSmall},"Refresh from OA")) : null),
       sec(5, "Locked", null, h("div",{style:{ fontSize:12, color:colors.muted }}, "Prices, quantities, HSN and GST rate (from the contract and the DC) · our GSTIN, bank and LUT (from Settings).")),
       sec(6, "Comes at issue", null, h("div",{style:{ fontSize:12, color:colors.muted }}, "IRN, Ack No / date and the signed QR"+(ewbNeed ? ", and the e-way bill (from the Factory Manager, or automatically with the IRN)" : "")+". The invoice is Issued only when all of them are in.")),
-      probs.length ? h("div",{"data-testid":"ic-probs",style:{ whiteSpace:"pre-wrap", fontSize:12, marginTop:8, padding:"6px 9px", borderRadius:6, background:"#fdecea", color:"#a3312a" }}, "Still to fill:\n• "+probs.filter(x=>!/Press Save/.test(x)).join("\n• ")) : null,
+      strict && probs.length ? h("div",{"data-testid":"ic-probs",style:{ whiteSpace:"pre-wrap", fontSize:12, marginTop:8, padding:"6px 9px", borderRadius:6, background:"#fdecea", color:"#a3312a" }}, "Still to fill:\n• "+probs.filter(x=>!/Press Save/.test(x)).join("\n• ")) : null,
       msg ? h("div",{"data-testid":"ic-msg",style:{ whiteSpace:"pre-wrap", fontSize:12, marginTop:8, padding:"6px 9px", borderRadius:6, background:"#fff4d6", color:"#854f0b" }}, msg) : null,
       h("div",{style:{ display:"flex", gap:8, justifyContent:"flex-end", marginTop:12, flexWrap:"wrap" }},
         h("button",{onClick:onClose,style:btnSecondary},"Close"),
@@ -86416,7 +87723,7 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
   const th = (t,w,al)=> h("th",{style:{textAlign:al||"left",padding:"5px 7px",fontSize:11,color:colors.muted,borderBottom:"2px solid "+colors.dark,width:w}},t);
   const td = (c,al)=> h("td",{style:{padding:"5px 7px",borderBottom:"1px solid "+colors.border,fontSize:12.5,textAlign:al||"left",verticalAlign:"top"}},c);
   const acts = [];
-  const cmpLeft = inv.status==="Draft" ? invCompleteProblems(inv, lines).length : 0;
+  const cmpLeft = 0;   // 2026-11-18T07:00:00Z: no "to fill" count on a draft — the checks come at Ready for IRN
   if(editable){ acts.push(h("button",{key:"cm","data-testid":"inv-complete-btn",onClick:()=>setCmp({}),style:cmpLeft?{...btnPrimary,background:"#c0392b",borderColor:"#c0392b"}:btnSecondary},"Complete the invoice"+(cmpLeft?" ("+cmpLeft+" to fill)":" ✓")));   // 344
     acts.push(h("button",{key:"rf","data-testid":"inv-refresh-oa",onClick:refreshOa,disabled:busy,style:btnSecondary},"Refresh from OA"));
     acts.push(h("button",{key:"s",onClick:()=>save(false),disabled:busy,style:btnSecondary},busy?"Saving…":"Save draft"));
@@ -86525,7 +87832,7 @@ function InvoiceEditor({ user, me, P, invoiceId, onClose, onChanged }){
         h("div",{style:{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}, h("button",{onClick:()=>setIrnDlg(null),style:btnSecondary},"Cancel"), h("button",{"data-testid":"irn-save",onClick:()=>issue(irnDlg),disabled:busy,style:btnPrimary},busy?"Saving…":(ewbNeed && !String(irnDlg.eway_no||"").trim() ? "Save the IRN (e-way bill to follow)" : "Issue the invoice"))))) : null,
     cancelDlg ? h(ReasonDialog,{title:"Record IRN cancellation — "+inv.invoice_no, subtitle:"Cancel the IRN on the IRP first (allowed within 24 hours of issue). This invoice and its number stay as Cancelled; the goods need a new DC.", placeholder:"Why was the IRN cancelled?", okLabel:"Record cancellation", okStyle:{background:colors.danger}, onCancel:()=>setCancelDlg(false), onOk:cancelIssued}) : null,
     gstDialog(),   // 2026-11-08 IRP build
-    cmp ? h(InvCompleteDialog,{ key:"cmp"+inv.id, inv, lines, user, me, dcl, canEdit:editable, startMsg:cmp.msg||"", onClose:()=>setCmp(null), onAmend:amend, onRefresh:refreshOa,
+    cmp ? h(InvCompleteDialog,{ key:"cmp"+inv.id, inv, lines, user, me, dcl, canEdit:editable, startMsg:cmp.msg||"", strict:!!cmp.msg, onClose:()=>setCmp(null), onAmend:amend, onRefresh:refreshOa,
       onSaved:async()=>{ setCmp(null); await load(); onChanged && onChanged(); } }) : null,   // 344
     ovr.length ? h("div",{"data-testid":"inv-ovr",style:{marginTop:14}},h("div",{style:{fontSize:12,fontWeight:700,color:colors.muted}},"Changed from the Order Acceptance (override history)"),
       ovr.map(x=>h("div",{key:x.id,style:{fontSize:11.5,color:colors.muted,padding:"2px 0"}},fmtDMYTime(x.at)+" · "+(x.by_user||"")+" · "+(x.label||x.field)+": "+(x.from_value||"—")+" → "+(x.to_value||"—")+" — "+(x.reason||"")))) : null,
