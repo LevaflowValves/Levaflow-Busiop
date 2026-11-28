@@ -4,6 +4,20 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>BOM Estimator</title>
+<script>
+/* 2026-11-27T10:00:00Z: SERVER CLOCK — the app runs on the server's time, not the computer's. After sign-in (and every 30 min) the app
+   reads the server time (app_now) and sets the difference here; every new Date() / Date.now() in the app then gives server time,
+   so a wrong Windows clock on one computer cannot put wrong times into the data. The last known difference is reused for 12 hours. */
+(function(){ var RD = window.Date, SK = 0;
+  try{ var c = JSON.parse(localStorage.getItem("srv_skew")||"null"); if(c && typeof c.s==="number" && RD.now()-c.at < 12*3600e3) SK = c.s; }catch(e){}
+  function D(){ if(!(this instanceof D)) return new D().toString(); var a = Array.prototype.slice.call(arguments);
+    if(!a.length) return new RD(RD.now()+SK); return new (Function.prototype.bind.apply(RD, [null].concat(a)))(); }
+  D.prototype = RD.prototype; D.now = function(){ return RD.now()+SK; }; D.UTC = RD.UTC; D.parse = RD.parse;
+  try{ Object.setPrototypeOf(D, RD); }catch(e){}
+  window.__RealDate = RD; window.__getSkew = function(){ return SK; };
+  window.__setSkew = function(s){ SK = s; try{ localStorage.setItem("srv_skew", JSON.stringify({ s:s, at:RD.now() })); }catch(e){} };
+  window.Date = D; })();
+</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -60,7 +74,7 @@ td:hover > .hoverPeekPop { display:block; }
 // sessionStorage guard prevents a reload loop if version.txt is ever
 // missing, unreachable, or the network is offline.
 (function(){
-  var APP_BUILD_VERSION = "2026-11-27T07:00:00Z";
+  var APP_BUILD_VERSION = "2026-11-28T05:30:00Z";
   // Published so the app can read it — issue reports record the build they
   // were raised on, which answers a good share of them outright. ONE source:
   // declaring a second copy in the app script would drift on the first build
@@ -2626,7 +2640,8 @@ function LoginScreen({ onLogin }) {
         // 23 Sep — which company's copy this is, so nobody signs in to the
         // wrong one. Blank on Flometriq, where there is no settings.js.
         APP_INSTANCE_LABEL && h("div",{style:{fontSize:13,fontWeight:700,color:colors.text,marginTop:4}},APP_INSTANCE_LABEL),
-        h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:4}},"Authored by K.Bala Boopathy")
+        h("div",{style:{fontSize:11,color:colors.mutedLight,marginTop:4}},"Authored by K.Bala Boopathy"),
+        h(LiveClock,{ big:true })   // 2026-11-27T10:00:00Z
       ),
       outMsg ? h("div",{"data-testid":"login-out-msg",style:{background:"#fff4d6",color:"#5c3d06",borderRadius:6,padding:"7px 10px",fontSize:12.5,marginBottom:14}},outMsg) : null,
       h("form",{onSubmit:submit},
@@ -2845,6 +2860,26 @@ function NotificationBell({ user }){
 // letter. Hover = the same moment in India time. For the first 24 hours this
 // browser sees a version, it turns yellow and says "new today" so staff know
 // the screens may have changed. Super Admins can click it for Version History.
+// 2026-11-27T10:00:00Z: 🕒 live clock in server time — updates its own text once a second, never redraws the screen, sends nothing
+function clkFmt(d){ try{ const p = d.toLocaleString("en-IN",{ timeZone:"Asia/Kolkata", hour:"2-digit", minute:"2-digit", second:"2-digit", hour12:true }).toUpperCase();
+    const q = d.toLocaleDateString("en-GB",{ timeZone:"Asia/Kolkata", day:"2-digit", month:"2-digit", year:"numeric" }).replace(/\//g,"-"); return p+" · "+q; }catch(e){ return d.toString(); } }
+function LiveClock({ big }){
+  const tRef = useRef(null), wRef = useRef(null);
+  useEffect(()=>{ let dead = false;
+    const paint = ()=>{ if(dead || !tRef.current) return; tRef.current.textContent = (big ? "" : "🕒 ") + clkFmt(new Date()) + (CLK.ok ? "" : big ? " (this computer)" : "");
+      if(wRef.current){ const bad = clkBad(); wRef.current.style.display = bad || big ? "" : "none";
+        wRef.current.textContent = bad ? "⚠ This computer's clock is "+clkTxt()+(big ? ". Fix it: right-click the clock › Adjust date and time › Set time automatically › Sync now." : "") : (big && CLK.ok ? "✓ Your computer's clock is right" : "");
+        wRef.current.style.color = bad ? (big ? "#a3312a" : "#ffb4a8") : (big ? "#0f6b4f" : ""); } };
+    clkCheck().then(paint).catch(()=>{}); paint(); const t = setInterval(paint, 1000); return ()=>{ dead = true; clearInterval(t); }; },[]);
+  const fix = ()=>{ alert("This computer's clock is "+clkTxt()+".\n\nThe app uses the server's time, so your work is stamped correctly. Please fix the Windows clock anyway:\n1. Right-click the clock at the bottom-right › Adjust date and time.\n2. Turn ON Set time automatically and Set time zone automatically ((UTC+05:30) Chennai, Kolkata, Mumbai, New Delhi).\n3. Press Sync now."); };
+  return big
+    ? h("div",{"data-testid":"login-clock",style:{marginTop:12,textAlign:"center"}},
+        h("div",{ref:tRef,style:{fontSize:20,fontWeight:700,color:colors.text,fontFamily:"ui-monospace,Consolas,monospace",letterSpacing:".02em"}}),
+        h("div",{style:{fontSize:10.5,color:colors.mutedLight}},"India time (from the server)"),
+        h("div",{ref:wRef,style:{fontSize:11.5,marginTop:4,lineHeight:1.4}}))
+    : h("div",{"data-testid":"top-clock",style:{fontSize:10,color:"#c9cdbf",marginTop:1,fontFamily:"ui-monospace,Consolas,monospace",whiteSpace:"nowrap",display:"flex",gap:6}},
+        h("span",{ref:tRef,title:"India time from the server"}), h("span",{ref:wRef,onClick:fix,title:"Click: how to fix the computer's clock",style:{cursor:"pointer",display:"none"}}));
+}
 function VersionLine({ onOpen }){
   const ver = (typeof window!=="undefined" && window.APP_BUILD_VERSION) || "";
   if(!ver) return null;
@@ -2860,7 +2895,7 @@ function VersionLine({ onOpen }){
   const tip = (ist ? "Saved "+ist+" India time" : "") + (onOpen ? " · click for what changed" : "");
   return h("div",{title:tip,onClick:onOpen||undefined,
     style:{fontSize:10,color:isNew?"#ffe27a":"#c9cdbf",marginTop:2,fontFamily:"ui-monospace,Consolas,monospace",letterSpacing:".02em",cursor:onOpen?"pointer":"default",whiteSpace:"nowrap"}},
-    "Version "+ver+(isNew?" · new today":""));
+    "Version "+ver+(isNew?" · new today":""), h(LiveClock,null));
 }
 
 
@@ -3264,7 +3299,8 @@ function TopBar({ user, sessionCompanyId, sessionCompany, onChangeCompany, onLog
         h("div",{style:{fontWeight:700,fontSize:13,color:"#fff"}},"BOM Estimator"),
         h("div",{style:{fontSize:10,color:"#9a9d8f",marginTop:1}},sessionCompany?.company_name||COMPANY_NAME),
         h(VersionLine,{onOpen:onOpenVersions||null})
-      )
+      ),
+      h(RibbonFind,null)   // 2026-11-27T11:00:00Z: Intelligent build — Contract / Quote boxes and 🔎 Ask
     ),
     h("div",{className:"topbar-user",style:{display:"flex",alignItems:"center",gap:14}},
       onChangeCompany && h("div",{style:{display:"flex",alignItems:"center",gap:6}},
@@ -3279,6 +3315,7 @@ function TopBar({ user, sessionCompanyId, sessionCompany, onChangeCompany, onLog
       h(ApprovalsTopBtn,{user}),   // 2026-11-13T16:30:00Z: ✅ Approvals by category
       h(NotificationBell,{user}),
       h(SweepTopBtn,{user}),   // 2026-11-26T10:00:00Z: 🔄 Refresh data (admins)
+      h(IncidentTopBtn,{user}),   // 2026-11-28T04:00:00Z: 🚨 Incidents — red while one is not seen by the Incident watch
       onFull ? h("button",{onClick:onFull,title:inFull?"Leave full screen (Esc)":"Full screen: hide the Windows taskbar, the browser bars and this ribbon for more room (Esc to leave)",style:{background:"none",border:"1px solid #3a3f33",color:"#fff",padding:"6px 12px",fontSize:12,cursor:"pointer",borderRadius:6}},inFull?"✕ Exit full screen":"⛶ Full screen") : null,   // 225
       onRef ? h("button",{"data-testid":"ref-btn",onClick:onRef,"aria-pressed":!!refOn,title:refOn?"Close the Reference window":"Reference window: keep a scan, bill or PDF open beside this screen",style:{background:refOn?"#0f6b4f":"none",border:"1px solid "+(refOn?"#0f6b4f":"#3a3f33"),color:"#fff",padding:"6px 12px",fontSize:12,cursor:"pointer",borderRadius:6,fontWeight:refOn?700:400}},"📌 Reference") : null,
       onBars ? h("button",{"data-testid":"bars-btn",onClick:onBars,title:barsHidden?"Show the browser tabs, address bar and bookmarks":"Hide the browser tabs, address bar and bookmarks",style:{background:"none",border:"1px solid #3a3f33",color:"#fff",padding:"6px 12px",fontSize:12,cursor:"pointer",borderRadius:6}}, barsHidden?"▾ Show browser bars":"▴ Hide browser bars") : null,
@@ -4056,6 +4093,8 @@ function MenuTabs({ user, active, onChange, onRefresh }) {
     addSub("Accounts", "Billing", { key:"chase_pay", label:"📨 Chase letters — payment" });
     addSub("QC", "Quality", { key:"chase_qc", label:"📨 RFI reminders" });
     addSub("QC", "Quality", { key:"mtc_awaited", label:"🧪 MTC awaited" });   // 2026-11-27T05:00:00Z
+    if(holds("app_support") && !visibleGroups.some(g=>JSON.stringify(g).includes('"sweeps"'))){   // 2026-11-27T10:30:00Z: App support post sees Refresh data & health alarm
+      const tg = ["Admin","Setup","Production","Order Status","Tasks"].find(l=>visibleGroups.some(g=>g.label===l)); if(tg) addSub(tg, "Health", { key:"sweeps", label:"🔄 Refresh data & health alarm" }); }
     if(holds("technical_head") && !visibleGroups.some(g=>JSON.stringify(g).includes('"master_cleanup"'))){   // 2026-11-27T05:00:00Z: the Technical Head post sees Master clean-up even without Setup
       const tg = ["Setup","Production","Order Status"].find(l=>visibleGroups.some(g=>g.label===l)); if(tg) addSub(tg, "Masters", { key:"master_cleanup", label:"🧹 Master clean-up" }); }   // 2026-11-25T02:00:00Z   // 2026-11-23T12:00:00Z
     addSub("Order Status", "Kick-off", { key:"kickoff", label:"🤝 Kick-off meetings" });   // 2026-11-18T13:00:00Z
@@ -7512,7 +7551,36 @@ function UsersEditor({ user }) {
   const load = useCallback(async()=>{ setLoading(true); const {data}=await sb.from("app_users").select("*").order("id"); setRows(data||[]); setLoading(false); },[]);
   useEffect(()=>{load();},[load]);
   useEffect(()=>{ (async()=>{ const {data}=await sb.from("company_master").select("id,company_name").order("company_name"); setCompanies(data||[]); })(); },[]);
-  useEffect(()=>{ sb.from("employee_tbl").select("employee_name").order("employee_name").then(({data})=>setEmployeeOptions((data||[]).map(r=>r.employee_name).filter(Boolean))); },[]);
+  // 2026-11-27T07:30:00Z: every employee (paged — no 1,000-row cut), sorted ignoring case, and a ↻ Refresh button
+  const [empMsg,setEmpMsg]=useState(""); const [refBusy,setRefBusy]=useState(false);
+  const loadEmps = useCallback(async()=>{
+    const data = await fetchPaged(()=>sb.from("employee_tbl").select("employee_name"));
+    const names = Array.from(new Set((data||[]).map(r=>String(r.employee_name||"").trim()).filter(Boolean))).sort((a,b)=>a.localeCompare(b,undefined,{sensitivity:"base"}));
+    setEmployeeOptions(names); return names.length; },[]);
+  useEffect(()=>{ loadEmps(); },[loadEmps]);
+  // 2026-11-27T08:30:00Z: 💬 send the login (username + password) to the employee by WhatsApp — Super Admins only, logged
+  const [waSent,setWaSent]=useState({});   // username -> time sent (cleared by a later password reset)
+  const loadWaSent = useCallback(async()=>{ try{
+      const { data } = await sb.from("audit_log").select("record_id,record_summary,performed_at").eq("table_name","app_users").or("record_summary.ilike.Login details sent by WhatsApp*,record_summary.ilike.Password reset for*").order("performed_at",{ascending:true}).limit(2000);
+      const m = {}; (data||[]).forEach(a=>{ const u = String(a.record_id||""); if(/^Login details sent/i.test(a.record_summary||"")) m[u] = a.performed_at||true; else delete m[u]; }); setWaSent(m);
+    }catch(e){} },[]);
+  useEffect(()=>{ loadWaSent(); },[loadWaSent]);
+  const sendLogin = (r)=>{
+    if(!r.employee_name){ alert("Link "+r.username+" to an employee first (Employee column) — the WhatsApp goes to that employee's mobile."); return; }
+    if(r.is_active===false){ alert(r.username+" is Inactive — reactivate first."); return; }
+    const co = (companies.find(c=>c.id===r.company_id)||{}).company_name || "our company";
+    const link = (()=>{ try{ return window.location.origin + window.location.pathname; }catch(e){ return ""; } })();
+    const first = String(r.employee_name).split(" ")[0];
+    const L = ["Dear "+first+",", "", "Your login for the "+co+" app:"];
+    if(link) L.push("Link: "+link);
+    L.push("Username: "+r.username, "Password: "+(r.password||""), "",
+      "*Do not give your password to anyone.* Everything you do in the app is recorded in your name — if someone else uses your login, it will show as your work.", "",
+      "After you sign in, the app asks whether to save the password on this device — say Yes. Then delete this message.", "", "— "+(user?.employee_name||user?.username||""));
+    waOpen(r.employee_name, L.join(String.fromCharCode(10)), async(how)=>{
+      try{ await logAudit("NOTE","app_users",r.username,"Login details sent by WhatsApp to "+r.employee_name+" ("+how+") by "+(user?.username||""),user?.username||"unknown",null,null); }catch(e){}
+      setWaSent(m=>({ ...m, [r.username]:new Date().toISOString() })); });
+  };
+  const refreshAll = async()=>{ setRefBusy(true); setEmpMsg(""); try{ try{ WA_PH.at = 0; }catch(e){} const n = await loadEmps(); await load(); setEmpMsg("✓ Refreshed — "+n+" employees in the drop-down"); }catch(e){ setEmpMsg("✗ "+(e.message||e)); } setRefBusy(false); };
   const usrPass = r=> fltHas(r.employee_name, uf.emp) && fltHas(r.username, uf.user) && fltHas(r.role, uf.role)
     && (!uf.status || (uf.status==="Inactive" ? r.is_active===false : uf.status==="Active" ? r.is_active!==false : true))
     && fltHas((companies.find(c=>c.id===r.company_id)||{}).company_name, uf.company);   // 261
@@ -7541,6 +7609,7 @@ function UsersEditor({ user }) {
     const { error:err } = await sb.from("app_users").update({password:resetVal}).eq("id",resetTarget.id);
     if(err){ alert("Failed: "+err.message); return; }
     await logAudit("UPDATE","app_users",resetTarget.username,"Password reset for \""+resetTarget.username+"\" by "+(user?.username||"unknown"),user?.username||"unknown",null,null);
+    setWaSent(m=>{ const n = { ...m }; delete n[resetTarget.username]; return n; });   // a new password can be sent again
     setResetTarget(null); setResetVal(""); load();
   };
   const addUser=async()=>{ if(!draft.username.trim()||!draft.password.trim()){alert("Username and password required.");return;} const{error:err}=await sb.from("app_users").insert({username:draft.username.trim(),password:draft.password,role:draft.role,employee_name:draft.employee_name||null}); if(err){alert("Failed: "+err.message);return;} await logAudit("CREATE","app_users",draft.username.trim(),"New user \""+draft.username.trim()+"\" created with role "+draft.role+(draft.employee_name?" for employee \""+draft.employee_name+"\"":"")+" and an initial password set",user?.username||"unknown",null,{username:draft.username.trim(),role:draft.role,employee_name:draft.employee_name}); setAdding(false);setDraft({username:"",password:"",role:"user",employee_name:""});load(); };
@@ -7552,7 +7621,10 @@ function UsersEditor({ user }) {
   return h("div",{style:{padding:"20px 24px"}},
     h("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}},
       h("h2",{style:{margin:0,fontSize:18,fontWeight:700}},"Users"),
-      h("button",{onClick:()=>setAdding(true),style:btnPrimary},"+ Add user")
+      h("div",{style:{display:"flex",gap:8,alignItems:"center"}},
+        empMsg ? h("span",{style:{fontSize:12,color:/^✓/.test(empMsg)?"#0f6b4f":colors.danger}},empMsg) : null,
+        h("button",{"data-testid":"users-refresh",onClick:refreshAll,disabled:refBusy,title:"Read the users and the Employees master again (a new employee shows in the drop-down)",style:btnSecondary},refBusy?"Refreshing…":"↻ Refresh"),
+        h("button",{onClick:()=>setAdding(true),style:btnPrimary},"+ Add user"))
     ),
     adding&&h("div",{style:{display:"flex",gap:8,marginBottom:14,padding:12,background:"#fbf6e8",borderRadius:6,flexWrap:"wrap"}},
       h("input",{placeholder:"Username",value:draft.username,onChange:e=>setDraft(d=>({...d,username:e.target.value})),style:{...inputStyle,width:160}}),
@@ -7588,6 +7660,7 @@ function UsersEditor({ user }) {
           isSuperAdmin
             ? h("select",{value:r.employee_name||"",onChange:e=>setUserEmployee(r.id,e.target.value),style:{...inputStyle,padding:"5px 7px",fontSize:12}},
                 h("option",{value:""},"— none —"),
+                r.employee_name && !employeeOptions.includes(r.employee_name) ? h("option",{value:r.employee_name},r.employee_name+" (not in Employees)") : null,
                 employeeOptions.map(e=>h("option",{key:e,value:e},e))
               )
             : h("span",{style:{fontSize:12,color:colors.muted}},r.employee_name||"— none —")
@@ -7598,7 +7671,10 @@ function UsersEditor({ user }) {
         isSuperAdmin && h("td",{style:{padding:"8px 10px",whiteSpace:"nowrap"}},
           h("span",{style:{fontFamily:"monospace",fontSize:12,marginRight:8}},revealed.has(r.id)?r.password:"••••••••"),
           h("button",{onClick:()=>toggleReveal(r),style:{...btnSmall,fontSize:10.5,padding:"3px 8px",marginRight:4}},revealed.has(r.id)?"Hide":"Show"),
-          h("button",{onClick:()=>startReset(r),style:{...btnSmall,fontSize:10.5,padding:"3px 8px"}},"Reset")
+          h("button",{onClick:()=>startReset(r),style:{...btnSmall,fontSize:10.5,padding:"3px 8px"}},"Reset"),
+          waSent[r.username]
+            ? h("span",{title:"Login sent by WhatsApp"+(typeof waSent[r.username]==="string"?" on "+fmtDMYTime(waSent[r.username]):"")+". Reset the password to send again.",style:{marginLeft:6,fontSize:10.5,fontWeight:700,color:"#0f6b4f"}},"💬 Sent ✓")
+            : h("button",{"data-testid":"user-wa-"+r.username,onClick:()=>sendLogin(r),title:r.employee_name?"WhatsApp the username and password to "+r.employee_name:"Link an employee first",style:{...btnSmall,fontSize:10.5,padding:"3px 8px",marginLeft:4,background:"#25d366",color:"#fff",borderColor:"#25d366",opacity:r.employee_name?1:.5}},"💬 WhatsApp login")
         ),
         isSuperAdmin && h("td",{style:{padding:"8px 10px",whiteSpace:"nowrap"}},
           h("span",{style:{fontSize:10.5,fontWeight:700,padding:"2px 9px",borderRadius:9,background:r.is_active===false?"#fdecea":"#eafaf1",color:r.is_active===false?colors.danger:"#0f6e3f",marginRight:6}},r.is_active===false?"Inactive":"Active"),
@@ -23778,11 +23854,12 @@ function SavedEstimates({ autoFile, user, sessionCompany, openTarget, onConsumed
     (rows||[]).forEach(r=>{
       const eff = r.cost ? r.sale/r.cost : 0;
       const enq = (r.est && r.est.sl_no_in_enq) || r.slNo;
-      const pr = cartSummaryPrinted(c(r.sale), r.qty, cartSummaryPoUnit(r, fx.div, !!o.inr), fx.code);
+      const sx = r.saleX!=null ? r.saleX : r.sale;   // 2026-11-28T05:30:00Z: unit price includes the options, as on the offer
+      const pr = cartSummaryPrinted(c(sx), r.qty, cartSummaryPoUnit(r, fx.div, !!o.inr), fx.code);
       if(o.includeCost){
         body.push([enq, (r.est&&r.est.item)||"", (r.est&&r.est.description)||"",
-                   c(r.cost), Number(eff.toFixed(2)), c(r.sale), pr.unit, r.qty,
-                   c(r.cost*r.qty), c(r.sale*r.qty), pr.total]);
+                   c(r.cost), Number(eff.toFixed(2)), c(sx), pr.unit, r.qty,
+                   c(r.cost*r.qty), c(sx*r.qty), pr.total]);
         if(expand && r.mixed){
           r.groups.forEach(G=>{
             body.push(["", "", "    \u21b3 "+G.name+" ("+G.lines.length+" line"+(G.lines.length>1?"s":"")+")",
@@ -23791,12 +23868,18 @@ function SavedEstimates({ autoFile, user, sessionCompany, openTarget, onConsumed
         }
       } else {
         body.push([enq, (r.est&&r.est.item)||"", (r.est&&r.est.description)||"",
-                   c(r.sale), pr.unit, r.qty, c(r.sale*r.qty), pr.total]);
+                   c(sx), pr.unit, r.qty, c(sx*r.qty), pr.total]);
       }
+      // the options & testing in the price, one line each (always — they are in the customer's price)
+      (r.extras||[]).forEach(x=>{ const t = "    \u21b3 "+x.label+(x.kind==="Testing"?" (testing)":" (option)")+" \u2014 in the unit price";
+        body.push(o.includeCost ? ["", "", t, "", "", c(x.amt/(r.qty||1)), "", "", "", c(x.amt), ""] : ["", "", t, c(x.amt/(r.qty||1)), "", "", c(x.amt), ""]); });
     });
+    const sepT = ((rows&&rows.sepTesting)||[]);
+    sepT.forEach(x=>{ const t = "Testing \u2014 separate line: "+x.label;
+      body.push(o.includeCost ? ["", "", t, "", "", "", "", "", "", c(x.amt), c(x.amt)] : ["", "", t, "", "", "", c(x.amt), c(x.amt)]); });
     const gCost = (rows||[]).reduce((s,r)=>s+r.cost*r.qty,0);
-    const gSale = (rows||[]).reduce((s,r)=>s+r.sale*r.qty,0);
-    const gPrinted = (rows||[]).reduce((s,r)=>s+cartSummaryPrinted(c(r.sale), r.qty, cartSummaryPoUnit(r, fx.div, !!o.inr), fx.code).total, 0);
+    const gSale = (rows||[]).reduce((s,r)=>s+(r.saleX!=null?r.saleX:r.sale)*r.qty,0) + sepT.reduce((a,x)=>a+x.amt,0);
+    const gPrinted = (rows||[]).reduce((s,r)=>s+cartSummaryPrinted(c(r.saleX!=null?r.saleX:r.sale), r.qty, cartSummaryPoUnit(r, fx.div, !!o.inr), fx.code).total, 0) + c(sepT.reduce((a,x)=>a+x.amt,0));
     const foot = o.includeCost
       ? ["","","","","","","","Total "+fx.code, c(gCost), c(gSale), gPrinted]
       : ["","","","","","Total "+fx.code, c(gSale), gPrinted];
@@ -23809,7 +23892,7 @@ function SavedEstimates({ autoFile, user, sessionCompany, openTarget, onConsumed
       sb.from("estimates").select("*").eq("reference_number",quoteRef),
       sb.from("estimate_lines").select("*").eq("reference_number",quoteRef),
     ]);
-    return { ests: e||[], rows: buildCartSummaryRows(e||[], l||[], {}) };
+    return { ests: e||[], rows: buildCartSummaryRows(e||[], l||[], {}, await cartExtrasLoad(quoteRef)) };
   };
 
   const exportCartSummaryExcel = async(quoteRef, ests0, rows0, opts)=>{
@@ -37909,6 +37992,17 @@ function FaqScreen(){
 // Manually maintained — a new entry is added here each time a new Index.html
 // is shipped, alongside the corresponding User Manual update. Super Admin only.
 const VERSION_HISTORY = [
+  { date:"28 Nov 2026", summary:"Built on 2026-11-28T05:30:00Z, on top of 2026-11-28T05:00:00Z. No SQL. CART SUMMARY NOW MATCHES THE OFFER (reported by the Estimation Engineer on FXAD260057): the Options (extra price — PMI, Paint Test, IGC…) and, when the quote's testing is prorata, the testing amounts are now added to each Sl No's unit price, as printed and total — the same way the offer folds them in. Each row shows “incl. options …” under the unit price; opening the row (+) lists every option / test with its per-piece and total amount. Testing set as a separate line of the offer shows as its own row at the bottom, so the grand total equals the offer total. The effective sales factor stays on the BOM only (options and testing are fixed prices a factor can't change) and says so. A PO-priced Sl No still prints its PO price all-in. The Excel and PDF exports carry the same figures and one line per option." },
+  { date:"28 Nov 2026", summary:"Built on 2026-11-28T05:00:00Z, on top of 2026-11-28T04:30:00Z. No SQL. PAYMENT VOUCHER — REMARKS (asked by Accounts): each “Paid to” line of a Payment now has a Remarks box, the same as the Receipt voucher (up to 300 characters, separate from the Narration). It is saved with the line, comes back when the voucher is edited, and shows in the voucher pop-up and the ledger view." },
+  { date:"28 Nov 2026", summary:"Built on 2026-11-28T04:30:00Z, on top of 2026-11-28T04:00:00Z. No SQL. SIRENS PARKED FOR EVERYONE TILL 01-01-2027: no siren sound, no “Needs you now” panel, no siren escalation to the Super Admins and no ⛔ block on new cards. Cards, bells, the boards, My Day and the ✅ Approvals button work as before. From 01-01-2027 the sirens start again by themselves (users signed in from before then get them at their next sign-in); the siren pace and the 3-day block count overdue days from 01-01-2027, so nobody is blocked on the first day for old overdue cards." },
+  { date:"28 Nov 2026", summary:"Built on 2026-11-28T04:00:00Z, on top of 2026-11-28T02:30:00Z. NEEDS SQL: structure_incident_watch_post_2026-11-28.sql (BOTH companies). INCIDENTS: (1) a 🚨 Incidents button on the ribbon for Super Admins and App support — it turns red, with a count, while an incident of the last 7 days has not been seen by Bala Boopathy or Suresh Subramanaiam (the new Incident watch post); it opens every incident with the PDF report, who saw it and what was done. (2) The incident pop-up now shows only to the Incident watch holders (Bala Boopathy, Suresh Subramanaiam) — no longer to every Super Admin. (3) In the Incidents list they mark an incident seen only after writing what was done (red asterisk); that is kept on the incident and in the audit log. Until the SQL is run, the pop-up goes to the Super Admins and App support as before." },
+  { date:"28 Nov 2026", summary:"Built on 2026-11-28T02:30:00Z, on top of 2026-11-27T11:00:00Z. No SQL. MTC AWAITED — QC OWNER (asked by the QC Manager): (1) a QC owner column and a “QC owner: all” filter (with “No QC owner set”) on Stores / Purchase / QC › MTC awaited, also in the Excel export; the QC owner is the one set for the contract in QC › QC owners. (2) The QC owner of the contract now gets the MTC awaited card too, next to the purchase owner, the Purchase Manager and the QC Manager — the card tells him he is the QC owner, that inspection can go ahead but the material can't be cleared for the dossier without the MTC, and to follow up the purchase owner. Lines that were already awaited get their QC owner cards the first time the MTC awaited screen is opened (then at most every half hour); when the QC owner of a contract is changed, the new owner gets the cards and the old owner's cards close." },
+  { date:"27 Nov 2026", summary:"Built on 2026-11-27T11:00:00Z, on top of 2026-11-27T10:30:00Z. No SQL needed for Version A. STEP LABELS (Order Status › Steps & action): every step carries a status word — DONE (date, by whom, on time / late), PENDING (with whom by name and post · since · due), OVERDUE (red, working days late), NOT STARTED (post and the names holding it · waiting for step N), ON HOLD (clock paused since …). Steps not yet done read as a noun (e.g. “Work order release · NOT STARTED”), no past tense. A strip on top: delivery clock in words (not started / running, days left / paused since), now with (names, post, step, days), promised delivery. INTELLIGENT BUILD: (1) Ribbon — a Contract box (Contract – Quote – Customer) and a Quote box; a pick opens Contract insights. (2) Contract insights — where it is now with the steps, Money (Accounts people only see amounts), Documents (GAD, ITP, Full Hold), Production & QC (PO, serials, DC, despatch), Open with people — each with a button to the screen, already filtered to the contract. (3) 🔎 Ask (Ctrl K) — type a question in plain words; Version A (rules) finds the contract / quote / customer and the topic (PI, invoice, payment, DC, despatch, GAD, ITP, documents, PO, MTC, stage, serials, delivery, OA, quote), answers in one line, shows how it understood the question and offers the screen. Version B (AI) is set up but PARKED until a Super Admin marks it live from the Ask window (needs the Edge Function ask-ai — see the ReadMe). (4) Accounts › Ageing & PIs due — Contract Number filter (blue, predictive, only contracts with money not received): takes you to the row and highlights it; a contract not there gets a message saying why." },
+  { date:"27 Nov 2026", summary:"Built on 2026-11-27T10:30:00Z, on top of 2026-11-27T10:00:00Z. SQL: structure_app_support_post_2026-11-27.sql (both companies). (1) DC SERIALS: a DC takes only serials the Serial Number Register has given — the free pick / typed serial from the 7-11 DC build is closed (the register and DCs were reconciled on 27-11 with the punched serials). Excel-loaded (legacy) contracts: any free register serial of the contract; app-given: by spec, one per piece. (2) APP SUPPORT POST (holder: Suresh Suramaniam): gets the health-watch messages exactly like the Super Admins (pop-up, incident report PDF, I've seen it — silent), and Admin › Health › 🔄 Refresh data & health alarm to re-run a failed sweep. No Super Admin powers, approvals or codes." },
+  { date:"27 Nov 2026", summary:"Built on 2026-11-27T10:00:00Z (replaces 09:00 and 09:30, not deployed), on top of 2026-11-27T08:30:00Z. SERVER CLOCK: the app runs on the server's time — at sign-in and every 30 min it reads app_now and corrects every date and time the app uses, so a wrong Windows clock on one computer cannot put wrong times into the data (no PDF block; a gentle reminder every 4 hours to fix the Windows clock). LIVE CLOCK: 🕒 on the login screen (large, with ✓ right / ⚠ wrong and how to fix) and in the top bar under the version on every screen (turns red when the computer is off; click for the fix) — it updates its own text once a second, never redraws the screen and sends nothing to the server. ALSO FROM 09:00: SQL: structure_clock_guard_2026-11-27.sql (both companies). After the 27-11 12:24 runaway-load alarm on Production review: (1) the alarm now needs two busy minutes in a row — one heavy action (opening a big screen, ↻ Refresh, switching company) is a burst, not a loop; the report now lists the screens visited in the last 3 minutes. (2) CLOCK GUARD: Mokesh's computer clock was hours ahead and stamped every background sweep in the future, so no other browser ran them. The app now reads the server time (app_now); a computer more than 5 minutes off runs no sweeps, its user gets a message to fix the Windows clock and the Super Admins an incident; sweep times are written in server time; a sweep stamped in the future is treated as due. The SQL also resets the future stamps." },
+  { date:"27 Nov 2026", summary:"Built on 2026-11-27T08:30:00Z, on top of 2026-11-27T08:00:00Z. No SQL. ADMIN › USERS: 💬 WhatsApp login on every row (Super Admins only) — a ready message to the linked employee with the app link, username and password, and: do not give your password to anyone; everything you do in the app is recorded in your name, so if someone else uses your login it shows as your work; say Yes to save the password on the device, then delete the message. The mobile comes from Employees (asked once and saved if missing). Every send is in the audit log; the row then shows 💬 Sent ✓ until the password is reset. Needs a linked employee; not for Inactive users." },
+  { date:"27 Nov 2026", summary:"Built on 2026-11-27T08:00:00Z, on top of 2026-11-27T07:30:00Z. No SQL. NO SIRENS FOR SUPER ADMINS, PERMANENTLY: no approvals siren (approvals stay on the ✅ Approvals button and the board), no stage-move or overdue siren, no master-stall siren; the health-watch alarm (database failing) is now a plain message — no sound, no blinking; every sound in the app is silent in a Super Admin session. The 🔔 panel shows a Super Admin only the monthly rate review, silently. Everyone else is as in 07:00." },
+  { date:"27 Nov 2026", summary:"Built on 2026-11-27T07:30:00Z, on top of 2026-11-27T07:00:00Z. No SQL. ADMIN › USERS: ↻ Refresh button — reads the users and the Employees master again, says how many employees are in the drop-down. The Employee drop-down now reads every employee (it stopped at 1,000 rows before) and sorts ignoring capitals (a name typed in small letters went to the end of the list). A user linked to a name that is not in Employees shows it as “(not in Employees)” instead of a blank." },
   { date:"27 Nov 2026", summary:"Built on 2026-11-27T07:00:00Z, on top of 2026-11-27T05:00:00Z (SIREN build). No SQL. SUPER ADMINS: the siren sounds only for approvals waiting on them (hourly, every 30 min from 2 days old, every 10 min from 3 days); no stage-move or overdue siren, no master-stall stop; the monthly rate review still shows in the panel but does not sound. 💬 WHATSAPP on every line of the 🔔 panel to the department head of that card (a head's own lines go to a Super Admin); lines that go to the same person make ONE message with all of them, and the send is logged on the cards. ⏰ POSTPONE 1 HR (3 times a day, logged) and – minimise; there is no close. ESCALATION after the 3 days of sirens: the block on new task cards starts and the Super Admins get a bell (once a day per person); the block box has a Siren release code field (24 hours, once, for that person) and Ask a Super Admin. Admin › Health › 🚨 Siren escalations (Super Admins): who is past 3 days, their oldest card, Make a Siren release code (sent to the person's bell)." },
   { date:"27 Nov 2026", summary:"Built on 2026-11-27T05:00:00Z, on top of 2026-11-27T03:00:00Z (GRN build). SQL: structure_grn_build_2026-11-27.sql (both companies). GRN LINE FROM THE PO LINE: a PO line with no Shape / Spec / Grade cannot be received — Stores asks the purchase owner with one press (card + bell, 1 working day); once filled the GRN line takes the masters. ONE TAG PER PIECE for every shape stocked in metres (pipe, bar, angle, flat, channel…): pieces + length of each, stock in metres; a PO line in Nos gives pieces = qty; Heat No once for the line with “Same heat for all pieces”, or one per piece. MTC AWAITED: tick it when the PO asks for an MTC and it did not come — the GRN is not blocked; cards to the purchase owner, the Purchase Manager post and the QC Manager post (🧪 MTC awaited list on their boards); QC may inspect; chase letter to the vendor (WhatsApp / email / copy, logged); cards close when Stores enters the MTC No. From 01-01-2027 such stock is in Suspense — not free, cannot be issued. REPORT 🧪 MTC awaited in Purchase, Stores and QC: date range, vendor, purchase owner, contract, status, days waiting, chase count, export. 🧹 MASTER CLEAN-UP (Setup › Raw material, Technical Head post): an Excel-like grid of near-duplicate specs / grades with how many PO lines use each — Keep this / Not a duplicate / note; the merge SQL applies the choices." },
   { date:"27 Nov 2026", summary:"Built on 2026-11-27T03:00:00Z, on top of 2026-11-26T18:00:00Z. SQL: structure_oa_gstin_2026-11-27.sql (both companies). GSTINS ON THE OA (after the Praxair Durgapur invoice FFI/0111/26-27 showed a Karnataka GSTIN under a West Bengal Bill To): ✎ EDIT BILLING / SHIPPING ADDRESS now holds a Bill-to GSTIN * (the buyer — tax, place of supply and e-invoice buyer follow it) and a Ship-to GSTIN * asked every time the shipping address is entered or changed, with a Site not registered tick. Known GSTINs of the customer are one-click picks; each is checked against its own address state (state name, else PIN). A mismatch never blocks Save — it needs a reason, kept in the history; a blue note explains bill to / ship to. The Accounts post changes everything any time, no code. Drafts take the new GSTINs by themselves. The ONLY hard stop: Ready for IRN on a tax invoice whose buyer GSTIN and Bill To are in different states — red box with 5 steps. Ship-to GSTIN prints under Deliver To (DC, tax invoice) and goes into the e-invoice Ship To. NEW Sales › Registers › Address & GSTIN changes (also from the OA) lists every change across all orders." },
@@ -49263,7 +49357,7 @@ function PurInsightsScreen({ user, onOpenGantt }){
 }
 // ---- 147: PROCUREMENT LIST (Purchase → Procurement list) — every contract's plan in one table --------------------
 function ProcListScreen({ user, onOpenCard, onOpenGantt }){
-  const [cfx,setCfx] = useState("");   // 2026-11-06 contract lookup
+  const [cfx,setCfx] = useState(()=>askPreTake());   // 2026-11-06 contract lookup
   const today = pgToday();
   const [rows,setRows] = useState(null);
   const [me,setMe] = useState("");
@@ -50933,7 +51027,7 @@ function QrPeriodButtons({ from, to, onPick }){
     h("button",{onClick:()=>onPick("",""),style:{border:"1px solid "+colors.border,background:"#fff",borderRadius:16,padding:"5px 12px",fontSize:12.5,cursor:"pointer",color:colors.muted}},"All dates"));
 }
 function OrdersReceivedList({ onOpenContract, user }){
-  const [cfx,setCfx] = useState("");   // 2026-11-06 contract lookup
+  const [cfx,setCfx] = useState(()=>askPreTake());   // 2026-11-06 contract lookup
   const saved = (()=>{ try{ return JSON.parse(localStorage.getItem("qrep_orders")||"null"); }catch(e){ return null; } })();
   const d0 = saved && saved.from!==undefined ? [saved.from, saved.to] : qrPeriod("lw");
   const [from,setFrom] = useState(d0[0]); const [to,setTo] = useState(d0[1]);
@@ -58562,7 +58656,19 @@ function computeSalesPrice(cost, sf){
 --------------------------------------------------------------------- */
 const CART_SUMMARY_OTHERS = "Others";
 
-function buildCartSummaryRows(ests, lines, staged){
+// 2026-11-28T05:30:00Z: the Options (extra price) and Testing of each Sl No — the amounts the offer folds into a Sl No's price
+// (computeSlNoPricing) and Cart Summary used to leave out. X = { sl:[{item_sl_no,label,price,kind}], mode, global:[{test_name,rate}] }
+async function cartExtrasLoad(ref){
+  const safe = async(q)=>{ try{ const r = await q; return r.error ? [] : (r.data||[]); }catch(e){ return []; } };
+  const [ex, te, gl, md] = await Promise.all([ safe(sb.from("quote_sl_extra_price_tbl").select("item_sl_no,label,price").eq("reference_number",ref)),
+    safe(sb.from("quote_sl_testing_tbl").select("item_sl_no,test_name,price").eq("reference_number",ref)),
+    safe(sb.from("quote_global_testing_tbl").select("test_name,rate").eq("reference_number",ref)),
+    safe(sb.from("quote_testing_mode_tbl").select("mode").eq("reference_number",ref).limit(1)) ]);
+  return { sl:[ ...ex.map(x=>({ item_sl_no:String(x.item_sl_no), label:x.label||"Option", price:Number(x.price)||0, kind:"Option" })),
+                ...te.map(x=>({ item_sl_no:String(x.item_sl_no), label:x.test_name||"Testing", price:Number(x.price)||0, kind:"Testing" })) ],
+    global:gl.map(g=>({ test_name:g.test_name||"Testing", rate:Number(g.rate)||0 })), mode:(md[0] && md[0].mode) || "separate" };
+}
+function buildCartSummaryRows(ests, lines, staged, X){
   staged = staged || {};
   const bySl = new Map();
   (ests||[]).forEach(e=>bySl.set(String(e.item_sl_no), {est:e, lines:[]}));
@@ -58600,6 +58706,28 @@ function buildCartSummaryRows(ests, lines, staged){
               mixed: gl.length>1, lost, lineCount:v.lines.length});
   });
   sortCartSummaryRows(out);
+  // 2026-11-28T05:30:00Z: Options & testing, exactly as the offer counts them. Options always fold into the Sl No's price;
+  // per-Sl testing and global testing fold in only when the testing mode is "prorata" (global shared by value);
+  // otherwise testing is a separate line of the offer. A PO-priced Sl No prints its PO price all-in, so nothing is added to it.
+  X = X || { sl:[], global:[], mode:"separate" }; const pro = X.mode==="prorata";
+  const isPo = (r)=>{ try{ return poUnitPriceInr(r.est)!==null; }catch(e){ return false; } };
+  const weight = (r)=>{ try{ const po = poUnitPriceInr(r.est); return po!==null ? po*r.qty : r.sale*r.qty; }catch(e){ return r.sale*r.qty; } };
+  const totW = out.reduce((a,r)=>a+weight(r),0) || 1;
+  const sep = [];
+  out.forEach(r=>{
+    const mine = (X.sl||[]).filter(x=>x.item_sl_no===String(r.slNo));
+    let ex = [];
+    if(isPo(r)){ r.extrasInPo = mine.filter(x=>x.kind==="Option" || pro).length; }
+    else {
+      ex = mine.filter(x=>x.kind==="Option" || pro).map(x=>({ label:x.label, kind:x.kind, amt:x.price }));
+      if(pro && (X.global||[]).length){ const sh = weight(r)/totW; const names = Array.from(new Set(X.global.map(g=>g.test_name)));
+        names.forEach(n=>{ const amt = X.global.filter(g=>g.test_name===n).reduce((a,g)=>a+g.rate,0)*sh; if(amt) ex.push({ label:n+" (share)", kind:"Testing", amt }); }); }
+    }
+    if(!pro) mine.filter(x=>x.kind==="Testing").forEach(x=>sep.push({ label:"Sl No "+((r.est&&r.est.sl_no_in_enq)||r.slNo)+" — "+x.label, amt:x.price }));
+    r.extras = ex; r.ext = ex.reduce((a,x)=>a+x.amt,0); r.extU = r.qty ? r.ext/r.qty : r.ext; r.saleX = r.sale + r.extU;
+  });
+  if(!pro) (X.global||[]).forEach(g=>sep.push({ label:g.test_name, amt:g.rate }));
+  out.sepTesting = sep.filter(x=>x.amt);
   return out;
 }
 
@@ -58721,6 +58849,7 @@ function CartSummaryScreen({ user, quoteRef, exportCartSummaryExcel, exportCartS
   const [includeCost,setIncludeCost] = useState(true);
   const [expandAll,setExpandAll] = useState(false);
   const [exporting,setExporting] = useState("");
+  const [xtra,setXtra] = useState(null);   // 2026-11-28T05:30:00Z: options & testing
 
   // One label, from the shared builder, so the screen and the exports
   // cannot end up calling the base group different things.
@@ -58734,13 +58863,14 @@ function CartSummaryScreen({ user, quoteRef, exportCartSummaryExcel, exportCartS
   const load = useCallback(async()=>{
     if(!quoteRef){ setLoading(false); return; }
     setLoading(true);
-    const [{data:e},{data:l},{data:holders},{data:emp}] = await Promise.all([
+    const [{data:e},{data:l},{data:holders},{data:emp},X] = await Promise.all([
       sb.from("estimates").select("*").eq("reference_number",quoteRef),
       sb.from("estimate_lines").select("*").eq("reference_number",quoteRef),
       sb.from("post_holder_tbl").select("employee_name").eq("post_key","sales_head"),
       sb.from("employee_tbl").select("employee_name").eq("app_user_id",user?.id||"").maybeSingle(),
+      cartExtrasLoad(quoteRef),
     ]);
-    setEsts(e||[]); setLines(l||[]);
+    setEsts(e||[]); setLines(l||[]); setXtra(X);
     const me = emp && emp.employee_name;
     setSalesHead(!!me && (holders||[]).some(h=>h.employee_name===me));
     setStaged({}); setLoading(false);
@@ -58750,19 +58880,23 @@ function CartSummaryScreen({ user, quoteRef, exportCartSummaryExcel, exportCartS
   // Grouping, the orphan guard and the sort all live in the shared
   // top-level builder so the exports below produce the same rows as this
   // table. See buildCartSummaryRows.
-  const rows = useMemo(()=>buildCartSummaryRows(ests, lines, staged),[ests,lines,staged]);
+  const rows = useMemo(()=>buildCartSummaryRows(ests, lines, staged, xtra),[ests,lines,staged,xtra]);
 
   const fxInfo = useMemo(()=>cartSummaryFx(ests, showInr),[ests,showInr]);
   const conv = (v)=> (Number(v)||0) / (fxInfo.div||1);
 
   const gCost = rows.reduce((s,r)=>s+r.cost*r.qty,0);
-  const gSale = rows.reduce((s,r)=>s+r.sale*r.qty,0);
+  // 2026-11-28T05:30:00Z: the factor stays on the BOM (options & testing are fixed prices a factor can't change); the totals carry them
+  const gSaleBom = rows.reduce((s,r)=>s+r.sale*r.qty,0);
+  const sepT = (rows.sepTesting||[]).reduce((a,x)=>a+x.amt,0);
+  const gSale = rows.reduce((s,r)=>s+r.saleX*r.qty,0) + sepT;
+  const gPrintedBom = rows.reduce((s,r)=>s+cartSummaryPrinted((Number(r.sale)||0)/(cartSummaryFx(ests,showInr).div||1), r.qty, cartSummaryPoUnit(r, cartSummaryFx(ests,showInr).div, showInr), cartSummaryFx(ests,showInr).code).total, 0);
   // Sum of what the offer will actually print, in the display currency.
-  const gPrinted = rows.reduce((s,r)=>s+cartSummaryPrinted((Number(r.sale)||0)/(cartSummaryFx(ests,showInr).div||1), r.qty, cartSummaryPoUnit(r, cartSummaryFx(ests,showInr).div, showInr), cartSummaryFx(ests,showInr).code).total, 0);
+  const gPrinted = rows.reduce((s,r)=>s+cartSummaryPrinted((Number(r.saleX)||0)/(cartSummaryFx(ests,showInr).div||1), r.qty, cartSummaryPoUnit(r, cartSummaryFx(ests,showInr).div, showInr), cartSummaryFx(ests,showInr).code).total, 0) + sepT/(cartSummaryFx(ests,showInr).div||1);
   // The factor actually achieved once the offer rounds. Cost converted to
   // the same currency so the ratio is comparable.
   const gCostDisp = gCost / (cartSummaryFx(ests,showInr).div||1);
-  const effPrinted = gCostDisp ? gPrinted/gCostDisp : 0;
+  const effPrinted = gCostDisp ? gPrintedBom/gCostDisp : 0;
   const dirty = Object.keys(staged).length>0;
   // The effective factor is a RATIO, so it is identical in either
   // currency — deliberately computed off the rupee figures so switching
@@ -58837,8 +58971,8 @@ function CartSummaryScreen({ user, quoteRef, exportCartSummaryExcel, exportCartS
     h("div",{style:{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap",padding:"9px 12px",
         background:"#f4f2ea",borderRadius:6,marginBottom:12}},
       h("span",{style:{fontSize:12.5}},"Effective sales factor ",
-        h("b",{style:{fontSize:15}}, gCost? (gSale/gCost).toFixed(2) : "\u2014")),
-      h("span",{style:{fontSize:11.5,color:colors.mutedLight}},"total sale \u00f7 total cost, whole sheet"),
+        h("b",{style:{fontSize:15}}, gCost? (gSaleBom/gCost).toFixed(2) : "\u2014")),
+      h("span",{style:{fontSize:11.5,color:colors.mutedLight}},"BOM sale \u00f7 BOM cost, whole sheet \u00b7 options & testing not counted"),
       // What the factor actually comes to once the offer rounds each unit
       // price to the nearest 5. Shown only when it differs, so it is a
       // signal rather than clutter.
@@ -58898,10 +59032,11 @@ function CartSummaryScreen({ user, quoteRef, exportCartSummaryExcel, exportCartS
         h("tbody",null, rows.flatMap(r=>{
           const eff = r.cost ? r.sale/r.cost : 0;
           // Rounded AFTER conversion, exactly where the Offer PDF rounds.
-          const pr = cartSummaryPrinted(conv(r.sale), r.qty, cartSummaryPoUnit(r, fxInfo.div, showInr), fxInfo.code);
+          const pr = cartSummaryPrinted(conv(r.saleX), r.qty, cartSummaryPoUnit(r, fxInfo.div, showInr), fxInfo.code);
+          const hasX = (r.extras||[]).length>0;
           const main = h("tr",{key:r.slNo,style:{borderBottom:"1px solid "+colors.border}},
             h("td",{style:{padding:"8px 5px"}},
-              r.mixed
+              (r.mixed || hasX)
                 ? h("button",{onClick:()=>setOpen(o=>({...o,[r.slNo]:!o[r.slNo]})),style:{...btnSmall,fontSize:11,padding:"1px 7px"}},open[r.slNo]?"\u2212":"+")
                 : h("span",{title:"single factor \u2014 nothing to open",style:{color:colors.mutedLight,cursor:"help"}},"\u00b7")),
             h("td",{style:{padding:"8px 6px"}},r.est?.sl_no_in_enq||r.slNo),
@@ -58912,11 +59047,13 @@ function CartSummaryScreen({ user, quoteRef, exportCartSummaryExcel, exportCartS
                 style:{marginLeft:6,fontSize:10.5,background:"#fdecea",color:"#a32b1c",padding:"1px 7px",borderRadius:9}},"grouping gap"):null),
             includeCost?h("td",{key:"uc",style:{padding:"8px 6px",textAlign:"right"}},fmtC(r.cost)):null,
             includeCost?h("td",{key:"sf",style:{padding:"8px 6px",textAlign:"right",fontStyle:r.mixed?"italic":"normal"}},eff.toFixed(2)+(r.mixed?" *":"")):null,
-            h("td",{style:{padding:"8px 6px",textAlign:"right"}},fmtC(r.sale)),
+            h("td",{style:{padding:"8px 6px",textAlign:"right"}},fmtC(r.saleX),
+              hasX ? h("div",{"data-testid":"cart-xtra",style:{fontSize:10.5,color:"#0f5f4a",whiteSpace:"nowrap"}},"incl. options "+fmtC(r.extU)) : null,
+              r.extrasInPo ? h("div",{style:{fontSize:10.5,color:colors.mutedLight,whiteSpace:"nowrap"}},"options in the PO price") : null),
             h("td",{style:{padding:"8px 6px",textAlign:"right",color:colors.muted}},fmtPrinted(pr.unit)),
             h("td",{style:{padding:"8px 6px",textAlign:"right"}},r.qty),
             includeCost?h("td",{key:"tc",style:{padding:"8px 6px",textAlign:"right"}},fmtC(r.cost*r.qty)):null,
-            h("td",{style:{padding:"8px 6px",textAlign:"right"}},fmtC(r.sale*r.qty)),
+            h("td",{style:{padding:"8px 6px",textAlign:"right"}},fmtC(r.saleX*r.qty)),
             h("td",{style:{padding:"8px 6px",textAlign:"right",color:colors.muted}},fmtPrinted(pr.total)));
           if(!(open[r.slNo]||expandAll)) return [main];
           const det = h("tr",{key:r.slNo+"-d",style:{background:"#faf9f4"}},
@@ -58927,9 +59064,19 @@ function CartSummaryScreen({ user, quoteRef, exportCartSummaryExcel, exportCartS
                   h("span",{style:{flex:1,fontSize:12,color:G.name===OTHERS?colors.text:"#854f0b"}},
                     G.name, h("span",{style:{color:colors.mutedLight,fontSize:11}}," ("+G.lines.length+")")),
                   h("span",{style:{fontSize:12,width:44,textAlign:"right"}},Number(G.sf).toFixed(2)),
-                  canEditSf?h("button",{onClick:()=>openEdit(r,G),style:{...btnSmall,fontSize:11,padding:"2px 9px"}},"Edit"):null)))));
+                  canEditSf?h("button",{onClick:()=>openEdit(r,G),style:{...btnSmall,fontSize:11,padding:"2px 9px"}},"Edit"):null)),
+                hasX ? h("div",{style:{borderTop:"1px solid "+colors.border,paddingTop:6,marginTop:2}},
+                  h("div",{style:{fontSize:12,color:"#0f5f4a",fontWeight:600,marginBottom:3}},"Options & testing ",h("span",{style:{fontWeight:400,color:colors.mutedLight,fontSize:11}},"(fixed prices — no sales factor)")),
+                  r.extras.map((x,i)=>h("div",{key:i,style:{display:"flex",gap:10,fontSize:12}},
+                    h("span",{style:{flex:1}},x.label+(x.kind==="Testing"?" · testing":"")),
+                    h("span",{style:{width:110,textAlign:"right"}},fmtC(x.amt/(r.qty||1))+" /pc"),
+                    h("span",{style:{width:110,textAlign:"right",color:colors.muted}},fmtC(x.amt)+" total")))) : null)));
           return [main,det];
-        })),
+        }).concat((rows.sepTesting||[]).map((x,i)=>h("tr",{key:"sep"+i,"data-testid":"cart-sep-testing",style:{borderBottom:"1px solid "+colors.border,background:"#f6fbf9"}},
+            h("td",null), h("td",{colSpan:includeCost?8:6,style:{padding:"7px 6px",fontSize:12}},"Testing — separate line of the offer: "+x.label),
+            includeCost?h("td",null):null,
+            h("td",{style:{padding:"7px 6px",textAlign:"right"}},fmtC(x.amt)),
+            h("td",{style:{padding:"7px 6px",textAlign:"right",color:colors.muted}},fmtPrinted(conv(x.amt))))))),
         h("tfoot",null,h("tr",{style:{fontWeight:700,borderTop:"2px solid "+colors.border}},
           h("td",null),
           h("td",{colSpan:includeCost?8:6,style:{padding:"9px 6px"}},"Total "+fxInfo.code),
@@ -61759,6 +61906,8 @@ function App() {
     try{ const raw=sessionStorage.getItem("flometriq_user"); return raw?JSON.parse(raw):null; } catch(e){ return null; }
   });
   const [tab,setTab]=useState("home");
+  useEffect(()=>{ window.__curTab = tab; },[tab]);   // 2026-11-27T11:00:00Z: Ask knows which screen is open
+  if(window.__curTab !== tab){ try{ (window.__tabTrail = window.__tabTrail || []).push({ tab, at:Date.now() }); if(window.__tabTrail.length>20) window.__tabTrail.shift(); }catch(e){} }   // 2026-11-27T09:00:00Z: screens visited, for the incident report
   window.__curTab = tab; window.__svUser = user && user.username;   // 2026-11-13T00:00: the stale gate knows a quote PDF from an order-side one
   // 225: Full screen — the browser goes full screen (Windows taskbar and browser bars hidden) and the app's top bar and menu fold away
   const [focusMode,setFocusMode]=useState(false); const [focusMenu,setFocusMenu]=useState(false);
@@ -62240,7 +62389,7 @@ function App() {
       else if(k==="quotes") setShowDraftPanel(true); else if(k==="orders"){ window.__osMine = true; pickTab("order_board"); } else if(k==="wo") pickTab("wo_pending");
       else if(k==="docs") pickTab("doc_board"); else if(k==="pur" || k==="acc") pickTab("pending_actions");
       else if(k==="bell"){ setTimeout(()=>{ const b = document.querySelector('[data-testid="bell"]'); if(b) b.click(); }, 60); } } }),
-    h(WaNoteHost,{user}), h(WaPickHost,{user}),   // 2026-11-16T08:00:00Z · 09:00 many
+    h(WaNoteHost,{user}), h(WaPickHost,{user}), h(AskHost,{user}),   // 2026-11-16T08:00:00Z · 09:00 many
     h(CtNavOnce,{setTab,openContract}),   // 19 Oct: the contract hold tag can open the Order Acceptance
     showDraftPanel && h(DraftOfferReminder,{user,onDone:()=>{ setShowDraftPanel(false); refreshDraftCount(); }}),
     showSignatoryNoticesPopup && h(SignatoryOverrideNoticesPopup,{notices:signatoryNotices,onAcknowledgeOne:acknowledgeSignatoryNotice,onAcknowledgeAll:acknowledgeAllSignatoryNotices,onClose:()=>setShowSignatoryNoticesPopup(false)}),
@@ -62397,6 +62546,7 @@ function App() {
     tab==="purchase_rules"?h(PurchaseRulesScreen,{user:uTab}):   // 247
     tab==="bill_register"?h(BillRegisterScreen,{user:uTab}):   // 212
     tab==="bill_ageing"?h(BillAgeingScreen,{user:uTab}):   // 2026-11-21T04:00:00Z
+    tab==="contract_insights"?h(ContractInsightsScreen,{user:uTab}):   // 2026-11-27T11:00:00Z: Intelligent build
     tab==="proforma_invoices"?h(ProformaScreen,{user:uTab}):
     tab==="legacy_proforma"?h(LegacyProformaScreen,{user:uTab}):
     tab==="period_reports"?h(PeriodReportsScreen,{user:uTab}):   // 148
@@ -64756,7 +64906,7 @@ function OrgChartScreen({ user, onOpenTab }){
     rr && ed ? rrDlg() : null);
 }
 function PurchaseRegisterScreen({ user }){
-  const [cfx,setCfx] = useState("");   // 2026-11-06 contract lookup
+  const [cfx,setCfx] = useState(()=>askPreTake());   // 2026-11-06 contract lookup
   const [P,setP] = useState(null); const [L,setL] = useState({}); const [err,setErr] = useState(""); const [who,setWho] = useState(null);
   const [fy,setFy] = useState(()=>{ try{ return localStorage.getItem("pr_fy")||purFy(toISODate(new Date())); }catch(e){ return purFy(toISODate(new Date())); } });
   const [st,setSt] = useState("All"); const [src,setSrc] = useState("All"); const [kind,setKind] = useState("All"); const [q,setQ] = useState("");
@@ -66130,21 +66280,52 @@ async function grnAskPoFill(po, pl, grn, by){
   try{ await logAudit("INSERT","task_tbl",ref,"PO line fill asked by Stores for GRN "+(grn?grn.grn_no:""),by); }catch(e){}
   return who;
 }
-// MTC awaited → one card each for the purchase owner, the Purchase Manager post and the QC Manager post (MTC awaited list)
-async function mtcCardsMake({ grn, line, po, by }){
+// 2026-11-28T02:30:00Z: the QC owner of the contract(s) on the PO (contract_owner_tbl.qc_owner) — Thangam: "QC Owner provision not available"
+const mtcCts = (ref)=> Array.from(new Set(String(ref||"").match(/\b\d{6}\b/g)||[]));
+async function mtcQcOwners(cns){ const out = {}; cns = Array.from(new Set((cns||[]).map(String).filter(Boolean)));
+  for(let i=0;i<cns.length;i+=150){ try{ const { data } = await sb.from("contract_owner_tbl").select("contract_number,qc_owner").in("contract_number",cns.slice(i,i+150)); (data||[]).forEach(o=>{ if(o.qc_owner) out[String(o.contract_number)] = o.qc_owner; }); }catch(e){} }
+  return out; }
+// MTC awaited → one card each for the purchase owner, the QC owner of the contract, the Purchase Manager post and the QC Manager post (MTC awaited list)
+async function mtcCardsMake({ grn, line, po, by, qcMap }){
   await loadPostPeople();
   const owner = (po && po.owner_name) || "";
-  const people = Array.from(new Set([owner, ...postHolders("purchase_manager"), ...postHolders("qc")].filter(Boolean)));
+  const cts = mtcCts(po && po.contract_ref); const qm = qcMap || await mtcQcOwners(cts);
+  const qcOwn = Array.from(new Set(cts.map(c=>qm[c]).filter(Boolean)));
+  const people = Array.from(new Set([owner, ...qcOwn, ...postHolders("purchase_manager"), ...postHolders("qc")].filter(Boolean)));
   if(!people.length) return;
   const { data: ex } = await sb.from("task_tbl").select("id,assignee").like("ref","MTC:"+line.id+":%").neq("status","done");
   const have = new Set((ex||[]).map(t=>t.assignee));
   const what = [line.shape, line.spec, line.grade].filter(Boolean).join(" · ") || line.description || "";
   for(const n of people){ if(have.has(n)) continue;
-    const role = n===owner ? "You are the purchase owner: send the vendor the chase letter (button on this card) until the MTC comes." : postHas("qc", n) ? "For QC: incoming inspection can go ahead; the MTC No still has to come." : "For the Purchase head: follow up the purchase owner.";
+    const qcOf = cts.filter(c=>qm[c]===n);
+    const role = n===owner ? "You are the purchase owner: send the vendor the chase letter (button on this card) until the MTC comes."
+      : qcOf.length ? "You are the QC owner of contract "+qcOf.join(", ")+": incoming inspection can go ahead, but the material cannot be cleared for this contract's dossier without the MTC. Follow up the purchase owner"+(owner?" ("+owner+")":"")+"."
+      : postHas("qc", n) ? "For QC: incoming inspection can go ahead; the MTC No still has to come." : "For the Purchase head: follow up the purchase owner.";
     await sb.from("task_tbl").insert({ title:"MTC awaited — "+grn.grn_no+" · "+(grn.vendor_name||"")+" · "+what, ref:"MTC:"+line.id+":"+n, department:await grnEmpDept(n), assignee:n, due_date:null, status:"open", labels:[MTC_LBL], links:[], checklists:[],
       notes:"PO "+(grn.po_no||"")+(po && po.contract_ref ? " · contract "+po.contract_ref : "")+" · "+(Number(line.qty)||0)+" "+(line.uom||"")+" · Heat "+(line.heat_no||"—")+". The PO asks for an MTC; it did not come with the material.\n\n"+role+"\n\n"+
         (toISODate(new Date())<SUSPENSE_FROM ? "Till 31-12-2026 the material is in stock with the MTC awaited flag and can be issued." : "The material is in Suspense: it cannot be issued until Stores enters the MTC No on the GRN line.")+" This card closes by itself when the MTC No is entered." }); }
-  try{ await notifyPeople(people, "🧪 MTC awaited — "+grn.grn_no+" ("+(grn.vendor_name||"")+"), PO "+(grn.po_no||"")+": "+what+". Purchase owner: chase the vendor.", "info"); }catch(e){}
+  const fresh = people.filter(n=>!have.has(n));
+  if(fresh.length) try{ await notifyPeople(fresh, "🧪 MTC awaited — "+grn.grn_no+" ("+(grn.vendor_name||"")+"), PO "+(grn.po_no||"")+": "+what+". Purchase owner: chase the vendor.", "info"); }catch(e){}
+}
+// catch-up: MTC awaited lines made before this build, or whose contract got a (new) QC owner — the QC owner gets the card; a QC owner who was replaced has his card closed
+let MTC_QC_SYNC = 0;
+async function mtcQcSync(rows, hd, pos, by, force){
+  if(!force && Date.now()-MTC_QC_SYNC < 30*60000) return 0; MTC_QC_SYNC = Date.now();
+  const aw = (rows||[]).filter(x=>x.mtc_awaited); if(!aw.length) return 0;
+  const P = (x)=> pos[(hd[x.grn_no]||{}).po_no] || null;
+  const qm = await mtcQcOwners(aw.flatMap(x=>mtcCts((P(x)||{}).contract_ref)));
+  const { data: ts } = await sb.from("task_tbl").select("id,ref,assignee").like("ref","MTC:%").neq("status","done");
+  const open = {}; (ts||[]).forEach(t=>{ const k = String(t.ref).split(":")[1]; (open[k] = open[k]||[]).push(t); });
+  let made = 0;
+  try{ await loadPostPeople(); }catch(e){}
+  for(const x of aw){ const po = P(x); if(!po) continue; const cts = mtcCts(po.contract_ref); const want = cts.map(c=>qm[c]).filter(Boolean);
+    const have = (open[String(x.id)]||[]);
+    if(want.some(n=>!have.some(t=>t.assignee===n))){ try{ await mtcCardsMake({ grn:hd[x.grn_no], line:x, po, by, qcMap:qm }); made++; }catch(e){} }
+    // a card held by someone who is no longer the QC owner, nor the purchase owner, nor in the two posts → close it
+    for(const t of have){ const n = t.assignee; if(!n || want.includes(n) || n===po.owner_name || postHas("purchase_manager", n) || postHas("qc", n)) continue;
+      try{ await sb.from("task_tbl").update({ status:"done" }).eq("id",t.id); await taskLog(t.id, by||"App", "Closed — no longer the QC owner of contract "+cts.join(", ")); }catch(e){} }
+  }
+  return made;
 }
 async function mtcCardsClose(itemId, by, why){
   const { data: cs } = await sb.from("task_tbl").select("id").like("ref","MTC:"+itemId+":%").neq("status","done");
@@ -66209,8 +66390,8 @@ function MtcChaseBtn({ task, user }){
 }
 // Stores / Purchase / QC › 🧪 MTC awaited — every GRN line whose MTC was awaited, with filters
 function MtcAwaitedScreen({ user }){
-  const [rows,setRows] = useState(null); const [msg,setMsg] = useState(""); const [hd,setHd] = useState({}); const [pos,setPos] = useState({}); const [ch,setCh] = useState({});
-  const [f,setF] = useState({ st:"aw", from:"", to:"", vendor:"", owner:"", ct:"", days:"", q:"" });
+  const [rows,setRows] = useState(null); const [msg,setMsg] = useState(""); const [hd,setHd] = useState({}); const [pos,setPos] = useState({}); const [ch,setCh] = useState({}); const [qo,setQo] = useState({});
+  const [f,setF] = useState({ st:"aw", from:"", to:"", vendor:"", owner:"", qc:"", ct:"", days:"", q:"" });
   const load = useCallback(async()=>{ setMsg("");
     try{
       const pr = await sb.from("grn_items").select("mtc_awaited").limit(1); if(pr.error) throw new Error(pr.error.message||"mtc_awaited");
@@ -66222,7 +66403,10 @@ function MtcAwaitedScreen({ user }){
       const { data: ts } = await sb.from("task_tbl").select("id,ref").like("ref","MTC:%"); const t2i = {}; (ts||[]).forEach(t=>{ t2i[t.id] = String(t.ref).split(":")[1]; });
       const ids = Object.keys(t2i); const cm = {};
       for(let i=0;i<ids.length;i+=150){ const { data } = await sb.from("task_history_tbl").select("task_id,action").in("task_id",ids.slice(i,i+150)).ilike("action","MTC chase letter sent%"); (data||[]).forEach(hh=>{ const k = t2i[hh.task_id]; cm[k] = (cm[k]||0)+1; }); }
-      setHd(hm); setPos(pm); setCh(cm); setRows(r||[]);
+      const qm = await mtcQcOwners(Object.values(pm).flatMap(p=>mtcCts(p.contract_ref)));
+      setHd(hm); setPos(pm); setCh(cm); setQo(qm); setRows(r||[]);
+      // 2026-11-28T02:30:00Z: QC owners get their MTC awaited cards (lines from before this build, or a changed QC owner) — once per half hour
+      mtcQcSync(r||[], hm, pm, user && user.username).catch(e=>console.warn("MTC QC sync", e));
     }catch(e){ setRows([]); setMsg(/mtc_awaited/.test(String(e.message||e)) ? "Run "+GRN_SQL2+" first (both companies)." : String(e.message||e)); } },[]);
   useEffect(()=>{ load(); },[load]);
   if(!rows) return h("div",{style:{padding:20,color:colors.muted}}, msg||"Loading…");
@@ -66231,15 +66415,17 @@ function MtcAwaitedScreen({ user }){
   const stOf = (x)=> x.mtc_awaited ? "aw" : "rc";
   const vendors = Array.from(new Set(rows.map(x=>G(x).vendor_name).filter(Boolean))).sort();
   const owners = Array.from(new Set(rows.map(x=>P(x).owner_name).filter(Boolean))).sort();
+  const QO = (x)=> Array.from(new Set(mtcCts(P(x).contract_ref).map(c=>qo[c]).filter(Boolean)));
+  const qcOwners = Array.from(new Set(rows.flatMap(QO))).sort();
   const lc = (v)=> String(v||"").toLowerCase();
   const shown = rows.filter(x=>{ const g = G(x), p = P(x), dt = String(g.grn_date||"").slice(0,10);
     return (!f.st || stOf(x)===f.st) && (!f.from || dt>=f.from) && (!f.to || dt<=f.to) && (!f.vendor || g.vendor_name===f.vendor) && (!f.owner || p.owner_name===f.owner)
-      && (!f.ct || lc(p.contract_ref).includes(lc(f.ct))) && (!f.days || (stOf(x)==="aw" && days(x)>=Number(f.days)))
+      && (!f.qc || (f.qc==="__none" ? !QO(x).length : QO(x).includes(f.qc))) && (!f.ct || lc(p.contract_ref).includes(lc(f.ct))) && (!f.days || (stOf(x)==="aw" && days(x)>=Number(f.days)))
       && (!f.q || [x.grn_no, g.po_no, x.shape, x.spec, x.grade, x.heat_no, x.mtc_no, x.description].some(v=>lc(v).includes(lc(f.q)))); })
     .sort((a,b)=>days(b)-days(a));
   const sus = toISODate(new Date())>=SUSPENSE_FROM;
   const cols = [{label:"GRN",get:x=>x.grn_no},{label:"GRN date",get:x=>fmtDMY(G(x).grn_date)},{label:"Vendor",get:x=>G(x).vendor_name||""},{label:"PO",get:x=>G(x).po_no||""},{label:"Contract",get:x=>P(x).contract_ref||""},
-    {label:"Purchase owner",get:x=>P(x).owner_name||""},{label:"Item",get:x=>[x.shape,x.spec,x.grade].filter(Boolean).join(" · ")||x.description||""},{label:"Qty",get:x=>(Number(x.qty)||0)+" "+(x.uom||"")},{label:"Heat No",get:x=>x.heat_no||""},
+    {label:"Purchase owner",get:x=>P(x).owner_name||""},{label:"QC owner",get:x=>QO(x).join(", ")},{label:"Item",get:x=>[x.shape,x.spec,x.grade].filter(Boolean).join(" · ")||x.description||""},{label:"Qty",get:x=>(Number(x.qty)||0)+" "+(x.uom||"")},{label:"Heat No",get:x=>x.heat_no||""},
     {label:"Status",get:x=>x.mtc_awaited?(sus?"Suspense — MTC awaited":"MTC awaited"):"MTC received"},{label:"Days waiting",get:x=>x.mtc_awaited?days(x):""},{label:"Chase letters",get:x=>ch[String(x.id)]||0},{label:"MTC No",get:x=>x.mtc_no||""},{label:"MTC received",get:x=>x.mtc_received_at?fmtDMY(x.mtc_received_at):""}];
   const inp = { ...inputStyle, padding:"6px 8px", fontSize:12.5 };
   const sel = (k,lab,opts)=>h("select",{value:f[k],onChange:e=>setF(x=>({ ...x, [k]:e.target.value })),style:{...inp,width:200}},h("option",{value:""},lab),opts.map(o=>h("option",{key:o,value:o},o)));
@@ -66249,30 +66435,32 @@ function MtcAwaitedScreen({ user }){
   return h("div",{"data-testid":"mtc-awaited",style:{padding:"14px 18px",maxWidth:1400}},
     h("div",{style:{display:"flex",alignItems:"baseline",gap:10,flexWrap:"wrap",marginBottom:4}},h("h2",{style:{margin:0,fontSize:18}},"🧪 MTC awaited"),h("button",{onClick:load,style:btnSmall},"Refresh"),h(ExportButtons,{title:"MTC awaited",columns:cols,rows:shown,filenameBase:"mtc_awaited"})),
     h("div",{style:{fontSize:12.5,color:colors.muted,marginBottom:10}}, sus ? "From "+fmtDMY(SUSPENSE_FROM)+" material with the MTC awaited is in Suspense: not free stock, cannot be issued until Stores enters the MTC No on the GRN line." : "Till "+fmtDMY("2026-12-31")+" material with the MTC awaited is in stock with the flag and can be issued. From "+fmtDMY(SUSPENSE_FROM)+" it goes to Suspense.",
-      " The purchase owner chases the vendor from his MTC awaited card; the "+postLabel("purchase_manager")+" and the "+postLabel("qc")+" see the same cards."),
+      " The purchase owner chases the vendor from his MTC awaited card; the QC owner of the contract, the "+postLabel("purchase_manager")+" and the "+postLabel("qc")+" see the same cards."),
     msg ? h("div",{style:{color:colors.danger,fontSize:12.5,background:"#fdecea",borderRadius:6,padding:"6px 10px",marginBottom:10}},msg) : null,
     h("div",{style:{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:10}},
       h("select",{value:f.st,onChange:e=>setF(x=>({ ...x, st:e.target.value })),style:{...inp,width:170}},h("option",{value:"aw"},"Awaited"),h("option",{value:"rc"},"Received (was awaited)"),h("option",{value:""},"All")),
       h("label",{style:{fontSize:12,color:colors.muted}},"GRN from ",h("input",{type:"date",value:f.from,onChange:e=>setF(x=>({ ...x, from:e.target.value })),style:{...inp,width:150}})),
       h("label",{style:{fontSize:12,color:colors.muted}},"to ",h("input",{type:"date",value:f.to,onChange:e=>setF(x=>({ ...x, to:e.target.value })),style:{...inp,width:150}})),
       sel("vendor","Vendor: all",vendors), sel("owner","Purchase owner: all",owners),
+      h("select",{"data-testid":"mtc-qc-owner",value:f.qc,onChange:e=>setF(x=>({ ...x, qc:e.target.value })),style:{...inp,width:200}},h("option",{value:""},"QC owner: all"),qcOwners.map(o=>h("option",{key:o,value:o},o)),h("option",{value:"__none"},"No QC owner set")),
       h("input",{value:f.ct,onChange:e=>setF(x=>({ ...x, ct:e.target.value })),placeholder:"Contract",style:{...inp,width:110}}),
       h("select",{value:f.days,onChange:e=>setF(x=>({ ...x, days:e.target.value })),style:{...inp,width:150}},h("option",{value:""},"Waiting: any"),h("option",{value:"3"},"3 days +"),h("option",{value:"7"},"7 days +"),h("option",{value:"15"},"15 days +"),h("option",{value:"30"},"30 days +")),
       h("input",{value:f.q,onChange:e=>setF(x=>({ ...x, q:e.target.value })),placeholder:"GRN / PO / item / heat",style:{...inp,width:190}}),
-      h("button",{onClick:()=>setF({ st:"aw", from:"", to:"", vendor:"", owner:"", ct:"", days:"", q:"" }),style:btnSmall},"Clear")),
+      h("button",{onClick:()=>setF({ st:"aw", from:"", to:"", vendor:"", owner:"", qc:"", ct:"", days:"", q:"" }),style:btnSmall},"Clear")),
     h("div",{style:{display:"flex",gap:10,flexWrap:"wrap",marginBottom:10,fontSize:12.5}},
       [["Lines shown",shown.length],["Still awaited",aw.length],["Vendors",new Set(aw.map(x=>G(x).vendor_name)).size],["Oldest (days)",aw.length?Math.max(...aw.map(days)):0],["Chase letters sent",shown.reduce((a,x)=>a+(ch[String(x.id)]||0),0)]]
         .map(([l,v])=>h("div",{key:l,style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:8,padding:"6px 12px"}},h("div",{style:{fontSize:11,color:colors.muted}},l),h("b",{style:{fontSize:16}},v)))),
     h("div",{style:{overflowX:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8}},h("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:1150}},
-      h("thead",null,h("tr",null,th("GRN"),th("Vendor · PO"),th("Contract"),th("Purchase owner"),th("Item"),th("Qty",1),th("Heat No"),th("Status"),th("Waiting",1),th("Chases",1),th(""))),
+      h("thead",null,h("tr",null,th("GRN"),th("Vendor · PO"),th("Contract"),th("Purchase owner"),th("QC owner"),th("Item"),th("Qty",1),th("Heat No"),th("Status"),th("Waiting",1),th("Chases",1),th(""))),
       h("tbody",null, shown.map(x=>{ const g = G(x), p = P(x), d = days(x);
         return h("tr",{key:x.id},
           td(h("div",null,h("b",null,x.grn_no),h("div",{style:{fontSize:11,color:colors.muted}},fmtDMY(g.grn_date)))), td((g.vendor_name||"")+(g.po_no?" · "+g.po_no:"")), td(p.contract_ref||"—"), td(p.owner_name||"—"),
+          td(QO(x).length ? QO(x).join(", ") : (mtcCts(p.contract_ref).length ? h("span",{style:{color:"#a3312a",fontSize:11.5}},"not set") : "—")),
           td([x.shape,x.spec,x.grade].filter(Boolean).join(" · ")||x.description||""), td((Number(x.qty)||0)+" "+(x.uom||""),{textAlign:"right",whiteSpace:"nowrap"}), td(x.heat_no||"—"),
           td(x.mtc_awaited ? h("span",{style:{fontSize:11.5,fontWeight:700,borderRadius:9,padding:"1px 8px",background:sus?"#fde2e2":"#fff3cd",color:sus?"#a3312a":"#8a6100",whiteSpace:"nowrap"}},sus?"Suspense":"MTC awaited") : h("span",{style:{fontSize:11.5,color:"#0f6b4f"}},"Received "+(x.mtc_no||"")+(x.mtc_received_at?" · "+fmtDMY(x.mtc_received_at):""))),
           td(x.mtc_awaited ? h("span",{style:{fontWeight:700,color:d>=7?"#a3312a":colors.text}},d+" d") : "",{textAlign:"right"}), td(ch[String(x.id)]||0,{textAlign:"right"}),
           td(h("button",{onClick:()=>{ window.__grnOpen = x.grn_no; appOpenTab("material_inward"); },style:btnSmall},"Open the GRN"))); }),
-        !shown.length ? h("tr",null,h("td",{colSpan:11,style:{padding:14,color:colors.muted,fontSize:13}},"Nothing for these filters.")) : null))));
+        !shown.length ? h("tr",null,h("td",{colSpan:12,style:{padding:14,color:colors.muted,fontSize:13}},"Nothing for these filters.")) : null))));
 }
 // Setup › Raw material › 🧹 Master clean-up — an Excel-like grid of near-duplicate specs and grades for the Technical Head post
 function mcNorm(v){ return String(v||"").toLowerCase().replace(/\bgrade\b|\bgr\b\.?/g,"gr").replace(/\bschdl\b|\bsched\b|\bschedule\b/g,"sch").replace(/\bseamless\b|\bsmls\b/g,"").replace(/[^a-z0-9]/g,""); }
@@ -68984,6 +69172,7 @@ async function qcOwnerSave(cn, name, by, why){
   const { error } = old ? await sb.from("contract_owner_tbl").update(row).eq("contract_number",String(cn)) : await sb.from("contract_owner_tbl").insert(row);
   if(error) throw new Error(error.message);
   try{ await logAudit("UPDATE","contract_owner_tbl",String(cn),"QC owner "+((old&&old.qc_owner)||"—")+" → "+name+(why?" ("+why+")":""), by); }catch(e){}
+  MTC_QC_SYNC = 0;   // 2026-11-28T02:30:00Z: the next MTC awaited open moves the MTC cards to the new QC owner
   try{ await loadPostPeople(); await notifyPeople([name, ...postHolders("qc")].filter((x,i,a)=>x && a.indexOf(x)===i), "🧪 Contract "+cn+": QC owner is now "+name+((old&&old.qc_owner)?" (was "+old.qc_owner+")":"")+" — raw material to despatch, RFIs and the dossier.", "info", { kind:"open", open:{ contract:String(cn) } }); }catch(e){}
   return true;
 }
@@ -70137,11 +70326,56 @@ const SWEEPS = [
   { k:"crq",      l:"Gantt actual dates from POs / GRNs", m:240, run:()=>crqSweep() },
   { k:"stgdue",   l:"Stage cards with no due date", m:240, run:()=>{ STG_DUE_FIXED = false; return stgDueFix(); } } ];
 const sweepCn = (k)=>"__sweep:"+k+"__";
-async function sweepMarkers(){
-  const { data, error } = await sb.from("order_stage_tbl").select("contract_number,updated_at,esc").like("contract_number","\\_\\_sweep:%");
-  if(error) throw error; const M = {}; (data||[]).forEach(r=>{ M[String(r.contract_number).slice(8,-2)] = { at:r.updated_at, by:(r.esc&&r.esc.by)||"", err:(r.esc&&r.esc.err)||"" }; }); return M; }
+// 2026-11-27T09:00:00Z: CLOCK GUARD — a computer whose clock is wrong stamped the sweeps hours in the future (27-11 incident: every sweep
+// "last run" 19:47–22:28 while it was 12:24), so no other browser ran them. Server time comes from app_now() (SQL), cached 30 min.
+let CLK = { skew:0, at:0, ok:false };
+async function clkCheck(){
+  if(CLK.at && (window.__RealDate||Date).now()-CLK.at < 30*60e3) return CLK;
+  const RD = window.__RealDate || Date;
+  try{ const t0 = RD.now(); const { data, error } = await sb.rpc("app_now"); const t1 = RD.now();
+    if(!error && data){ const srv = new RD(Array.isArray(data) ? data[0] : data).getTime(); if(isFinite(srv)){ CLK = { skew: srv - (t0+t1)/2, at:RD.now(), ok:true }; try{ if(window.__setSkew) window.__setSkew(Math.abs(CLK.skew) < 60e3 ? 0 : CLK.skew); }catch(e){} } else CLK = { skew:0, at:RD.now(), ok:false }; }
+    else CLK = { skew:0, at:RD.now(), ok:false };
+  }catch(e){ CLK = { skew:0, at:RD.now(), ok:false }; }
+  if(CLK.ok && Math.abs(CLK.skew) > 5*60e3) clkWarn().catch(()=>{});
+  else if(CLK.ok){ try{ if(clkWarnN()) localStorage.removeItem(clkKey()); }catch(e){} }
+  return CLK;
+}
+const nowS = ()=> Date.now();   // Date is already server time (the SERVER CLOCK shim at the top)
+const clkBad = ()=> CLK.ok && Math.abs(CLK.skew) > 5*60e3;
+function clkTxt(){ const m = Math.round(Math.abs(CLK.skew)/60e3); const t = m>=90 ? (Math.round(m/6)/10)+" hours" : m+" minutes"; return t+(CLK.skew<0 ? " ahead" : " behind"); }
+let CLK_WARNED = 0;
+const CLK_MAX_WARN = 3;
+function clkWho(){ const u = hwMe(); return (u && (u.employee_name||u.username)) || ""; }
+function clkKey(){ const u = hwMe(); return "clkWarnN|"+((u && u.username)||""); }
+function clkWarnN(){ try{ return Number(localStorage.getItem(clkKey()))||0; }catch(e){ return 0; } }
+function clkBlocked(){ return clkBad() && clkWarnN() >= CLK_MAX_WARN; }
+async function clkHeads(){   // the user's department head (by post) and the Super Admins
+  let dept = SIR.dept || ""; const me = clkWho();
+  if(!dept){ try{ const { data } = await sb.from("employee_tbl").select("department").eq("employee_name",me).limit(1).maybeSingle(); dept = (data && data.department)||""; }catch(e){} }
+  let head = []; try{ await loadPostPeople(); const hp = deptHeadPost(dept); head = hp ? (postHolders(hp)||[]).filter(n=>!sameName(n,me)) : []; }catch(e){}
+  let sas = []; try{ sas = await superAdminNames(); }catch(e){}
+  return { dept, head, sas };
+}
+function clkSteps(){ return "1. Right-click the clock at the bottom-right of the screen › Adjust date and time.\n2. Turn ON “Set time automatically” and “Set time zone automatically” (time zone: (UTC+05:30) Chennai, Kolkata, Mumbai, New Delhi).\n3. Press “Sync now”.\n4. Come back to the app and press ⟳ Reload app."; }
+function clkModal(title, body, tone){
+  try{ const old = document.getElementById("clk-modal"); if(old) old.remove();
+    const w = document.createElement("div"); w.id = "clk-modal"; w.setAttribute("data-svnolock","1");
+    w.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:99500;display:flex;align-items:center;justify-content:center;font-family:inherit";
+    const b = document.createElement("div"); b.style.cssText = "background:#fff;border-radius:12px;max-width:560px;width:92%;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3);border-top:6px solid "+(tone==="red"?"#c9372c":"#d4a017");
+    const h3 = document.createElement("div"); h3.style.cssText = "font-size:18px;font-weight:800;color:"+(tone==="red"?"#a3312a":"#8a6100")+";margin-bottom:8px"; h3.textContent = title;
+    const p = document.createElement("div"); p.style.cssText = "font-size:13.5px;line-height:1.55;white-space:pre-wrap;color:#172b4d"; p.textContent = body;
+    const ok = document.createElement("button"); ok.textContent = "OK, I'll fix it"; ok.style.cssText = "margin-top:14px;padding:8px 16px;background:#1d3a33;color:#fff;border:none;border-radius:7px;font-weight:600;cursor:pointer";
+    ok.onclick = ()=>w.remove(); b.appendChild(h3); b.appendChild(p); b.appendChild(ok); w.appendChild(b); document.body.appendChild(w);
+  }catch(e){ try{ alert(title+"\n\n"+body); }catch(x){} }
+}
+async function clkWarn(){   // 2026-11-27T10:00:00Z: a gentle reminder only — the app already works on server time
+  if(Date.now()-CLK_WARNED < 4*3600e3) return; CLK_WARNED = Date.now();
+  try{ appToast("⏰ Your computer's clock is "+clkTxt()+". The app uses the server's time, so your work is safe — but please fix the Windows clock: right-click the clock › Adjust date and time › Set time automatically › Sync now."); }catch(e){}
+  try{ const who = clkWho(), k = "clkLog|"+who+"|"+toISODate(new Date()); if(!localStorage.getItem(k)){ localStorage.setItem(k,"1"); await logAudit("NOTE","clock",who,"Computer clock "+clkTxt()+" — app corrected to server time",who); } }catch(e){}
+}
+function clkPdfGate(){ return true; }   // 2026-11-27T10:00:00Z: no PDF block — a wrong computer clock no longer harms the data
 async function sweepClaim(k, old, by, force){
-  const cn = sweepCn(k), at = new Date().toISOString(), esc = { by, at };
+  const cn = sweepCn(k), at = new Date(nowS()).toISOString(), esc = { by, at };
   if(old && !force){ const { data, error } = await sb.from("order_stage_tbl").update({ updated_at:at, esc }).eq("contract_number",cn).eq("updated_at",old).select("contract_number"); return !error && !!(data && data.length); }
   if(old || force){ const { data, error } = await sb.from("order_stage_tbl").update({ updated_at:at, esc }).eq("contract_number",cn).select("contract_number"); if(!error && data && data.length) return true; }
   const { error } = await sb.from("order_stage_tbl").insert({ contract_number:cn, tasks:{}, opened:{}, esc, updated_at:at }); return !error; }
@@ -70150,8 +70384,8 @@ function sweepUnguard(){ try{ const re = /^(osStaleSweep|bellPurge|billAge|calSw
     for(let i=localStorage.length-1;i>=0;i--){ const k = localStorage.key(i); if(k && re.test(k)) localStorage.removeItem(k); } }catch(e){}
   try{ PGA_AT = 0; }catch(e){} try{ DREG_SYNC_AT = 0; }catch(e){} try{ DREG_CARD_AT = 0; }catch(e){} try{ BELL_PURGE_RUN = false; }catch(e){} try{ CHASE_SWEEP_AT = 0; }catch(e){} }
 async function sweepOne(k, user){   // a screen that wants one sweep: still once per interval for everyone
-  try{ const s = SWEEPS.find(x=>x.k===k); if(!s || hwDbBad()) return; const M = await sweepMarkers(); const last = M[k]; const at = last ? new Date(last.at).getTime() : 0;
-    if(at && Date.now()-at < s.m*60000) return; const by = (user && user.username) || "App"; if(await sweepClaim(k, last ? last.at : null, by)) await sweepRunOne(s, by, user); }catch(e){} }
+  try{ const s = SWEEPS.find(x=>x.k===k); if(!s || hwDbBad()) return; await clkCheck(); const M = await sweepMarkers(); const last = M[k]; const at = last ? new Date(last.at).getTime() : 0;
+    if(at && nowS()-at < s.m*60000 && at <= nowS()+5*60000) return; /* a stamp in the future = written by a wrong clock: run it */ const by = (user && user.username) || "App"; if(await sweepClaim(k, last ? last.at : null, by)) await sweepRunOne(s, by, user); }catch(e){} }
 async function sweepRunOne(s, by, user, force){
   if(force) sweepUnguard();
   try{ await s.run(by, user); return ""; }
@@ -70163,15 +70397,18 @@ let SWEEP_TICK_AT = 0, SWEEP_RUNNING = false;
 async function sweepTick(user){
   if(SWEEP_RUNNING || Date.now()-SWEEP_TICK_AT < 9*60000) return; SWEEP_TICK_AT = Date.now(); SWEEP_RUNNING = true;
   const by = (user && user.username) || "App";
-  try{ if(hwDbBad()) return; let M; try{ M = await sweepMarkers(); }catch(e){ return; }
+  try{ if(hwDbBad()) return; await clkCheck();   // 2026-11-27T10:00:00Z: times are server time now, so every computer may run sweeps
+    let M; try{ M = await sweepMarkers(); }catch(e){ return; }
     for(const s of SWEEPS){ const last = M[s.k]; const lastAt = last ? new Date(last.at).getTime() : 0;
-      if(lastAt && Date.now()-lastAt < s.m*60000) continue;
+      if(lastAt && nowS()-lastAt < s.m*60000 && lastAt <= nowS()+5*60000) continue;   // a stamp in the future is treated as due
       if(hwDbBad()) break;
       if(!(await sweepClaim(s.k, last ? last.at : null, by))) continue;
       await sweepRunOne(s, by, user);
       await new Promise(r=>setTimeout(r, 4000)); } }
   finally{ SWEEP_RUNNING = false; } }
 function sweepStart(user){
+  setTimeout(()=>{ clkCheck().catch(()=>{}); }, 8000);
+  if(!window.__clkTimer) window.__clkTimer = setInterval(()=>{ clkCheck().catch(()=>{}); }, 30*60e3 + 5000);   // warnings come every 30 min while it stays wrong   // 2026-11-27T09:00:00Z: tell a user whose clock is wrong, soon after sign-in
   setTimeout(()=>sweepTick(user), 30000);
   if(!window.__sweepTimer) window.__sweepTimer = setInterval(()=>sweepTick(user), 10*60000); }
 
@@ -70183,8 +70420,15 @@ function noidAdd(k){ if(!k || NOID.has(k)) return; NOID.add(k); try{ localStorag
 // ---- HEALTH ALARM (super admins). Counting is local; one incident row per incident; never retried while the database is failing.
 const HW_T = { dbFail:5, dbWin:120e3, slowMs:25e3, slowN:5, stormN:50, stormWin:600e3, loopN:300, loginN:3, loginWin:300e3, cool:15*60e3 };
 function hwMe(){ try{ return JSON.parse(sessionStorage.getItem("flometriq_user")||"null"); }catch(e){ return null; } }
-function hwIsSA(){ const u = hwMe(); return !!(u && u.role==="super_admin"); }
+function hwIsSA(){ const u = hwMe(); if(!u) return false; if(u.role==="super_admin") return true;   // 2026-11-27T10:30:00Z: + the App support post (health messages like a Super Admin)
+  try{ const n = u.employee_name || u.username; return !!(n && postHas("app_support", n)); }catch(e){ return false; } }
 function hwOff(){ try{ return localStorage.getItem("hw_off")==="1"; }catch(e){ return false; } }
+// 2026-11-28T04:00:00Z: the incident pop-up goes only to the holders of the Incident watch post (Bala Boopathy, Suresh Subramanaiam).
+// Until that post has holders (structure_incident_watch_post_2026-11-28.sql not run), it goes to the Super Admins and App support as before.
+function hwWatchers(){ try{ return postHolders("incident_watch")||[]; }catch(e){ return []; } }
+function hwIsWatch(){ const u = hwMe(); if(!u) return false; const w = hwWatchers(); if(!w.length) return hwIsSA();
+  const n = u.employee_name || u.username; return !!(n && (nameIn(w, n) || nameIn(w, u.username))); }
+function hwSeenByWatch(x){ if(!x || !x.seen_at) return false; const w = hwWatchers(); return w.length ? nameIn(w, x.seen_by||"") : true; }
 function hwRecent(win, fn){ const t = Date.now()-win; let n = 0; for(let i=HW.log.length-1;i>=0;i--){ const x = HW.log[i]; if(x.at<t) break; if(!fn || fn(x)) n++; } return n; }
 function hwDbBad(){ return hwRecent(60e3, x=>x.st===0 || x.st>=500) >= 3; }
 function hwSlow(){ const t = Date.now(); let n = 0; HW.pending.forEach(p=>{ if(t-p.t0 > HW_T.slowMs) n++; }); return n; }
@@ -70196,7 +70440,8 @@ function hwRaise(kind, title, message, todo, details){
   try{ const k = "hw_last_"+kind; const last = Number(localStorage.getItem(k)||0); if(Date.now()-last < HW_T.cool) return; localStorage.setItem(k, String(Date.now())); }catch(e){}
   const u = hwMe(); const inc = { kind, title, message, todo, details:details||{}, raised_by:(u && (u.employee_name||u.username)) || "", raised_at:new Date().toISOString(), screen:String(window.__curTab||"") };
   HW_Q.push(inc); hwSaveQ();
-  if(hwIsSA() && !hwOff()) hwShow(inc); }
+  if(hwIsWatch() && !hwOff()) hwShow(inc);
+  try{ window.dispatchEvent(new CustomEvent("flo-incident")); }catch(e){} }
 let HW_FLUSH_AT = 0, HW_NO_TABLE = false;
 async function hwFlush(){
   if(HW_NO_TABLE || !HW_Q.length || hwDbBad() || Date.now()-HW_FLUSH_AT < 120e3) return; HW_FLUSH_AT = Date.now();
@@ -70210,7 +70455,7 @@ async function hwFlush(){
 function SV_RAW_FROM(t){ try{ if(typeof SV_RAW!=="undefined" && SV_RAW) return SV_RAW.from(t); }catch(e){} return sb.from(t); }
 let HW_POLL_AT = 0;
 async function hwPoll(){
-  if(HW_NO_TABLE || !hwIsSA() || hwOff() || hwDbBad() || Date.now()-HW_POLL_AT < 115e3) return; HW_POLL_AT = Date.now();
+  if(HW_NO_TABLE || !hwIsWatch() || hwOff() || hwDbBad() || Date.now()-HW_POLL_AT < 115e3) return; HW_POLL_AT = Date.now();
   try{ const since = new Date(Date.now()-6*3600e3).toISOString();
     const { data, error } = await SV_RAW_FROM("app_incident_tbl").select("id,kind,title,message,details,raised_by,raised_at,recovered_at").is("seen_at",null).gte("raised_at",since).order("id",{ ascending:false }).limit(3);
     if(error){ if(/app_incident_tbl/.test(error.message||"")) HW_NO_TABLE = true; return; }
@@ -70228,14 +70473,17 @@ function hwCheck(){
     if(lf >= HW_T.loginN) hwRaise("login", "Sign-in failing", lf+" sign-in requests failed in the last 5 minutes.", "Check Supabase is Healthy; restart the project if not.", { lf });
     const storm = hwTop(HW_T.stormWin, x=>x.st>=400 && x.st<500 && x.tbl!=="app_incident_tbl", 5).filter(r=>r[2] >= HW_T.stormN);
     if(storm.length) hwRaise("storm", "Error storm", "The same request failed "+storm[0][2]+" times in 10 minutes: "+storm[0][0]+" ("+storm[0][1]+").", "No restart needed. Send the incident report to Claude — it names the failing request so it can be fixed.", { top:storm });
-    const n60 = hwRecent(60e3);
-    if(up > 180e3 && n60 > HW_T.loopN) hwRaise("loop", "Runaway load — one screen in a loop", "This browser made "+n60+" requests in the last minute (normal is well under 100). Screen: "+String(window.__curTab||"—")+".", "Close and reopen the app on this computer. Send the incident report to Claude to find the loop.", { n60, top:hwTop(60e3, null, 8) });
+    const n60 = hwRecent(60e3), nPrev = hwRecent(120e3) - n60;
+    // 2026-11-27T09:00:00Z: a loop keeps going — raise only when the minute before was busy too. One heavy action (opening a big screen,
+    // ↻ Refresh, switching company) is a burst, not a loop, and no longer raises the alarm.
+    const trail = (window.__tabTrail||[]).filter(x=>Date.now()-x.at < 180e3).map(x=>x.tab);
+    if(up > 180e3 && n60 > HW_T.loopN && nPrev > HW_T.loopN*0.6) hwRaise("loop", "Runaway load — one screen in a loop", "This browser made "+n60+" requests in the last minute and "+nPrev+" the minute before (normal is well under 100). Screen: "+String(window.__curTab||"—")+(trail.length>1?" (screens in the last 3 min: "+trail.join(" → ")+")":"")+".", "Close and reopen the app on this computer. Send the incident report to Claude to find the loop.", { n60, top:hwTop(60e3, null, 8) });
   }catch(e){}
   hwFlush(); hwPoll(); }
 if(!window.__hwTimer) window.__hwTimer = setInterval(hwCheck, 15000);
 // ---- the alarm on screen: 2 minutes blinking, 10 s siren, message, I've seen it, incident report
 let HW_AUDIO = null;
-function hwSiren(){ try{ HW_AUDIO = HW_AUDIO || new (window.AudioContext||window.webkitAudioContext)(); if(HW_AUDIO.state==="suspended") HW_AUDIO.resume();
+function hwSiren(){ if(hwIsSA()) return ()=>{}; try{ HW_AUDIO = HW_AUDIO || new (window.AudioContext||window.webkitAudioContext)(); if(HW_AUDIO.state==="suspended") HW_AUDIO.resume();
   const o = HW_AUDIO.createOscillator(), g = HW_AUDIO.createGain(); o.type = "sawtooth"; g.gain.value = 0.15; o.connect(g); g.connect(HW_AUDIO.destination);
   const t0 = HW_AUDIO.currentTime; for(let i=0;i<10;i++){ o.frequency.setValueAtTime(650,t0+i); o.frequency.linearRampToValueAtTime(1150,t0+i+0.5); o.frequency.linearRampToValueAtTime(650,t0+i+1); }
   o.start(t0); o.stop(t0+10); return ()=>{ try{ o.stop(); }catch(e){} }; }catch(e){ return ()=>{}; } }
@@ -70255,11 +70503,12 @@ function hwShow(inc){
     const b2 = mk("button","font:inherit;font-weight:600;border:1px solid #dfe1e6;border-radius:8px;padding:10px 16px;min-height:44px;cursor:pointer;background:#fff;color:#172b4d","👁 Incident report (PDF)");
     const cd = mk("span","font-size:12px;color:#5e6c84",""); row.appendChild(b1); row.appendChild(b2); row.appendChild(cd); box.appendChild(row); ov.appendChild(box); document.body.appendChild(ov);
     b1.setAttribute("data-svnolock","1"); b2.setAttribute("data-svnolock","1");
-    const stop = hwSiren(); let s = 120; cd.textContent = "Blinking stops in "+s+" s";
-    const t = setInterval(()=>{ s--; cd.textContent = s>0 ? "Blinking stops in "+s+" s" : ""; if(s<=0){ clearInterval(t); ov.style.animation = "none"; } }, 1000);
+    // 2026-11-27T08:00:00Z: no sirens for Super Admins — the health alarm is a plain message: no sound, no blinking
+    const stop = ()=>{}; ov.style.animation = "none"; ov.style.background = "rgba(0,0,0,.45)"; const t = null;
     b1.onclick = async()=>{ clearInterval(t); stop(); ov.remove(); const u = hwMe(); const who = (u && (u.employee_name||u.username)) || "super admin";
       if(inc.id){ try{ await SV_RAW_FROM("app_incident_tbl").update({ seen_by:who, seen_at:new Date().toISOString() }).eq("id",inc.id); }catch(e){} }
-      else { inc._shownLocal = true; inc._seen = who; hwSaveQ(); } };
+      else { inc._shownLocal = true; inc._seen = who; hwSaveQ(); }
+      try{ window.dispatchEvent(new CustomEvent("flo-incident")); }catch(e){} };
     b2.onclick = ()=>{ hwPdf(inc).catch(e=>alert("Report not made: "+(e.message||e))); };
     b1.focus();
   }catch(e){ console.warn("alarm", e); } }
@@ -70280,7 +70529,8 @@ async function hwPdf(inc){
   doc.autoTable({ startY:y+7, head:[["Seen by (super admin)","Recovered at","Remarks"]], body:[["","",""]], theme:"grid", styles:{ fontSize:8, minCellHeight:9 }, margin:{ left:10, right:10 } });
   pdfShow(doc, ("Incident_"+String(inc.kind)+"_"+String(inc.raised_at).slice(0,16)).replace(/[^A-Za-z0-9_-]+/g,"_")+".pdf"); }
 // ---- Admin › 🔄 Refresh data (admins and super admins)
-function sweepCanUse(user){ return !!(user && (user.role==="admin" || user.role==="super_admin")); }
+function sweepCanUse(user){ if(!user) return false; if(user.role==="admin" || user.role==="super_admin") return true;   // 2026-11-27T10:30:00Z: + App support post
+  try{ const n = user.employee_name || user.username; return !!(n && postHas("app_support", n)); }catch(e){ return false; } }
 function SweepPanel({ user }){
   const [M,setM] = useState(null); const [err,setErr] = useState(""); const [run,setRun] = useState({}); const [incs,setIncs] = useState(null); const [off,setOff] = useState(hwOff());
   const isSA = !!(user && user.role==="super_admin"); const by = (user && user.username) || "App";
@@ -70324,6 +70574,63 @@ function SweepPanel({ user }){
           !(incs||[]).length ? h("tr",null, h("td",{ colSpan:6, style:{ ...td, color:colors.muted } },"No incidents.")) : null))) : null);
 }
 function SweepScreen({ user }){ if(!sweepCanUse(user)) return h("div",{ style:{ padding:20 } },"Refresh data is for admins and super admins ("+saNamesTxt()+")."); return h("div",{ style:{ padding:"14px 18px" } }, h(SweepPanel,{ user })); }
+// 2026-11-28T04:00:00Z: 🚨 Incidents on the ribbon (Super Admins, App support, Incident watch). Red while an incident of the last 7 days
+// has not been seen by an Incident watch holder. Every incident with what was done; only the Incident watch holders mark them seen.
+const INC_SQL = "structure_incident_watch_post_2026-11-28.sql";
+async function incRecent(){ const since = new Date(Date.now()-7*864e5).toISOString();
+  const { data, error } = await SV_RAW_FROM("app_incident_tbl").select("id,seen_by,seen_at,raised_at").gte("raised_at",since).order("id",{ ascending:false }).limit(60);
+  if(error) throw error; return data||[]; }
+function IncidentTopBtn({ user }){
+  const can = !!user && (user.role==="super_admin" || hwIsSA() || hwIsWatch());
+  const [n,setN] = useState(0); const [open,setOpen] = useState(false);
+  useEffect(()=>{ if(!can) return; let off = false, t = null;
+    const chk = async()=>{ if(hwDbBad() || HW_NO_TABLE) return; try{ const r = await incRecent(); if(!off) setN(r.filter(x=>!hwSeenByWatch(x)).length); }catch(e){} };
+    chk(); t = setInterval(chk, 3*60e3); const f = ()=>setTimeout(chk, 1500); window.addEventListener("flo-incident", f);
+    return ()=>{ off = true; clearInterval(t); window.removeEventListener("flo-incident", f); }; },[can]);
+  if(!can) return null;
+  return h(React.Fragment,null,
+    h("button",{ "data-svnolock":"1","data-testid":"inc-btn", onClick:()=>setOpen(true), title: n ? n+" incident"+(n===1?"":"s")+" not yet seen by "+(hwWatchers().join(" or ")||"the Incident watch") : "App health incidents",
+      style:{ background:n?"#c9372c":"none", border:"1px solid "+(n?"#c9372c":"#3a3f33"), color:"#fff", padding:"6px 12px", fontSize:12, fontWeight:n?700:400, cursor:"pointer", borderRadius:6 } }, "🚨 Incidents"+(n?" · "+n:"")),
+    open ? h(OsModal,{ title:"App health incidents", onClose:()=>setOpen(false), width:1050 }, h(IncidentPanel,{ user })) : null); }
+function IncidentPanel({ user }){
+  const [rows,setRows] = useState(null); const [err,setErr] = useState(""); const [note,setNote] = useState({}); const [done,setDone] = useState({}); const [busy,setBusy] = useState(0); const [all,setAll] = useState(false);
+  const me = (user && (user.employee_name||user.username)) || ""; const watch = hwIsWatch(); const W = hwWatchers();
+  const load = async()=>{ setErr(""); try{ const { data, error } = await SV_RAW_FROM("app_incident_tbl").select("*").order("id",{ ascending:false }).limit(all?200:40); if(error) throw error; setRows(data||[]); }
+    catch(e){ setRows([]); setErr(/app_incident_tbl/.test(String(e.message||e)) ? "Incident history needs "+LOAD_SQL+" (both companies)." : String(e.message||e)); } };
+  useEffect(()=>{ load(); },[all]);
+  const seen = async(x)=>{ const t = String(note[x.id]||"").trim(); if(!t){ setDone(d=>({ ...d, [x.id]:"✗ Write what was done first." })); return; }
+    setBusy(x.id); try{ const at = new Date(nowS()).toISOString(); const det = { ...(x.details||{}), action:t, action_by:me, action_at:at };
+      const { error } = await SV_RAW_FROM("app_incident_tbl").update({ seen_by:me, seen_at:at, details:det }).eq("id",x.id); if(error) throw error;
+      try{ await logAudit("UPDATE","app_incident_tbl",String(x.id),"Incident seen — "+x.title+" · done: "+t.slice(0,200), me); }catch(e){}
+      setDone(d=>({ ...d, [x.id]:"✓ Marked seen" })); setRows(r=>(r||[]).map(y=>y.id===x.id ? { ...y, seen_by:me, seen_at:at, details:det } : y));
+      try{ window.dispatchEvent(new CustomEvent("flo-incident")); }catch(e){} }
+    catch(e){ setDone(d=>({ ...d, [x.id]:"✗ "+(e.message||e) })); } setBusy(0); };
+  const td = { padding:"6px 8px", borderTop:"1px solid "+colors.border, fontSize:12.5, verticalAlign:"top" };
+  if(!rows) return h("div",{ style:{ color:colors.muted } }, "Loading…");
+  return h("div",{ "data-testid":"inc-panel" },
+    h("div",{ style:{ fontSize:12.5, color:colors.muted, marginBottom:8 } }, "The pop-up goes only to ", h("b",null, W.length ? W.join(" and ") : "the Super Admins and App support (the Incident watch post has nobody yet — run "+INC_SQL+")"),
+      ". Red rows have not been seen by them yet. Mark an incident seen only after writing what was done."),
+    err ? h("div",{ style:{ color:colors.danger, fontSize:12.5, marginBottom:8 } }, err) : null,
+    h("div",{ style:{ display:"flex", gap:10, alignItems:"center", marginBottom:8 } }, h("button",{ onClick:load, style:btnSmall },"Refresh"),
+      h("label",{ style:{ fontSize:12.5 } }, h("input",{ type:"checkbox", checked:all, onChange:e=>setAll(e.target.checked) }), " Show older too (last 200)")),
+    h("div",{ style:{ overflowX:"auto" } }, h("table",{ style:{ borderCollapse:"collapse", width:"100%", background:"#fff", border:"1px solid "+colors.border } },
+      h("thead",null, h("tr",null, ["Raised","Incident","Raised in","Seen by","What was done",""].map((x,i)=>h("th",{ key:i, style:{ ...td, background:"#f4f2ea", textAlign:"left", fontSize:12 } }, x)))),
+      h("tbody",null, rows.map(x=>{ const d = x.details||{}; const ok = hwSeenByWatch(x);
+        return h("tr",{ key:x.id, "data-testid":"inc-row", style:{ background: ok ? "#fff" : "#fdecea" } },
+          h("td",{ style:{ ...td, whiteSpace:"nowrap" } }, fmtDMYTime(x.raised_at), x.recovered_at ? h("div",{ style:{ fontSize:11, color:"#0f6b4f" } }, "recovered "+fmtDMYTime(x.recovered_at)) : null),
+          h("td",{ style:td }, h("b",null, x.title), h("div",{ style:{ fontSize:11.5, color:colors.muted, maxWidth:380 } }, x.message||"")),
+          h("td",{ style:td }, (x.raised_by||"—")+(d.screen ? " · "+d.screen : "")),
+          h("td",{ style:td }, x.seen_by ? h("span",null, x.seen_by, h("div",{ style:{ fontSize:11, color:colors.muted } }, fmtDMYTime(x.seen_at)+(ok ? "" : " — not Incident watch"))) : h("span",{ style:{ color:"#a3312a", fontWeight:600 } }, "not yet")),
+          h("td",{ style:{ ...td, minWidth:240 } }, d.action ? h("span",null, d.action, h("div",{ style:{ fontSize:11, color:colors.muted } }, (d.action_by||"")+(d.action_at?" · "+fmtDMYTime(d.action_at):"")))
+            : watch && !ok ? h("div",null, h("div",{ style:{ fontSize:11, color:colors.muted } }, "What was done ", h("span",{ style:{ color:"#dc2626" } }, "*")),
+                h("input",{ value:note[x.id]||"", onChange:e=>{ const v = e.target.value; setNote(n=>({ ...n, [x.id]:v })); setDone(dd=>({ ...dd, [x.id]:"" })); }, placeholder:"e.g. closed and reopened the app; sent the report to Claude", style:{ ...inputStyle, width:"100%", padding:"5px 7px", fontSize:12.5 } }))
+            : h("span",{ style:{ color:colors.muted } }, "—")),
+          h("td",{ style:{ ...td, whiteSpace:"nowrap" } },
+            watch && !ok ? h("button",{ "data-svnolock":"1", disabled:busy===x.id || /^✓/.test(done[x.id]||""), onClick:()=>seen(x), style:{ ...btnSmall, borderColor:"#c9372c", color:"#c9372c", fontWeight:700, marginRight:6 } }, busy===x.id ? "Saving…" : "Mark seen") : null,
+            h("button",{ "data-svnolock":"1", onClick:()=>hwPdf({ ...x, todo:d.todo||"" }).catch(e=>alert(e.message||e)), style:btnSmall }, "👁 PDF"),
+            done[x.id] ? h("div",{ style:{ fontSize:11.5, marginTop:3, color:/^✓/.test(done[x.id])?"#0f6b4f":colors.danger } }, done[x.id]) : null)); }),
+        !rows.length ? h("tr",null, h("td",{ colSpan:6, style:{ ...td, color:colors.muted } }, "No incidents.")) : null))));
+}
 function SweepTopBtn({ user }){
   const [open,setOpen] = useState(false); if(!sweepCanUse(user)) return null;
   return h(React.Fragment,null,
@@ -70344,6 +70651,11 @@ const SIR_FROM = "2026-11-26T12:00:00Z";        // stage cards made from this bu
 const SIR_STAGE_MIN = 30;
 const SIR_OD_MIN = (d)=> d>=3 ? 10 : d===2 ? 30 : 60;
 const SIR_BLOCK_AFTER = 3;                     // overdue days of sirens before a block
+// 2026-11-28T04:30:00Z: sirens PARKED for everyone till 01-01-2027 — no sound, no "Needs you now" panel, no escalation, no block.
+// From 01-01-2027 they start again by themselves; overdue days for the siren pace and the block count from that day, so nobody is blocked on day one.
+const SIR_PARK_UNTIL = "2027-01-01";
+function sirParked(){ return toISODate(new Date()) < SIR_PARK_UNTIL; }
+function sirDaysFrom(due){ const d = String(due||"").slice(0,10); return sirDays(d > SIR_PARK_UNTIL ? d : SIR_PARK_UNTIL); }
 var SIR = { user:null, name:"", stage:[], overdue:[], appr:[], dept:"", relUntil:0, cols:true, at:0, timer:null, alerted:new Set(), open:false, min:false, msg:{} };
 function sirDays(fromIso){ const t = toISODate(new Date()); const a = new Date(String(fromIso).slice(0,10)+"T12:00:00"), b = new Date(t+"T12:00:00"); return Math.round((b-a)/864e5); }
 function sirAddDays(iso, n){ const d = new Date(String(iso).slice(0,10)+"T12:00:00"); d.setDate(d.getDate()+n); return toISODate(d); }
@@ -70352,6 +70664,7 @@ function sirLastKey(){ return "sirLast|"+((SIR.user&&SIR.user.username)||""); }
 function sirLast(){ try{ return Number(localStorage.getItem(sirLastKey()))||0; }catch(e){ return 0; } }
 function sirStart(user, name){
   if(!user) return;
+  if(sirParked()){ try{ const el = document.getElementById("sir-panel"); if(el) el.remove(); }catch(e){} return; }   // 2026-11-28T04:30:00Z: parked till 01-01-2027
   if(SIR.user && SIR.user.username===user.username){ SIR.at = 0; return; }
   SIR.user = user; SIR.name = name || user.employee_name || user.username || ""; SIR.at = 0; SIR.alerted = new Set(); SIR.stage = []; SIR.overdue = []; SIR.appr = []; SIR.dept = ""; SIR.relUntil = 0;
   try{ if(!sessionStorage.getItem("sirSess|"+user.username)){ sessionStorage.setItem("sirSess|"+user.username,"1"); localStorage.removeItem(sirLastKey()); } }catch(e){}   // a fresh sign-in sounds at once
@@ -70373,7 +70686,7 @@ async function sirLoad(){
   try{ await loadPostPeople(); if(!SA_NAMES_LAST.length) await superAdminNames(); }catch(e){}
   SIR.relUntil = await sirRelLoad();
   SIR.appr = [];
-  if(isSA){ try{ const A = await apprLoad(); const S = apprSplit(A.items, SIR.name, SIR.user, true, []); SIR.appr = (S.mine||[]).slice().sort((a,b)=>(b.days||0)-(a.days||0)); }catch(e){} }
+  // 2026-11-27T08:00:00Z: no sirens for Super Admins at all — approvals stay on the ✅ Approvals button and the board
   SIR.stage = SIR_TASKS.filter(t=>{ try{ return stgKeyOf(t) && String(t.created_at||"") >= SIR_FROM && !t.siren_ack_at && !sirAckLocal(t.id); }catch(e){ return false; } })
     .sort((a,b)=>String(a.created_at).localeCompare(String(b.created_at)));
   sirOverdueBuild(); SIR.at = Date.now();
@@ -70388,18 +70701,20 @@ function sirOverdueBuild(){
     const mine = nameIn(r.owners||[], SIR.name) || (nameIn(r.pm_owners||[], SIR.name) && r.pm_from && today > String(r.pm_from).slice(0,10));
     if(!mine) return; const from = String(r.pm_from && nameIn(r.pm_owners||[], SIR.name) && !nameIn(r.owners||[], SIR.name) ? r.pm_from : r.stale_from).slice(0,10);
     out.push({ kind:"stale", id:"s"+r.id, title:ndStepLabel(r.step_key), ref:r.contract_number||"", customer:"", due:from, days:sirDays(from), lot:!!r.lot_id }); }); }catch(e){}
+  out.forEach(o=>{ o.sd = Math.max(0, sirDaysFrom(o.due)); });   // siren days: counted from 01-01-2027 at the earliest
   SIR.overdue = out.filter(o=>o.days>=1).sort((a,b)=>b.days-a.days);
 }
 function sirInterval(){
   let m = Infinity;
   if(SIR.stage.length) m = SIR_STAGE_MIN;
-  if(SIR.overdue.length) m = Math.min(m, SIR_OD_MIN(SIR.overdue[0].days));
+  if(SIR.overdue.length) m = Math.min(m, SIR_OD_MIN(Math.max(...SIR.overdue.map(o=>o.sd!=null?o.sd:o.days))));
   if(SIR.appr.length) m = Math.min(m, SIR_OD_MIN(Math.max(1, SIR.appr[0].days||1)));   // approvals: hourly, 30 min from 2 days, 10 min from 3 days
   return m;
 }
 async function sirTick(){
   try{
     if(!SIR.user) return;
+    if(sirParked()){ const el = document.getElementById("sir-panel"); if(el) el.remove(); return; }   // 2026-11-28T04:30:00Z
     if(typeof hwDbBad==="function" && hwDbBad()) return;   // never while the database is failing
     if(!SIR.at || Date.now()-SIR.at > 5*60e3) await sirLoad();
     const pending = SIR.stage.length + SIR.overdue.length + SIR.appr.length + (SIR.rateDue?1:0);
@@ -70419,6 +70734,7 @@ async function sirTick(){
 }
 let SIR_AUDIO = null;
 function sirSound(sec){
+  if(window.__sessRole==="super_admin") return;   // 2026-11-27T08:00:00Z: never for Super Admins
   try{ SIR_AUDIO = SIR_AUDIO || new (window.AudioContext||window.webkitAudioContext)();
     if(SIR_AUDIO.state==="suspended"){ SIR_AUDIO.resume().catch(()=>{}); if(SIR_AUDIO.state==="suspended"){ SIR.pendingSound = true; return; } }
     const o = SIR_AUDIO.createOscillator(), g = SIR_AUDIO.createGain(); o.type = "square"; g.gain.value = 0.08; o.connect(g); g.connect(SIR_AUDIO.destination);
@@ -70612,7 +70928,7 @@ async function sirAskRelease(rows){
 }
 // after 3 days of sirens: tell the Super Admins (a bell, once a day per person — not a siren)
 async function sirEscalate(){
-  try{ if(window.__sessRole==="super_admin") return; const rows = SIR.overdue.filter(o=>o.kind==="task" && o.days > SIR_BLOCK_AFTER); if(!rows.length) return;
+  try{ if(window.__sessRole==="super_admin" || sirParked()) return; const rows = SIR.overdue.filter(o=>o.kind==="task" && (o.sd!=null?o.sd:o.days) > SIR_BLOCK_AFTER); if(!rows.length) return;
     const k = "sirEsc|"+SIR.name+"|"+toISODate(new Date()); if(localStorage.getItem(k)) return; localStorage.setItem(k,"1");
     const ref = "SIRESC:"+SIR.name+":"+toISODate(new Date());
     const { data: ex } = await sb.from("audit_log").select("id").eq("record_id",ref).limit(1); if((ex||[]).length) return;
@@ -70661,9 +70977,9 @@ function SirenEscScreen({ user }){
 }
 // --- the block after 3 days of sirens: new task cards stop while a card of yours is more than 3 days overdue
 function sirOverdueBlocking(){
-  if(!SIR.user || window.__sessRole==="super_admin") return [];
+  if(!SIR.user || window.__sessRole==="super_admin" || sirParked()) return [];
   if(SIR.relUntil && SIR.relUntil > Date.now()) return [];   // 2026-11-27T07:00:00Z: a Siren release code lifts it for 24 hours
-  return SIR.overdue.filter(o=>o.kind==="task" && o.days > SIR_BLOCK_AFTER);
+  return SIR.overdue.filter(o=>o.kind==="task" && (o.sd!=null?o.sd:o.days) > SIR_BLOCK_AFTER);
 }
 function sirBlockShow(rows, what){
   try{
@@ -70990,6 +71306,7 @@ function MreqCardBtn({ task, user, onDone }){
 }
 // 5-second siren
 function mreqSiren(){
+  if(window.__sessRole==="super_admin") return;   // 2026-11-27T08:00:00Z
   try{ const A = window.AudioContext || window.webkitAudioContext; if(!A) return; const ctx = new A(); const o = ctx.createOscillator(), g = ctx.createGain();
     o.type = "sawtooth"; g.gain.value = 0.08; o.connect(g); g.connect(ctx.destination); const t0 = ctx.currentTime;
     for(let i=0;i<10;i++){ o.frequency.setValueAtTime(650, t0+i*0.5); o.frequency.linearRampToValueAtTime(1150, t0+i*0.5+0.25); o.frequency.linearRampToValueAtTime(650, t0+i*0.5+0.5); }
@@ -72367,7 +72684,7 @@ async function ctFindLoad(force){
 }
 function ctFindUse(){ const [L,setL] = useState(CTF.list||[]); useEffect(()=>{ let off = false; ctFindLoad().then(x=>{ if(!off) setL(x); }); return ()=>{ off = true; }; },[]); return L; }
 const ctFindName = (cn, L)=>{ const k = String(cn||"").trim(); const hit = (L||CTF.list||[]).find(x=>x[0]===k); return hit ? hit[1] : ctClientOf(k); };
-function ContractFind({ value, onChange, options, extra, placeholder, width, disabled, testid, remember, style, compact }){
+function ContractFind({ value, onChange, options, extra, placeholder, width, disabled, testid, remember, style, compact, onNoMatch }){
   const all = ctFindUse();
   const opts = options ? options.map(o=>Array.isArray(o) ? [String(o[0]), o[1]||""] : [String(o), ctFindName(o, all)]) : all;
   const ex = (extra||[]).map(o=>Array.isArray(o) ? [String(o[0]), o[1]] : [String(o), String(o)]);
@@ -72394,7 +72711,7 @@ function ContractFind({ value, onChange, options, extra, placeholder, width, dis
       onFocus:()=>{ setOpen(true); setQ(""); setHi(0); },
       onChange:e=>{ setQ(e.target.value); setOpen(true); setHi(0); },
       onKeyDown:e=>{ if(e.key==="ArrowDown"){ e.preventDefault(); setOpen(true); setHi(x=>Math.min(x+1, list.length-1)); } else if(e.key==="ArrowUp"){ e.preventDefault(); setHi(x=>Math.max(x-1,0)); }
-        else if(e.key==="Enter"){ e.preventDefault(); if(open && list[hi]){ pick(list[hi]); e.currentTarget.blur(); } } else if(e.key==="Escape"){ setOpen(false); setQ(""); e.currentTarget.blur(); } else if(e.key==="Tab"){ setOpen(false); setQ(""); } },
+        else if(e.key==="Enter"){ e.preventDefault(); if(open && list[hi]){ pick(list[hi]); e.currentTarget.blur(); } else if(open && onNoMatch && q.trim()){ const t = q.trim(); setOpen(false); setQ(""); e.currentTarget.blur(); onNoMatch(t); } } else if(e.key==="Escape"){ setOpen(false); setQ(""); e.currentTarget.blur(); } else if(e.key==="Tab"){ setOpen(false); setQ(""); } },
       style:{ ...inputStyle, width:"100%", background:"#0c447c", color:"#ffd84d", fontWeight:600, borderColor:"#0c447c", caretColor:"#ffd84d", padding: compact ? "4px 24px 4px 7px" : "6px 26px 6px 9px", fontSize: compact ? 12 : 13, ...(style||{}) }}),
     v && !disabled && onChange ? h("button",{type:"button","data-testid":(testid||"ct-find")+"-x",title:"Clear",onMouseDown:e=>{ e.preventDefault(); setOpen(false); setQ(""); onChange(""); },
       style:{position:"absolute",right:4,top:"50%",transform:"translateY(-50%)",background:"none",border:0,color:"#ffd84d",cursor:"pointer",fontSize:13,padding:"0 4px"}},"✕") : null,
@@ -72402,7 +72719,8 @@ function ContractFind({ value, onChange, options, extra, placeholder, width, dis
       list.length ? list.map((o,i)=>h("div",{key:(o.ex?"x|":"")+o.v,"data-v":o.v,onMouseDown:e=>{ e.preventDefault(); pick(o); },onMouseEnter:()=>setHi(i),
           style:{padding:"6px 10px",fontSize:12.5,cursor:"pointer",background:i===hi?"#eef3fb":"#fff",borderBottom:"1px solid #f2f0e8",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",color:colors.text}},
           o.ex ? h("i",null,mark(o.a)) : [h("b",{key:"a"},mark(o.a)), h("span",{key:"q",style:{color:o.q==="No Quote"?"#a8720f":"#0f5f4a",fontWeight:600}}," – ", mark(o.q)), h("span",{key:"b",style:{color:colors.muted}}," – ", mark(o.b||"—"))]))
-        : h("div",{style:{padding:"8px 10px",fontSize:12,color:colors.muted}}, all.length || options ? "No open order matches “"+q+"”." : "Reading the orders…")) : null);
+        : h("div",{style:{padding:"8px 10px",fontSize:12,color:colors.muted}}, all.length || options ? "No open order matches “"+q+"”." : "Reading the orders…",
+            onNoMatch && q.trim() ? h("div",{onMouseDown:e=>{ e.preventDefault(); const t = q.trim(); setOpen(false); setQ(""); onNoMatch(t); },style:{marginTop:4,color:"#0c447c",cursor:"pointer",textDecoration:"underline"}},"Why is “"+q.trim()+"” not here?") : null)) : null);
 }
 // a row belongs to the picked contract (rows carry it as contract_number / contract_ref / cn …)
 const ctFindOk = (pick, ...vals)=> !pick || vals.some(x=>String(x==null?"":x).trim()===String(pick));
@@ -79634,7 +79952,7 @@ async function qcsrForContract(cn, exceptDcId){
   const legacy = DC_SERIAL_FREE || legacyReal;   // 2026-11-07T04:30:00Z: free pick on every contract for now
   return { rows, onDc, missing:false, legacy, legacyReal };
 }
-const DC_SERIAL_FREE = true;   // 2026-11-07T04:30:00Z "DC" build: serials are not checked on any DC for now (set false for the strict rule)
+const DC_SERIAL_FREE = false;   // 2026-11-27T10:30:00Z: a DC takes only serials the register has given (the 7-11 free pick is closed — the register was fixed on 27-11)
 // ---- 2026-11-07T04:00:00Z: the spec of a register serial or a DC line = item type + size NB + pressure class + material
 const SER_TYPES = [["Self-cleaning strainer",/self[\s-]*clean/i],["Duplex strainer",/duplex\s*(basket\s*)?(strainer|filter)/i],["Basket strainer",/basket\s*(type\s*)?strainer|basket\s*filter|\bbasket\b/i],
   ["Y strainer",/\by[\s-]*(type\s*)?strainer/i],["T strainer",/\bt[\s-]*(type\s*)?strainer|\btee\s*strainer/i],["Conical strainer",/conical|temporary\s*strainer|cone\s*strainer/i],
@@ -79664,7 +79982,7 @@ function serSpecLab(s, size){ if(!s) return ""; const sz = [s.nb ? s.nb+"NB" : (
 function serSizeLab(g, s){ s = s || serSpec(g); const t = [s.nb ? s.nb+"NB" : "", s.cls ? (/^PN/.test(s.cls) ? s.cls : s.cls+"#") : ""].filter(Boolean).join(" / "); return t || String(g.size||"—"); }
 
 function QcSerialRegister({ user }){
-  const [cfx,setCfx] = useState("");   // 2026-11-06 contract lookup
+  const [cfx,setCfx] = useState(()=>askPreTake());   // 2026-11-06 contract lookup
   const [rows,setRows] = useState(null);
   const [cfg,setCfg] = useState(null);
   const [dcOf,setDcOf] = useState(new Map());   // serial -> DC number
@@ -79857,7 +80175,7 @@ async function qcsrApply(rows, patchOf, hist){
     if(error) throw new Error("Serial "+r.serial+": "+error.message); } }
 function QcSerialCheck({ user, rows, dcOf, onBack, onDone }){
   const [E,setE] = useState(null); const [asks,setAsks] = useState({}); const [names,setNames] = useState([]); const [me,setMe] = useState("");
-  const [cfx,setCfx] = useState(""); const [open,setOpen] = useState(null); const [msg,setMsg] = useState("");
+  const [cfx,setCfx] = useState(()=>askPreTake()); const [open,setOpen] = useState(null); const [msg,setMsg] = useState("");
   useEffect(()=>{ (async()=>{
     setMe(await despMe(user)); setNames(await qcsrFixApprovers());
     try{ const { data: c } = await sb.from("qc_serial_config_tbl").select("fix_asks").eq("id",1).maybeSingle(); setAsks((c&&c.fix_asks)||{}); }catch(e){}
@@ -81494,7 +81812,7 @@ function OsLotPanel({ lotId, user, me, P, so, onClose, onChanged, sessionCompany
 }
 // ---- Place old contracts: one list, many at once, no tasks ----
 function OsPlaceList({ data, user, me, onClose, onDone }){
-  const [cfx,setCfx] = useState("");   // 2026-11-06 contract lookup
+  const [cfx,setCfx] = useState(()=>askPreTake());   // 2026-11-06 contract lookup
   const lotted = new Set(data.lots.map(l=>l.contract_number));
   const placed = new Map(data.place.map(p=>[p.contract_number,p]));
   const rows = data.sos.filter(s=>!/cancel|closed/i.test(s.status||"") && !lotted.has(s.contract_number)).sort((a,b)=>String(b.contract_number).localeCompare(String(a.contract_number)));
@@ -87202,7 +87520,7 @@ async function woListRights(user){
 const WO_CH = { ok:["#eef6f3","#0f7a5c"], warn:["#fff6df","#7a5200"], bad:["#fbe9e7","#a3312a"] };
 const woChip = (c,i)=> h("span",{key:i,title:c.why||"",style:{display:"inline-block",fontSize:10.5,fontWeight:700,borderRadius:9,padding:"1px 7px",margin:"1px 3px 1px 0",background:WO_CH[c.k][0],color:WO_CH[c.k][1],border:"1px solid "+WO_CH[c.k][1],whiteSpace:"nowrap"}},(c.k==="ok"?"✓ ":c.k==="bad"?"✖ ":"⚠ ")+c.t);
 function WoReleaseScreen({ user, mode, onOpenContract }){
-  const [cfx,setCfx] = useState("");   // 2026-11-06 contract lookup
+  const [cfx,setCfx] = useState(()=>askPreTake());   // 2026-11-06 contract lookup
   const parked = mode==="parked";
   const [rows,setRows] = useState(null); const [R,setR] = useState({ can:false, blk:false, sa:false });
   const [tick,setTick] = useState({}); const [rel,setRel] = useState(null); const [msg,setMsg] = useState(""); const [busyAll,setBusyAll] = useState(false);
@@ -88300,8 +88618,8 @@ function NiStepGrid({ L, steps, I, fg, onPick, pick }){
       : (s.plan && s.plan.date ? "Planned "+(s.plan.guess?"≈ ":"")+fmtDMY(s.plan.date) : "") ;
     return h("button",{key:s.k,"data-testid":"ni-step-"+s.k,"data-state":s.state,title:(by?"Moved by "+by:"")+(d.why?(by?" — ":"")+d.why:""),onClick:()=>onPick(pick===s.k?null:s.k),
       style:{textAlign:"left",background:s.state==="now"?fg+"14":"#fff",border:"1px solid "+(pick===s.k?fg:"#e4e1d6"),borderLeft:"4px solid "+edge,borderRadius:6,padding:"5px 7px",cursor:"pointer",minWidth:0,font:"inherit",color:"#333"}},
-      h("div",{style:{fontSize:10,color:"#888",fontVariantNumeric:"tabular-nums"}},s.sl+(s.state==="done"?" ✓":s.state==="now"?" ●":"")),
-      h("div",{style:{fontSize:11.5,fontWeight:s.state==="now"?700:600,lineHeight:1.2,color:s.state==="now"?fg:s.state==="done"?"#555":"#333"}},s.label),
+      h("div",{style:{fontSize:10,color:"#888",fontVariantNumeric:"tabular-nums"}},s.sl+(s.state==="done"?" ✓":s.state==="now"?" ●":"")+" ", (()=>{ const w = s.state==="done" ? "DONE" : s.state==="now" ? (L.dv && L.dv.delivery_state==="ON HOLD" ? "ON HOLD" : late ? "OVERDUE" : "PENDING") : "NOT STARTED"; const t = NI_WORD[w]; return h("b",{style:{fontSize:9.5,color:t.fg,background:t.bg,borderRadius:8,padding:"0 5px"}},w); })()),
+      h("div",{style:{fontSize:11.5,fontWeight:s.state==="now"?700:600,lineHeight:1.2,color:s.state==="now"?fg:s.state==="done"?"#555":"#333"}},s.state==="done" ? s.label : (NI_NOUN[s.k]||s.label)),
       h("div",{style:{fontSize:10.5,color:late?"#a3312a":"#777",marginTop:2,lineHeight:1.2}},sub||ndPostText(s.post)),
       s.state!=="done" && sub ? h("div",{style:{fontSize:10,color:"#999",marginTop:1}},ndPostText(s.post)) : null); };
   const P = pick ? steps.find(s=>s.k===pick) : null;
@@ -88344,6 +88662,28 @@ function useNiLoad(cn, open){
 }
 
 
+// 2026-11-27T11:00:00Z: status words for the steps list, and the noun for a step not yet done (no past tense for what has not happened)
+const NI_WORD = { "DONE":{ fg:"#0f6b4f", bg:"#e3f5ec" }, "PENDING":{ fg:"#8a5a00", bg:"#fff3cd" }, "OVERDUE":{ fg:"#b42318", bg:"#fde2e2" }, "NOT STARTED":{ fg:"#6b778c", bg:"#eef0f3" }, "ON HOLD":{ fg:"#6941c6", bg:"#f1e9ff" } };
+const NI_NOUN = { so:"Order Acceptance", doc:"Full Hold documents", wo:"Work order release", bom:"BOM summary approval", pbm:"Purchase BOM", pbe:"Purchase BOM endorsement",
+  pba:"Purchase BOM budget approval", pr:"Stock check and PR", po:"PO release (planning)", pur:"All material in", prod:"Production", dc:"DC and packing slip", qc:"QC clearance",
+  acc:"Accounts despatch clearance", irn:"Invoice: IRN, Ack and e-way bill", send:"Invoice sending", clear:"Gate pass and despatch", paid:"Payment receipt" };
+// the strip above the steps: the delivery clock in words, who has the order now, the promised date
+function NiClockStrip({ L, I, steps }){
+  const dv = L.dv || {}; const st = dv.delivery_state || "NOT SET"; const cur = (steps||[]).find(s=>s.state==="now");
+  const left = dv.delivery_date ? Math.round((new Date(String(dv.delivery_date).slice(0,10)+"T12:00:00") - new Date(L.today+"T12:00:00"))/864e5) : null;
+  const clock = st==="ON HOLD" ? { b:"⏸ Paused", s:(dv.hold_since ? "since "+fmtDMY(String(dv.hold_since).slice(0,10)) : "order on hold")+(dv.days_left_at_hold!=null ? " · "+dv.days_left_at_hold+" d left when held" : ""), c:"#6941c6" }
+    : (st==="FIRM" || st==="OVERRIDDEN") && dv.delivery_date ? { b:"▶ Running", s: left<0 ? (-left)+" day"+(left===-1?"":"s")+" past the promised date" : left+" day"+(left===1?"":"s")+" left", c: left<0 ? "#b42318" : "#0f6b4f" }
+    : { b:"⏸ Not started", s:"starts when the delivery trigger on the OA is met (e.g. advance, or GAD + ITP Code 2)", c:"#8a5a00" };
+  const names = cur ? niUniq(niNames(cur.post)) : [];
+  const nowWith = !cur ? { b:"Nobody", s:"all steps done" } : { b:(names.join(", ")||"Nobody holds the post"), s:ndPostText(cur.post)+" · step "+cur.sl+(I && I.since ? " · "+((I && I.days)||0)+" day"+((I && I.days)===1?"":"s") : "") };
+  const prom = (st==="FIRM" || st==="OVERRIDDEN") && dv.delivery_date ? { b:fmtDMY(String(dv.delivery_date).slice(0,10)), s: st==="OVERRIDDEN" ? "overridden date" : "firm" }
+    : st==="ON HOLD" ? { b:"Paused", s:"a new date follows when the hold is released" }
+    : dv.delivery_date ? { b:"≈ "+fmtDMY(String(dv.delivery_date).slice(0,10)), s:String(st).toLowerCase()+" — firm once the clock starts" } : { b:"—", s:"after the clock starts" };
+  const box = (k, t, x)=> h("div",{key:k,"data-testid":"ni-strip-"+k,style:{background:"#f6f5f0",borderRadius:8,padding:"5px 9px",fontSize:11,color:"#6b778c",minWidth:0,flex:"1 1 150px"}},
+    t, h("b",{style:{display:"block",fontSize:12.5,color:x.c||"#172b4d"}}, x.b), h("span",null, x.s));
+  return h("div",{"data-testid":"ni-strip",style:{display:"flex",gap:7,flexWrap:"wrap",marginBottom:8}},
+    box("clock","Delivery clock",clock), box("now","Now with",nowWith), box("prom","Promised delivery",prom));
+}
 // 2026-11-12T22:00: the steps list (left of Steps & action) — each done step with its date, on time / late and who moved it;
 // click a done step for its log; the current step with its planned date; future steps with the planned date and owner post
 function NiStepListBox({ L, I, fg, dot }){
@@ -88352,20 +88692,31 @@ function NiStepListBox({ L, I, fg, dot }){
   const tot = (()=>{ const c = steps[curI]; if(c && c.delay>0) return c.delay; const d = steps.filter(s=>s.state==="done" && s.delay!=null); return d.length ? Math.max(0, d[d.length-1].delay) : 0; })();
   const guess = steps.some(x=>x.plan && x.plan.guess);
   const pd = (p)=> p && p.date ? (p.guess?"≈ ":"")+fmtDMY(p.date) : "";
+  // 2026-11-27T11:00:00Z: every step carries a status word — DONE · PENDING · OVERDUE · NOT STARTED · ON HOLD; steps not yet done read as a noun
+  const held = !!(L.dv && L.dv.delivery_state==="ON HOLD") || /hold/i.test(String((I && I.label)||""));
+  const who = (post)=>{ const n = niUniq(niNames(post)); return n.length ? n.join(", ")+" ("+ndPostText(post)+")" : ndPostText(post)+" (nobody holds the post)"; };
+  const sinceOf = (i)=>{ if(I && I.since) return toISODate(I.since); for(let j=i-1;j>=0;j--){ const x = steps[j]; if(x.done && x.done.date) return x.done.date; } return null; };
+  const dm = (iso)=> iso ? fmtDMY(iso) : "";
   return h("div",{"data-testid":"ni-list"},
+    h(NiClockStrip,{ L, I, steps }),
     h("div",{style:{fontSize:11,fontWeight:700,letterSpacing:".05em",color:fg,marginBottom:5}},"STEPS",
-      h("span",{"data-testid":"ni-delay",style:{fontWeight:600,letterSpacing:0,marginLeft:6,color:tot>0?"#a3312a":"#0f6b4f"}}, L.dv && L.dv.delivery_date ? "· "+(tot>0 ? "delay so far "+tot+" working day"+(tot===1?"":"s") : "on plan so far")+(guess?" (planned dates ≈ until the standard days are filled)":"") : "· no planned dates — the delivery clock has not started")),
-    steps.map(s=>{ const d = s.done||{}; const late = s.delay!=null && s.delay>0; const by = d.by ? d.by+(d.post?" ("+ndPostText(d.post)+")":"") : "";
-      const meta = s.state==="done" ? (d.placed ? h("span",{style:{color:"#888"}},"placed, real date unknown") : d.unknown ? h("span",{style:{color:"#888"}},"done · date not recorded")
-          : h("span",null, h("span",{style:{color:late?"#a3312a":"#0f6b4f",fontWeight:600}},fmtDMY(d.date)+(s.delay!=null?(late?" · "+s.delay+" d late":" · on time"):"")), by ? " · "+by : ""))
-        : s.state==="now" ? h("span",{style:{color:late?"#a3312a":"#888"}}, (s.plan&&s.plan.date?"planned "+pd(s.plan):"now")+(late?" · "+s.delay+" d late":"")+" · "+(niUniq(niNames(s.post)).join(", ")||ndPostText(s.post)))
-        : h("span",{style:{color:"#888"}}, (s.plan&&s.plan.date?"planned "+pd(s.plan)+" · ":"")+ndPostText(s.post));
+      h("span",{"data-testid":"ni-delay",style:{fontWeight:600,letterSpacing:0,marginLeft:6,color:tot>0?"#a3312a":"#0f6b4f"}}, L.dv && L.dv.delivery_date && L.dv.delivery_state!=="NOT SET" ? "· "+(tot>0 ? "delay so far "+tot+" working day"+(tot===1?"":"s") : "on plan so far")+(guess?" (planned dates ≈ until the standard days are filled)":"") : "· no planned dates — the delivery clock has not started")),
+    steps.map((s,i)=>{ const d = s.done||{}; const late = s.delay!=null && s.delay>0; const by = d.by ? d.by+(d.post?" ("+ndPostText(d.post)+")":"") : "";
+      const word = s.state==="done" ? "DONE" : s.state==="now" ? (held ? "ON HOLD" : late ? "OVERDUE" : "PENDING") : "NOT STARTED";
+      const tone = NI_WORD[word];
+      const name = s.state==="done" ? s.label : (NI_NOUN[s.k] || s.label);
+      const since = s.state==="now" ? sinceOf(i) : null;
+      const meta = s.state==="done" ? (d.placed ? "placed, real date unknown" : d.unknown ? "date not recorded" : dm(d.date)+(by ? " · by "+by : "")+(s.delay!=null ? (late ? " · "+s.delay+" working day"+(s.delay===1?"":"s")+" late" : " · on time") : ""))
+        : s.state==="now" ? (held ? "Clock paused"+(L.dv && L.dv.hold_since ? " since "+dm(String(L.dv.hold_since).slice(0,10)) : "")+(L.dv && L.dv.days_left_at_hold!=null ? " · "+L.dv.days_left_at_hold+" d left when held" : "")+" · with "+who(s.post)
+            : "With "+who(s.post)+(since ? " · since "+dm(since) : "")+(s.plan && s.plan.date ? " · due "+pd(s.plan) : "")+(late ? " · "+s.delay+" working day"+(s.delay===1?"":"s")+" overdue" : ""))
+        : who(s.post)+(i>0 ? " · waiting for step "+steps[i-1].sl : "")+(s.plan && s.plan.date ? " · planned "+pd(s.plan) : "");
       const P = pick===s.k ? s : null;
       return h(React.Fragment,{key:s.k},
-        h("div",{"data-testid":"ni-step-"+s.k,"data-state":s.state,title:by?"Moved by "+by+(d.why?" — "+d.why:""):"",onClick:()=>setPick(pick===s.k?null:s.k),
-          style:{display:"flex",gap:7,alignItems:"flex-start",padding:"2px 0",lineHeight:1.3,cursor:"pointer",color:s.state==="done"?"#555":s.state==="now"?fg:"#333",fontWeight:s.state==="now"?700:400}},
+        h("div",{"data-testid":"ni-step-"+s.k,"data-state":s.state,"data-word":word,title:by?"Moved by "+by+(d.why?" — "+d.why:""):"",onClick:()=>setPick(pick===s.k?null:s.k),
+          style:{display:"flex",gap:7,alignItems:"flex-start",padding:"3px 4px",margin:"0 -4px",borderRadius:5,lineHeight:1.3,cursor:"pointer",background:s.state==="now"?tone.bg+"aa":"transparent",color:s.state==="done"?"#555":s.state==="now"?tone.fg:"#5e6c84",fontWeight:s.state==="now"?700:400}},
           dot(s.state==="done" ? "done" : s.state==="now" ? (late?"late":"now") : "todo"),
-          h("span",null, s.sl+". "+s.label, h("span",{style:{fontWeight:400,fontSize:11}}," · ", meta))),
+          h("span",{style:{flex:1,minWidth:0}}, s.sl+". "+name+" · ", h("b",{"data-testid":"ni-word-"+s.k,style:{fontSize:10.5,letterSpacing:".04em",color:tone.fg,background:tone.bg,borderRadius:9,padding:"1px 7px",whiteSpace:"nowrap"}},word),
+            h("span",{style:{display:"block",fontWeight:400,fontSize:11,color:s.state==="now"?tone.fg:"#7a7f8a"}}, meta))),
         P ? h("div",{"data-testid":"ni-log",style:{margin:"2px 0 6px 22px",border:"1px solid #e4e1d6",borderRadius:6,padding:"6px 9px",background:"#fff",fontSize:11.5,lineHeight:1.45,color:"#333",fontWeight:400}},
           h("div",null,"Owner post: "+ndPostText(P.post)+" ("+(niUniq(niNames(P.post)).join(", ")||"nobody")+")"),
           h("div",null,"Planned: "+(pd(P.plan)||"—")+" · Actual: "+(P.done ? (P.done.placed ? "placed, real date unknown" : P.done.unknown ? "not recorded" : fmtDMY(P.done.date)+(P.done.by?" by "+P.done.by:"")+(P.done.src==="stamp"?" (from the step's own record)":"")) : P.state==="now" ? "in progress" : "—")+(P.delay!=null?(P.delay>0?" · "+P.delay+" working days late":" · on time"):"")),
@@ -90166,7 +90517,7 @@ function ProdReviewScreen({ user }){
     ed ? h(PrvNoteBox,{ row:ed, me, onClose:()=>setEd(null), onSaved:(n)=>{ setRows(rs=>(rs||[]).map(x=>x.cn===ed.cn?{ ...x, note:n }:x)); setEd(null); try{ appToast("✓ Meeting note saved — "+ed.cn); }catch(e){} } }) : null);
 }
 function DeliveryScreen({ user, onOpenContract }){
-  const [cfx,setCfx] = useState("");   // 2026-11-06 contract lookup
+  const [cfx,setCfx] = useState(()=>askPreTake());   // 2026-11-06 contract lookup
   const [rows,setRows] = useState(null); const [f,setF] = useState(""); const [q,setQ] = useState(""); const [hold,setHold] = useState(null); const [crq,setCrq] = useState(null);
   const load = async()=>{ setRows(null); try{ setRows(await delLoadAll()); }catch(e){ console.error("delivery", e); setRows([]); } };
   useEffect(()=>{ load(); },[]);
@@ -91558,10 +91909,371 @@ async function billAgeSweep(user){
       "Made by the app every day from the payment milestones of each OA: advance with the order, balance when the DC is made, retention after despatch. A line goes away once the PI is sent. Full list: Accounts › Billing › Ageing & PIs due › PIs due by milestone.", today, user?.username||"App");
   }catch(e){ console.warn("billing ageing sweep", e); }
 }
+// ===================================================================================================================
+// 2026-11-27T11:00:00Z — INTELLIGENT BUILD
+//   · Ribbon: a Contract box and a Quote box (labels Contract – Quote – Customer). Picking one opens Contract insights.
+//   · Contract insights (tab contract_insights): where it is now + the steps, Money, Documents, Production & QC, each with a
+//     button to the exact screen, already filtered to the contract.
+//   · 🔎 Ask (Ctrl K): type a question in plain words. Version A (live): rule-based — finds the contract / quote / customer
+//     and the topic word, answers in one line, says how it understood the question, and offers the screen.
+//     Version B (AI): set up but PARKED until a Super Admin marks it live (marker row "__setting:ask_ai__" in order_stage_tbl;
+//     no new table). Live, it sends the question and this contract's facts to the Supabase Edge Function "ask-ai".
+//   · Accounts › Ageing & PIs due: a Contract Number filter (only contracts with money not received) that takes you to the row.
+// ===================================================================================================================
+// a contract handed to the next screen's contract filter (read once, on that screen's first draw)
+function askPreSet(cn){ window.__askPre = { cn:String(cn||""), at:Date.now() }; try{ CTF.last = String(cn||""); }catch(e){} }
+function askPreTake(){ const p = window.__askPre; if(p && p.cn && Date.now()-p.at < 8000){ window.__askPre = null; return p.cn; } return ""; }
+const ASK_GO = {
+  insights:{ tab:"contract_insights", label:"Contract insights" },
+  pi:{ tab:"bill_register", label:"Invoice & PI Register" },
+  invoice:{ tab:"bill_register", label:"Invoice & PI Register" },
+  ageing:{ tab:"bill_ageing", label:"Ageing & PIs due" },
+  proforma:{ tab:"proforma_invoices", label:"Proforma Invoices" },
+  dc:{ tab:"despatch_dc", label:"DC & packing slip" },
+  docs:{ tab:"doc_board", label:"Document Control — this contract" },
+  board:{ tab:"order_board", label:"Order Status — this contract" },
+  serials:{ tab:"qc_serials", label:"Sl No register" },
+  po:{ tab:"po_register", label:"Purchase Register" },
+  mtc:{ tab:"mtc_awaited", label:"MTC awaited" },
+  delivery:{ tab:"os_delivery", label:"Delivery dates" },
+  oa:{ label:"Order Acceptance" }, quote:{ label:"Quote" } };
+function askGo(where, cn, quote){
+  cn = String(cn||"").trim();
+  try{ window.dispatchEvent(new CustomEvent("flo-ask-close")); }catch(e){}
+  if(where==="oa"){ window.dispatchEvent(new CustomEvent("flo-goto",{ detail:{ contract:cn } })); return; }
+  if(where==="quote"){ window.dispatchEvent(new CustomEvent("flo-goto",{ detail:{ quote:quote||ctQ(cn) } })); return; }
+  const g = ASK_GO[where]; if(!g) return;
+  if(where==="insights"){ window.__ciCn = cn; try{ CTF.last = cn; }catch(e){} try{ window.dispatchEvent(new CustomEvent("flo-ci",{ detail:{ cn } })); }catch(e){} appOpenTab(g.tab); return; }
+  askPreSet(cn);
+  if(where==="docs"){ try{ window.__navMem.dc_mode = "one"; }catch(e){} }
+  if(where==="board"){ try{ window.__navMem.os_one = cn; }catch(e){} }
+  // the screen reads the contract when it is first drawn: if it is already open, step out and back in
+  if(window.__curTab===g.tab){ appOpenTab("home"); setTimeout(()=>{ askPreSet(cn); appOpenTab(g.tab); }, 60); } else appOpenTab(g.tab);
+}
+const ciMoneyOk = ()=> accessMenuMode("Accounts")==="full";
+// everything about one contract, in one read
+const CI_CACHE = {};
+async function ciLoad(cn, force){
+  cn = String(cn||"").trim(); if(!cn) return null;
+  const c = CI_CACHE[cn]; if(!force && c && Date.now()-c.at < 60000) return c;
+  const safe = async(fn, d)=>{ try{ const r = await fn(); return r==null ? d : r; }catch(e){ return d; } };
+  try{ await ctFindLoad(); }catch(e){}
+  const [I, so, reg, pis, ms, invs, ld, pos, ser, M] = await Promise.all([
+    safe(()=>ctfInfo(cn, !!force), null),
+    safe(async()=>(await sb.from("sale_order_tbl").select("*").eq("contract_number",cn).maybeSingle()).data, null),
+    safe(async()=>((await sb.from("contract_register_tbl").select("*").eq("contract_number",cn).limit(1)).data||[])[0], null),
+    safe(async()=>(await sb.from("proforma_tbl").select("*").eq("contract_number",cn).order("id")).data, []),
+    safe(async()=>(await sb.from("pay_milestone_tbl").select("*").eq("contract_number",cn).order("sl")).data, []),
+    safe(async()=>(await sb.from("invoice_tbl").select("*").eq("contract_number",cn).order("id")).data, []),
+    safe(async()=>{ const r = await sb.from("so_lot_tbl").select("*").eq("contract_number",cn).order("id"); const d = await sb.from("dc_tbl").select("*").eq("contract_number",cn).order("id");
+      return { lots:(r.data||[]).filter(l=>l.status!=="Returned"), dcs:(d.data||[]).filter(x=>!x.is_test) }; }, { lots:[], dcs:[] }),
+    safe(async()=>{ const r = await sb.from("po_register").select("*").ilike("contract_ref","%"+cn+"%"); return (r.data||[]).filter(p=>!/cancel/i.test(p.status||"") && !/draft/i.test(p.stage||"")); }, []),
+    safe(async()=>{ const r = await sb.from("qc_serial_register_tbl").select("serial,item_sl_no,void_at").eq("contract_number",cn); return (r.data||[]).filter(x=>!x.void_at); }, []),
+    safe(()=>ctfBoard(), null) ]);
+  let docs = { fh:[], open:[] }; try{ if(M) docs = ospDocs(cn, M); }catch(e){}
+  const D = { cn, I, so, reg, pis:pis||[], ms:ms||[], invs:(invs||[]).filter(i=>i.status!=="Cancelled"), lots:ld.lots, dcs:ld.dcs, pos:pos||[], ser:ser||[], docs,
+    client:(so && so.customer_name) || (reg && reg.client) || ctFindName(cn) || "", quote:(so && so.quote_reference_number) || (reg && reg.quote_number) || ctQ(cn) || "", known: !!(so || reg), at:Date.now() };
+  CI_CACHE[cn] = D; return D;
+}
+const ciN = (n, w)=> n+" "+w+(n===1?"":"s");
+function ciDocsOf(D, re){ return (D.docs.fh||[]).filter(d=>re.test(String(d.name||""))); }
+function ciDocTxt(d){ const days = d.since ? osDays(d.since) : null;
+  const code = d.ach ? "Code "+d.ach+(d.ach==="1"||d.ach==="2" ? " (approved)" : d.ach==="3" ? " (comments — resubmit)" : "") : "";
+  return d.name+": "+(code || (d.list==="client" ? "with the client"+(days!=null?" "+days+" d":"") : d.status || "not submitted yet")); }
+function ciSerialTxt(ser){ const n = (ser||[]).map(x=>Number(x.serial)).filter(x=>!isNaN(x)).sort((a,b)=>a-b); if(!n.length) return (ser||[]).map(x=>x.serial).join(", ");
+  const out = []; let a = n[0], b = n[0]; for(let i=1;i<=n.length;i++){ if(i<n.length && n[i]===b+1){ b = n[i]; continue; } out.push(a===b ? String(a) : a+"–"+b); if(i<n.length){ a = b = n[i]; } } return out.join(", "); }
+// one topic → one line, a tone, and the screens to open
+function ciAnswer(topic, D){
+  const I = D.I || {}; const money = ciMoneyOk(); const cur = (x)=> money ? x : "";
+  const pis = (D.pis||[]).filter(p=>!/cancel/i.test(p.status||""));
+  const sent = pis.filter(p=>p.status==="Issued" && p.sent_at), unsent = pis.filter(p=>p.status==="Issued" && !p.sent_at), drafts = pis.filter(p=>!/issued/i.test(p.status||""));
+  const pend = (D.ms||[]).filter(m=>m.status==="Pending PI");
+  const where = I.label ? "Now: "+I.label+(I.waiting && I.waiting.length ? " — with "+I.waiting.join(", ") : "") : "";
+  const A = (t, tone, go)=>({ t, tone:tone||"", go:go||[] });
+  if(topic==="pi"){
+    if(sent.length) return A("Yes — "+sent.map(p=>piLabel(p)+" sent "+osDmy(p.sent_at)+(p.sent_by?" by "+p.sent_by:"")).join("; ")+(unsent.length ? ". Also "+unsent.map(p=>piLabel(p)+" issued "+osDmy(p.issued_at)+", not marked sent").join("; ") : "")+".", "ok", ["pi","ageing"]);
+    if(unsent.length) return A("No — "+unsent.map(p=>piLabel(p)+" was issued "+osDmy(p.issued_at)+(p.issued_by?" by "+p.issued_by:"")).join("; ")+" but is not marked sent.", "red", ["pi","ageing"]);
+    if(drafts.length) return A("No — the PI is in draft, not issued yet ("+drafts.length+" draft"+(drafts.length===1?"":"s")+").", "red", ["proforma","pi"]);
+    return A("No PI made yet."+(pend.length ? " Milestone "+pend[0].sl+" "+(pend[0].label||"")+" ("+pend[0].percent+"%) is waiting for a PI." : (D.ms||[]).length ? "" : " No payment milestones are set up on the OA."), pend.length ? "red" : "", ["ageing","proforma"]);
+  }
+  if(topic==="invoice"){
+    if(!D.invs.length) return A("No invoice yet"+(D.dcs.length ? " — DC "+(D.dcs[0].bill_no||D.dcs[0].draft_no||"")+" is "+(D.dcs[0].status||"made")+"." : " — no DC made yet."), "", ["dc","invoice"]);
+    return A(D.invs.map(i=>"Invoice "+(i.invoice_no||"#"+i.id)+" · "+(i.status||"")+(i.irn?" · IRN ✓":"")+(i.sent_at?" · sent "+osDmy(i.sent_at):" · not marked sent")+cur(" · "+invMoney(i.grand_total, i.currency||"INR"))).join("; ")+".",
+      D.invs.some(i=>!i.sent_at) ? "red" : "ok", ["invoice","ageing"]);
+  }
+  if(topic==="payment"){
+    const ms = D.ms||[]; const paidLots = D.lots.filter(l=>l.paid_at);
+    if(!ms.length && !paidLots.length) return A("No payment milestones on the OA, and no lot marked paid.", "", ["ageing"]);
+    const claimed = ms.reduce((n,m)=>n+Number(m.claimed_amount||0),0), got = ms.reduce((n,m)=>n+Number(m.received_amount||0),0);
+    return A(ms.map(m=>m.sl+". "+(m.label||PM_KINDS[m.kind]||m.kind)+" "+m.percent+"%: "+(m.status||"due")+(money && Number(m.received_amount)>0 ? " ("+invMoney(m.received_amount,"INR")+")" : "")).join(" · ")
+      +(money && claimed>0 ? " — received "+invMoney(got,"INR")+" of "+invMoney(claimed,"INR")+" claimed." : "")+(paidLots.length ? " "+ciN(paidLots.length,"lot")+" marked paid." : ""),
+      ms.some(m=>/pi sent|part/i.test(m.status||"")) ? "red" : ms.every(m=>/received|settled/i.test(m.status||"")) ? "ok" : "", ["ageing","pi"]);
+  }
+  if(topic==="dc"){
+    if(!D.dcs.length) return A("No DC made yet. "+where, "", ["dc","board"]);
+    return A(D.dcs.map(d=>"DC "+(d.bill_no||d.draft_no||"#"+d.id)+" · "+(d.status||"")+" · "+osDmy(d.created_at)).join("; ")+".", "", ["dc"]);
+  }
+  if(topic==="despatch"){
+    const sh = D.lots.filter(l=>l.shipped_at);
+    if(sh.length) return A("Despatched: "+sh.map(l=>"lot "+(l.lot_no||l.id)+" on "+osDmy(l.shipped_at)).join("; ")+(sh.length<D.lots.length ? " — "+(D.lots.length-sh.length)+" lot(s) still to go." : "."), "ok", ["dc","board"]);
+    return A("Not despatched yet. "+where+(I.delivery ? " · delivery "+fmtDMY(I.delivery.date)+(I.daysLeft!=null ? (I.daysLeft<0 ? " ("+(-I.daysLeft)+" d late)" : " ("+I.daysLeft+" d left)") : "") : ""), I.daysLeft!=null && I.daysLeft<0 ? "red" : "", ["board","dc"]);
+  }
+  if(topic==="gad" || topic==="itp" || topic==="docs"){
+    const list = topic==="gad" ? ciDocsOf(D, /\bGAD\b|general arrangement|drawing/i) : topic==="itp" ? ciDocsOf(D, /\bITP\b|inspection.*test|\bQAP\b|quality plan/i) : (D.docs.fh||[]);
+    if(!list.length) return A(topic==="docs" ? "No Full Hold documents listed for this contract." : (topic==="gad"?"GAD":"ITP")+" is not on this contract's document list.", "", ["docs"]);
+    const open = list.filter(d=>!(d.ach==="1"||d.ach==="2"));
+    return A(list.slice(0,6).map(ciDocTxt).join(" · ")+(list.length>6 ? " · +"+(list.length-6)+" more" : "")+".", open.length ? "red" : "ok", ["docs"]);
+  }
+  if(topic==="po"){
+    if(!D.pos.length) return A("No PO released for this contract yet. "+where, "", ["po","board"]);
+    return A(ciN(D.pos.length,"PO")+": "+D.pos.slice(0,6).map(p=>p.po_no+(p.po_date?" "+osDmy(p.po_date):"")+(p.vendor_name?" ("+p.vendor_name+")":"")).join("; ")+(D.pos.length>6?" …":"")+".", "", ["po"]);
+  }
+  if(topic==="mtc") return A("Material certificates are checked against each PO at GRN. "+ciN(D.pos.length,"PO")+" on this contract — open MTC awaited for the open ones.", "", ["mtc","po"]);
+  if(topic==="serials"){
+    if(!D.ser.length) return A("No serials given yet in the Sl No register for this contract.", "", ["serials"]);
+    return A(ciN(D.ser.length,"serial")+": "+ciSerialTxt(D.ser)+".", "ok", ["serials"]);
+  }
+  if(topic==="delivery"){
+    if(!I.delivery) return A("Delivery date not set — the delivery clock has not started.", "red", ["delivery","board"]);
+    return A("Delivery "+fmtDMY(I.delivery.date)+" ("+String(I.delivery.state||"").toLowerCase()+")"+(I.daysLeft!=null ? (I.daysLeft<0 ? " · "+(-I.daysLeft)+" days late" : " · "+I.daysLeft+" days left") : "")+".", I.daysLeft!=null && I.daysLeft<0 ? "red" : "", ["delivery","board"]);
+  }
+  if(topic==="oa"){
+    const so = D.so; if(!so) return A("No Order Acceptance yet"+(D.reg ? " — the contract is in the Contract Register." : "."), "red", ["board"]);
+    return A("OA "+D.cn+" · "+(so.status||"")+(so.oa_issued_on ? " · issued "+osDmy(so.oa_issued_on) : "")+(so.po_number||so.po_no ? " · PO "+(so.po_number||so.po_no) : "")+".", "", ["oa"]);
+  }
+  if(topic==="quote") return A(D.quote ? "Quote "+D.quote+" — "+(D.client||"") : "No quote is linked to this contract.", "", D.quote ? ["quote"] : []);
+  // stage (default)
+  const hold = (I.holding||[]).slice(0,2).join(" · ");
+  return A((I.label || "Not on the Order Status board")+(I.stepNo ? " (step "+I.stepNo+")" : "")+(I.waiting && I.waiting.length ? " — with "+I.waiting.join(", ") : "")+(I.since ? " for "+(I.days||0)+" d"+(I.late?" (late)":"") : "")+(hold ? ". "+hold : "")+".", I.late ? "red" : "", ["board","insights"]);
+}
+// ---- the question → contract / quote / customer + topic ----
+const ASK_TOPICS = [
+  ["pi", /\bpi\b|\bpis\b|proforma/i, "PI"], ["invoice", /invoice|\birn\b|e-?way|\bbill\b/i, "invoice"],
+  ["payment", /payment|\bpaid\b|\bpay\b|money|outstanding|collection|advance|balance due|receipt/i, "payment"],
+  ["dc", /\bdc\b|delivery challan|packing (slip|list)/i, "DC"], ["despatch", /despatch|dispatch|shipped|\bship\b|gate ?pass|lorry|transport/i, "despatch"],
+  ["gad", /\bgad\b|drawing/i, "GAD"], ["itp", /\bitp\b|\bqap\b|quality plan/i, "ITP"], ["docs", /document|\bdocs?\b|code ?[123]\b|vdrl|datasheet/i, "documents"],
+  ["mtc", /\bmtc\b|certificate|3\.1|3\.2/i, "MTC"], ["po", /\bpo\b|\bpos\b|purchase order|purchase|vendor|material/i, "PO"],
+  ["serials", /serial|sl\.? ?no|name ?plate/i, "serials"], ["delivery", /delivery date|promised|\bdue date|when.*deliver|\blate\b|delay/i, "delivery date"],
+  ["oa", /\boa\b|order acceptance|sale order/i, "OA"], ["quote", /\bquote|quotation|offer\b/i, "quote"],
+  ["payment", /received|recd/i, "payment"],
+  ["stage", /stage|status|where|stuck|pending|who|now|progress|step/i, "stage"] ];
+const ASK_STOP = new Set("the a an is are was were has have had been be to for of on in at by with and or not yet any did does do we our us it its this that what which when where who how why can sent send made make give given ready done there from about tell me show".split(" "));
+function askParse(text, list, quotes){
+  const t = String(text||""); const out = { cn:"", quote:"", cust:"", cands:[], topic:"stage", word:"stage", by:"" };
+  for(const [k, re, w] of ASK_TOPICS){ if(re.test(t)){ out.topic = k; out.word = w; break; } }
+  const L = list||[]; const has = (cn)=> L.some(x=>x[0]===cn);
+  const m6 = (t.match(/\b\d{6}\b/g)||[]).find(has); if(m6){ out.cn = m6; out.by = "contract"; return out; }
+  const mq = t.match(/\b(F[A-Z]{1,6}\d{5,7})(?:[- ]?R(?:ev)?[- ]?\d+)?\b/i);
+  if(mq){ const q = mq[1].toUpperCase(); out.quote = q; out.by = "quote";
+    const cts = L.filter(x=>String(ctQ(x[0])||"").replace(/-Rev-\d+$/i,"").toUpperCase()===q).map(x=>x[0]);
+    if(cts.length===1) out.cn = cts[0]; else if(cts.length) out.cands = cts; return out; }
+  const words = t.toLowerCase().replace(/[^a-z0-9& ]/g," ").split(/\s+/).filter(w=>w.length>=3 && !ASK_STOP.has(w) && !ASK_TOPICS.some(([,re])=>re.test(w)));
+  if(words.length){
+    const hit = L.filter(x=>{ const c = String(x[1]||"").toLowerCase(); return c && words.some(w=>c.split(/[^a-z0-9&]+/).some(p=>p.startsWith(w))); });
+    if(hit.length){ out.by = "customer"; out.cust = hit[0][1]; const same = hit.filter(x=>x[1]===hit[0][1]); out.cands = same.map(x=>x[0]).slice(0,12); if(same.length===1){ out.cn = same[0][0]; out.cands = []; } return out; }
+    const qh = (quotes||[]).find(q=>words.some(w=>String(q[1]||"").toLowerCase().split(/[^a-z0-9&]+/).some(p=>p.startsWith(w))));
+    if(qh){ out.by = "customer"; out.cust = qh[1]; out.quote = qh[0]; }
+  }
+  return out;
+}
+// ---- Version B (AI): parked until a Super Admin marks it live ----
+const ASK_AI_CN = "__setting:ask_ai__";
+let ASK_AI = { at:0, live:false, by:"", when:"" };
+async function askAiLoad(force){
+  if(!force && ASK_AI.at && Date.now()-ASK_AI.at < 300000) return ASK_AI;
+  try{ const { data } = await sb.from("order_stage_tbl").select("esc").eq("contract_number",ASK_AI_CN).maybeSingle(); const e = (data && data.esc) || {};
+    ASK_AI = { at:Date.now(), live:e.live===true, by:e.by||"", when:e.at||"" }; }catch(e){ ASK_AI = { ...ASK_AI, at:Date.now() }; }
+  return ASK_AI;
+}
+async function askAiSet(live, user){
+  if(!user || user.role!=="super_admin") return { err:"Only a Super Admin can mark Version B live or park it." };
+  const esc = { live:!!live, by:user.username||"", at:new Date(nowS()).toISOString() };
+  const up = await sb.from("order_stage_tbl").update({ esc, updated_at:esc.at }).eq("contract_number",ASK_AI_CN).select("contract_number");
+  if(up.error) return { err:up.error.message };
+  if(!(up.data||[]).length){ const ins = await sb.from("order_stage_tbl").insert({ contract_number:ASK_AI_CN, tasks:{}, opened:{}, esc, updated_at:esc.at }); if(ins.error) return { err:ins.error.message }; }
+  try{ await logAudit("UPDATE","order_stage_tbl",ASK_AI_CN,"Ask the app — Version B (AI) "+(live?"marked LIVE":"parked"),user.username,null,null); }catch(e){}
+  ASK_AI = { at:Date.now(), live:!!live, by:esc.by, when:esc.at }; return { ok:true };
+}
+function askFacts(D){ if(!D) return null; const I = D.I||{}; const money = ciMoneyOk();
+  return { contract:D.cn, quote:D.quote, customer:D.client, stage:I.label||"", step:I.stepNo||null, with:I.waiting||[], holding:I.holding||[], days_at_step:I.days||0,
+    delivery:I.delivery||null, days_left:I.daysLeft, oa_status:(D.so||{}).status||null,
+    pis:(D.pis||[]).map(p=>({ no:piLabel(p), status:p.status, issued:p.issued_at||null, sent:p.sent_at||null, amount: money ? (Number(p.advance_amount)>0?p.advance_amount:p.grand_total) : undefined })),
+    milestones:(D.ms||[]).map(m=>({ sl:m.sl, label:m.label, percent:m.percent, status:m.status, received: money ? m.received_amount : undefined })),
+    invoices:(D.invs||[]).map(i=>({ no:i.invoice_no, status:i.status, irn:!!i.irn, sent:i.sent_at||null, amount: money ? i.grand_total : undefined })),
+    dcs:(D.dcs||[]).map(d=>({ no:d.bill_no||d.draft_no, status:d.status, made:d.created_at })), lots:(D.lots||[]).map(l=>({ lot:l.lot_no, shipped:l.shipped_at||null, paid:l.paid_at||null })),
+    documents:(D.docs.fh||[]).map(d=>({ name:d.name, code:d.ach||null, where:d.list||null, status:d.status||null })), pos:(D.pos||[]).map(p=>({ no:p.po_no, date:p.po_date, vendor:p.vendor_name||null })),
+    serials:(D.ser||[]).map(s=>s.serial), money_visible:money }; }
+async function askAiCall(q, D, rule){
+  const { data, error } = await sb.functions.invoke("ask-ai", { body:{ question:String(q||"").slice(0,500), facts:askFacts(D), rule_answer:rule ? rule.t : "" } });
+  if(error) throw error; return (data && (data.answer || data.text)) || "";
+}
+// ---- the quotes for the ribbon's Quote box: [quote, customer] ----
+let QF = { at:0, list:null, p:null };
+async function qfLoad(){
+  if(QF.list && Date.now()-QF.at < 600000) return QF.list; if(QF.p) return QF.p;
+  QF.p = (async()=>{ const m = new Map(); try{ const r = await fetchPaged(()=>sb.from("estimates").select("reference_number,customer_name"));
+      (r||[]).forEach(x=>{ const b = String(x.reference_number||"").replace(/-Rev-\d+$/i,"").trim(); if(b && !m.has(b)) m.set(b, String(x.customer_name||"").trim()); }); }catch(e){}
+    QF.list = [...m.entries()].filter(([q])=>!/^\d{5,7}$/.test(q)).sort((a,b)=>b[0].localeCompare(a[0])); QF.at = Date.now(); QF.p = null; return QF.list; })();
+  return QF.p;
+}
+function qfContract(q){ const b = String(q||"").toUpperCase(); const L = CTF.list||[]; const hit = L.filter(x=>String(ctQ(x[0])||"").replace(/-Rev-\d+$/i,"").toUpperCase()===b); return hit.length ? hit[0][0] : ""; }
+function RibbonQuoteFind(){
+  const [q,setQ] = useState(""); const [open,setOpen] = useState(false); const [L,setL] = useState(QF.list||[]); const [hi,setHi] = useState(0); const ref = useRef(null);
+  useEffect(()=>{ if(!open) return; let off = false; Promise.all([qfLoad(), ctFindLoad()]).then(([x])=>{ if(!off) setL(x||[]); });
+    const f = (e)=>{ if(ref.current && !ref.current.contains(e.target)){ setOpen(false); setQ(""); } }; document.addEventListener("mousedown", f); return ()=>{ off = true; document.removeEventListener("mousedown", f); }; },[open]);
+  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+  const list = (words.length ? L.filter(o=>{ const t = (o[0]+" "+o[1]+" "+qfContract(o[0])).toLowerCase(); return words.every(w=>t.includes(w)); }) : L).slice(0,120);
+  const pick = (o)=>{ setOpen(false); setQ(""); const cn = qfContract(o[0]); if(cn) askGo("insights", cn); else window.dispatchEvent(new CustomEvent("flo-goto",{ detail:{ quote:o[0] } })); };
+  return h("span",{ref,"data-testid":"rb-quote",style:{position:"relative",display:"inline-block",width:190,verticalAlign:"middle"}},
+    h("input",{"data-testid":"rb-quote-in",className:"find-quote",autoComplete:"off",value:q,placeholder:"Quote – Customer…",title:"Find a quote: picks open the contract's insights (or the quote, if it has no contract)",
+      onFocus:()=>{ setOpen(true); setHi(0); }, onChange:e=>{ setQ(e.target.value); setOpen(true); setHi(0); },
+      onKeyDown:e=>{ if(e.key==="ArrowDown"){ e.preventDefault(); setHi(x=>Math.min(x+1,list.length-1)); } else if(e.key==="ArrowUp"){ e.preventDefault(); setHi(x=>Math.max(x-1,0)); }
+        else if(e.key==="Enter"){ e.preventDefault(); if(list[hi]){ pick(list[hi]); e.currentTarget.blur(); } } else if(e.key==="Escape"){ setOpen(false); setQ(""); e.currentTarget.blur(); } },
+      style:{ ...inputStyle, width:"100%", background:"#0c447c", color:"#ffd84d", fontWeight:600, borderColor:"#0c447c", caretColor:"#ffd84d", padding:"4px 7px", fontSize:12 }}),
+    open ? h("div",{"data-testid":"rb-quote-list",style:{position:"absolute",top:"100%",left:0,width:420,maxWidth:"calc(92vw / var(--uiz,1))",maxHeight:320,overflowY:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8,boxShadow:"0 8px 22px rgba(0,0,0,.18)",zIndex:3600,marginTop:3}},
+      list.length ? list.map((o,i)=>{ const cn = qfContract(o[0]); return h("div",{key:o[0],onMouseDown:e=>{ e.preventDefault(); pick(o); },onMouseEnter:()=>setHi(i),
+          style:{padding:"6px 10px",fontSize:12.5,cursor:"pointer",background:i===hi?"#eef3fb":"#fff",borderBottom:"1px solid #f2f0e8",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",color:colors.text}},
+          h("b",{style:{color:cn?colors.text:"#a8720f"}}, cn||"No contract"), h("span",{style:{color:"#0f5f4a",fontWeight:600}}," – "+o[0]), h("span",{style:{color:colors.muted}}," – "+(o[1]||"—"))); })
+        : h("div",{style:{padding:"8px 10px",fontSize:12,color:colors.muted}}, L.length ? "No quote matches “"+q+"”." : "Reading the quotes…")) : null);
+}
+function RibbonFind(){
+  const [v,setV] = useState("");
+  return h("div",{"data-testid":"rb-find",style:{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}},
+    h(ContractFind,{ testid:"rb-ct", value:v, compact:true, width:220, placeholder:"Contract – Quote – Customer…", onChange:x=>{ setV(""); if(x) askGo("insights", x); } }),
+    h(RibbonQuoteFind,null),
+    h("button",{"data-testid":"rb-ask",onClick:()=>window.dispatchEvent(new CustomEvent("flo-ask",{ detail:{} })),title:"Ask the app a question in plain words (Ctrl K)",
+      style:{background:"#ffd84d",color:"#1c1f1a",border:"none",padding:"5px 10px",fontSize:12,fontWeight:700,cursor:"pointer",borderRadius:6,whiteSpace:"nowrap"}},"🔎 Ask"));
+}
+// ---- one answer card ----
+function AskAnswer({ D, topic, word, by }){
+  const a = ciAnswer(topic, D); const col = a.tone==="red" ? "#b42318" : a.tone==="ok" ? "#0f6b4f" : "#172b4d";
+  return h("div",{"data-testid":"ask-answer",style:{border:"1px solid "+(a.tone==="red"?"#f3b9b3":a.tone==="ok"?"#bfe3d0":"#e3e5ea"),borderLeft:"4px solid "+col,borderRadius:8,padding:"9px 11px",background:"#fff"}},
+    h("div",{style:{fontSize:11,color:"#6b778c",marginBottom:3}}, "Understood as: contract ", h("b",null,D.cn), " – "+(D.quote||"No Quote")+" – "+(D.client||"—")+" · topic ", h("b",null,word||topic), by ? " · found by "+by : ""),
+    h("div",{"data-testid":"ask-line",style:{fontSize:14,color:col,fontWeight:600,lineHeight:1.4}}, a.t),
+    h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",marginTop:8}},
+      [...a.go, ...(a.go.includes("insights")?[]:["insights"])].map(g=>h("button",{key:g,"data-testid":"ask-go-"+g,onClick:()=>askGo(g, D.cn, D.quote),style:{...btnSmall,fontSize:12,borderColor:"#0c447c",color:"#0c447c",fontWeight:600}},"Open "+(ASK_GO[g]||{}).label+" ›")),
+      h("button",{onClick:()=>askGo("oa", D.cn),style:{...btnSmall,fontSize:12}},"Open the OA ›")));
+}
+const ASK_EXAMPLES = ["Is the PI sent for 260099?", "Payment for Trillium", "Where is 260111 now?", "GAD status FS260121", "Has 260149 been despatched?", "Serials of 260012"];
+function AskHost({ user }){
+  const [open,setOpen] = useState(false); const [q,setQ] = useState(""); const [R,setR] = useState(null); const [busy,setBusy] = useState(false);
+  const [ai,setAi] = useState(ASK_AI); const [aiTxt,setAiTxt] = useState(""); const [aiBusy,setAiBusy] = useState(false); const [conf,setConf] = useState(false); const [aiMsg,setAiMsg] = useState("");
+  const inRef = useRef(null); const sa = user && user.role==="super_admin";
+  useEffect(()=>{ const f = (e)=>{ const d = (e && e.detail)||{}; setOpen(true); if(d.q){ setQ(d.q); setTimeout(()=>run(d.q), 30); } setTimeout(()=>{ try{ inRef.current && inRef.current.focus(); }catch(x){} }, 40); };
+    const c = ()=>setOpen(false);
+    const k = (e)=>{ if((e.ctrlKey||e.metaKey) && !e.shiftKey && !e.altKey && String(e.key).toLowerCase()==="k"){ e.preventDefault(); f({ detail:{} }); } else if(e.key==="Escape") setOpen(false); };
+    window.addEventListener("flo-ask", f); window.addEventListener("flo-ask-close", c); window.addEventListener("keydown", k);
+    return ()=>{ window.removeEventListener("flo-ask", f); window.removeEventListener("flo-ask-close", c); window.removeEventListener("keydown", k); }; },[]);
+  useEffect(()=>{ if(open){ askAiLoad().then(x=>setAi({ ...x })); ctFindLoad(); qfLoad(); } },[open]);
+  const run = async(text, pickCn)=>{ const t = String(text==null ? q : text).trim(); if(!t && !pickCn) return; setBusy(true); setAiTxt(""); setAiMsg("");
+    try{ const list = await ctFindLoad(); const quotes = await qfLoad().catch(()=>[]); const P = askParse(t, list, quotes); if(pickCn){ P.cn = pickCn; P.cands = []; P.by = P.by || "your pick"; }
+      if(!P.cn){ setR({ P, D:null }); setBusy(false); return; }
+      const D = await ciLoad(P.cn); setR({ P, D }); setBusy(false);
+      if(ASK_AI.live){ setAiBusy(true); try{ const x = await askAiCall(t, D, ciAnswer(P.topic, D)); setAiTxt(x || "(no answer)"); }catch(e){ setAiTxt("✗ Version B could not answer ("+String(e.message||e).slice(0,120)+") — the answer above is from Version A."); } setAiBusy(false); }
+    }catch(e){ setR({ err:String(e.message||e) }); setBusy(false); } };
+  const toggle = async()=>{ setConf(false); const r = await askAiSet(!ai.live, user); if(r.err){ setAiMsg("✗ "+r.err); return; } setAi({ ...ASK_AI }); setAiMsg(ASK_AI.live ? "✓ Version B (AI) is live — answers now also come from the AI." : "✓ Version B (AI) is parked — only Version A answers."); };
+  if(!open) return null;
+  const P = R && R.P; const D = R && R.D;
+  return h("div",{"data-testid":"ask-host",onMouseDown:e=>{ if(e.target===e.currentTarget) setOpen(false); },style:{position:"fixed",inset:0,background:"rgba(20,24,30,.38)",zIndex:3200,display:"flex",justifyContent:"center",alignItems:"flex-start",paddingTop:"8vh"}},
+    h("div",{style:{width:"min(720px, 94vw)",background:"#f7f6f1",borderRadius:12,boxShadow:"0 14px 40px rgba(0,0,0,.3)",overflow:"hidden"}},
+      h("div",{style:{display:"flex",gap:8,alignItems:"center",padding:"12px 14px",background:"#0c447c"}},
+        h("span",{style:{fontSize:16}},"🔎"),
+        h("input",{ref:inRef,"data-testid":"ask-in",value:q,onChange:e=>setQ(e.target.value),onKeyDown:e=>{ if(e.key==="Enter"){ e.preventDefault(); run(); } },autoComplete:"off",
+          placeholder:"Ask in plain words — e.g. “is the PI sent to Trillium?”, “where is 260111 now?”",style:{flex:1,fontSize:15,padding:"8px 10px",borderRadius:7,border:"none",background:"#fff",color:"#172b4d",outline:"none"}}),
+        h("button",{"data-testid":"ask-run",onClick:()=>run(),disabled:busy||!q.trim(),style:{background:"#ffd84d",border:"none",borderRadius:7,padding:"8px 14px",fontWeight:700,cursor:busy||!q.trim()?"default":"pointer",opacity:busy||!q.trim()?0.6:1}}, busy ? "Looking…" : "Ask"),
+        h("button",{onClick:()=>setOpen(false),title:"Close (Esc)",style:{background:"none",border:"none",color:"#fff",fontSize:18,cursor:"pointer"}},"✕")),
+      h("div",{style:{padding:"12px 14px",maxHeight:"62vh",overflowY:"auto"}},
+        !R ? h("div",null,
+          h("div",{style:{fontSize:12,color:"#6b778c",marginBottom:6}},"Name a contract, a quote or a customer, and say what you want to know: PI, invoice, payment, DC, despatch, GAD, ITP, documents, PO, MTC, stage, serials, delivery date."),
+          h("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}}, ASK_EXAMPLES.map(x=>h("button",{key:x,onClick:()=>{ setQ(x); run(x); },style:{...btnSmall,fontSize:12,borderRadius:14,background:"#fff"}},x))))
+        : R.err ? h("div",{style:{color:"#b42318",fontSize:13}},"✗ "+R.err)
+        : !D ? h("div",{"data-testid":"ask-nohit",style:{fontSize:13,color:"#172b4d"}},
+            P.cands && P.cands.length ? h(React.Fragment,null, h("div",{style:{marginBottom:6}},"Understood as: topic ", h("b",null,P.word), P.cust ? h("span",null," · customer ", h("b",null,P.cust)) : P.quote ? h("span",null," · quote ", h("b",null,P.quote)) : null, " — which contract?"),
+                h("div",{style:{display:"flex",gap:6,flexWrap:"wrap"}}, P.cands.map(cn=>h("button",{key:cn,"data-testid":"ask-cand",onClick:()=>run(q, cn),style:{...btnSmall,fontSize:12,background:"#fff"}}, cn+" – "+ctQOr(cn)+" – "+(ctFindName(cn)||"")))))
+            : P.quote ? h("div",null,"Quote ", h("b",null,P.quote), P.cust ? " ("+P.cust+")" : "", " has no contract yet. ", h("button",{onClick:()=>askGo("quote","",P.quote),style:{...btnSmall,fontSize:12}},"Open the quote ›"))
+            : h("div",null,"I could not tell which contract you mean. Add the contract number, the quote number or the customer's name — e.g. “PI sent 260099” or “payment Trillium”."))
+        : h(React.Fragment,null, h(AskAnswer,{ D, topic:P.topic, word:P.word, by:P.by }),
+            ai.live ? h("div",{"data-testid":"ask-ai",style:{marginTop:8,border:"1px dashed #8e7cc3",borderRadius:8,padding:"8px 11px",background:"#fbf9ff",fontSize:13,color:"#3d2a7a"}},
+              h("div",{style:{fontSize:11,fontWeight:700,letterSpacing:".04em",marginBottom:3}},"VERSION B (AI)"), aiBusy ? "Thinking…" : aiTxt) : null)),
+      h("div",{style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",padding:"8px 14px",borderTop:"1px solid #e3e5ea",fontSize:11.5,color:"#6b778c",background:"#fff"}},
+        h("span",null,"Version A (rules) is live. Version B (AI): ", h("b",{"data-testid":"ask-ai-state",style:{color:ai.live?"#0f6b4f":"#8a5a00"}}, ai.live ? "LIVE" : "PARKED"), ai.by ? " · "+(ai.live?"marked live":"parked")+" by "+ai.by+(ai.when?" "+osDmy(ai.when):"") : ""),
+        h("span",{style:{flex:1}}),
+        sa ? (conf ? h(React.Fragment,null, h("span",{style:{color:"#172b4d"}}, ai.live ? "Park Version B? Only Version A will answer." : "Mark Version B live? Questions and this contract's facts go to the AI (Edge Function ask-ai)."),
+              h("button",{"data-testid":"ask-ai-yes",onClick:toggle,style:{...btnSmall,fontSize:11.5,color:"#fff",background:"#0c447c",borderColor:"#0c447c"}},"Yes"), h("button",{onClick:()=>setConf(false),style:{...btnSmall,fontSize:11.5}},"No"))
+            : h("button",{"data-testid":"ask-ai-toggle",onClick:()=>setConf(true),style:{...btnSmall,fontSize:11.5}}, ai.live ? "Park Version B" : "Mark Version B live")) : null,
+        aiMsg ? h("span",{style:{width:"100%",color:/^✗/.test(aiMsg)?"#b42318":"#0f6b4f"}}, aiMsg) : null)));
+}
+// ---- the Contract insights screen ----
+function ContractInsightsScreen({ user }){
+  const [cn,setCn] = useState(()=>{ const x = window.__ciCn || CTF.last || ""; window.__ciCn = null; return x; }); const [D,setD] = useState(null); const [tick,setTick] = useState(0); const [busy,setBusy] = useState(false);
+  useEffect(()=>{ const f = (e)=>{ const c = e && e.detail && e.detail.cn; if(c){ window.__ciCn = null; setCn(String(c)); } }; window.addEventListener("flo-ci", f); return ()=>window.removeEventListener("flo-ci", f); },[]);
+  useEffect(()=>{ if(!cn){ setD(null); return; } let off = false; setD(null); setBusy(true); ciLoad(cn, tick>0).then(x=>{ if(!off){ setD(x); setBusy(false); } }).catch(()=>{ if(!off) setBusy(false); }); return ()=>{ off = true; }; },[cn, tick]);
+  const money = ciMoneyOk();
+  const card = (k, title, lines, gos)=> h("div",{key:k,"data-testid":"ci-"+k,style:{background:"#fff",border:"1px solid "+colors.border,borderRadius:10,padding:"10px 12px",display:"flex",flexDirection:"column",gap:4}},
+    h("div",{style:{fontSize:11,fontWeight:700,letterSpacing:".05em",color:"#0c447c"}}, title),
+    lines.filter(Boolean).map((x,i)=>h("div",{key:i,style:{fontSize:12.5,lineHeight:1.4,color:x.tone==="red"?"#b42318":x.tone==="ok"?"#0f6b4f":colors.text,fontWeight:x.b?600:400}}, x.t)),
+    h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",marginTop:"auto",paddingTop:6}}, (gos||[]).map(g=>h("button",{key:g,onClick:()=>askGo(g, cn, D && D.quote),style:{...btnSmall,fontSize:11.5,borderColor:"#0c447c",color:"#0c447c"}}, (ASK_GO[g]||{}).label+" ›"))));
+  const line = (topic)=>{ const a = ciAnswer(topic, D); return { t:a.t, tone:a.tone }; };
+  const lbl = (k, topic)=>{ const a = ciAnswer(topic, D); return { t:k+": "+a.t, tone:a.tone }; };
+  return h("div",{"data-testid":"contract-insights",style:{padding:"14px 18px"}},
+    h("div",{style:{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",marginBottom:10}},
+      h("span",{style:{fontSize:18,fontWeight:700}},"Contract insights"),
+      h(ContractFind,{ testid:"ci-ct", value:cn, onChange:v=>setCn(v||""), width:340, placeholder:"Contract – Quote – Customer…" }),
+      cn ? h("button",{onClick:()=>setTick(t=>t+1),disabled:busy,style:btnSmall}, busy ? "Reading…" : "Refresh") : null,
+      cn ? h("button",{onClick:()=>askGo("oa", cn),style:btnSmall},"Open the OA ›") : null,
+      D && D.quote ? h("button",{onClick:()=>askGo("quote", cn, D.quote),style:btnSmall},"Open quote "+D.quote+" ›") : null,
+      h("span",{style:{flex:1}}),
+      h("button",{onClick:()=>window.dispatchEvent(new CustomEvent("flo-ask",{ detail:{} })),style:{...btnSmall,background:"#ffd84d",borderColor:"#e0bb2a",fontWeight:700}},"🔎 Ask (Ctrl K)")),
+    !cn ? h("div",{style:{color:colors.muted,fontSize:13}},"Pick a contract above, or type it in the Contract box on the ribbon. Everything about it shows here: where it is now, the steps, money, documents, production and QC.")
+    : !D ? h("div",{style:{color:colors.muted,fontSize:13}},"Reading "+cn+"…")
+    : h(React.Fragment,null,
+        h("div",{style:{fontSize:13.5,marginBottom:8}}, h("b",null,D.cn), " – "+(D.quote||"No Quote")+" – "+(D.client||"—"), !D.known ? h("span",{style:{color:"#b42318"}}," · not in the Contract Register or the OAs") : null),
+        h(CtfFlag,{ key:"ci"+D.cn, cn:D.cn }),
+        h("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:10}},
+          card("now","WHERE IT IS NOW",[ { ...line("stage"), b:true }, lbl("Delivery","delivery"), lbl("OA","oa") ], ["board","delivery"]),
+          money ? card("money","MONEY",[ lbl("PI","pi"), lbl("Invoice","invoice"), lbl("Payment","payment") ], ["pi","ageing","proforma"])
+            : card("money","MONEY",[ lbl("PI","pi"), { t:"Amounts are in Accounts, which only Super Admins and the Accounts people named by them can open." } ], []),
+          card("docs","DOCUMENTS",[ lbl("GAD","gad"), lbl("ITP","itp"), { t:ciN((D.docs.fh||[]).length,"Full Hold document")+" · "+(D.docs.open||[]).length+" open", tone:(D.docs.open||[]).length?"red":"" } ], ["docs"]),
+          card("prod","PRODUCTION & QC",[ lbl("PO","po"), lbl("Serials","serials"), lbl("DC","dc"), lbl("Despatch","despatch") ], ["po","serials","dc"]),
+          card("open","OPEN WITH PEOPLE",[ ...(D.I && D.I.holding && D.I.holding.length ? D.I.holding.slice(0,6).map(x=>({ t:"· "+x })) : [{ t:"Nothing is holding it.", tone:"ok" }]),
+            D.I && D.I.waiting && D.I.waiting.length ? { t:"Waiting on: "+D.I.waiting.join(", "), b:true } : null ], ["board"]))));
+}
+// Accounts › Ageing & PIs due: why a contract is not in any of the three lists
+async function billAgeWhy(cn){
+  cn = String(cn||"").trim(); if(!cn) return "";
+  if(!/^\d{5,7}$/.test(cn)) return "No contract with money due matches “"+cn+"”. Type the contract number, the quote number or the customer.";
+  const safe = async(fn)=>{ try{ return (await fn()).data||[]; }catch(e){ return []; } };
+  const [so, reg, pis, invs, ms] = await Promise.all([ safe(()=>sb.from("sale_order_tbl").select("contract_number,status,customer_name").eq("contract_number",cn).limit(1)), safe(()=>sb.from("contract_register_tbl").select("contract_number,status,client").eq("contract_number",cn).limit(1)),
+    safe(()=>sb.from("proforma_tbl").select("id,pi_no,rev,status,sent_at").eq("contract_number",cn)), safe(()=>sb.from("invoice_tbl").select("id,invoice_no,status,sent_at").eq("contract_number",cn)), safe(()=>sb.from("pay_milestone_tbl").select("sl,label,status,percent").eq("contract_number",cn)) ]);
+  const o = so[0] || reg[0]; if(!o) return cn+" is not here: there is no contract with this number in the Contract Register or the OAs.";
+  const who = cn+(o.customer_name||o.client ? " ("+(o.customer_name||o.client)+")" : "");
+  if(/cancel/i.test(o.status||"")) return who+" is not here: the order is cancelled.";
+  const iv = invs.filter(i=>i.status!=="Cancelled"), sentI = iv.filter(i=>i.sent_at), unsentI = iv.filter(i=>!i.sent_at);
+  const pi = pis.filter(p=>p.status==="Issued"), sentP = pi.filter(p=>p.sent_at);
+  if(sentI.length || sentP.length) return who+" is not here: every invoice and PI sent on it is paid ("+[...sentI.map(i=>i.invoice_no), ...sentP.map(piLabel)].filter(Boolean).join(", ")+") — no money is outstanding.";
+  if(unsentI.length) return who+" is not here: invoice "+unsentI.map(i=>i.invoice_no||"#"+i.id).join(", ")+" is made but not marked sent. Ageing starts once it is marked sent (Invoice & PI Register).";
+  const pend = ms.filter(m=>m.status==="Pending PI");
+  if(pend.length) return who+" is not here: no invoice or PI has been sent, and its milestone"+(pend.length===1?"":"s")+" ("+pend.map(m=>m.sl+" "+(m.label||"")+" "+m.percent+"%").join(", ")+") "+(pend.length===1?"is":"are")+" not due yet.";
+  if(!ms.length) return who+" is not here: no invoice or PI has been sent, and no payment milestones are set up on the OA.";
+  return who+" is not here: no invoice or PI is waiting for money ("+ms.map(m=>m.sl+" "+m.status).join(", ")+").";
+}
 function BillAgeingScreen({ user }){
   const [view,setView] = useState("age"); const [A,setA] = useState(null); const [P,setP] = useState(null); const [err,setErr] = useState(""); const [kind,setKind] = useState(""); const [bk,setBk] = useState(""); const [allMs,setAllMs] = useState(false);
   const load = async()=>{ setErr(""); try{ const [a, p] = await Promise.all([billAgeLoad(), billPiDueLoad()]); setA(a); setP(p); }catch(e){ setErr(String(e.message||e)); } };
   useEffect(()=>{ load(); },[]);
+  // 2026-11-27T11:00:00Z: Contract Number filter — only contracts with money not received; takes you to the row, or says why it is not here
+  const [ct,setCt] = useState(()=>askPreTake()); const [ctMsg,setCtMsg] = useState("");
+  useEffect(()=>{ if(!ct || !A || !P){ setCtMsg(""); return; } let off = false;
+    const inA = A.filter(r=>r.cn===ct), inMs = P.rows.filter(r=>r.cn===ct), inNs = P.notSent.filter(p=>p.cn===ct);
+    const also = (here)=>{ const o = []; if(here!=="age" && inA.length) o.push("Ageing ("+inA.length+")"); if(here!=="ms" && inMs.length) o.push("PI Due but Not Sent ("+inMs.length+")"); if(here!=="ns" && inNs.length) o.push("PIs issued, not sent ("+inNs.length+")"); return o.length ? " Also in: "+o.join(", ")+"." : ""; };
+    if(inA.length){ setView("age"); if(kind && !inA.some(r=>r.kind===kind)) setKind(""); if(bk && !inA.some(r=>ageBucket(r.days)===bk)) setBk(""); setCtMsg(ct+": "+inA.length+" line"+(inA.length===1?"":"s")+" sent and not fully paid — highlighted below."+also("age")); }
+    else if(inMs.length){ setView("ms"); const due = inMs.some(r=>r.due||r.check); if(!due) setAllMs(true); setCtMsg(ct+": "+(due ? "a PI is due by milestone and not sent" : "milestone not due yet — shown with “Show milestones not yet due too”")+" — highlighted below."+also("ms")); }
+    else if(inNs.length){ setView("ns"); setCtMsg(ct+": PI issued and not marked sent — highlighted below."+also("ns")); }
+    else { setCtMsg("Checking why "+ct+" is not here…"); billAgeWhy(ct).then(t=>{ if(!off) setCtMsg(t); }); }
+    return ()=>{ off = true; }; },[ct, A, P]);
+  useEffect(()=>{ if(!ct) return; const t = setTimeout(()=>{ const el = document.querySelector('[data-age-hit="1"]'); if(el) try{ el.scrollIntoView({ block:"center", behavior:"smooth" }); }catch(e){} }, 120); return ()=>clearTimeout(t); },[ct, view, A, P, allMs]);
+  const hit = (cn)=> !!ct && String(cn)===ct;
+  const hitSt = { background:"#fff3b0", outline:"2px solid #e0b100", outlineOffset:-2 };
   const tb = (k,l)=> h("button",{key:k,onClick:()=>setView(k),style:{...btnSmall,background:view===k?colors.dark:"#fff",color:view===k?"#fff":colors.text}},l);
   const td = (x,st)=> h("td",{style:{padding:"4px 7px",borderBottom:"1px solid "+colors.border,fontSize:12.5,...(st||{})}},x);
   const th = (x)=> h("th",{style:{padding:"5px 7px",textAlign:"left",fontSize:12,background:"#f4f2ea",borderBottom:"1px solid "+colors.border}},x);
@@ -91581,6 +92293,12 @@ function BillAgeingScreen({ user }){
       view==="age" ? h("button",{onClick:()=>exportRowsToExcel(AGE_COLS, ageRows, "Ageing", "Invoice_PI_Ageing_"+toISODate(new Date())),style:btnSmall},"Excel") : null,
       view==="ms" ? h("button",{onClick:()=>exportRowsToExcel(MS_COLS, msRows, "PI Due but Not Sent", "PI_Due_but_Not_Sent_"+toISODate(new Date())),style:btnSmall},"Excel") : null,
       h("button",{onClick:()=>{ setA(null); load(); },style:btnSmall},"Refresh")),
+    h("div",{"data-testid":"age-ct-row",style:{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:8}},
+      h("span",{style:{fontSize:12.5,fontWeight:600}},"Contract Number"),
+      h(ContractFind,{ testid:"age-ct", value:ct, width:360, placeholder:"Contract – Quote – Customer (money not received)…",
+        options:(()=>{ const m = new Map(); [...A.map(r=>[r.cn,r.customer]), ...P.rows.map(r=>[r.cn,r.customer]), ...P.notSent.map(p=>[p.cn,p.customer])].forEach(([c,n])=>{ c = String(c||""); if(c && (!m.has(c) || (!m.get(c) && n))) m.set(c, n||""); }); return [...m.entries()].sort((a,b)=>b[0].localeCompare(a[0])); })(),
+        onChange:v=>setCt(v||""), onNoMatch:t=>setCt(t) }),
+      ctMsg ? h("span",{"data-testid":"age-ct-msg",style:{fontSize:12.5,color:/not here|No contract/.test(ctMsg)?"#b42318":"#0f6b4f",fontWeight:600,maxWidth:760}}, ctMsg) : null),
     view==="age" ? h(React.Fragment,null,
       h("div",{style:{fontSize:12,color:colors.muted,marginBottom:6}},"Every invoice and PI marked sent and not fully paid, by days since it was sent. Over "+AGE_FOLLOW_DAYS+" days, each one is a line on the Accounts post's “Payment follow-up” card every day until the money is in."),
       h("div",{style:{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8,alignItems:"center"}},
@@ -91590,7 +92308,7 @@ function BillAgeingScreen({ user }){
         bk ? h("button",{onClick:()=>setBk(""),style:btnSmall},"All buckets") : null),
       h("div",{style:{overflowX:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8}},
         h("table",{style:{borderCollapse:"collapse",width:"100%"}}, h("thead",null,h("tr",null, ["Type","Number","PI For What","Contract","Customer","Sent on","Days","Amount","Received","Outstanding","Status"].map(x=>th(x)))),
-          h("tbody",null, ageRows.map(r=>h("tr",{key:r.kind+r.id,style:{background:r.days>60?"#fdecea":r.days>AGE_FOLLOW_DAYS?"#fff7e6":"#fff"}},
+          h("tbody",null, ageRows.map(r=>h("tr",{key:r.kind+r.id,"data-age-hit":hit(r.cn)?"1":undefined,style:{background:r.days>60?"#fdecea":r.days>AGE_FOLLOW_DAYS?"#fff7e6":"#fff",...(hit(r.cn)?hitSt:{})}},
             td(r.kind), td(r.no), td(r.kind==="PI" ? (r.forWhat||"—") : h("span",{style:{color:colors.mutedLight}},"—")), td(h(CtRef,{ct:r.cn,compact:true})), td(r.customer), td(osDmy(r.sent)), td(h("b",{style:{color:r.days>AGE_FOLLOW_DAYS?"#a3312a":colors.text}},r.days)),
             td(r.ccy+" "+money(r.amount),{textAlign:"right"}), td(r.got?money(r.got):"",{textAlign:"right"}), td(money(r.amount-(r.got||0)),{textAlign:"right",fontWeight:700}), td(r.status))),
             !ageRows.length ? h("tr",null,td("Nothing outstanding.",{color:colors.muted})) : null)))) : null,
@@ -91599,12 +92317,12 @@ function BillAgeingScreen({ user }){
       h("label",{style:{fontSize:12.5,display:"inline-flex",gap:5,alignItems:"center",marginBottom:6}}, h("input",{type:"checkbox",checked:allMs,onChange:e=>setAllMs(e.target.checked)}),"Show milestones not yet due too"),
       h("div",{style:{overflowX:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8}},
         h("table",{style:{borderCollapse:"collapse",width:"100%"}}, h("thead",null,h("tr",null, ["Contract","Customer","Milestone","%","Due","Days since due"].map(x=>th(x)))),
-          h("tbody",null, msRows.map(r=>h("tr",{key:r.cn+"|"+r.sl,style:{background:r.due&&r.days>3?"#fdecea":r.check?"#fff7e6":"#fff"}},
+          h("tbody",null, msRows.map(r=>h("tr",{key:r.cn+"|"+r.sl,"data-age-hit":hit(r.cn)?"1":undefined,style:{background:r.due&&r.days>3?"#fdecea":r.check?"#fff7e6":"#fff",...(hit(r.cn)?hitSt:{})}},
             td(h(CtRef,{ct:r.cn,compact:true})), td(r.customer), td(r.sl+" · "+r.label+" ("+(PM_KINDS[r.kind]||r.kind)+")"), td(r.pct+"%"), td(r.when), td(r.days==null?"—":h("b",{style:{color:r.days>3?"#a3312a":colors.text}},r.days)))),
             !msRows.length ? h("tr",null,td("No PI is due by milestone.",{color:colors.muted})) : null)))) : null,
     view==="ns" ? h("div",{style:{overflowX:"auto",background:"#fff",border:"1px solid "+colors.border,borderRadius:8}},
         h("table",{style:{borderCollapse:"collapse",width:"100%"}}, h("thead",null,h("tr",null, ["PI","Contract","Customer","Issued","Days","Issued by"].map(x=>th(x)))),
-          h("tbody",null, P.notSent.map(p=>h("tr",{key:p.no},td(p.no), td(h(CtRef,{ct:p.cn,compact:true})), td(p.customer), td(osDmy(p.issued)), td(h("b",{style:{color:p.days>1?"#a3312a":colors.text}},p.days)), td(p.by))),
+          h("tbody",null, P.notSent.map(p=>h("tr",{key:p.no,"data-age-hit":hit(p.cn)?"1":undefined,style:hit(p.cn)?hitSt:undefined},td(p.no), td(h(CtRef,{ct:p.cn,compact:true})), td(p.customer), td(osDmy(p.issued)), td(h("b",{style:{color:p.days>1?"#a3312a":colors.text}},p.days)), td(p.by))),
             !P.notSent.length ? h("tr",null,td("Every issued PI is marked sent.",{color:colors.muted})) : null))) : null);
 }
 // the Proforma screen: what is due to be claimed / received
@@ -93129,13 +93847,14 @@ async function calSweep(){
 }
 
 // ---- DC list ----------------------------------------------------------------------------------------
+const q0Desp = (q)=> q ? "all" : "mine";
 function DespatchScreen({ user }){
   const [list,setList] = useState(null); const [err,setErr] = useState("");
   const [me,setMe] = useState(""); const [P,setP] = useState({ stores:[], pm:[], qc:[], acc:[], supers:[] }); const [S,setS] = useState({});
   const [open,setOpen] = useState(()=>{ const x = window.__despOpenId||null; window.__despOpenId = null; return x; });        // dc id or {new: contract}
   useEffect(()=>{ const f = ()=>setTimeout(()=>{ if(window.__despOpenId){ const x = window.__despOpenId; window.__despOpenId = null; setOpen(null); setTimeout(()=>setOpen(x),0); } },30); window.addEventListener("flo-open-tab", f); return ()=>window.removeEventListener("flo-open-tab", f); },[]);   // 229: a card in Approvals pending opens its DC
-  const [pick,setPick] = useState(false); const [contracts,setContracts] = useState([]); const [q,setQ] = useState("");
-  const [filter,setFilter] = useState("mine");
+  const [pick,setPick] = useState(false); const [contracts,setContracts] = useState([]); const [q,setQ] = useState(()=>askPreTake());   // 2026-11-27T11:00:00Z: from Ask / insights
+  const [filter,setFilter] = useState(()=>q0Desp(q));
   const load = useCallback(async()=>{
     const [m, p, s] = await Promise.all([despMe(user), despPeople(), despSettings()]);
     setMe(m); setP(p); setS(s);
@@ -95587,7 +96306,7 @@ function BillServiceModal({ user, onClose, onMade }){
 
 // ---------- Accounts → Billing → Invoice & PI Register ----------
 function BillRegisterScreen({ user }){
-  const [cfx,setCfx] = useState("");   // 2026-11-06 contract lookup
+  const [cfx,setCfx] = useState(()=>askPreTake());   // 2026-11-06 contract lookup
   const [W,setW] = useState(null); const [D,setD] = useState(null); const [err,setErr] = useState(""); const [msg,setMsg] = useState("");
   const [tab,setTab] = useState("I"); const [tile,setTile] = useState("all"); const [q,setQ] = useState(""); const [cur,setCur] = useState(""); const [src,setSrc] = useState("");
   const [fy,setFy] = useState(()=>despFy()); const [sel,setSel] = useState(null); const [edit,setEdit] = useState(null); const [mp,setMp] = useState(null);
@@ -96562,7 +97281,7 @@ async function legacyPiFile(row, username){
   return true;
 }
 function LegacyProformaScreen({ user, onClose }){
-  const [cfx,setCfx] = useState("");   // 2026-11-06 contract lookup
+  const [cfx,setCfx] = useState(()=>askPreTake());   // 2026-11-06 contract lookup
   const [rows,setRows] = useState(null); const [err,setErr] = useState("");
   const [me,setMe] = useState(""); const [P,setP] = useState({ stores:[], pm:[], qc:[], acc:[], supers:[] });
   const [drafts,setDrafts] = useState([]); const [reading,setReading] = useState(false); const [busy,setBusy] = useState(""); const [msg,setMsg] = useState("");
@@ -97351,7 +98070,7 @@ function accPartyForInvoice(C, inv){
 }
 function accGstModeOfInv(inv){ const t = (inv.tax_lines||[]); if(!t.length) return "ex"; return t.some(x=>/IGST/i.test(x.label)) ? "out" : "in"; }
 function AccSalesGateway({ user, A, C, onDone, onClose, onOpenVoucher, typeBar }){
-  const [cfx,setCfx] = useState("");   // 2026-11-06 contract lookup
+  const [cfx,setCfx] = useState(()=>askPreTake());   // 2026-11-06 contract lookup
   const [R,setR] = useState(null); const [ct,setCt] = useState(""); const [mode,setMode] = useState("list"); const [inv,setInv] = useState(null); const [last,setLast] = useState(null);
   const load = useCallback(async()=>{ setR(await accInvoicesForBooks()); },[]);
   useEffect(()=>{ load(); },[load]);
@@ -97953,7 +98672,7 @@ function AccBankForm({ user, A, C, vtype, editing, onDone, onClose, onOpenVouche
   useEffect(()=>{ let alive = true; accModesLoad().then(m=>{ if(alive) setModes(m); }); return ()=>{ alive=false; }; },[]);
   const mObj = modes.find(m=>m.mode===s.mode) || ACC_MODES_FIXED.find(m=>m.mode===s.mode) || null;
   const modeOpts = (()=>{ const l = accModesFor(modes, dir, contra).map(m=>m.mode); return l.includes(s.mode) ? l : [...l, s.mode]; })();
-  const remarks = vtype==="Receipt";   // 249: Remarks on each line of a Receipt (Payments: not asked for)
+  const remarks = vtype==="Receipt" || vtype==="Payment";   // 249: Remarks on each line of a Receipt · 2026-11-28T05:00:00Z: and of a Payment (asked by Accounts)
   useEffect(()=>{ setUnsavedGuard(dirty, "This voucher isn't saved. Leave anyway?"); return ()=>setUnsavedGuard(false); },[dirty]);
   const others = useMemo(()=>C.ledgers.filter(l=>l.is_active!==false && !accIsStock(l) && l.code!==ACC_STK.ppa && l.source!=="System" && l.id!==Number(s.acct)
     && (contra ? (M.bank.has(l.group_id)||M.cash.has(l.group_id)) : true)).sort((a,b)=>a.name.localeCompare(b.name)),[C, s.acct, vtype]);
@@ -97992,7 +98711,7 @@ function AccBankForm({ user, A, C, vtype, editing, onDone, onClose, onOpenVouche
     setBusy(true);
     const a = Number(s.acct); const ls = [];
     if(dir==="in"){ ls.push({ ledger_id:a, dr:String(total), cr:"" }); used.forEach(x=>ls.push({ ledger_id:x.ledger_id, dr:"", cr:String(accR2(accNumber(x.amt))), note: remarks ? x.note : "" })); }
-    else { used.forEach(x=>ls.push({ ledger_id:x.ledger_id, dr:String(accR2(accNumber(x.amt))), cr:"" })); ls.push({ ledger_id:a, dr:"", cr:String(total) }); }
+    else { used.forEach(x=>ls.push({ ledger_id:x.ledger_id, dr:String(accR2(accNumber(x.amt))), cr:"", note: remarks ? x.note : "" })); ls.push({ ledger_id:a, dr:"", cr:String(total) }); }
     const narr = String(s.narration||"").trim() || autoNarr(s);
     const r = await accSaveVoucher(user, C, { vtype: editing ? editing.vtype : vtype, date:s.date, ref, narration:narr, lines:ls }, editing && editing.id);
     if(r.err){ setBusy(false); alert(saveFailedText("The voucher", r.err)); return; }
@@ -98042,7 +98761,7 @@ function AccBankForm({ user, A, C, vtype, editing, onDone, onClose, onOpenVouche
                 bo.filter(b=>b.v).map(b=>h("option",{key:b.v.id,value:String(b.v.id)}, (b.ref||b.no)+" · "+fmtDMY(b.date)+" · due "+accInr(b.due))))
               : h("span",{style:{color:colors.muted,fontSize:11.5}},"—")) : null,
             h("td",{style:accTd}, h("input",{type:"number",step:"0.01",min:"0",value:ln.amt,onChange:e=>setLine(ln.k,{ amt:e.target.value }),style:{...inputStyle,textAlign:"right"}})),
-            remarks ? h("td",{style:{...accTd,minWidth:220}}, h("input",{value:ln.note||"",maxLength:300,onChange:e=>setLine(ln.k,{ note:e.target.value }),placeholder:"e.g. USD 10,050 @ 83.84 — 2nd instalment",style:inputStyle,"data-t":"bf-note"})) : null,
+            remarks ? h("td",{style:{...accTd,minWidth:220}}, h("input",{value:ln.note||"",maxLength:300,onChange:e=>setLine(ln.k,{ note:e.target.value }),placeholder: dir==="in" ? "e.g. USD 10,050 @ 83.84 — 2nd instalment" : "e.g. advance for PO 1234 · TDS 2% deducted",style:inputStyle,"data-t":"bf-note"})) : null,
             h("td",{style:accTd}, s.lines.length>1 ? h("button",{style:btnSmall,onClick:()=>{ setS(x=>({ ...x, lines:x.lines.filter(y=>y.k!==ln.k) })); setDirty(true); }},"Remove") : null)); }),
           h("tr",{className:"acc-tot"}, h("td",{style:accTd}), h("td",{style:accTd}, h("button",{style:btnSmall,onClick:()=>{ setS(x=>({ ...x, lines:[...x.lines, accPayBlank()] })); setDirty(true); }},"+ Add line")),
             h("td",{colSpan:contra?1:2,style:{...accNum,fontWeight:700}}, (contra?"Total transferred":dir==="in"?"Total received":"Total paid")+(acct?" — "+acct.name:"")),
@@ -102907,7 +103626,7 @@ function AccAssets({ C, A, user, onLedger }){
 
 // ---------------------------------------------------------------------------- Contract profitability (material view)
 function AccContracts({ C, user }){
-  const [cfx,setCfx] = useState("");   // 2026-11-06 contract lookup
+  const [cfx,setCfx] = useState(()=>askPreTake());   // 2026-11-06 contract lookup
   const [D,setD] = useState(null); const [q,setQ] = useState(""); const [only,setOnly] = useState(true);
   useEffect(()=>{ (async()=>{ const safe = async(f)=>{ try{ const r = await f(); return r||[]; }catch(e){ return []; } };
     const [inv, leg, po, lk, so] = await Promise.all([ safe(()=>fetchPaged(()=>sb.from("invoice_tbl").select("*"))),
@@ -103347,7 +104066,7 @@ function ContractRegisterDrawer({ c, user, canEdit, onClose, onSaved, onOpenQuot
 }
 // ---- the register screen -----------------------------------------------------------------------------
 function ContractRegisterScreen({ user, onOpenQuote, onOpenContract, onGoToTab, onStartSaleOrder }){
-  const [cfx,setCfx] = useState("");   // 2026-11-06 contract lookup
+  const [cfx,setCfx] = useState(()=>askPreTake());   // 2026-11-06 contract lookup
   const [list,setList] = useState(null); const [err,setErr] = useState("");
   const [canEdit,setCanEdit] = useState(false);
   const [q,setQ] = useState(""); const [st,setSt] = useState("All"); const [hd,setHd] = useState("All"); const [wo,setWo] = useState("All");   /* 236 */ const [chk,setChk] = useState(false);   // 171: opens on everything
@@ -106961,7 +107680,7 @@ function PendingActionsScreen({ user }){
 // orders up. Reads through fetchDocumentHistory, the same function the
 // Order Acceptance screen's panel uses, so the two can never disagree.
 function DocumentRegisterReport(){
-  const [cfx,setCfx] = useState("");   // 2026-11-06 contract lookup
+  const [cfx,setCfx] = useState(()=>askPreTake());   // 2026-11-06 contract lookup
   const [rows,setRows] = useState([]);
   const [loading,setLoading] = useState(true);
   const [statusRows,setStatusRows] = useState([]);
